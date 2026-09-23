@@ -115,9 +115,7 @@ async def test_export_schema_matches_fixture(tmp_path: Path) -> None:
 async def test_render_3mf_writes_a_file(tmp_path: Path) -> None:
     scad = tmp_path / "name_keychain.scad"
     shutil.copy(FIXTURES / "name_keychain.scad", scad)
-    schema = build_schema(
-        load_fixture_param("name_keychain"), load_fixture_source("name_keychain")
-    )
+    schema = build_schema(load_fixture_param("name_keychain"), load_fixture_source("name_keychain"))
     out = tmp_path / "out.3mf"
     result = await render_3mf(scad, schema, {"name": 'Re"agan'}, out, config=load_config())
     assert out.stat().st_size > 0
