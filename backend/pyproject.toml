@@ -4,11 +4,16 @@ version = "0.1.0"
 description = "Self-hosted OpenSCAD customizer for Bambuddy"
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "fastapi>=0.115",
+    "httpx>=0.28",
     "lxml>=5.3",
     "networkx>=3.4",
     "numpy>=2.1",
     "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "python-multipart>=0.0.20",
     "trimesh>=4.5",
+    "uvicorn[standard]>=0.32",
 ]
 
 [build-system]
@@ -23,6 +28,7 @@ dev = [
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
+    "respx>=0.22",
     "ruff>=0.7",
 ]
 
