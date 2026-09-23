@@ -242,26 +242,6 @@ jobs:
         # channel prints the lifecycle instead.
         env:
           DEBUG: pw:webserver
-          # Why this is required on a GitHub-hosted runner, and not on a laptop:
-          # playwright.config.ts polls the LITERAL url `http://127.0.0.1:4173`,
-          # but `vite preview` binds vite's default host, the NAME `localhost`.
-          # Node 17+ resolves names `verbatim` (confirmed: Node 24's
-          # dns.getDefaultResultOrder() is `verbatim`), returning addresses in
-          # resolver order rather than IPv4-first. The runner's /etc/hosts maps
-          # `localhost` to BOTH 127.0.0.1 and ::1, so vite binds ::1 ONLY and
-          # every IPv4 poll is refused -- the server is up and unreachable.
-          # Run 35821833518 is the signature: `vite preview` logged
-          # "Local: http://localhost:4173/" at 05:19:17, then 183 consecutive
-          # ECONNREFUSED on 127.0.0.1:4173 until the 180s timeout at 05:22:13.
-          # It passes on a dev box only because a typical /etc/hosts maps
-          # `localhost` to 127.0.0.1 alone (::1 is `ip6-localhost`), so the same
-          # name resolves to IPv4 there.
-          #
-          # This pins the resolution to IPv4 so the bind matches the poll. The
-          # durable fix belongs in frontend/ (`preview: { host: '127.0.0.1' }`
-          # in vite.config.ts) and is owned by the frontend epic; this line is
-          # harmless once that lands and is the only lever available from CI.
-          NODE_OPTIONS: --dns-result-order=ipv4first
         run: pnpm exec playwright test
 
       - name: Upload the Playwright report
