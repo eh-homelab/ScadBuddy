@@ -97,9 +97,10 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           # `type=gha`, viable only because this is a GitHub-hosted runner —
-          # the eh-homelab self-hosted pools sit behind a TLS intercept that
-          # breaks the Actions cache protocol outright (it fails the build, it
-          # does not degrade). Writing from the default branch is what gives
+          # the Actions cache protocol fails outright on the eh-homelab
+          # self-hosted pools (it fails the build, it does not degrade).
+          # Mechanism unconfirmed; see ci.yml's header for the measurements
+          # either way. Writing from the default branch is what gives
           # PRs a warm cache, since Actions cache scoping lets a PR read the
           # default branch's entries.
           #

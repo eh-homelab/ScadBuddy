@@ -22,8 +22,24 @@ name: CI
 # `allows_public_repositories`, default false; the right answer here is not to
 # turn it on but to stay off those pools.)
 #
-# Hosted also gets the `type=gha` buildx cache back, which the self-hosted
-# pools' TLS interception breaks outright.
+# Hosted also gets the `type=gha` buildx cache back, which fails outright on
+# the self-hosted pools -- it fails the BUILD, it does not degrade, which is
+# what makes it misleading (the image builds fine, then the job dies on the
+# cache export). The rule "never buildx `type=gha` on a self-hosted pool" is
+# attested and stands on its own.
+#
+# The MECHANISM is unconfirmed, and is recorded here so it does not harden
+# into folklore. It was observed as a TLS cert substitution on
+# `results-receiver.actions.githubusercontent.com` (the ACTIONS_RESULTS_URL
+# host the exporter talks to) on 2026-08-10 and 2026-09-02 -- but that host's
+# chain measured CLEAN from inside a runner pod on 2026-09-23
+# (`CN=*.actions.githubusercontent.com`, Let's Encrypt YR2, SAN covering the
+# name). Absent-now does not disprove an intermittent fault, and a clean probe
+# cannot prove absence of one, so treat it as intermittent rather than settled
+# in either direction. Note a separate, similar-looking error -- `Failed to
+# resolve action download info ... SSL connection could not be established` --
+# is a DIFFERENT host (`pipelines.actions.githubusercontent.com`, measured
+# 120/120 clean) and an upstream flake; do not merge the two.
 #
 # `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
 # build-image.yml, so no job here needs a bigger or different runner.
