@@ -45,10 +45,7 @@ select = ["E", "F", "I", "N", "UP", "B", "SIM", "RUF"]
 python_version = "3.12"
 strict = true
 files = ["scadbuddy", "tests"]
-
-[[tool.mypy.overrides]]
-module = ["trimesh.*"]
-ignore_missing_imports = true
+untyped_calls_exclude = ["trimesh"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

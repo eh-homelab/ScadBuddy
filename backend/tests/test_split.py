@@ -3,18 +3,11 @@ from __future__ import annotations
 import zipfile
 from pathlib import Path
 
-import numpy as np
 import pytest
 import trimesh
 
 from scadbuddy.render.split import MaterialSplitError, normalise_colour, split_by_material
 from tests.conftest import write_openscad_3mf
-
-
-def _translate(x: float, y: float, z: float) -> np.ndarray:
-    matrix = np.eye(4)
-    matrix[:3, 3] = (x, y, z)
-    return matrix
 
 
 def _two_boxes(path: Path) -> Path:
@@ -27,7 +20,7 @@ def _two_boxes(path: Path) -> Path:
                 "#1F6FEB00",
                 trimesh.creation.box(
                     extents=(2, 2, 2),
-                    transform=_translate(20, 0, 0),
+                    transform=trimesh.transformations.translation_matrix([20, 0, 0]),
                 ),
             ),
         ],
