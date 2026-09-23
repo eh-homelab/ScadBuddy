@@ -6,9 +6,18 @@ from fastapi import APIRouter, File, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, OutputIdPath, OutputsDep, QueueDep, SlugPath
+from scadbuddy.api.deps import (
+    CatalogueDep,
+    OutputIdPath,
+    OutputsDep,
+    QueueDep,
+    SettingsStoreDep,
+    SlugPath,
+)
 from scadbuddy.api.jobs import require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
+from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -23,8 +32,6 @@ from scadbuddy.render.schema import ParamValue
 router = APIRouter(tags=["outputs"])
 
 THREE_MF_MEDIA_TYPE = "model/3mf"
-
-# Reserved for the Bambuddy epic: POST /outputs/{output_id}/send
 
 
 class OutputSummary(OutputMeta):
@@ -151,3 +158,27 @@ async def put_output_thumbnail(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
     outputs.write_thumbnail(output_id, png)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post(
+    "/outputs/{output_id}/send",
+    response_model=SendResult,
+    summary="Send the 3MF to Bambuddy",
+)
+async def send_output_to_bambuddy(
+    output_id: OutputIdPath,
+    body: SendRequest,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+) -> SendResult:
+    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
+    slice and queue it.
+
+    The file is read from the PVC and pushed by the server, so the API key never
+    reaches the browser. A re-send replaces the file Bambuddy already holds rather
+    than adding a second copy.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await send_output(client, outputs, meta, settings, body)

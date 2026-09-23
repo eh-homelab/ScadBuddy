@@ -5,25 +5,29 @@ import stat
 from pathlib import Path
 
 import httpx
-import pytest
 import respx
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.settings import parse_printers
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 
-PRINTERS_URL = "https://bambuddy.test/api/v1/printers"
+# The trailing slash is load-bearing: /api/v1/printers is a 404 on Bambuddy 1.2.5.5.
+PRINTERS_URL = "https://bambuddy.test/api/v1/printers/"
+PRINTERS_BODY = [{"id": 1, "name": "3DP-31B-598", "model": "H2C", "access_code": "xxxx"}]
 
 
 def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
     assert client.get("/api/v1/settings").json() == {
         "bambuddy_url": None,
         "has_api_key": False,
+        "public_url": None,
         "library_folder_id": None,
         "pipeline_id": None,
         "printer_id": None,
-        "public_url": None,
+        "printer_preset": None,
+        "process_preset": None,
+        "filament_presets": [],
+        "bed_type": None,
     }
 
 
@@ -33,8 +37,8 @@ def test_the_api_key_is_write_only(client: TestClient, data_dir: Path) -> None:
         json={
             "bambuddy_url": "https://bambuddy.test",
             "bambuddy_api_key": "s3cret",
-            "library_folder_id": "7",
-            "printer_id": "p1",
+            "library_folder_id": 7,
+            "printer_id": 1,
         },
     )
     assert response.status_code == 200
@@ -56,7 +60,7 @@ def test_the_settings_file_is_not_world_readable(client: TestClient, data_dir: P
 
 def test_an_omitted_key_is_kept_and_an_empty_one_clears_it(client: TestClient) -> None:
     client.put("/api/v1/settings", json={"bambuddy_api_key": "s3cret"})
-    assert client.put("/api/v1/settings", json={"pipeline_id": "3"}).json()["has_api_key"] is True
+    assert client.put("/api/v1/settings", json={"pipeline_id": 3}).json()["has_api_key"] is True
     assert (
         client.put("/api/v1/settings", json={"bambuddy_api_key": ""}).json()["has_api_key"] is False
     )
@@ -90,18 +94,14 @@ def test_the_connection_test_reports_the_printers(client: TestClient) -> None:
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test/", "bambuddy_api_key": "s3cret"},
     )
-    route = respx.get(PRINTERS_URL).mock(
-        return_value=httpx.Response(
-            200, json=[{"id": 1, "name": "X1C", "model": "X1 Carbon", "extra": "ignored"}]
-        )
-    )
+    route = respx.get(PRINTERS_URL).mock(return_value=httpx.Response(200, json=PRINTERS_BODY))
 
     body = client.post("/api/v1/settings/test").json()
-    assert body == {
-        "ok": True,
-        "printers": [{"id": "1", "name": "X1C", "model": "X1 Carbon"}],
-        "error": None,
-    }
+    assert body["ok"] is True
+    assert "3DP-31B-598" in body["detail"]
+    assert body["printers"] == [
+        {"id": 1, "name": "3DP-31B-598", "model": "H2C", "is_active": True, "nozzle_count": None}
+    ]
     assert route.calls.last.request.headers["X-API-Key"] == "s3cret"
 
 
@@ -115,7 +115,8 @@ def test_a_rejected_key_is_reported_not_raised(client: TestClient) -> None:
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
-    assert body["error"] == "Bambuddy answered 401"
+    # The scope, not a bare "401" — that is the whole point of the mapping.
+    assert "Read Status" in body["detail"]
     assert body["printers"] == []
 
 
@@ -126,27 +127,10 @@ def test_an_unreachable_bambuddy_is_reported_not_raised(client: TestClient) -> N
 
     body = client.post("/api/v1/settings/test").json()
     assert body["ok"] is False
-    assert "ConnectError" in (body["error"] or "")
+    assert "ConnectError" in body["detail"]
 
 
 def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> None:
     response = client.post("/api/v1/settings/test")
     assert response.status_code == 409
     assert response.headers["content-type"] == "application/problem+json"
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        [{"id": "a", "name": "n", "model": "m"}],
-        {"items": [{"id": "a", "name": "n", "model": "m"}]},
-        {"printers": [{"id": "a", "name": "n", "model": "m"}]},
-    ],
-)
-def test_printers_are_read_out_of_either_shape(payload: object) -> None:
-    assert [printer.id for printer in parse_printers(payload)] == ["a"]
-
-
-def test_an_unexpected_printers_payload_yields_nothing() -> None:
-    assert parse_printers({"unexpected": True}) == []
-    assert parse_printers("not json at all") == []

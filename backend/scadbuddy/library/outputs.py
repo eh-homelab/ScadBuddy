@@ -37,10 +37,11 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    # Filled in by the Bambuddy epic; carried here so the shape is stable.
-    library_file_id: str | None = None
-    pipeline_run_id: str | None = None
-    queue_item_id: str | None = None
+    # Bambuddy ids, filled in by POST /outputs/{id}/send. Integers, matching
+    # Bambuddy's own OpenAPI.
+    library_file_id: int | None = None
+    pipeline_run_id: int | None = None
+    queue_item_id: int | None = None
 
 
 class OutputStore:
@@ -105,6 +106,31 @@ class OutputStore:
         )
         self._write_meta(directory, meta)
         return meta
+
+    def record_send(
+        self,
+        output_id: str,
+        *,
+        library_file_id: int | None = None,
+        pipeline_run_id: int | None = None,
+        queue_item_id: int | None = None,
+    ) -> OutputMeta:
+        """Persist the Bambuddy ids a send produced, leaving omitted ones alone."""
+        directory = self._find_dir(output_id)
+        meta = self.get(output_id)
+        updated = meta.model_copy(
+            update={
+                key: value
+                for key, value in (
+                    ("library_file_id", library_file_id),
+                    ("pipeline_run_id", pipeline_run_id),
+                    ("queue_item_id", queue_item_id),
+                )
+                if value is not None
+            }
+        )
+        self._write_meta(directory, updated)
+        return updated
 
     def delete(self, output_id: str) -> None:
         shutil.rmtree(self._find_dir(output_id), ignore_errors=True)

@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     # Initial values for data/settings.json; the stored file wins once written.
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
+    # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
+    # ingress, which the server cannot infer from a request behind a proxy.
+    public_url: str | None = None
 
     log_level: str = Field(default="INFO")
 
