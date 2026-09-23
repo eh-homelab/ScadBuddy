@@ -1,17 +1,50 @@
 ---
+# Conventions here are the eh-homelab/WonderForgeLabs house style, ported from
+# WonderForgeLabs/forge:
+#
+#   * `schedule` pins the day and time, not just the interval — every ecosystem
+#     lands in the same Monday 04:00 batch instead of drifting to whenever each
+#     one was first enabled.
+#   * `commit-message.prefix: "deps"` / `prefix-development: "deps-dev"`, so
+#     release-drafter and a human skimming `git log` can tell a runtime bump
+#     from a tooling bump without opening the diff. (This replaces the previous
+#     `chore` prefix, which said nothing about which kind of change it was.)
+#   * `labels` carry BOTH this repo's domain label (ci / api / frontend) and the
+#     ecosystem name, so a PR can be filtered either way.
+#   * No `update-types` filter anywhere: major, minor and patch all flow. See
+#     forge's docs/ADR/051-dependabot-actions-composite-and-ungrouped-severity.md
+#     — filtering majors out does not remove the upgrade, it only removes the
+#     notification that it is due.
 version: 2
 updates:
   # GitHub Actions. `directory: "/"` is correct and non-obvious: Dependabot
   # always reads .github/workflows/ relative to the repo root, never a
   # workflows subdirectory.
+  #
+  # There are no composite actions in .github/actions/ here. If any are ever
+  # added they need their OWN entry pointed at their directory — the
+  # github-actions ecosystem scans <directory>/.github/workflows and
+  # <directory>/action.yml only, and does not recurse.
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
     commit-message:
-      prefix: "chore"
+      prefix: "deps"
       include: "scope"
-    labels: ["dependencies", "ci"]
+    labels: ["dependencies", "ci", "github-actions"]
+    groups:
+      # One PR for every first-party action rather than one per action. These
+      # move together, review as a unit, and each separate PR costs a full CI
+      # run including an image build.
+      actions:
+        applies-to: version-updates
+        patterns: ["actions/*"]
 
   # Python. `uv` ecosystem, NOT `pip`: the backend is a uv project with a
   # uv.lock, and the `pip` ecosystem would edit pyproject.toml while leaving
@@ -21,19 +54,73 @@ updates:
     directory: "/backend"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
     commit-message:
-      prefix: "chore"
+      prefix: "deps"
+      prefix-development: "deps-dev"
       include: "scope"
-    labels: ["dependencies", "api"]
+    labels: ["dependencies", "api", "uv"]
+    groups:
+      # FastAPI is a thin layer over starlette and pydantic and its version
+      # constraints on both are tight; bumping one without the others is the
+      # usual way to land an unsatisfiable lock. uvicorn ships here too because
+      # it is what actually serves the app.
+      fastapi:
+        patterns:
+          - "fastapi"
+          - "starlette"
+          - "uvicorn*"
+          - "pydantic"
+          - "pydantic-settings"
+          - "python-multipart"
+      # The geometry stack. trimesh's own requirements pin numpy ranges, and
+      # networkx/lxml are its optional-but-used companions, so they resolve
+      # together or not at all.
+      geometry:
+        patterns:
+          - "trimesh"
+          - "numpy"
+          - "networkx"
+          - "lxml"
+      # respx mocks httpx at the transport layer and tracks its internals, so
+      # a respx bump that leaves httpx behind (or vice versa) breaks every
+      # test that stubs the Bambuddy client. httpx is a runtime dependency,
+      # which is why this is its own group rather than part of `pytest` below.
+      httpx:
+        patterns:
+          - "httpx"
+          - "respx"
+      # pytest-asyncio's compatibility window with pytest is narrow enough
+      # that the two must move together.
+      pytest:
+        patterns:
+          - "pytest"
+          - "pytest-*"
+      # Lint/typecheck. Both gate CI and neither affects the shipped app, so a
+      # single PR carrying both is the cheapest thing to review and revert.
+      lint:
+        patterns:
+          - "ruff"
+          - "mypy"
 
   - package-ecosystem: "npm"
     directory: "/frontend"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
     commit-message:
-      prefix: "chore"
+      prefix: "deps"
+      prefix-development: "deps-dev"
       include: "scope"
-    labels: ["dependencies", "frontend"]
+    labels: ["dependencies", "frontend", "npm"]
     groups:
       # React and the three.js stack move together; separate PRs for
       # react/react-dom or three/@react-three/* land a tree that does not build.
@@ -41,6 +128,40 @@ updates:
         patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
       three:
         patterns: ["three", "@types/three", "@react-three/*"]
+      # vitest is built on vite and resolves against its exact major; a vite
+      # bump without vitest (or the plugin) is a typecheck failure at best.
+      vite:
+        patterns:
+          - "vite"
+          - "vitest"
+          - "@vitejs/*"
+      # eslint 10 flat config: the core, the config package and the TS plugin
+      # share a config schema, so a partial bump breaks `pnpm lint` outright.
+      eslint:
+        patterns:
+          - "eslint"
+          - "@eslint/*"
+          - "eslint-plugin-*"
+          - "typescript-eslint"
+          - "globals"
+      tailwind:
+        patterns:
+          - "tailwindcss"
+          - "@tailwindcss/*"
+      # The test harness: Playwright drives the e2e suite, msw mocks the API
+      # for both it and the vitest unit tests, and testing-library/jsdom are
+      # what those tests are written against.
+      testing:
+        patterns:
+          - "@playwright/test"
+          - "msw"
+          - "@testing-library/*"
+          - "jsdom"
+      # Kept out of the groups above so a bare @types bump never blocks a
+      # runtime group's PR on an unrelated typecheck failure.
+      types:
+        patterns:
+          - "@types/node"
 
   # Docker: the Dockerfile's FROM lines. Three of the four are bumpable
   # (node, ghcr.io/astral-sh/uv, hadolint's own image is not here); the fourth,
@@ -51,7 +172,19 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    reviewers:
+      - "ElanHasson"
     commit-message:
-      prefix: "chore"
+      prefix: "deps"
       include: "scope"
     labels: ["dependencies", "docker"]
+    ignore:
+      # Node majors are taken by hand, in lockstep with ci.yml's node-version.
+      # Odd majors are never LTS and ship no corepack, which this image needs
+      # to honour the frontend's `packageManager` pin; corepack cannot even be
+      # installed from npm there. #55 (24 -> 25) broke main on 2026-09-23.
+      - dependency-name: "node"
+        update-types: ["version-update:semver-major"]

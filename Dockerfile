@@ -15,6 +15,15 @@
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
 # can never reach the image (.dockerignore drops it from the context too).
+# Node MAJORS here are LTS-only, and that is a constraint rather than a
+# preference. Odd-numbered releases (25, 27, ...) never become LTS, and they do
+# not ship corepack -- which the next line depends on. Installing it from npm
+# does not rescue them either: corepack 0.36 declares
+# `node: ^22.22.2 || ^24.15.0 || >=26.0.0`, so npm refuses node 25 outright.
+# Dependabot bumped this 24 -> 25 in #55 and broke every build on main; that is
+# now excluded in .github/dependabot.yml. Move it deliberately, to the next
+# EVEN major, together with ci.yml's `node-version` (they must not diverge --
+# a mismatch passes the frontend job and fails only in the image).
 FROM node:24-bookworm-slim AS frontend
 
 WORKDIR /src/frontend

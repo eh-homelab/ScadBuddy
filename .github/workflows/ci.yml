@@ -32,9 +32,14 @@ on:
   push:
     branches: [main]
 
-# One run per ref. A newer push supersedes an older one — there are no
-# force-pushing auto-fixers in this repo, so cancelling costs nothing but the
-# wasted minutes.
+# One run per ref. A newer push supersedes an older one, so cancelling costs
+# nothing but the wasted minutes.
+#
+# `freshness` below is an auto-fixer and pushes to the PR branch, which cancels
+# the very run that pushed. That is harmless and deliberate: the push has
+# already happened by then, the superseding run regenerates the same files,
+# finds no diff, and reports green. What it must never do is `[skip ci]` the
+# commit — see that job for why.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -387,12 +392,254 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci || true
 
+  # ── Committed generated files must match their generator ────────────────────
+  #
+  # Ported from WonderForgeLabs/forge's `freshness` job. Two files in this repo
+  # are written by a tool and committed, so they can silently drift from the
+  # inputs they were generated from:
+  #
+  #   backend/openapi.json
+  #     Written by `scadbuddy.tools.export_openapi`, which builds the FastAPI
+  #     app and dumps `app.openapi()` with `indent=2, sort_keys=True` — so the
+  #     bytes are a pure function of the route/model definitions, not of the
+  #     environment (it passes `frontend_dir=/nonexistent` precisely so no
+  #     bundle or data dir can leak in). Any route or response-model edit
+  #     invalidates it. It is the contract the frontend client is written
+  #     against, and it is what a generated client would be generated FROM.
+  #
+  #   frontend/public/mockServiceWorker.js
+  #     Written by `msw init`, copied verbatim out of the installed msw
+  #     package. It embeds `PACKAGE_VERSION` and an `INTEGRITY_CHECKSUM`, and
+  #     msw refuses to start when the worker's checksum does not match the
+  #     library's — so a Dependabot msw bump that does not re-run `msw init`
+  #     breaks `pnpm test` and the Playwright suite, both of which mock the API
+  #     with msw. It is a pure copy, so regenerating it is deterministic.
+  #
+  # Deliberately NOT covered:
+  #   models/<slug>/model.json — hand-authored catalogue metadata (name,
+  #     description, tags, source). The design doc calls it a "params schema
+  #     cache" because the RENDERER writes a `schema` key into it at runtime,
+  #     keyed by the source's SHA-256 (see library/catalogue.py: "The editable
+  #     half of model.json. The renderer owns the schema key."). That half is
+  #     runtime state produced by a real openscad against a real data dir, not
+  #     a committed build product — regenerating it here would need the image
+  #     and would still not be a function of the tree alone.
+  #   frontend/src/api/types.ts — its own header says "Hand-written against
+  #     the documented contract". There is no openapi-typescript (or any other
+  #     generator) in frontend/package.json, so nothing generates it.
+  #   frontend/pnpm-lock.yaml, backend/uv.lock — owned by Dependabot and by
+  #     `--frozen-lockfile` / `--frozen`, which already fail loudly on drift.
+  #
+  # PR-only, and ALWAYS on a PR.
+  #
+  # Never on `main`: a push-path run has no PR branch to auto-commit the
+  # regenerated files back to, which is half of what this job does.
+  #
+  # Always on a PR, and never path-gated: `CI Summary` counts a SKIPPED job as
+  # satisfied, so a path-gated skip is indistinguishable on the checks UI from
+  # a real pass — the vacuous-green trap. A `models/`-only or docs-only PR
+  # cannot make either file stale, and the cost of proving that rather than
+  # assuming it is one ubuntu-latest job.
+  freshness:
+    name: Generated file freshness
+    # NOT `needs: layout`. This job re-derives which trees exist from its own
+    # checkout, for the same reason `CI Summary` does: a job gated on an
+    # upstream job's outputs turns that job's failure into empty strings, every
+    # step skipping, and a green result that asserted nothing.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    env:
+      # Can this run push the fix back, or can it only report?
+      #
+      # dependabot[bot]: GitHub gives a Dependabot-triggered `pull_request` run
+      # NO repository secrets (its anti-exfiltration measure for bot-authored
+      # PRs), so the App id/key resolve empty and the token step would fail
+      # outright. Skip it, check out read-only, and let the job simply fail —
+      # checking freshness needs no write access, only the auto-fix does.
+      #
+      # Fork PRs: the head branch does not exist in this repository, so there
+      # is nothing here to push to. ScadBuddy is public, so this is a real
+      # case, not a hypothetical.
+      CAN_AUTOFIX: ${{ github.actor != 'dependabot[bot]' && github.event.pull_request.head.repo.full_name == github.repository }}
+    steps:
+      # Mint a token from the eh-homelab-org-runners GitHub App so the auto-fix
+      # commit is pushed by an App identity, NOT github-actions[bot]. A push by
+      # GITHUB_TOKEN makes the PR head bot-owned, which gates every subsequent
+      # `pull_request` run on this PR as `action_required` (awaiting manual
+      # approval) — no required check ever reports and the PR becomes
+      # unmergeable until a human clicks Approve. App installation tokens carry
+      # no such restriction.
+      #
+      # `client-id`, not `app-id`: `app-id` is the deprecated spelling upstream,
+      # and this repo's other App-token steps (issue-intake.yml,
+      # claude-code-review.yml) already use `client-id` with the same secret.
+      - name: Generate app token
+        id: app-token
+        if: ${{ env.CAN_AUTOFIX == 'true' }}
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+
+      # The PR HEAD, not the merge commit `pull_request` checks out by default:
+      # a fix has to be committed onto the branch, and regenerating against a
+      # merge commit would fold in main's changes.
+      #
+      # `repository:` is spelled out so a fork PR checks out the FORK's branch
+      # and the check still means something there; `token` then falls back to
+      # the read-only default, the auto-fix steps below skip, and a stale file
+      # simply reds the job.
+      - uses: actions/checkout@v7
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.ref }}
+          token: ${{ steps.app-token.outputs.token || github.token }}
+          fetch-depth: 1
+
+      - name: Detect which trees are present
+        id: detect
+        run: |
+          # `if`, not `[ ... ] && ...` — every `run:` block here is `bash -e {0}`
+          # and a failing bare test aborts the step. Same trap as `layout`.
+          backend=false
+          if [ -f backend/pyproject.toml ]; then backend=true; fi
+          frontend=false
+          if [ -f frontend/package.json ]; then frontend=true; fi
+          {
+            echo "backend=$backend"
+            echo "frontend=$frontend"
+          } | tee -a "$GITHUB_OUTPUT"
+
+      # uv resolves the environment from backend/uv.lock, so the exported
+      # schema depends on the LOCKED FastAPI/pydantic versions and not on
+      # whichever uv did the resolving — which is why this does not need to be
+      # pinned to the Dockerfile's `ghcr.io/astral-sh/uv:0.9.9`. openscad is
+      # not needed: `export_openapi` only builds the app object.
+      #
+      # Pinned to a full version, not `@v10`: astral-sh stopped publishing
+      # floating major tags after v7 (`v10` does not exist and the job fails at
+      # "Set up job" with `unable to find version`). Dependabot's
+      # github-actions ecosystem bumps this line.
+      - name: Set up uv
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: backend/uv.lock
+
+      - name: Regenerate backend/openapi.json
+        if: ${{ steps.detect.outputs.backend == 'true' }}
+        working-directory: backend
+        run: uv run --frozen python -m scadbuddy.tools.export_openapi
+
+      # Same Node major and the same corepack-driven pnpm as the `frontend`
+      # job, so the msw the worker is copied from is the msw the tests run.
+      - uses: actions/setup-node@v7
+        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      # `--save` is REQUIRED and is not about saving anything here: without it
+      # `msw init` opens an @inquirer prompt asking whether to record the
+      # worker directory, and on a runner (no TTY) that aborts with
+      # `ExitPromptError: User force closed the prompt`. package.json already
+      # carries `msw.workerDirectory: ["public"]`, so the flag rewrites it to
+      # the value it already has and produces no diff.
+      - name: Regenerate frontend/public/mockServiceWorker.js
+        if: ${{ steps.detect.outputs.frontend == 'true' }}
+        working-directory: frontend
+        run: pnpm exec msw init public --save
+
+      - name: Check for drift
+        id: check
+        run: |
+          set -uo pipefail
+          # Scoped to the two generated paths on purpose: `pnpm install` and
+          # `uv run` touch other things (node_modules is ignored, but a future
+          # tool need not be), and this job must never commit a file it did not
+          # deliberately regenerate.
+          if git diff --quiet -- backend/openapi.json frontend/public/mockServiceWorker.js; then
+            echo "stale=false" | tee -a "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "stale=true" | tee -a "$GITHUB_OUTPUT"
+          echo "Generated files differ from their generators:"
+          git --no-pager diff --stat -- backend/openapi.json frontend/public/mockServiceWorker.js
+
+      # The commit message deliberately carries NO `[skip ci]`. That tag stops
+      # every workflow running on the new head; required checks are evaluated
+      # on the PR head, and nothing retries — so a PR that needed an auto-fix
+      # would become permanently unmergeable with no stated cause. Without the
+      # tag the loop still terminates after exactly one extra round: round two
+      # regenerates, finds no diff, and pushes nothing.
+      - name: Auto-fix and push
+        id: autofix
+        if: ${{ steps.check.outputs.stale == 'true' && env.CAN_AUTOFIX == 'true' }}
+        run: |
+          set -euo pipefail
+          # Committer identity is cosmetic — the PUSHER is the App token
+          # configured on the checkout above, and that is what decides whether
+          # later runs are gated as `action_required`. The noreply address
+          # avoids GH007 (push rejected for publishing a private email).
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add backend/openapi.json frontend/public/mockServiceWorker.js
+          git commit -m "chore: regenerate committed generated files
+
+          Auto-generated by the CI freshness check."
+          git push
+          echo "pushed=true" | tee -a "$GITHUB_OUTPUT"
+
+      # The App token, not github.token: the eh-homelab org caps the default
+      # GITHUB_TOKEN's issue-comment write, so a POST to the comments API 403s
+      # with "Resource not accessible by integration" even with
+      # `pull-requests: write` in the permissions banner.
+      - name: Say so on the PR
+        if: ${{ steps.autofix.outputs.pushed == 'true' }}
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh pr comment "$PR_NUMBER" --repo "$REPO" --body \
+            '🤖 Committed generated files were out of date and have been regenerated and pushed to this branch. A new CI run will verify them.'
+
+      # Aggregate gate, so the job's pass/fail is decided in one place and a
+      # successful auto-fix still FAILS this run — the push created a new head,
+      # and it is that run, not this one, that gets to report green.
+      - name: Fail if anything was stale
+        if: ${{ always() && steps.check.outputs.stale == 'true' }}
+        env:
+          PUSHED: ${{ steps.autofix.outputs.pushed }}
+        run: |
+          set -uo pipefail
+          if [ "$PUSHED" = "true" ]; then
+            echo "::error::Generated files were stale and have been auto-fixed. The new commit's CI run will verify them."
+          else
+            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi' and 'cd frontend && pnpm exec msw init public --save', then commit the result."
+          fi
+          exit 1
+
   # ── The required check ──────────────────────────────────────────────────────
   summary:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, image]
+    needs: [layout, lint, frontend, image, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -419,6 +666,8 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          FRESHNESS_RESULT: ${{ needs.freshness.result }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -uo pipefail
           failed=0
@@ -466,6 +715,16 @@ jobs:
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Image build, backend checks, smoke"     "$IMAGE_RESULT"    "$has_image"
+
+          # `freshness` is PR-only — it auto-commits regenerated files back to
+          # the PR branch, and a push to main has no branch to push to. It is
+          # therefore REQUIRED on a pull_request and legitimately skipped on a
+          # push, and it is never path-gated: a skip that this job counts as
+          # satisfied is indistinguishable from a real pass, which is the whole
+          # reason the third argument exists.
+          is_pr=false
+          if [ "$EVENT_NAME" = "pull_request" ]; then is_pr=true; fi
+          assert "Generated file freshness"              "$FRESHNESS_RESULT" "$is_pr"
 
           if [ "$failed" -ne 0 ]; then
             echo "::error::CI Summary failed — see the job results above."
