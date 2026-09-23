@@ -53,7 +53,7 @@ jobs:
       # has arm64 hardware (wingnut), so building both keeps that door open at
       # the cost of build minutes, not of correctness.
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - uses: docker/setup-buildx-action@v4
 
