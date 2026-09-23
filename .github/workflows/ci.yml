@@ -39,7 +39,9 @@ name: CI
 # in either direction. Note a separate, similar-looking error -- `Failed to
 # resolve action download info ... SSL connection could not be established` --
 # is a DIFFERENT host (`pipelines.actions.githubusercontent.com`, measured
-# 120/120 clean) and an upstream flake; do not merge the two.
+# 120/120 clean). That rules out the homelab network -- it reproduced across
+# two independent networks on 2026-09-02, and an 880 ms failure is too fast to
+# be congestion -- but the cause is UNIDENTIFIED; do not merge the two.
 #
 # `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
 # build-image.yml, so no job here needs a bigger or different runner.
