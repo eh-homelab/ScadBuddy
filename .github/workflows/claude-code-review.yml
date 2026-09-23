@@ -541,12 +541,24 @@ jobs:
       # the job's declared `issues: write` (confirmed by WonderForgeLabs/forge, which
       # hit the identical 403 and fixed it this way — not with a job split). Mint a
       # token from the eh-homelab-org-runners App instead; its installation already
-      # holds `issues: write` and isn't subject to that cap. Falls back to
-      # github.token if the App secrets are ever removed, so the step degrades to
-      # the prior (best-effort) behavior rather than hard-failing.
+      # holds `issues: write` and isn't subject to that cap.
+      #
+      # `continue-on-error` is what MAKES the documented fallback real. The
+      # enforce step below reads `steps.app-token.outputs.token || github.token`,
+      # but without this the action hard-fails on absent/empty inputs, every
+      # later step without an `if:` is skipped, and that `||` becomes dead code —
+      # the gate then reds purely because the App secrets are missing.
+      #
+      # They ARE missing here today: RUNNER_APP_ID / RUNNER_APP_PRIVATE_KEY are
+      # REPO-level secrets in eh-homelab/clusters, not org-level, so this repo
+      # does not inherit them (only CLAUDE_CODE_OAUTH_TOKEN is org-wide). Until
+      # they are added the gate still works on the ambient token; only the
+      # sticky comment degrades, and a comment-API failure is already a
+      # `::warning::` that never changes the verdict.
       - name: Generate app token
         id: app-token
         if: always()
+        continue-on-error: true
         uses: actions/create-github-app-token@v3
         with:
           client-id: ${{ secrets.RUNNER_APP_ID }}
@@ -565,6 +577,11 @@ jobs:
       # this shape exists to remove.
       - name: Enforce merge gate
         id: enforce
+        # `if: always()` because the App-token step above can fail (see its
+        # comment); the default skip-on-failed-step would otherwise take the
+        # gate's whole verdict out of the run and leave the status step below
+        # reading an empty outcome.
+        if: always()
         continue-on-error: true
         env:
           REVIEW_OUTCOME: ${{ needs.claude-review-run.outputs.review_outcome }}

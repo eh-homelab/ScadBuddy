@@ -103,6 +103,36 @@ gh api "repos/${REPO}/branches/main/protection" --jq '{
 gh api "repos/${REPO}" --jq '{auto_merge: .allow_auto_merge, delete_on_merge: .delete_branch_on_merge, squash_only: (.allow_squash_merge and (.allow_merge_commit | not))}'
 ```
 
+## Secrets this depends on
+
+Measured 2026-09-23 with `gh api repos/eh-homelab/ScadBuddy/actions/organization-secrets`
+and `gh secret list -R eh-homelab/ScadBuddy`:
+
+| Secret | Where it lives | Available here? |
+|---|---|---|
+| `CLAUDE_CODE_OAUTH_TOKEN` | org-level (`eh-homelab`) | **yes** |
+| `RUNNER_APP_ID` | **repo**-level in `eh-homelab/clusters` | **no** |
+| `RUNNER_APP_PRIVATE_KEY` | **repo**-level in `eh-homelab/clusters` | **no** |
+
+The App secrets are repo-scoped in `clusters`, so this repo does not inherit
+them. Consequences until they are added here (or promoted to org-level):
+
+- `claude-code-review.yml` — the gate still works. Its App-token step is
+  `continue-on-error` and the enforce step falls back to `github.token`; only
+  the **sticky comment** may 403, and a comment-API failure is already a
+  `::warning::` that never changes the verdict.
+- `issue-intake.yml` — **broken**. Every GitHub write in that job passes the App
+  token explicitly, with no fallback, because the ambient token's
+  issue-comment write is capped by org policy here (the
+  eh-homelab/clusters#484 403). It will fail loudly at the first step, which is
+  the correct behaviour: intake cannot do its job without it.
+
+```bash
+# Add them to this repo (values from the eh-homelab-org-runners GitHub App):
+gh secret set RUNNER_APP_ID          -R eh-homelab/ScadBuddy
+gh secret set RUNNER_APP_PRIVATE_KEY -R eh-homelab/ScadBuddy < private-key.pem
+```
+
 ## Notes
 
 - `enforce_admins: false` is deliberate. The commit status is posted by a job
