@@ -309,7 +309,7 @@ jobs:
       # dependency group), so building it warms every layer the smoke test
       # below needs and `--target runtime` is then almost free.
       - name: Build the test image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: test
@@ -336,7 +336,7 @@ jobs:
         run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
 
       - name: Build the runtime image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           target: runtime
