@@ -11,6 +11,23 @@ name: CI
 # build on the light pool OOMs the sidecar rather than failing legibly.
 # `ubuntu-latest` is deliberately unused: nothing here needs GitHub-hosted
 # capacity, and the house rule is self-hosted by default.
+#
+# ── ONE-TIME ORG SETTING THIS DEPENDS ON ──────────────────────────────────────
+# ScadBuddy is the first PUBLIC repo in eh-homelab; every other consumer of
+# these pools (clusters, and the forge-* pools) is private. A GitHub org runner
+# group carries `allows_public_repositories`, which defaults to FALSE, and a
+# public repo simply never has jobs assigned to that group's runners — no
+# error, no warning, the run just sits `queued` until the 24h expiry.
+#
+# Measured here 2026-09-23: the `clusters-runner-light` listener was healthy
+# (up 3h50m, 7 runners, 5 idle) and assigning clusters' jobs in the same
+# minutes that this repo's run sat queued for 12+ minutes with nothing
+# assigned.
+#
+# The fix is an org-owner action, not a workflow change: on the runner group
+# serving clusters-runner*, enable "Allow public repositories" and make sure
+# ScadBuddy is in scope. If a run here is queued with no runner in sight, check
+# that FIRST — it looks exactly like a saturated or wedged pool and is neither.
 
 on:
   pull_request:
