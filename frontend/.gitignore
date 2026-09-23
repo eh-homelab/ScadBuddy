@@ -1,0 +1,13 @@
+node_modules/
+dist/
+coverage/
+.vite/
+*.local
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+*.tsbuildinfo
+
+# The repository root ignores build output called `lib/`; these are sources.
+!src/lib/

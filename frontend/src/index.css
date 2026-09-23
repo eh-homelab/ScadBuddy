@@ -1,0 +1,159 @@
+@import 'tailwindcss';
+
+/*
+ * ScadBuddy reads as an instrument panel inside Bambuddy's dark chrome: steel-dark
+ * surfaces, hairline rules, a 4 px rhythm. The only saturated colour in the UI is
+ * the model's own filament colours — everything else stays quiet so the swatches
+ * and the preview carry the page.
+ */
+
+:root {
+  color-scheme: dark;
+
+  --sb-bg: #0b0e13;
+  --sb-surface: #131822;
+  --sb-surface-2: #1a212c;
+  --sb-surface-3: #222b38;
+  --sb-line: #28313f;
+  --sb-line-strong: #3a4557;
+  --sb-text: #dde4ee;
+  --sb-muted: #8895a7;
+  --sb-faint: #5d6a7c;
+  --sb-accent: #f2a93b;
+  --sb-accent-ink: #1a1204;
+  --sb-ok: #4ade80;
+  --sb-warn: #f87171;
+  --sb-focus: #9ec5ff;
+
+  /* Read by the 3D viewer, which cannot use Tailwind utilities. */
+  --sb-plate-cell: #29323f;
+  --sb-plate-section: #3c4a5c;
+  --sb-plate-edge: #4c5b70;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    color-scheme: light;
+
+    --sb-bg: #f4f6f9;
+    --sb-surface: #ffffff;
+    --sb-surface-2: #eef1f6;
+    --sb-surface-3: #e2e7ef;
+    --sb-line: #d3dae4;
+    --sb-line-strong: #b4bfcd;
+    --sb-text: #161b23;
+    --sb-muted: #5b6878;
+    --sb-faint: #808d9d;
+    --sb-accent: #b96f05;
+    --sb-accent-ink: #fff8ec;
+    --sb-ok: #15803d;
+    --sb-warn: #b91c1c;
+    --sb-focus: #1d4ed8;
+
+    --sb-plate-cell: #ccd4df;
+    --sb-plate-section: #a9b5c4;
+    --sb-plate-edge: #8b9aab;
+  }
+}
+
+@theme {
+  --color-bg: var(--sb-bg);
+  --color-surface: var(--sb-surface);
+  --color-surface-2: var(--sb-surface-2);
+  --color-surface-3: var(--sb-surface-3);
+  --color-line: var(--sb-line);
+  --color-line-strong: var(--sb-line-strong);
+  --color-ink: var(--sb-text);
+  --color-muted: var(--sb-muted);
+  --color-faint: var(--sb-faint);
+  --color-accent: var(--sb-accent);
+  --color-accent-ink: var(--sb-accent-ink);
+  --color-ok: var(--sb-ok);
+  --color-warn: var(--sb-warn);
+
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono:
+    ui-monospace, 'JetBrains Mono', 'SF Mono', 'Cascadia Mono', Menlo, Consolas, monospace;
+
+  --radius-sb: 6px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    margin: 0;
+    background: var(--sb-bg);
+    color: var(--sb-text);
+    font-family: var(--font-sans);
+    font-size: 14px;
+    line-height: 1.45;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--sb-focus);
+    outline-offset: 2px;
+  }
+
+  input,
+  select,
+  textarea,
+  button {
+    font: inherit;
+    color: inherit;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: var(--sb-surface-3);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+@layer components {
+  .sb-field {
+    background: var(--sb-surface-2);
+    border: 1px solid var(--sb-line);
+    border-radius: var(--radius-sb);
+    padding: 6px 9px;
+    width: 100%;
+    transition: border-color 120ms ease;
+  }
+  .sb-field:hover:not(:disabled) {
+    border-color: var(--sb-line-strong);
+  }
+  .sb-field:disabled {
+    opacity: 0.55;
+  }
+
+  .sb-num {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+}
