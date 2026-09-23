@@ -17,12 +17,15 @@ name: Issue Intake
 #     clusters because TWO call sites would otherwise carry duplicate
 #     create-label-and-apply logic that drifts silently. Here there is one call
 #     site, so it is inline.
-#   * PROJECT BOARD IS A TODO. The design spec puts ScadBuddy's epics on a
-#     board, but that board is being bootstrapped separately and its project
-#     number is not known yet. Rather than stub a half-working board step, the
-#     agent is told to say so in its summary. Wire it up by adding the
-#     `scripts/project/` helpers and a `repository-projects: write` permission,
-#     the way forge does.
+#   * BOARD PLACEMENT IS A DETERMINISTIC STEP, not an agent instruction.
+#     Adding an item is two idempotent API calls, and an LLM that REPORTS
+#     having done it without doing it is exactly the silent no-op the two
+#     verify steps below exist to catch. The agent is told not to touch the
+#     board; the step below owns it.
+#     Note `permissions:` cannot grant this — `repository-projects` is classic
+#     Projects only. Projects V2 is org-level, so the write rides the
+#     `eh-homelab-org-runners` App token and needs that App to carry
+#     `organization_projects: write`.
 #
 # Nothing about this workflow is testable from a PR — issue webhooks do not
 # fire on `pull_request` events, so the first real exercise is the first issue
@@ -406,18 +409,14 @@ jobs:
 
             ## Project board
 
-            ScadBuddy's GitHub Projects V2 board is being bootstrapped separately and its project number is not known to this workflow yet, so you cannot add the issue to it. Say so explicitly, in one line, at the end of your summary comment:
-
-            > TODO: not added to the project board — no project number is wired into `issue-intake.yml` yet.
-
-            Do not attempt to discover or guess a project number.
+            A later step in this same job adds the issue to the board and sets its Status, deterministically. Do not add it yourself, do not report on it, and do not mention the board in your summary — you cannot observe whether that step succeeded, and guessing either way is worse than silence.
 
             ## Important guidelines
 
             - DO NOT attempt to resolve the issue or write code.
             - DO NOT close the issue, ever — not even a confirmed duplicate.
             - DO NOT create issues, epics, or labels.
-            - DO NOT attempt to add the issue to a project board (see above).
+            - DO NOT add the issue to a project board, or comment about the board (see above).
             - If re-triaging (the `needs-triage` path), update what is already there rather than duplicating it.
             - Remove the `needs-triage` label once you are done.
             - Prepend the `[View job run](...)` line to every comment you post.
@@ -483,6 +482,91 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
             || echo "::warning::Failed to apply failed:issue-intake."
           exit 1
+
+      # Runs `if: always()` so a board problem can never block triage -- the
+      # labelling above has already happened by the time we get here -- but it
+      # still FAILS rather than warning. An issue missing from the board is
+      # invisible by construction: nobody notices the row that is not there.
+      #
+      # `gh api graphql`, NOT `gh project`. The porcelain does a client-side
+      # scope check for `project`/`read:project`, which an App INSTALLATION
+      # token cannot carry -- it has permissions, not OAuth scopes -- so the
+      # command can fail on a token that is in fact authorised. This is also
+      # the pattern forge settled on (`scripts/project/add-item.sh`).
+      #
+      # addProjectV2ItemById is idempotent server-side: re-running returns the
+      # existing item, so the `labeled` re-triage path is safe and an issue
+      # that missed the board self-heals on the next run. That is why forge's
+      # pre-flight pagination is not reproduced here.
+      - name: Add the issue to the project board
+        id: board
+        if: always() && steps.intake.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_NODE_ID: ${{ github.event.issue.node_id }}
+        run: |
+          # NOTE on the `shellcheck disable=SC2016` directives below: SC2016 is
+          # correct that $p/$c/$i/$f/$o do not expand inside the single-quoted
+          # GraphQL queries -- that is the point. They are GraphQL variables
+          # bound by the -f flags; expanding them would send empty variables.
+          #
+          # `set -uo pipefail` only ADDS flags; Actions' `bash -e {0}` stays,
+          # so every command whose non-zero exit is tolerable carries `|| true`.
+          set -uo pipefail
+
+          contract=".claude/project-ops.yaml"
+          project_id=""
+          if [ -f "$contract" ]; then
+            # Flat top-level scalar only; anchored so a nested key cannot match.
+            # (A nested-YAML parse would add a PyYAML dependency to buy nothing:
+            # the field ids below come from the API, which is more robust than
+            # pinning them anyway.)
+            project_id="$(sed -n 's/^project_id:[[:space:]]*\([A-Za-z0-9_-]*\).*/\1/p' "$contract" | head -1)"
+          fi
+          if [ -z "$project_id" ]; then
+            # The contract lands in its own PR (branch `chore/project-ops`).
+            # Until it does, this is the ScadBuddy board, org project 1.
+            project_id="PVT_kwDOCQNNjc4BkYmK"
+            echo "::notice::${contract} not found; falling back to the pinned ScadBuddy project id."
+          fi
+
+          # shellcheck disable=SC2016
+          if ! add_out="$(gh api graphql \
+                -f query='mutation($p: ID!, $c: ID!) { addProjectV2ItemById(input: {projectId: $p, contentId: $c}) { item { id } } }' \
+                -f p="$project_id" -f c="$ISSUE_NODE_ID" 2>&1)"; then
+            echo "::error::Could not add the issue to the project board. A 'Resource not accessible by integration' here means the eh-homelab-org-runners App is missing 'organization_projects: write' -- a job permissions: block cannot grant it, since 'repository-projects' covers classic Projects only. Response: ${add_out}"
+            exit 1
+          fi
+
+          item_id="$(printf '%s' "$add_out" | jq -r '.data.addProjectV2ItemById.item.id // empty' 2>/dev/null || true)"
+          if [ -z "$item_id" ]; then
+            echo "::error::addProjectV2ItemById returned no item id: ${add_out}"
+            exit 1
+          fi
+          echo "Issue is on the board as ${item_id}"
+
+          # Status is best-effort ONLY: the item is on the board by here, which
+          # is the part that matters. A renamed or removed field should not red
+          # every intake run.
+          # shellcheck disable=SC2016
+          fields="$(gh api graphql \
+            -f query='query($p: ID!) { node(id: $p) { ... on ProjectV2 { field(name: "Status") { ... on ProjectV2SingleSelectField { id options { id name } } } } } }' \
+            -f p="$project_id" 2>/dev/null || true)"
+          field_id="$(printf '%s' "$fields" | jq -r '.data.node.field.id // empty' 2>/dev/null || true)"
+          option_id="$(printf '%s' "$fields" | jq -r '.data.node.field.options[]? | select(.name == "Todo") | .id' 2>/dev/null || true)"
+
+          if [ -n "$field_id" ] && [ -n "$option_id" ]; then
+            # shellcheck disable=SC2016
+            if gh api graphql \
+                 -f query='mutation($p: ID!, $i: ID!, $f: ID!, $o: String!) { updateProjectV2ItemFieldValue(input: {projectId: $p, itemId: $i, fieldId: $f, value: {singleSelectOptionId: $o}}) { projectV2Item { id } } }' \
+                 -f p="$project_id" -f i="$item_id" -f f="$field_id" -f o="$option_id" >/dev/null 2>&1; then
+              echo "Status set to Todo."
+            else
+              echo "::warning::Item is on the board but Status could not be set to Todo."
+            fi
+          else
+            echo "::warning::Item is on the board but the Status field could not be resolved (field_id='${field_id}' option_id='${option_id}')."
+          fi
 
       # A run can report is_error=false with zero permission_denials while
       # having silently done nothing at all (forge#3053: a 7-turn run made no
