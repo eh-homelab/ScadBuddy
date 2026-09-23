@@ -92,12 +92,11 @@ jobs:
           if [ -d models ]; then models=true; fi
 
           # Can the image actually SERVE yet? The Dockerfile's CMD is
-          # `uvicorn scadbuddy.main:app`, and the API epic that adds both the
-          # entrypoint and the uvicorn dependency has not landed. Until it
-          # does, the image builds and its test stage runs, but starting the
-          # container dies with `exec uvicorn failed` — so the smoke test and
-          # the Playwright suite are gated on the entrypoint existing rather
-          # than asserting against a server that cannot exist.
+          # `uvicorn scadbuddy.main:app`. When this gate was written the API
+          # epic had not landed and starting the container died with
+          # `exec uvicorn failed`; it has landed since, so this now reads true.
+          # Kept because it is the honest precondition for the container smoke
+          # test, and because it costs one `[ -f ]`.
           app=false
           if [ -f backend/scadbuddy/main.py ]; then app=true; fi
 
@@ -213,6 +212,42 @@ jobs:
       - name: Build
         run: pnpm build
 
+      # The e2e suite lives here and NOT in the image job, which is where it
+      # started. frontend/playwright.config.ts is self-contained: it runs its
+      # own `webServer` (`pnpm build && pnpm preview --port 4173`) against the
+      # production bundle with the msw worker mocking the API — by its own
+      # comment, "so it exercises the same build the backend will host". It
+      # never talks to the backend, so pointing it at the running container was
+      # simply wrong, and gating it on the container's entrypoint was wrong for
+      # the same reason. Here it also reuses the node_modules this job already
+      # installed instead of a second `pnpm install`.
+      - name: Install Playwright browsers
+        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Playwright smoke
+        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        # DEBUG=pw:webserver is load-bearing for diagnosis, not noise.
+        # Playwright pipes the webServer's STDERR but IGNORES its stdout, so a
+        # server that fails to come up produces only
+        # "Timed out waiting 180000ms from config.webServer" with no cause —
+        # vite's own startup banner and any build output are discarded. This
+        # channel prints the lifecycle instead.
+        env:
+          DEBUG: pw:webserver
+        run: pnpm exec playwright test
+
+      - name: Upload the Playwright report
+        if: ${{ failure() && needs.layout.outputs.e2e == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
   # ── Image build + everything that needs a real openscad ─────────────────────
   #
   # ONE job, on purpose. The backend's integration tests are marked
@@ -322,31 +357,6 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: curl --fail --silent --show-error http://127.0.0.1:18080/healthz
 
-      # Playwright only when the suite exists — the frontend branch adds
-      # frontend/e2e/ separately. Browsers are installed here rather than baked
-      # into the runner image because this is the only job that needs them.
-      # `--with-deps` shells out to apt via sudo, which ubuntu-latest provides
-      # passwordless. Do not drop it to avoid the apt step — chromium will not
-      # start without those system libraries.
-      - name: Install Playwright browsers
-        if: ${{ needs.layout.outputs.e2e == 'true' && needs.layout.outputs.app == 'true' }}
-        working-directory: frontend
-        run: |
-          set -euo pipefail
-          corepack enable
-          pnpm install --frozen-lockfile
-          pnpm exec playwright install --with-deps chromium
-
-      - name: Playwright smoke
-        if: ${{ needs.layout.outputs.e2e == 'true' && needs.layout.outputs.app == 'true' }}
-        working-directory: frontend
-        env:
-          # The container started above, not a `pnpm dev` server: the smoke test
-          # is about the SHIPPED artifact — backend serving the built bundle —
-          # not about the dev server.
-          SCADBUDDY_BASE_URL: http://127.0.0.1:18080
-        run: pnpm exec playwright test
-
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
         run: docker logs scadbuddy-ci || true
@@ -428,7 +438,7 @@ jobs:
           if [ -f backend/scadbuddy/main.py ]; then has_app=true; fi
 
           echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} models=${has_models} image=${has_image}"
-          echo "Container smoke + Playwright gated on the API entrypoint: app=${has_app}"
+          echo "Container smoke gated on the API entrypoint: app=${has_app}"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
