@@ -17,12 +17,15 @@ name: Issue Intake
 #     clusters because TWO call sites would otherwise carry duplicate
 #     create-label-and-apply logic that drifts silently. Here there is one call
 #     site, so it is inline.
-#   * PROJECT BOARD IS A TODO. The design spec puts ScadBuddy's epics on a
-#     board, but that board is being bootstrapped separately and its project
-#     number is not known yet. Rather than stub a half-working board step, the
-#     agent is told to say so in its summary. Wire it up by adding the
-#     `scripts/project/` helpers and a `repository-projects: write` permission,
-#     the way forge does.
+#   * BOARD PLACEMENT IS A DETERMINISTIC STEP, not an agent instruction.
+#     Adding an item is two idempotent API calls, and an LLM that REPORTS
+#     having done it without doing it is exactly the silent no-op the two
+#     verify steps below exist to catch. The agent is told not to touch the
+#     board; the step below owns it.
+#     Note `permissions:` cannot grant this — `repository-projects` is classic
+#     Projects only. Projects V2 is org-level, so the write rides the
+#     `eh-homelab-org-runners` App token and needs that App to carry
+#     `organization_projects: write`.
 #
 # Nothing about this workflow is testable from a PR — issue webhooks do not
 # fire on `pull_request` events, so the first real exercise is the first issue
@@ -406,18 +409,14 @@ jobs:
 
             ## Project board
 
-            ScadBuddy's GitHub Projects V2 board is being bootstrapped separately and its project number is not known to this workflow yet, so you cannot add the issue to it. Say so explicitly, in one line, at the end of your summary comment:
-
-            > TODO: not added to the project board — no project number is wired into `issue-intake.yml` yet.
-
-            Do not attempt to discover or guess a project number.
+            A later step in this same job adds the issue to the board and sets its Status, deterministically. Do not add it yourself, do not report on it, and do not mention the board in your summary — you cannot observe whether that step succeeded, and guessing either way is worse than silence.
 
             ## Important guidelines
 
             - DO NOT attempt to resolve the issue or write code.
             - DO NOT close the issue, ever — not even a confirmed duplicate.
             - DO NOT create issues, epics, or labels.
-            - DO NOT attempt to add the issue to a project board (see above).
+            - DO NOT add the issue to a project board, or comment about the board (see above).
             - If re-triaging (the `needs-triage` path), update what is already there rather than duplicating it.
             - Remove the `needs-triage` label once you are done.
             - Prepend the `[View job run](...)` line to every comment you post.
@@ -483,6 +482,73 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
             || echo "::warning::Failed to apply failed:issue-intake."
           exit 1
+
+      # Runs `if: always()` so a board problem can never block triage -- the
+      # labelling above has already happened by the time we get here -- but it
+      # still FAILS rather than warning. An issue missing from the board is
+      # invisible by construction: nobody notices the row that is not there.
+      #
+      # Every project-specific id is resolved at runtime instead of pinned.
+      # `.claude/project-ops.yaml` is the contract, but only its flat scalars
+      # are read here (a nested-YAML parse would add a PyYAML dependency to buy
+      # nothing) -- the Status field and option ids come from the API, which is
+      # also what keeps this working if the board is ever rebuilt.
+      - name: Add the issue to the project board
+        id: board
+        if: always() && steps.intake.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          ISSUE_URL: ${{ github.event.issue.html_url }}
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          # `set -uo pipefail` only ADDS flags; Actions' `bash -e {0}` stays,
+          # so every command whose non-zero exit is tolerable carries `|| true`.
+          set -uo pipefail
+
+          contract=".claude/project-ops.yaml"
+          number=""
+          if [ -f "$contract" ]; then
+            # Flat top-level scalar; anchored so a nested key cannot match.
+            number="$(sed -n 's/^project_number:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$contract" | head -1)"
+          fi
+          if [ -z "$number" ]; then
+            # The contract lands in its own PR (branch `chore/project-ops`).
+            # Until it does, this is org project 1 -- the ScadBuddy board.
+            number=1
+            echo "::notice::${contract} not found; falling back to project ${number}."
+          fi
+          echo "Adding ${ISSUE_URL} to ${OWNER} project ${number}"
+
+          if ! item_json="$(gh project item-add "$number" --owner "$OWNER" --url "$ISSUE_URL" --format json 2>&1)"; then
+            echo "::error::Could not add the issue to project ${number}. If this is a 403, the eh-homelab-org-runners App is missing 'organization_projects: write' -- job permissions cannot grant it, since 'repository-projects' covers classic Projects only. Response: ${item_json}"
+            exit 1
+          fi
+
+          item_id="$(printf '%s' "$item_json" | jq -r '.id // empty')"
+          if [ -z "$item_id" ]; then
+            echo "::error::project item-add returned no item id: ${item_json}"
+            exit 1
+          fi
+          echo "item_id=${item_id}"
+
+          # Status is best-effort ONLY here: the item is on the board, which is
+          # the part that matters. A board whose Status field was renamed or
+          # removed should not red every intake run.
+          project_id="$(gh project view "$number" --owner "$OWNER" --format json --jq '.id // empty' 2>/dev/null || true)"
+          fields="$(gh project field-list "$number" --owner "$OWNER" --format json 2>/dev/null || true)"
+          field_id="$(printf '%s' "$fields" | jq -r '.fields[]? | select(.name == "Status") | .id // empty' 2>/dev/null || true)"
+          option_id="$(printf '%s' "$fields" | jq -r '.fields[]? | select(.name == "Status") | .options[]? | select(.name == "Todo") | .id // empty' 2>/dev/null || true)"
+
+          if [ -n "$project_id" ] && [ -n "$field_id" ] && [ -n "$option_id" ]; then
+            if gh project item-edit --id "$item_id" --project-id "$project_id" \
+                 --field-id "$field_id" --single-select-option-id "$option_id" >/dev/null; then
+              echo "Status set to Todo."
+            else
+              echo "::warning::Item is on the board but Status could not be set to Todo."
+            fi
+          else
+            echo "::warning::Item is on the board but the Status field could not be resolved (project_id='${project_id}' field_id='${field_id}' option_id='${option_id}')."
+          fi
 
       # A run can report is_error=false with zero permission_denials while
       # having silently done nothing at all (forge#3053: a 7-turn run made no
