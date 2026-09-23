@@ -107,7 +107,19 @@ fields:
         description: "Epic #44"
   "Sprint":
     id: PVTIF_lADOCQNNjc4BkYmKzhjJWbY
-    iterations: []
+    iterations:
+      - id: "2cb1bfb0"
+        title: "Sprint 1"
+        startDate: "2026-09-23"
+        duration: 7
+      - id: "a29dfbb7"
+        title: "Sprint 2"
+        startDate: "2026-09-30"
+        duration: 7
+      - id: "c4526df2"
+        title: "Sprint 3"
+        startDate: "2026-10-07"
+        duration: 7
   "Start Date":
     id: PVTF_lADOCQNNjc4BkYmKzhjJWbc
   "Target Date":
