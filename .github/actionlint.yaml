@@ -1,0 +1,18 @@
+---
+# actionlint rejects any `runs-on:` label it does not recognise, and every
+# self-hosted label in this repo is an org-level ARC scale set living in the
+# eh-homelab homelab cluster (eh-homelab/clusters,
+# clusters/prod/actions-runner-controller/generated-runners/clusters-runners/).
+# Declaring them here is what keeps the lint honest about typos: a misspelled
+# pool name is a job that queues forever with no error, and this file is the
+# only thing that catches it.
+self-hosted-runner:
+  labels:
+    # Default for everything. Capped pool, dind sidecar sized at 1Gi — docker
+    # work does NOT belong here.
+    - clusters-runner-light
+    # The docker pool: runner 4Gi + dind 8Gi. Image builds only.
+    - clusters-runner
+    # 3Gi agent tier, for long single-agent runs that must not compete with
+    # CI for light-pool slots.
+    - clusters-runner-agent

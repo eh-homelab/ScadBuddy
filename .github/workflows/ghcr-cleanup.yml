@@ -1,0 +1,87 @@
+---
+name: GHCR Cleanup
+
+# Prunes old untagged versions of ghcr.io/eh-homelab/scadbuddy. Every
+# build-image.yml run pushes a full set of new blobs for TWO architectures plus
+# a `buildcache` tag; nothing else ever deletes the superseded versions, so
+# untagged manifests accumulate indefinitely in GHCR and, downstream, keep the
+# Nexus ghcr-proxy blob store growing.
+#
+# dataaxiom/ghcr-cleanup-action is used (rather than
+# actions/delete-package-versions) because it is multi-arch/manifest aware: it
+# never deletes an untagged child manifest that a tagged manifest list still
+# references, and `validate: true` checks tag integrity after the prune.
+# Tagged versions (main / sha-* / semver / buildcache) are never touched —
+# keep-n-tagged is deliberately unset. `buildcache` in particular MUST survive:
+# deleting it does not break anything, but it throws away the registry cache
+# every PR build reads and turns the next few CI runs into cold builds.
+#
+# FIRST RUN: once this lands on the default branch, dispatch it manually (it
+# defaults to dry-run) and review the deletion set before the first cron fires.
+
+on:
+  schedule:
+    # Monthly. Nothing here is time-critical; the point is that the untagged
+    # set never grows without bound.
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Log what would be deleted without deleting"
+        type: boolean
+        default: true
+
+permissions:
+  packages: write
+
+# One prune at a time. Two concurrent runs enumerate the same package versions
+# and then both try to delete them: the loser 404s on versions the winner
+# already removed, and `validate: true` runs its tag-integrity check against a
+# package another run is still mutating. A manual dry-run dispatch while the
+# monthly cron is live is the realistic way to hit that. Never cancel a run
+# mid-prune — deletion is not transactional.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      # This org has a documented precedent of the default GITHUB_TOKEN having a
+      # write scope silently capped by org policy — the job's permissions banner
+      # shows the scope, but the API call still 403s (eh-homelab/clusters#484,
+      # where `issues: write` needed a GitHub App token instead).
+      # `packages: write` here is subject to the same class of failure.
+      #
+      # That cannot be verified in advance. GitHub exposes no permission-check
+      # endpoint, a read probe can succeed while DELETE is capped, and the
+      # action's dry-run deliberately skips the mutation — so the only call that
+      # proves the write scope is a real delete. The achievable goal is
+      # therefore not "verify first" but "fail legibly": the handler below turns
+      # any failure of the prune (403 included) into an actionable message
+      # instead of an opaque monthly action error.
+      - name: Prune old untagged image versions
+        id: prune
+        uses: dataaxiom/ghcr-cleanup-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          owner: eh-homelab
+          repository: ScadBuddy
+          packages: scadbuddy
+          # Keep a rollback window of recent untagged (superseded) versions and
+          # delete the rest. `keep-n-untagged` already implies deleting the
+          # untagged versions beyond N, and the action rejects the combination
+          # `delete-untagged` + `keep-n-untagged` outright ("cannot be set at
+          # the same time"), so this must stand alone.
+          keep-n-untagged: 10
+          validate: true
+          # Scheduled runs delete for real; manual dispatches default to
+          # dry-run so the deletion set can be reviewed first.
+          dry-run: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}
+
+      - name: Explain prune failure
+        if: failure() && steps.prune.outcome == 'failure'
+        run: |
+          echo "::error::GHCR prune failed — no versions were deleted. If the log shows a 403, GITHUB_TOKEN's packages:write is capped by org policy (the eh-homelab/clusters#484 pattern); fix by switching to the eh-homelab-org-runners App token (RUNNER_APP_ID / RUNNER_APP_PRIVATE_KEY), as claude-code-review.yml does."

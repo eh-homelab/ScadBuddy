@@ -1,0 +1,71 @@
+---
+name: Release Drafter
+
+# Two different actions from the same repo, and they are not interchangeable:
+#   * `release-drafter/release-drafter@v7` maintains the draft release. Only
+#     meaningful on a push to the default branch.
+#   * `release-drafter/release-drafter/autolabeler@v7` — a DIFFERENT action at a
+#     subpath — applies labels to a PR from its title. The top-level action has
+#     no `disable-autolabeler` input; passing one is silently ignored.
+# Both read the same .github/release-drafter.yml.
+#
+# Nothing is published automatically. A human edits and publishes the draft,
+# which creates the `v*` tag that build-image.yml's semver tags key off.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update_release_draft:
+    name: Update the release draft
+    if: github.event_name == 'push'
+    runs-on: clusters-runner-light
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: release-drafter/release-drafter@v7.7.0
+        with:
+          config-name: release-drafter.yml@${{ github.event.repository.default_branch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  autolabel:
+    name: Autolabel the PR
+    if: github.event_name == 'pull_request'
+    runs-on: clusters-runner-light
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # `@${{ ...default_branch }}` on config-name is LOAD-BEARING, not
+      # decoration. With no explicit `@ref`, the action resolves its config at
+      # `github.context.ref`, which for a pull_request event is
+      # `refs/pull/<n>/merge` — an ephemeral commit GitHub DELETES the instant
+      # the PR merges. Jobs on this capped self-hosted pool routinely queue for
+      # 10-20 minutes, so any PR that merges while its run is still queued 404s
+      # with "Config file not found" even though the file is plainly on main.
+      # (Diagnosed in WonderForgeLabs/forge: 15 failures in 29h; fixed there by
+      # this exact pin.) Use `default_branch`, NOT `base.ref` — a stacked PR's
+      # base branch is also deleted on merge and reintroduces the same race.
+      #
+      # `pull_request`, not `pull_request_target`: this repo takes no fork
+      # contributions, and pull_request_target would hand a write token to a
+      # run triggered by an untrusted head for no gain.
+      - uses: release-drafter/release-drafter/autolabeler@v7.7.0
+        with:
+          config-name: release-drafter.yml@${{ github.event.repository.default_branch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

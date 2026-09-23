@@ -1,0 +1,545 @@
+---
+name: Issue Intake
+
+# Agent-driven triage for newly opened issues, ported from
+# eh-homelab/clusters' issue-intake.yml (itself a port of
+# WonderForgeLabs/forge's). It cannot be a `workflow_call` shim: the upstream
+# repos are private, so GitHub will not let this one call them. This is a
+# vendored adaptation.
+#
+# Deltas from the clusters original, all deliberate:
+#
+#   * NO Hindsight MCP server. This repo has no `.github/claude.mcp.json`, and
+#     ScadBuddy has no accumulated incident history for memory to draw on yet.
+#     Worth revisiting once it does — memory is what makes the duplicate check
+#     catch overlaps that keyword search misses.
+#   * NO `label-on-agent-failure` composite action. That extraction exists in
+#     clusters because TWO call sites would otherwise carry duplicate
+#     create-label-and-apply logic that drifts silently. Here there is one call
+#     site, so it is inline.
+#   * PROJECT BOARD IS A TODO. The design spec puts ScadBuddy's epics on a
+#     board, but that board is being bootstrapped separately and its project
+#     number is not known yet. Rather than stub a half-working board step, the
+#     agent is told to say so in its summary. Wire it up by adding the
+#     `scripts/project/` helpers and a `repository-projects: write` permission,
+#     the way forge does.
+#
+# Nothing about this workflow is testable from a PR — issue webhooks do not
+# fire on `pull_request` events, so the first real exercise is the first issue
+# opened after merge.
+
+on:
+  issues:
+    types: [opened, labeled]
+
+# Serialize per issue: two agents writing labels on one issue would race.
+# cancel-in-progress is FALSE, unlike most per-resource concurrency groups
+# here — cancelling mid-intake leaves labels half-applied AND trips the
+# always()-guarded verify step below into stamping failed:issue-intake on an
+# issue that was merely superseded. Queueing costs a few minutes and is
+# always safe. (Same reasoning as claude.yml's group.)
+concurrency:
+  group: issue-intake-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  # Trust is decided in a JOB, not in an `if:` on the agent job, and the split
+  # is the point: a job skipped by `if:` leaves NO logs — GitHub keeps the
+  # condition-evaluation lines only for jobs that actually ran, and a skipped
+  # job's log archive downloads as an empty zip. A gate that mis-evaluates is
+  # then undiagnosable after the fact, which is exactly how forge#2925 and
+  # this repo's #986 both stayed invisible. Same shape as claude.yml's `gate`.
+  #
+  # The `if:` below is a cheap STRUCTURAL filter only (is this event even a
+  # candidate) — never the trust check.
+  gate:
+    if: |
+      (
+        github.event.action == 'opened' &&
+        !contains(fromJSON('["claude[bot]", "eh-homelab-org-runners[bot]", "dependabot[bot]"]'), github.event.issue.user.login) &&
+        !contains(github.event.issue.labels.*.name, 'pr-feedback')
+      ) || (
+        github.event.action == 'labeled' &&
+        github.event.label.name == 'needs-triage'
+      )
+    runs-on: clusters-runner-light
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      allowed: ${{ steps.trust.outputs.allowed }}
+    steps:
+      # GITHUB_TOKEN, deliberately — same endpoint and same token as
+      # claude.yml's gate, which is the in-production fix for #986.
+      #
+      # An eh-homelab-org-runners App token was considered and rejected: the
+      # installation carries no `members` and no `administration` permission
+      # (actions, contents, environments, issues, merge_queues, metadata,
+      # packages, pages, pull_requests, repository_hooks, repository_projects,
+      # secrets, workflows — checked against
+      # `gh api orgs/eh-homelab/installations`), so it reads this endpoint no
+      # better than the ambient token while making every trust decision in
+      # the repo depend on App health. The intake job below does mint one,
+      # for a reason that genuinely applies there and not here (see its own
+      # comment).
+      - name: Decide whether this actor's issue gets intake
+        id: trust
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # `sender` is correct for BOTH triggers: on `opened` it is the issue
+          # author, and on `labeled` it is whoever applied needs-triage — which
+          # is the actor whose authority actually matters for re-triage.
+          ACTOR: ${{ github.event.sender.login }}
+          ACTION: ${{ github.event.action }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          # NOTE: Actions runs every `run:` block as `bash -e {0}`; `set -uo
+          # pipefail` only ADDS flags and cannot remove that -e. Any command
+          # whose non-zero exit is expected must carry `|| true`.
+          set -uo pipefail
+
+          echo "action=${ACTION} issue=#${ISSUE_NUMBER} actor=${ACTOR}"
+
+          # `var="$(cmd)"` is a simple command: under `bash -e` a non-zero
+          # exit aborts the STEP before the next line can read `$?`. forge's
+          # original reads `api_exit=$?` on the following line, which makes
+          # its own 404 branch unreachable — the step just dies instead. The
+          # `|| api_exit=$?` form is what actually captures the code here.
+          api_exit=0
+          api_output="$(gh api "repos/${REPO}/collaborators/${ACTOR}/permission" --jq '.permission' 2>&1)" || api_exit=$?
+
+          if [ "$api_exit" -eq 0 ]; then
+            permission="$api_output"
+          elif echo "$api_output" | grep -q "HTTP 404"; then
+            # A genuine 404 means the actor really is not a collaborator.
+            permission="none"
+          else
+            # Any other failure (bad/expired App credential, rate limit,
+            # transient 5xx) is INCONCLUSIVE, not a "not trusted" verdict.
+            # Quietly resolving to "none" here would recreate the silent-skip
+            # bug this job exists to eliminate, one level deeper. Fail loudly.
+            echo "::error::Live permission check for ${ACTOR} failed inconclusively (not a 404): ${api_output}"
+            exit 1
+          fi
+
+          echo "Live repo permission for ${ACTOR}: ${permission}"
+
+          case "$permission" in
+            admin|maintain|write|triage)
+              echo "allowed=true" >> "$GITHUB_OUTPUT"
+              echo "::notice::Intake accepted for ${ACTOR} (permission=${permission})."
+              ;;
+            *)
+              echo "allowed=false" >> "$GITHUB_OUTPUT"
+              echo "::warning::Intake skipped: ${ACTOR} has no triage-or-better permission on ${REPO} (permission=${permission})."
+              ;;
+          esac
+
+  intake:
+    needs: gate
+    if: needs.gate.outputs.allowed == 'true'
+    # The org's 3Gi agent tier. Almost nothing targets it, so a long agent run
+    # here cannot starve `CI Summary` or `claude-review` of the capped
+    # clusters-runner-light slots they share.
+    runs-on: clusters-runner-agent
+    timeout-minutes: 20
+    # `issues: write` and `actions: read` are on the AMBIENT GITHUB_TOKEN and
+    # look unused, since every GitHub write below explicitly passes the App
+    # token instead. They stay deliberately. A job-level `permissions:` block
+    # REPLACES the workflow default rather than extending it, and this repo
+    # has already been bitten by trimming one too far: kustomize-validation.yml
+    # lost `actions: read` and got a 403 "Resource not accessible by
+    # integration" that failed SILENTLY, because the affected step was
+    # best-effort (commit ebd48875). Whether claude-code-action reaches for
+    # the ambient token on any path outside its explicit `github_token` input
+    # cannot be established from a PR — issue webhooks do not fire on
+    # `pull_request`, so the first real exercise of this workflow is the first
+    # issue opened after merge. Two unused read/write bits on a token that is
+    # already out-scoped by the App token in the same job is a far cheaper
+    # error than an unreproducible silent 403.
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+      actions: read
+
+    steps:
+      # Unlike the gate above, this job WRITES to the issue — a run-link
+      # comment, labels, and whatever the agent posts. The default
+      # GITHUB_TOKEN's issue-comment write is capped by org policy here: a
+      # POST to the issues/comments API 403s with "Resource not accessible by
+      # integration" even when the job's permissions banner shows
+      # `issues: write` (#484, and the reason claude-code-review.yml's gate
+      # job mints one too). That — not forge's organization Projects: write,
+      # which this port has no use for — is what the App token is for.
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Stamp the issue with a link to THIS job before the agent starts, so
+      # every intake is traceable back to the run that produced it —
+      # including the silent-no-op case (forge#3053), where the agent leaves
+      # no comment at all and there is otherwise nothing on the issue tying
+      # it to a run.
+      #
+      # claude-code-action can do this natively via `track_progress: true`,
+      # but that input FORCES tag mode — a different execution model from the
+      # agent mode this prompt, --allowedTools allowlist and turn budget are
+      # tuned around — and it links the RUN, not the job. This workflow has
+      # two jobs, so resolve the job id and link that, falling back to the run
+      # URL if the jobs API is unavailable.
+      - name: Post job run link on the issue
+        id: run-link
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          SERVER_URL: ${{ github.server_url }}
+        run: |
+          set -uo pipefail
+
+          run_url="${SERVER_URL}/${REPO}/actions/runs/${RUN_ID}"
+
+          # `|| true` is load-bearing: `set -uo pipefail` cannot remove the
+          # `-e` that Actions imposes, so an unavailable jobs API (or the
+          # pipefail'd `head`) would abort the step rather than fall through
+          # to the run-URL fallback three lines below.
+          job_id="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}/attempts/${RUN_ATTEMPT}/jobs" \
+            --jq '.jobs[] | select(.name == "intake") | .id' 2>/dev/null | head -n1)" || true
+
+          if [ -n "${job_id:-}" ]; then
+            job_url="${run_url}/job/${job_id}"
+          else
+            echo "::warning::Could not resolve the intake job id; falling back to the run URL."
+            job_url="$run_url"
+          fi
+
+          echo "Job URL: ${job_url}"
+          echo "job_url=${job_url}" >> "$GITHUB_OUTPUT"
+
+          # Never fail intake over the comment — the URL is still handed to
+          # the agent below via the step output regardless.
+          gh issue comment "$ISSUE_NUMBER" --repo "$REPO" \
+            --body "🤖 Issue intake started — [View job run](${job_url})" \
+            || echo "::warning::Failed to post the job run link comment."
+
+      - name: Issue Intake with Claude
+        id: intake
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
+        with:
+          # Only matters on the `labeled` path: a pr-feedback issue authored
+          # by claude[bot] that a human deliberately re-triages by applying
+          # needs-triage. Without this the action refuses the bot-authored
+          # trigger context.
+          allowed_bots: "claude[bot],eh-homelab-org-runners[bot],dependabot[bot]"
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
+          # NO `Task` tool here, deliberately. Confirmed in forge (#3061, via a
+          # downloaded execution transcript) that `Task` launches a sub-agent
+          # ASYNCHRONOUSLY, and this action's one-shot headless invocation has
+          # no mechanism to wait for that and resume: the lead's turn scores
+          # complete (stop_reason: end_turn) the moment it stops generating,
+          # right after it delegates and says "I'll wait for their results".
+          # Nothing collects the sub-agents' output, every later step silently
+          # never runs, and is_error stays false so it reports green.
+          #
+          # NO mcp__github__create_issue either — that is what makes "never
+          # invent an epic" a capability boundary rather than a prompt request.
+          #
+          # --max-turns is well above the default 20 (a full intake does not
+          # fit), but below forge's 100 since the six board fields are gone.
+          # `Read,Glob,Grep` are granted (the clusters original has none):
+          # the design spec IS this repo's institutional memory, and reading it
+          # is what lets the agent tell "renderer" from "api" on an issue whose
+          # title says neither.
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,Bash(gh:*),mcp__github__get_issue,mcp__github__search_issues,mcp__github__update_issue,mcp__github__add_issue_comment,mcp__github__get_issue_comments" --model "claude-sonnet-5" --max-turns 60
+          prompt: |
+            You are the issue intake agent for eh-homelab/ScadBuddy — a self-hosted OpenSCAD customizer that reproduces MakerWorld's Parametric Model Maker inside Bambuddy (Python/FastAPI backend that shells out to `openscad`, React 19 + Vite frontend, `.scad` models, one container). The approved design spec is `docs/superpowers/specs/2026-09-22-scadbuddy-design.md`; read it when an issue's area is unclear. Your job is to triage one GitHub issue: check for duplicates, apply labels, wire it to an existing epic if one fits, and note blockers.
+
+            ## Context
+
+            - REPO: ${{ github.repository }}
+            - ISSUE_NUMBER: ${{ github.event.issue.number }}
+            - EVENT: ${{ github.event_name }}.${{ github.event.action }} - Label (if a labeled event): ${{ github.event.label.name }}
+            - RUN_URL: ${{ steps.run-link.outputs.job_url }}
+
+            EVERY comment you post on this issue must START with this exact
+            line, followed by a blank line, before any other content:
+
+            [View job run](${{ steps.run-link.outputs.job_url }})
+
+            This applies to every comment in every step below (duplicate
+            notices, blocker notices, your analysis summary) — it is what ties
+            a comment back to the run that wrote it.
+
+            ## Tooling constraints (read before running anything)
+
+            This run is sandboxed to a narrow `--allowedTools`. These three
+            patterns are denied, and every denial costs you turns you need for
+            the actual work:
+
+            1. **No piping into an interpreter.** A Bash command is matched on
+               its literal leading token, so `gh ... | python3 -c ...` or
+               `gh ... | jq ...` is denied even though `gh` alone is allowed.
+               `gh` has `--jq` built in — use it (`gh label list --limit 100
+               --jq '.[].name'`). Same for `| head`: use the command's own
+               `--limit`/`--jq`.
+            2. **No writing files.** Neither `Write` nor `cat > file <<EOF` is
+               available. You never need them: to post a comment, pass the body
+               straight to `mcp__github__add_issue_comment`, which takes the
+               text as a parameter. (A multi-line `gh issue comment --body '...'`
+               also works, since the command still starts with `gh`.)
+            3. **No leading variable assignment.** `FOO=$(gh ...)` matches none
+               of the allowed prefixes. Run one command, read its printed
+               output yourself, and type the literal value into the next one.
+
+            ## Step 1: Read the issue
+
+            Use `mcp__github__get_issue` to read issue #${{ github.event.issue.number }} in full (title, body, existing labels, assignees).
+
+            If this is a re-triage — EVENT above is `issues.labeled` — also read the existing comments with `mcp__github__get_issue_comments` before doing anything else. A previous intake may already have posted a summary, wired an epic, or recorded blockers; your job is to correct and extend that, not to repeat it. On the `issues.opened` path skip this, there is nothing to read.
+
+            ## Step 2: Analysis
+
+            Perform all three analyses below YOURSELF, directly, one after
+            another, in this same session. Do NOT use the `Task` tool or try
+            to delegate any of this to a sub-agent — it is not available in
+            this workflow, and even if it were, a sub-agent launched from a
+            one-shot headless run like this one starts asynchronously with no
+            way for you to wait for it to finish, so delegating here would
+            silently abandon the rest of this task instead of completing it.
+
+            ### Analysis A: Duplicate check
+            Search for similar OPEN issues using `mcp__github__search_issues` with keywords from the title and body. Prefer searching distinctive nouns (a module name like `render`, a filename, an API path like `/models/{slug}/schema`, a spec section number) over generic words. Criteria for duplicate: same bug, same request, same root problem, even if worded differently. Note: candidates with confidence (high/medium/low).
+
+            ### Analysis B: Label selection
+            Run `gh label list --limit 100` to see what exists.
+
+            **Apply only labels that already exist. Never create a label.**
+            The vocabulary here is small and deliberately so — there is no
+            `area:*` taxonomy. Descriptive labels you may apply: `bug`,
+            `enhancement`, `documentation`, `question`, `duplicate`, `epic`,
+            `ci`, `docker`, `dependencies`, `accessibility`, and the component
+            labels `renderer` (OpenSCAD render pipeline), `api` (FastAPI
+            backend), `frontend` (customizer UI), `bambuddy` (Bambuddy
+            integration), `deploy` (cluster deployment in eh-homelab/clusters)
+            and `models` (example .scad models).
+
+            **Never apply any of these — they are MECHANISM labels that
+            trigger other workflows or encode process state, and applying one
+            from here fires a workflow or corrupts a gate:**
+            `claude-make-follow-up-issues` (a PR label that files pr-feedback
+            issues), `pr-feedback`, `needs-triage` (applying it re-enters this
+            very workflow), `failed:issue-intake`.
+
+            Preserve every label the issue already has; you are adding, not replacing.
+
+            ### Analysis C: Epic search
+            Search for existing epic issues with `mcp__github__search_issues`, query `is:issue is:open "[Epic]" in:title`, and also `is:issue is:open label:epic`. Note: candidate parents and how well each fits.
+
+            The epics here map to the design spec's §12 work breakdown: Renderer, API, Customizer UI, Bambuddy integration, Container & CI, Deployment, Models & acceptance, Docs. Match the issue to one of those before concluding there is no parent.
+
+            ## Step 3: Handle duplicates
+
+            If Analysis A found a HIGH confidence duplicate:
+            1. Post a comment linking to the original issue(s).
+            2. Apply the `duplicate` label.
+            3. STOP — do not proceed with the rest of intake. Do NOT close the issue; a human decides that.
+
+            If only medium/low confidence duplicates were found, mention them in your Step 6 summary and continue.
+
+            ## Step 4: Apply labels
+
+            Apply Analysis B's selections via `mcp__github__update_issue`, including the issue's existing labels in the call so none are dropped. If `needs-triage` is present, remove it — triage is now complete, and a later step checks for exactly that.
+
+            ## Step 5: Epic wiring
+
+            **Never create an epic.** If Analysis C found a clearly matching open epic — the issue is plainly a piece of that epic's stated scope, not merely adjacent — wire it as a sub-issue:
+
+            First get the two node IDs (each is its own standalone command):
+            ```bash
+            gh api repos/${{ github.repository }}/issues/${{ github.event.issue.number }} --jq .node_id
+            ```
+            ```bash
+            gh api repos/${{ github.repository }}/issues/<EPIC_NUMBER> --jq .node_id
+            ```
+            Then, substituting both printed values literally:
+            ```bash
+            gh api graphql -f query='
+              mutation($epicId: ID!, $subIssueId: ID!) {
+                addSubIssue(input: {
+                  issueId: $epicId
+                  subIssueId: $subIssueId
+                }) { issue { number title } }
+              }' -f epicId="<EPIC_NODE_ID>" -f subIssueId="<THIS_ISSUE_NODE_ID>"
+            ```
+
+            If nothing matches clearly, leave the issue unparented and say so in your Step 6 summary. An unparented issue is a normal, correct outcome here — a wrong parent is worse than none.
+
+            ## Step 6: Blockers and summary
+
+            Look for OPEN issues that genuinely block this one: explicitly named as prerequisites in the body, or an earlier phase of the same epic. Be conservative — only when clearly justified. For each, post `Blocked by #<N>` as a comment, and check you have not created a cycle.
+
+            Then post one summary comment covering: what you labelled and why, the duplicate candidates you considered and rejected, the epic you wired to (or why none fit), and any blockers. If Hindsight surfaced prior work on this — a past incident, a decision already taken, a fix already shipped — include it under the blockquote header above, with enough specifics (issue/PR numbers, values, file paths) that a human can check it. Attribute only what memory actually contributed; do not add the header decoratively.
+
+            ## Project board
+
+            ScadBuddy's GitHub Projects V2 board is being bootstrapped separately and its project number is not known to this workflow yet, so you cannot add the issue to it. Say so explicitly, in one line, at the end of your summary comment:
+
+            > TODO: not added to the project board — no project number is wired into `issue-intake.yml` yet.
+
+            Do not attempt to discover or guess a project number.
+
+            ## Important guidelines
+
+            - DO NOT attempt to resolve the issue or write code.
+            - DO NOT close the issue, ever — not even a confirmed duplicate.
+            - DO NOT create issues, epics, or labels.
+            - DO NOT attempt to add the issue to a project board (see above).
+            - If re-triaging (the `needs-triage` path), update what is already there rather than duplicating it.
+            - Remove the `needs-triage` label once you are done.
+            - Prepend the `[View job run](...)` line to every comment you post.
+
+      # Fail loudly on a half-finished intake and stamp the issue with
+      # `failed:issue-intake`, so a bad run is discoverable via
+      # `gh issue list --label failed:issue-intake` instead of by
+      # cross-referencing Actions run history by hand (that manual
+      # cross-reference is how forge#3053 was found in the first place).
+      #
+      # claude-code-action does NOT propagate the agent's own error — turn-cap
+      # exhaustion, tool permission denials — into the step exit code, so an
+      # aborted run otherwise reports green and looks like intake never fired.
+      # Read the verdict out of the execution log instead.
+      #
+      # Inlined rather than extracted into a composite action (which is what
+      # clusters does): there is exactly one call site here, so an extraction
+      # would add a directory and a second file to keep in sync for no
+      # duplication avoided.
+      - name: Verify intake completed
+        id: verify
+        if: always() && steps.intake.outcome != 'skipped'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          EXECUTION_FILE: ${{ steps.intake.outputs.execution_file }}
+          STEP_OUTCOME: ${{ steps.intake.outcome }}
+        run: |
+          # `set -uo pipefail` only ADDS flags; Actions' `bash -e {0}` stays.
+          # Every command whose non-zero exit is expected carries `|| true`.
+          set -uo pipefail
+
+          is_error=false
+          denials=0
+
+          if [ -n "${EXECUTION_FILE:-}" ] && [ -s "${EXECUTION_FILE}" ]; then
+            result="$(jq -c '[.[] | select(.type == "result")] | last // empty' "$EXECUTION_FILE" 2>/dev/null || true)"
+            if [ -n "$result" ]; then
+              is_error="$(printf '%s' "$result" | jq -r '.is_error // false')"
+              denials="$(printf '%s' "$result" | jq -r '(.permission_denials // []) | length')"
+              echo "is_error=${is_error} permission_denials=${denials}"
+            else
+              echo "::warning::execution log has no result message."
+            fi
+          else
+            echo "::warning::no execution log at '${EXECUTION_FILE:-<unset>}'."
+          fi
+
+          {
+            echo "is_error=$is_error"
+            echo "denials=$denials"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$STEP_OUTCOME" = "success" ] && [ "$is_error" != "true" ] && [ "$denials" = "0" ]; then
+            echo "Intake completed without errors or tool denials."
+            exit 0
+          fi
+
+          echo "::error::Intake did not complete cleanly (outcome=${STEP_OUTCOME} is_error=${is_error} denials=${denials})."
+          gh label create "failed:issue-intake" --repo "$REPO" --color b60205 \
+            --description "The issue-intake workflow errored or hit a tool permission denial" >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
+            || echo "::warning::Failed to apply failed:issue-intake."
+          exit 1
+
+      # A run can report is_error=false with zero permission_denials while
+      # having silently done nothing at all (forge#3053: a 7-turn run made no
+      # label/comment change and left needs-triage in place). The step above
+      # cannot catch this — nothing failed from the SDK's point of view.
+      # Re-check the actual GitHub state instead: if needs-triage was present
+      # when this run was TRIGGERED (github.event.issue.labels reflects the
+      # pre-run webhook payload) and it is still present afterwards, and the
+      # issue was not closed out-of-band, intake silently no-op'd.
+      - name: Verify needs-triage was resolved
+        id: triage-check
+        if: always() && steps.intake.outcome != 'skipped' && contains(github.event.issue.labels.*.name, 'needs-triage')
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -euo pipefail
+
+          state="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json state --jq .state)"
+          if [ "$state" = "CLOSED" ]; then
+            echo "Issue was closed during intake — needs-triage left in place is expected."
+            echo "stuck=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          still_present="$(gh issue view "$ISSUE_NUMBER" --repo "$REPO" --json labels --jq '[.labels[].name] | any(. == "needs-triage")')"
+          echo "stuck=$still_present" >> "$GITHUB_OUTPUT"
+
+          if [ "$still_present" = "true" ]; then
+            echo "::error::Issue #$ISSUE_NUMBER still carries needs-triage after intake ran — the agent made no visible progress despite reporting success. Check the uploaded execution transcript, or re-add the needs-triage label to retry."
+          else
+            echo "needs-triage was cleared — intake completed for real."
+          fi
+
+      # Detecting the silent no-op is the step above's job; STAMPING it is this
+      # one's. Same label, same discoverability, different symptom: nothing
+      # failed from the SDK's point of view, so `Verify intake completed` above
+      # cannot see it.
+      - name: Stamp failed:issue-intake on a silent no-op
+        if: always() && steps.triage-check.outputs.stuck == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+        run: |
+          set -uo pipefail
+          gh label create "failed:issue-intake" --repo "$REPO" --color b60205 \
+            --description "The issue-intake workflow errored or hit a tool permission denial" >/dev/null 2>&1 || true
+          gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --add-label "failed:issue-intake" \
+            || echo "::warning::Failed to apply failed:issue-intake."
+          echo "::error::Issue #${ISSUE_NUMBER} still carries needs-triage after intake ran — the agent reported success but changed nothing."
+          exit 1
+
+      # The execution file is never uploaded elsewhere and dies with the
+      # runner, so a permission denial, abnormal exit, or silent no-op is
+      # otherwise undebuggable after the fact — the summary only carries a
+      # denial COUNT, not which tools were denied. Upload the full transcript
+      # only when there is something to investigate, so routine green runs do
+      # not pay artifact storage.
+      - name: Upload execution transcript on permission denial
+        if: |
+          always() &&
+          steps.intake.outputs.execution_file != '' &&
+          (steps.verify.outputs.denials != '0' || steps.verify.outputs.is_error == 'true' || steps.triage-check.outputs.stuck == 'true')
+        uses: actions/upload-artifact@v7
+        with:
+          name: issue-intake-execution-${{ github.event.issue.number }}-${{ github.run_id }}
+          path: ${{ steps.intake.outputs.execution_file }}
+          retention-days: 7
