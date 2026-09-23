@@ -10,7 +10,11 @@ export default defineConfig({
       ? undefined
       : { '/api': { target: 'http://127.0.0.1:8080', changeOrigin: true } },
   },
-  preview: { port: 4173 },
+  // Bind the literal address Playwright polls (`http://127.0.0.1:4173`).
+  // Vite's default host is the NAME `localhost`, which Node 17+ resolves
+  // `verbatim`; on a host whose /etc/hosts maps it to ::1 first (GitHub
+  // runners) vite binds ::1 only and every IPv4 poll is refused (#62).
+  preview: { host: '127.0.0.1', port: 4173 },
   build: {
     outDir: 'dist',
     sourcemap: false,
