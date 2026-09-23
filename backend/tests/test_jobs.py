@@ -8,12 +8,23 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
+import trimesh
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobResult, JobStore, PartInfo, RenderQueue
+from scadbuddy.render.jobs import (
+    UNCOLOURED_WARNING,
+    Job,
+    JobResult,
+    JobStore,
+    PartInfo,
+    RenderQueue,
+    solid_parts,
+)
 from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.render.schema import CustomizerSchema
+from scadbuddy.render.split import ColourPart
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -23,7 +34,7 @@ def _result() -> JobResult:
         model_3mf="jobs/x.work/model.3mf",
         preview_glb="jobs/x.work/preview.glb",
         parts=[PartInfo(name="Color 1", colour="#FF6AC1", extruder=1, watertight=True)],
-        bounding_box=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
     )
 
 
@@ -159,3 +170,20 @@ async def test_start_fails_jobs_left_behind_by_a_restart(paths: DataPaths) -> No
         assert queue.store.read("stale").state == "failed"
     finally:
         await queue.aclose()
+
+
+async def test_uncoloured_geometry_falls_back_to_the_split_parts() -> None:
+    preview = [
+        ColourPart(0, "Default", "#F9D72C", trimesh.creation.box()),
+        ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box()),
+    ]
+    parts, warnings = await solid_parts(
+        Path("/nonexistent/model.scad"),
+        CustomizerSchema(),
+        {},
+        preview,
+        Path("/nonexistent"),
+        config=Config(openscad="/nonexistent/openscad"),
+    )
+    assert parts == preview
+    assert warnings == [UNCOLOURED_WARNING]

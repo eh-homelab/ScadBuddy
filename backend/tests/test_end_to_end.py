@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -9,12 +10,32 @@ import trimesh
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.render.jobs import RenderQueue
-from scadbuddy.render.split import split_by_material
+from scadbuddy.render.jobs import Job, JobResult, RenderQueue
 from tests.conftest import FIXTURES
 
 SLUG = "name_keychain"
+KEYCHAIN_MODEL = Path(__file__).resolve().parents[2] / "models" / "name-keychain" / "model.scad"
 pytestmark = pytest.mark.requires_openscad
+
+
+def _installed_fonts() -> str:
+    if shutil.which("fc-list") is None:
+        return ""
+    return subprocess.run(["fc-list"], capture_output=True, text=True, check=False).stdout.lower()
+
+
+async def _render(paths: DataPaths, slug: str, params: dict[str, object]) -> tuple[Job, JobResult]:
+    queue = RenderQueue(Config(openscad=load_config().openscad, data_dir=paths.root), paths)
+    await queue.start()
+    try:
+        job = await queue.submit(slug, params)  # type: ignore[arg-type]
+        await queue.join()
+    finally:
+        await queue.aclose()
+    done = queue.store.read(job.id)
+    assert done.state == "done", done.error
+    assert done.result is not None
+    return done, done.result
 
 
 @pytest.fixture
@@ -27,38 +48,20 @@ def data(tmp_path: Path) -> DataPaths:
 
 
 async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) -> None:
-    config = Config(openscad=load_config().openscad, data_dir=data.root)
-    queue = RenderQueue(config, data)
-    await queue.start()
-    try:
-        job = await queue.submit(
-            SLUG, {"name": "Reagan", "base_colour": "#ff6ac1", "text_colour": "#1f6feb"}
-        )
-        await queue.join()
-    finally:
-        await queue.aclose()
-
-    done = queue.store.read(job.id)
-    assert done.state == "done", done.error
-    result = done.result
-    assert result is not None
+    _, result = await _render(
+        data, SLUG, {"name": "Reagan", "base_colour": "#ff6ac1", "text_colour": "#1f6feb"}
+    )
 
     assert [part.extruder for part in result.parts] == [1, 2]
-    assert [part.colour for part in result.parts] == ["#FF6AC1", "#1F6FEB"]
+    assert result.colors == ["#FF6AC1", "#1F6FEB"]
     assert [part.name for part in result.parts] == ["Color 1", "Color 2"]
+    assert result.warnings == []
 
-    # OpenSCAD unions the two colour solids and drops the faces where they touch, so
-    # neither part closes on its own; the assembly does.
-    assert [part.watertight for part in result.parts] == [False, False]
-    raw = split_by_material(data.job_work_dir(job.id) / "render.3mf")
-    assembly = trimesh.Trimesh()
-    for part in raw:
-        assembly += part.mesh
-    assembly.merge_vertices()
-    assert assembly.is_watertight
+    # Each part comes from its own solid render, so each one closes on its own.
+    assert [part.watertight for part in result.parts] == [True, True]
 
-    assert result.bounding_box.size[0] == pytest.approx(60.0)
-    assert result.bounding_box.size[2] == pytest.approx(6.0)
+    assert result.bbox_mm.size[0] == pytest.approx(60.0)
+    assert result.bbox_mm.size[2] == pytest.approx(6.0)
 
     schema = json.loads(data.model_meta(SLUG).read_text(encoding="utf-8"))["schema"]
     assert [p["name"] for p in schema["parameters"]][:3] == ["name", "text_colour", "text_font"]
@@ -66,10 +69,34 @@ async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) 
     scene = trimesh.load(data.root / result.model_3mf, file_type="3mf")
     assert isinstance(scene, trimesh.Scene)
     assert len(scene.geometry) == 2
-    assert sorted(round(float(m.volume), 1) for m in scene.geometry.values()) == sorted(
-        round(float(part.mesh.volume), 1) for part in raw
-    )
+    assert all(mesh.is_watertight for mesh in scene.geometry.values())
 
     preview = trimesh.load(data.root / result.preview_glb, file_type="glb")
     assert isinstance(preview, trimesh.Scene)
     assert sorted(preview.geometry) == ["Color 1", "Color 2"]
+
+
+async def test_the_model_directory_is_left_as_it_was(data: DataPaths) -> None:
+    await _render(data, SLUG, {"name": "Reagan"})
+    assert sorted(p.name for p in data.model_dir(SLUG).iterdir()) == ["model.json", "model.scad"]
+
+
+@pytest.mark.skipif(not KEYCHAIN_MODEL.is_file(), reason="models/name-keychain is not present")
+async def test_the_shipped_keychain_measures_as_the_spec_says(tmp_path: Path) -> None:
+    if "lobster two" not in _installed_fonts():
+        pytest.skip("Lobster Two is not installed; the model would silently fall back to DejaVu")
+
+    paths = DataPaths(tmp_path)
+    paths.ensure()
+    paths.model_dir("name-keychain").mkdir(parents=True)
+    shutil.copy(KEYCHAIN_MODEL, paths.model_source("name-keychain"))
+
+    _, result = await _render(paths, "name-keychain", {"name": "Reagan"})
+
+    assert result.colors == ["#0047BB", "#FF1493"]
+    assert [part.extruder for part in result.parts] == [1, 2]
+    assert [part.watertight for part in result.parts] == [True, True]
+    assert result.warnings == []
+    assert result.bbox_mm.size[0] == pytest.approx(95.576, abs=0.1)
+    assert result.bbox_mm.size[1] == pytest.approx(34.776, abs=0.1)
+    assert result.bbox_mm.size[2] == pytest.approx(6.8, abs=0.1)

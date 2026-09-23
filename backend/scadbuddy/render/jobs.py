@@ -4,8 +4,10 @@ import asyncio
 import json
 import shutil
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -15,14 +17,19 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
-from scadbuddy.render.schema import ParamValue
-from scadbuddy.render.split import split_by_material
+from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.render.solids import render_solids
+from scadbuddy.render.split import ColourPart, split_by_material
 
 JobState = Literal["pending", "running", "done", "failed"]
 
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
 PREVIEW_NAME = "preview.glb"
+
+# Material 0 is OpenSCAD's "Default": geometry no color() call reached.
+UNCOLOURED_MATERIAL_INDEX = 0
+UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 
 
 class PartInfo(BaseModel):
@@ -36,7 +43,9 @@ class JobResult(BaseModel):
     model_3mf: str
     preview_glb: str
     parts: list[PartInfo]
-    bounding_box: BoundingBox
+    bbox_mm: BoundingBox
+    colors: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -105,6 +114,34 @@ class JobStore:
         return removed
 
 
+async def solid_parts(
+    scad_path: Path,
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    preview_parts: Sequence[ColourPart],
+    work_dir: Path,
+    *,
+    config: Config,
+) -> tuple[list[ColourPart], list[str]]:
+    """The parts the 3MF is written from: one closed solid per colour where OpenSCAD can
+    give us one, the open split mesh where it cannot."""
+    if any(part.material_index == UNCOLOURED_MATERIAL_INDEX for part in preview_parts):
+        return list(preview_parts), [UNCOLOURED_WARNING]
+    solids = await render_solids(
+        scad_path,
+        schema,
+        params,
+        [part.colour for part in preview_parts],
+        work_dir,
+        config=config,
+    )
+    parts = [
+        part if part.colour not in solids.meshes else replace(part, mesh=solids.meshes[part.colour])
+        for part in preview_parts
+    ]
+    return parts, solids.warnings
+
+
 async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
     scad = paths.model_source(job.slug)
     schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
@@ -112,14 +149,18 @@ async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[Job
     work.mkdir(parents=True, exist_ok=True)
 
     output = await render_3mf(scad, schema, job.params, work / RAW_RENDER_NAME, config=config)
-    parts = split_by_material(work / RAW_RENDER_NAME)
-    if not parts:
+    preview_parts = split_by_material(work / RAW_RENDER_NAME)
+    if not preview_parts:
         raise OpenSCADError("the render produced no geometry", output.log_tail)
 
-    model_path = work / MODEL_NAME
     preview_path = work / PREVIEW_NAME
+    box = write_glb(preview_parts, preview_path)
+
+    parts, warnings = await solid_parts(
+        scad, schema, job.params, preview_parts, work, config=config
+    )
+    model_path = work / MODEL_NAME
     write_bambu_3mf(parts, model_path, model_name=job.slug)
-    box = write_glb(parts, preview_path)
 
     result = JobResult(
         model_3mf=str(model_path.relative_to(paths.root)),
@@ -133,7 +174,9 @@ async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[Job
             )
             for index, part in enumerate(parts, start=1)
         ],
-        bounding_box=box,
+        bbox_mm=box,
+        colors=[part.colour for part in parts],
+        warnings=warnings,
     )
     return result, output.log_tail
 

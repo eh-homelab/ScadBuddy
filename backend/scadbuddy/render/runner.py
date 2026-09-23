@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import tempfile
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
@@ -127,9 +128,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
 
 
 async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:
-    target = scad_path.with_suffix(".param")
-    await run_openscad(["-o", target.name, scad_path.name], cwd=scad_path.parent, config=config)
-    data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory(prefix="scadbuddy-param-") as tmp:
+        target = Path(tmp) / "model.param"
+        await run_openscad(["-o", str(target), scad_path.name], cwd=scad_path.parent, config=config)
+        data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
     return data
 
 
@@ -155,12 +157,14 @@ async def render_3mf(
     out_path: Path,
     *,
     config: Config,
+    extra_defines: Sequence[str] = (),
 ) -> ProcessOutput:
     args = [
         "--backend=Manifold",
         "--summary",
         "all",
         *build_defines(schema, params),
+        *extra_defines,
         "-o",
         str(out_path.resolve()),
         scad_path.name,
