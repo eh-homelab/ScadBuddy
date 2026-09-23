@@ -27,8 +27,8 @@ on:
         required: true
         type: string
 
-# Cancel an in-flight review when a newer dispatch supersedes it (a rapid push
-# push on the PR triggers its own CI -> dispatch chain, and each dispatch
+# Cancel an in-flight review when a newer dispatch supersedes it (each push on
+# the PR triggers its own CI -> dispatch chain, and each dispatch
 # targets the same branch ref, so this still groups correctly).
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -40,10 +40,10 @@ jobs:
   # GitHub App installation token for their internal API calls; empirically a
   # POST to the issues/comments API from a later step in this SAME job can 403
   # ("Resource not accessible by integration") even though this job's own
-  # GITHUB_TOKEN correctly shows issues:write in its permissions banner (seen
-  # on eh-homelab/clusters#484 — a sibling repo in this org — the sticky merge-gate comment silently never
-  # posted). Giving enforcement its own job gets it a GITHUB_TOKEN nothing else
-  # in this workflow has touched.
+  # GITHUB_TOKEN correctly shows issues:write in its permissions banner (seen on
+  # eh-homelab/clusters#484, a sibling repo in this org, where the sticky
+  # merge-gate comment silently never posted). Giving enforcement its own job
+  # gets it a GITHUB_TOKEN nothing else in this workflow has touched.
   claude-review-run:
     # The org's capped, docker-free pool. Self-hosted by default here: nothing
     # in this job needs GitHub-hosted capacity, and the runner image already
@@ -498,15 +498,16 @@ jobs:
     # DISPLAY NAME DELIBERATELY NOT `claude-review`, and this is load-bearing.
     #
     # `claude-review` is the required status-check context on `main`, and it is
-    # satisfied by a COMMIT STATUS this job posts (see the last two steps). If this job were still NAMED `claude-review`, the SHA would carry
-    # two different objects claiming that one context — a check run and a commit
+    # satisfied by a COMMIT STATUS this job posts (see the last two steps). If
+    # this job were still NAMED `claude-review`, the SHA would carry two
+    # different objects claiming that one context — a check run and a commit
     # status — that can be green and red independently, and GitHub does not
     # document which one a required-check evaluation honours when both exist.
     #
     # Today the check run is invisible to the gate anyway (workflow_dispatch, so
     # its check suite is not associated with the PR and never reaches the
-    # rollup), which is precisely the bug being fixed — but that invisibility is
-    # a property of the TRIGGER, not of anything guaranteed. Anyone moving this
+    # rollup) — but that invisibility is a property of the TRIGGER, not of
+    # anything guaranteed. Anyone moving this
     # workflow back to `on: pull_request` would silently create the ambiguous
     # two-object case. Renaming removes the possibility instead of relying on it
     # not arising, so the gating rule stays stateable in one sentence: exactly
