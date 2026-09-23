@@ -519,7 +519,12 @@ jobs:
       # not needed: `export_openapi` only builds the app object.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10
+        # Exact release tag, NOT `@v10`: astral-sh stopped publishing moving
+        # major tags after v7, so `@v10` resolves to nothing and the job dies
+        # at "Set up job" with `Unable to resolve action ... unable to find
+        # version v10` -- before any step runs, which is why the log is empty
+        # and the cause is only visible in the check annotation.
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
