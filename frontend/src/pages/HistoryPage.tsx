@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api } from '../api/client'
-import type { ModelSchema, Output } from '../api/types'
+import type { CustomizerSchema, Output } from '../api/types'
 import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
@@ -9,6 +9,11 @@ import { Spinner } from '../components/ui/Spinner'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
+
+/** Output ids are 32 hex characters; only the head of one is worth showing. */
+function shortId(id: string): string {
+  return id.slice(0, 8)
+}
 
 export function HistoryPage() {
   const { slug = '' } = useParams()
@@ -29,6 +34,7 @@ export function HistoryPage() {
   }
 
   const loading = schemaState.loading || outputsState.loading
+  const schema = schemaState.data
 
   return (
     <div className="h-full overflow-y-auto">
@@ -63,13 +69,13 @@ export function HistoryPage() {
           </div>
         )}
 
-        {!loading && schemaState.data && outputsState.data && outputsState.data.length > 0 && (
+        {!loading && schema && outputsState.data && outputsState.data.length > 0 && (
           <ul data-testid="outputs" aria-label="Generated outputs" className="space-y-2">
             {outputsState.data.map((output) => (
               <OutputRow
                 key={output.id}
                 output={output}
-                schema={schemaState.data as ModelSchema}
+                schema={schema}
                 deleting={deleting === output.id}
                 onReopen={() => void navigate(`/m/${slug}?from=${output.id}`)}
                 onSend={() => setSendFor(output)}
@@ -99,28 +105,33 @@ function OutputRow({
   onDelete,
 }: {
   output: Output
-  schema: ModelSchema
+  schema: CustomizerSchema
   deleting: boolean
   onReopen: () => void
   onSend: () => void
   onDelete: () => void
 }) {
-  const diff = diffFromDefaults(schema, output.params)
+  const diff = diffFromDefaults(schema, output.params ?? {})
 
   return (
     <li className="rounded-[6px] border border-line bg-surface p-3">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <div className="flex items-center gap-2.5">
-            <ColorStrip colors={output.colors} size="sm" />
-            <span className="sb-num text-[13px] text-ink">{output.id}</span>
+            <ColorStrip colors={output.colors ?? []} size="sm" />
+            <span className="text-[13px] text-ink">{output.name ?? shortId(output.id)}</span>
             <span className="text-[12px] text-faint">{timeAgo(output.created_at)}</span>
           </div>
           <p className="sb-num mt-1 text-[12px] text-muted">
             {output.bbox_mm ? formatBbox(output.bbox_mm) : 'No dimensions recorded'}
-            {output.queue_item_id && <span className="ml-2 text-ok">queued {output.queue_item_id}</span>}
-            {!output.queue_item_id && output.library_file_id && (
-              <span className="ml-2 text-muted">in library {output.library_file_id}</span>
+            {output.queue_item_id && (
+              <span className="ml-2 text-ok">queued #{output.queue_item_id}</span>
+            )}
+            {!output.queue_item_id && output.pipeline_run_id && (
+              <span className="ml-2 text-ok">pipeline run #{output.pipeline_run_id}</span>
+            )}
+            {!output.queue_item_id && !output.pipeline_run_id && output.library_file_id && (
+              <span className="ml-2 text-muted">in library #{output.library_file_id}</span>
             )}
           </p>
         </div>

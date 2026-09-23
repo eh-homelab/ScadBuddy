@@ -787,109 +787,6 @@
         "title": "OutputDetail",
         "type": "object"
       },
-      "OutputSummary": {
-        "properties": {
-          "bbox_mm": {
-            "$ref": "#/components/schemas/BoundingBox"
-          },
-          "colors": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Colors",
-            "type": "array"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "has_thumbnail": {
-            "title": "Has Thumbnail",
-            "type": "boolean"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "job_id": {
-            "title": "Job Id",
-            "type": "string"
-          },
-          "library_file_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Library File Id"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "parts": {
-            "items": {
-              "$ref": "#/components/schemas/PartInfo"
-            },
-            "title": "Parts",
-            "type": "array"
-          },
-          "pipeline_run_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pipeline Run Id"
-          },
-          "queue_item_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queue Item Id"
-          },
-          "slug": {
-            "title": "Slug",
-            "type": "string"
-          },
-          "warnings": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Warnings",
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "slug",
-          "job_id",
-          "created_at",
-          "bbox_mm",
-          "has_thumbnail"
-        ],
-        "title": "OutputSummary",
-        "type": "object"
-      },
       "Parameter": {
         "properties": {
           "caption": {
@@ -1916,6 +1813,7 @@
     },
     "/api/v1/models/{slug}/outputs": {
       "get": {
+        "description": "Details, not summaries: the history page shows each output's parameter diff, and\na summary list would make it fetch every row again one at a time.",
         "operationId": "list_outputs_api_v1_models__slug__outputs_get",
         "parameters": [
           {
@@ -1936,7 +1834,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/OutputSummary"
+                    "$ref": "#/components/schemas/OutputDetail"
                   },
                   "title": "Response List Outputs Api V1 Models  Slug  Outputs Get",
                   "type": "array"

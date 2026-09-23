@@ -1,17 +1,19 @@
 import type {
   BambuddyTargets,
   ConnectionTest,
+  CustomizerSchema,
   FontFamily,
   Job,
-  ModelSchema,
   ModelSummary,
   Output,
   ParamValue,
   Problem,
+  RenderAccepted,
   SendRequest,
   SendResult,
   Settings,
   SettingsUpdate,
+  SidebarLink,
 } from './types'
 
 export const API_BASE = '/api/v1'
@@ -19,12 +21,14 @@ export const API_BASE = '/api/v1'
 export class ApiError extends Error {
   readonly status: number
   readonly detail: string
+  readonly problem: Problem
 
   constructor(problem: Problem) {
     super(problem.title)
     this.name = 'ApiError'
     this.status = problem.status
     this.detail = problem.detail ?? problem.title
+    this.problem = problem
   }
 }
 
@@ -52,7 +56,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 async function readProblem(response: Response): Promise<Problem> {
   try {
     const body = (await response.json()) as Partial<Problem>
+    // Spread first so the standard members win, but the extensions survive.
     return {
+      ...body,
       title: body.title ?? response.statusText,
       status: body.status ?? response.status,
       detail: body.detail,
@@ -62,10 +68,12 @@ async function readProblem(response: Response): Promise<Problem> {
   }
 }
 
+const seg = encodeURIComponent
+
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
 
-  getModel: (slug: string) => request<ModelSummary>(`/models/${encodeURIComponent(slug)}`),
+  getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
   uploadModel: (file: File) => {
     const body = new FormData()
@@ -73,46 +81,46 @@ export const api = {
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
 
-  deleteModel: (slug: string) =>
-    request<void>(`/models/${encodeURIComponent(slug)}`, { method: 'DELETE' }),
+  deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
-  getSchema: (slug: string) => request<ModelSchema>(`/models/${encodeURIComponent(slug)}/schema`),
+  modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
+
+  getSchema: (slug: string) => request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
 
   render: (slug: string, params: Record<string, ParamValue>) =>
-    request<{ job_id: string }>(`/models/${encodeURIComponent(slug)}/render`, {
+    request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
       body: JSON.stringify({ params }),
     }),
 
-  getJob: (jobId: string) => request<Job>(`/jobs/${encodeURIComponent(jobId)}`),
+  getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
 
-  previewUrl: (jobId: string) => `${API_BASE}/jobs/${encodeURIComponent(jobId)}/preview.glb`,
+  previewUrl: (jobId: string) => `${API_BASE}/jobs/${seg(jobId)}/preview.glb`,
 
-  createOutput: (slug: string, jobId: string) =>
-    request<Output>(`/models/${encodeURIComponent(slug)}/outputs`, {
+  createOutput: (slug: string, jobId: string, name?: string) =>
+    request<Output>(`/models/${seg(slug)}/outputs`, {
       method: 'POST',
-      body: JSON.stringify({ job_id: jobId }),
+      body: JSON.stringify({ job_id: jobId, name: name ?? null }),
     }),
 
-  listOutputs: (slug: string) => request<Output[]>(`/models/${encodeURIComponent(slug)}/outputs`),
+  listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
-  deleteOutput: (id: string) =>
-    request<void>(`/outputs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
 
-  downloadUrl: (id: string) => `${API_BASE}/outputs/${encodeURIComponent(id)}/model.3mf`,
+  deleteOutput: (id: string) => request<void>(`/outputs/${seg(id)}`, { method: 'DELETE' }),
+
+  downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
+
+  outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
   sendOutput: (id: string, body: SendRequest) =>
-    request<SendResult>(`/outputs/${encodeURIComponent(id)}/send`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+    request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
-  putThumbnail: async (outputId: string, png: Blob) => {
-    const response = await fetch(
-      `${API_BASE}/outputs/${encodeURIComponent(outputId)}/thumbnail.png`,
-      { method: 'PUT', body: png, headers: { 'Content-Type': 'image/png' } },
-    )
-    if (!response.ok) throw new ApiError(await readProblem(response))
+  /** Multipart with a `file` part — not a raw PNG body, and no `.png` in the path. */
+  putThumbnail: (outputId: string, png: Blob) => {
+    const body = new FormData()
+    body.append('file', png, 'thumbnail.png')
+    return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
 
   listFonts: () => request<FontFamily[]>('/fonts'),
@@ -122,12 +130,11 @@ export const api = {
   putSettings: (body: SettingsUpdate) =>
     request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  testSettings: (body: SettingsUpdate) =>
-    request<ConnectionTest>('/settings/test', { method: 'POST', body: JSON.stringify(body) }),
+  /** Tests what is *stored*, so the key never travels back out of the server. */
+  testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
 
   getBambuddyTargets: () => request<BambuddyTargets>('/settings/targets'),
 
-  registerSidebar: () => request<{ ok: boolean; detail: string }>('/settings/register-sidebar', {
-    method: 'POST',
-  }),
+  registerSidebar: () =>
+    request<SidebarLink>('/settings/register-sidebar', { method: 'POST' }),
 }

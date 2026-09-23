@@ -47,10 +47,6 @@ class CreateOutputRequest(BaseModel):
     name: str | None = None
 
 
-def _summary(store: OutputStore, meta: OutputMeta) -> OutputSummary:
-    return OutputSummary(**meta.model_dump(), has_thumbnail=store.thumbnail_path(meta.id).is_file())
-
-
 def _detail(store: OutputStore, meta: OutputMeta) -> OutputDetail:
     return OutputDetail(
         **meta.model_dump(),
@@ -92,12 +88,14 @@ def create_output(
     return _detail(outputs, outputs.create(job, name=body.name))
 
 
-@router.get("/models/{slug}/outputs", response_model=list[OutputSummary], summary="Output history")
+@router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
 def list_outputs(
     slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep
-) -> list[OutputSummary]:
+) -> list[OutputDetail]:
+    """Details, not summaries: the history page shows each output's parameter diff, and
+    a summary list would make it fetch every row again one at a time."""
     require_model(catalogue, slug)
-    return [_summary(outputs, meta) for meta in outputs.list_for(slug)]
+    return [_detail(outputs, meta) for meta in outputs.list_for(slug)]
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")

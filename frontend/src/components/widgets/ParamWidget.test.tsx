@@ -44,6 +44,7 @@ function setup(param: Param, value: ParamValue) {
 
 describe('slider', () => {
   const param: Param = {
+    group: 'Main',
     name: 'text_size',
     type: 'slider',
     initial: 14,
@@ -81,13 +82,13 @@ describe('slider', () => {
 
 describe('number and integer', () => {
   it('steps by 0.1 for a number', () => {
-    setup({ name: 'padding', type: 'number', initial: 6, caption: 'Margin' }, 6)
+    setup({ group: 'Main', name: 'padding', type: 'number', initial: 6, caption: 'Margin' }, 6)
     expect(screen.getByRole('spinbutton', { name: 'Margin' })).toHaveAttribute('step', '0.1')
   })
 
   it('rounds an integer parameter', async () => {
     const { onChange, user } = setup(
-      { name: 'corner_radius', type: 'integer', initial: 4, caption: 'Corner radius' },
+      { group: 'Main', name: 'corner_radius', type: 'integer', initial: 4, caption: 'Corner radius' },
       4,
     )
     const input = screen.getByRole('spinbutton', { name: 'Corner radius' })
@@ -100,11 +101,12 @@ describe('number and integer', () => {
 
 describe('string', () => {
   const param: Param = {
+    group: 'Main',
     name: 'name',
     type: 'string',
     initial: 'Reagan',
     caption: 'Name on the tag',
-    maxLength: 20,
+    max_length: 20,
   }
 
   it('enforces maxLength and shows the count', () => {
@@ -124,6 +126,7 @@ describe('string', () => {
 
 describe('boolean', () => {
   const param: Param = {
+    group: 'Main',
     name: 'keyring_hole',
     type: 'boolean',
     initial: true,
@@ -144,6 +147,7 @@ describe('boolean', () => {
 
 describe('select', () => {
   const param: Param = {
+    group: 'Main',
     name: 'hole_side',
     type: 'select',
     initial: 'left',
@@ -168,6 +172,7 @@ describe('select', () => {
     render(
       <ParamWidget
         param={{
+          group: 'Main',
           name: 'layers',
           type: 'select',
           initial: 1,
@@ -188,7 +193,13 @@ describe('select', () => {
 })
 
 describe('color', () => {
-  const param: Param = { name: 'body_color', type: 'color', initial: '#1B6CA8', caption: 'Plate' }
+  const param: Param = {
+    group: 'Colours',
+    name: 'body_color',
+    type: 'color',
+    initial: '#1B6CA8',
+    caption: 'Plate',
+  }
 
   it('shows the extruder it maps to', () => {
     setup(param, '#1B6CA8')
@@ -221,6 +232,7 @@ describe('color', () => {
 
 describe('font', () => {
   const param: Param = {
+    group: 'Main',
     name: 'font',
     type: 'font',
     initial: 'Liberation Sans:style=Bold',

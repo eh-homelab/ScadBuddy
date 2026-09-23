@@ -1,150 +1,72 @@
 /**
- * Wire types for the ScadBuddy API (spec §5.1, §8).
- * Hand-written against the documented contract; the backend is the source of truth.
+ * Wire types for the ScadBuddy API.
+ *
+ * Every one is an alias into `schema.d.ts`, which is generated from
+ * `backend/openapi.json` by `pnpm gen:api`. Nothing here is hand-written against the
+ * spec any more: the previous version was, and it disagreed with the running backend
+ * in a dozen places (`api_key_set` vs `has_api_key`, `job_id` vs `id`, a `{x,y,z}`
+ * bounding box that is really `{min,max,size}`, a thumbnail PUT that is multipart).
+ * Regenerate after any backend change and `tsc` will point at whatever broke.
  */
+import type { components } from './schema'
 
-export type ParamType =
-  | 'number'
-  | 'integer'
-  | 'string'
-  | 'boolean'
-  | 'select'
-  | 'color'
-  | 'font'
-  | 'slider'
+type Schemas = components['schemas']
 
-export type ParamValue = string | number | boolean
+export type ParamValue = boolean | number | string
 
-export interface ParamOption {
-  name: string
-  value: ParamValue
-}
+export type Param = Schemas['Parameter']
+export type ParamType = Param['type']
+export type ParamOption = Schemas['Option']
+export type CustomizerSchema = Schemas['CustomizerSchema']
 
-export interface Param {
-  name: string
-  type: ParamType
-  initial: ParamValue
-  caption?: string
-  min?: number
-  max?: number
-  step?: number
-  maxLength?: number
-  options?: ParamOption[]
-}
+export type ModelSummary = Schemas['ModelRecord']
 
+export type Job = Schemas['JobStatus']
+export type JobState = Job['status']
+export type BoundingBox = Schemas['BoundingBox']
+export type PartInfo = Schemas['PartInfo']
+export type RenderAccepted = Schemas['RenderAccepted']
+
+export type Output = Schemas['OutputDetail']
+
+export type FontFamily = Schemas['FontFamily']
+
+export type Settings = Schemas['SettingsView']
+export type SettingsUpdate = Schemas['SettingsPatch']
+export type ConnectionTest = Schemas['ConnectionTest']
+export type BambuddyTargets = Schemas['BambuddyTargets']
+export type BambuddyFolder = Schemas['Folder']
+export type BambuddyPipeline = Schemas['Pipeline']
+export type BambuddyPrinter = Schemas['Printer']
+export type PresetRef = Schemas['PresetRef']
+export type SidebarLink = Schemas['SidebarLink']
+
+export type SendRequest = Schemas['SendRequest']
+export type SendResult = Schemas['SendResult']
+export type SendMode = SendResult['mode']
+
+/**
+ * A view model, not a wire type: the API returns a flat `parameters` list plus the
+ * group names in source order, and the panel wants them bucketed.
+ */
 export interface ParamGroup {
   name: string
   params: Param[]
 }
 
-export interface ModelSchema {
-  title: string
-  groups: ParamGroup[]
-}
-
-export interface ModelSummary {
-  slug: string
-  name: string
-  description?: string
-  tags: string[]
-  thumbnail_url?: string
-  updated_at: string
-  last_generated_at?: string
-  output_count: number
-}
-
-export type JobStatus = 'pending' | 'running' | 'done' | 'failed'
-
-export interface Bbox {
-  x: number
-  y: number
-  z: number
-}
-
-export interface Job {
-  job_id: string
-  slug: string
-  status: JobStatus
-  log_tail?: string
-  preview_url?: string
-  bbox_mm?: Bbox
-  colors?: string[]
-  created_at: string
-}
-
-export interface Output {
-  id: string
-  slug: string
-  created_at: string
-  params: Record<string, ParamValue>
-  bbox_mm?: Bbox
-  colors: string[]
-  thumbnail_url?: string
-  library_file_id?: string
-  queue_item_id?: string
-}
-
-export interface FontFamily {
-  family: string
-  styles: string[]
-}
-
-export interface Settings {
-  bambuddy_url: string
-  /** Write-only: the API never returns the key, only whether one is stored. */
-  api_key_set: boolean
-  library_folder_id?: string
-  pipeline_id?: string
-  sidebar_registered: boolean
-}
-
-export interface SettingsUpdate {
-  bambuddy_url: string
-  /** Omit to leave the stored key untouched; empty string clears it. */
-  api_key?: string
-  library_folder_id?: string
-  pipeline_id?: string
-}
-
-export interface ConnectionTest {
-  ok: boolean
-  detail: string
-  printers?: { id: string; name: string }[]
-}
-
-export interface BambuddyFolder {
-  id: string
-  name: string
-}
-
-export interface BambuddyPipeline {
-  id: string
-  name: string
-}
-
-export interface BambuddyTargets {
-  folders: BambuddyFolder[]
-  pipelines: BambuddyPipeline[]
-}
-
-export type SendMode = 'library' | 'queue'
-
-export interface SendRequest {
-  mode: SendMode
-  copies: number
-}
-
-export interface SendResult {
-  mode: SendMode
-  library_file_id: string
-  queue_item_id?: string
-  queue_url?: string
-}
-
-/** RFC 9457 problem details. */
+/**
+ * RFC 9457 problem details. The backend adds extensions alongside the standard
+ * members — `required_scope` on a missing Bambuddy scope, `bambuddy_body` carrying a
+ * pipeline-eligibility report verbatim — so unknown keys are kept, not dropped.
+ */
 export interface Problem {
   type?: string
   title: string
   status: number
   detail?: string
+  instance?: string
+  required_scope?: string
+  bambuddy_status?: number
+  bambuddy_body?: unknown
+  [extension: string]: unknown
 }

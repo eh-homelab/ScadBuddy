@@ -28,11 +28,7 @@ describe('SettingsPage', () => {
   it('says when no key is stored yet', async () => {
     server.use(
       http.get('/api/v1/settings', () =>
-        HttpResponse.json({
-          bambuddy_url: '',
-          api_key_set: false,
-          sidebar_registered: false,
-        }),
+        HttpResponse.json({ bambuddy_url: '', has_api_key: false }),
       ),
     )
     renderPage(<SettingsPage />)
@@ -44,28 +40,34 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
-    const status = await screen.findByRole('status')
-    expect(status).toHaveTextContent('Manage Library, Manage Queue and Read Status')
-    expect(status).toHaveTextContent('X1C · Workshop')
+    expect(await screen.findByRole('status')).toHaveTextContent('3DP-31B-598')
   })
 
-  it('reports a bad URL instead of claiming success', async () => {
+  it('names the missing scope rather than the bare status code', async () => {
+    server.use(
+      http.post('/api/v1/settings/test', () =>
+        HttpResponse.json({
+          ok: false,
+          detail: "The key needs the 'Read Status' scope",
+          printers: [],
+        }),
+      ),
+    )
     const { user } = renderPage(<SettingsPage />)
     await seeded()
-    const url = screen.getByLabelText('Bambuddy URL')
-    await user.clear(url)
-    await user.type(url, 'bambuddy.local')
 
     await user.click(screen.getByRole('button', { name: 'Test connection' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('starting with http')
+    expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
   })
 
   it('offers the folders and pipelines Bambuddy reports', async () => {
     renderPage(<SettingsPage />)
     await seeded()
     expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Library folder')).toHaveValue('folder-scadbuddy')
-    expect(screen.getByLabelText('Slicer pipeline')).toHaveValue('pipeline-textured-pei')
+    // Bambuddy's ids are integers, so the <select> values are their decimal strings.
+    expect(screen.getByLabelText('Library folder')).toHaveValue('2')
+    expect(screen.getByLabelText('Slicer pipeline')).toHaveValue('1')
+    expect(screen.getByLabelText('Printer')).toHaveValue('1')
     expect(
       screen.getByRole('option', { name: 'Textured PEI · 0.20 mm · AMS' }),
     ).toBeInTheDocument()
@@ -78,13 +80,13 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(put).toHaveBeenCalled())
-    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('api_key')
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('bambuddy_api_key')
     await waitFor(() => expect(screen.getByText(/Saved at/)).toBeInTheDocument())
 
     await user.type(screen.getByLabelText('API key'), 'secret')
     await user.click(screen.getByRole('button', { name: 'Save changes' }))
     await waitFor(() => expect(put).toHaveBeenCalledTimes(2))
-    expect(put.mock.calls[1]?.[0]).toMatchObject({ api_key: 'secret' })
+    expect(put.mock.calls[1]?.[0]).toMatchObject({ bambuddy_api_key: 'secret' })
     put.mockRestore()
   })
 
@@ -103,6 +105,7 @@ describe('SettingsPage', () => {
     await seeded()
 
     await user.click(screen.getByRole('button', { name: 'Add to Bambuddy sidebar' }))
-    expect(await screen.findByRole('status')).toHaveTextContent('appears in the Bambuddy sidebar')
+    // Bambuddy renders the link in a sandboxed iframe at /external/{id}.
+    expect(await screen.findByRole('status')).toHaveTextContent('/external/3')
   })
 })

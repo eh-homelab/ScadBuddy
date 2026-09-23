@@ -10,10 +10,12 @@ vi.mock('../components/Preview', () => ({
   Preview: ({ job, rendering }: { job?: Job; rendering: boolean }) => (
     <div data-testid="preview">
       {rendering && <span>rendering</span>}
-      {job?.status === 'failed' && <pre data-testid="render-log">{job.log_tail}</pre>}
+      {job?.status === 'failed' && (
+        <pre data-testid="render-log">{(job.log_tail ?? []).join('\n')}</pre>
+      )}
       {job?.bbox_mm && (
         <span data-testid="bbox">
-          {job.bbox_mm.x} × {job.bbox_mm.y} × {job.bbox_mm.z} mm
+          {job.bbox_mm.size[0]} × {job.bbox_mm.size[1]} × {job.bbox_mm.size[2]} mm
         </span>
       )}
     </div>
@@ -94,16 +96,18 @@ describe('CustomizePage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     await user.click(within(dialog).getByRole('button', { name: 'Send' }))
 
-    await waitFor(() => expect(within(dialog).getByText(/Queued as/)).toBeInTheDocument())
+    // A pipeline is configured in the fixtures, so the send starts a pipeline run
+    // rather than queueing the plate itself.
+    await waitFor(() => expect(within(dialog).getByText(/Pipeline run/)).toBeInTheDocument())
     expect(within(dialog).getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
   })
 
   it('reopens an earlier output with its parameters', async () => {
-    render('/m/name-keychain?from=out-20260920-1122')
+    render(`/m/name-keychain?from=${'c'.repeat(32)}`)
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
     )
-    expect(screen.getByText('reopened from out-20260920-1122')).toBeInTheDocument()
+    expect(screen.getByText('reopened from Nova')).toBeInTheDocument()
   })
 
   it('counts changes against the model defaults', async () => {

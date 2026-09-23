@@ -72,7 +72,10 @@ function ModelCard({ model }: { model: ModelSummary }) {
   return (
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
       <Link to={`/m/${model.slug}`} className="block p-3 focus-visible:rounded-[6px]">
-        <ModelThumbnail src={model.thumbnail_url} alt={model.name} />
+        <ModelThumbnail
+          src={model.has_thumbnail ? api.modelThumbnailUrl(model.slug) : undefined}
+          alt={model.name}
+        />
 
         <h2 className="mt-3 text-[14px] font-medium">{model.name}</h2>
         {model.description && (
@@ -81,9 +84,9 @@ function ModelCard({ model }: { model: ModelSummary }) {
           </p>
         )}
 
-        {model.tags.length > 0 && (
+        {(model.tags ?? []).length > 0 && (
           <ul className="mt-2.5 flex flex-wrap gap-1">
-            {model.tags.map((tag) => (
+            {(model.tags ?? []).map((tag) => (
               <li
                 key={tag}
                 className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
@@ -95,15 +98,7 @@ function ModelCard({ model }: { model: ModelSummary }) {
         )}
 
         <p className="mt-3 border-t border-line pt-2 text-[12px] text-faint">
-          {model.last_generated_at ? (
-            <>
-              <span className="sb-num">{model.output_count}</span>{' '}
-              {model.output_count === 1 ? 'output' : 'outputs'} · last generated{' '}
-              {timeAgo(model.last_generated_at)}
-            </>
-          ) : (
-            'Never generated'
-          )}
+          Updated {timeAgo(model.updated_at)}
         </p>
       </Link>
     </li>

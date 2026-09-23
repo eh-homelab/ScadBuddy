@@ -1,6 +1,7 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
+import { bbox } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { HistoryPage } from './HistoryPage'
@@ -9,22 +10,30 @@ function render() {
   return renderPage(<HistoryPage />, { route: '/m/name-keychain/history', path: '/m/:slug/history' })
 }
 
+/**
+ * Rows are labelled by the output's name — its id is 32 hex characters. The name is
+ * also one of the parameters, so it appears twice in its own row; the heading is first.
+ */
+async function row(name: string): Promise<HTMLElement> {
+  const headings = await screen.findAllByText(name)
+  return (headings[0] as HTMLElement).closest('li') as HTMLElement
+}
+
 describe('HistoryPage', () => {
   it('lists every output newest first', async () => {
     render()
     const list = await screen.findByTestId('outputs')
     expect(list.children).toHaveLength(3)
-    expect(within(list.children[0] as HTMLElement).getByText('out-20260921-1931')).toBeInTheDocument()
+    expect(within(list.children[0] as HTMLElement).getByText('Reagan')).toBeInTheDocument()
   })
 
   it('diffs each output against the model defaults', async () => {
     render()
-    const row = (await screen.findByText('out-20260920-1122')).closest('li') as HTMLElement
+    const nova = await row('Nova')
 
-    const textSize = within(row).getByText('Text size').parentElement as HTMLElement
+    const textSize = within(nova).getByText('Text size').parentElement as HTMLElement
     expect(textSize).toHaveTextContent('18')
     expect(textSize).toHaveTextContent('14')
-    expect(within(row).getByText('Nova')).toBeInTheDocument()
   })
 
   it('says so when an output used the defaults', async () => {
@@ -32,10 +41,14 @@ describe('HistoryPage', () => {
       http.get('/api/v1/models/:slug/outputs', () =>
         HttpResponse.json([
           {
-            id: 'out-defaults',
+            id: '9'.repeat(32),
             slug: 'name-keychain',
+            name: 'Defaults',
+            job_id: '8'.repeat(32),
             created_at: '2026-09-22T10:00:00Z',
+            has_thumbnail: false,
             params: {},
+            bbox_mm: bbox(10, 10, 10),
             colors: ['#1B6CA8'],
           },
         ]),
@@ -45,27 +58,22 @@ describe('HistoryPage', () => {
     expect(await screen.findByText('Model defaults, unchanged.')).toBeInTheDocument()
   })
 
-  it('shows where an output already went', async () => {
+  it('shows where an output already went, by Bambuddy id', async () => {
     render()
-    const row = (await screen.findByText('out-20260921-1931')).closest('li') as HTMLElement
-    expect(within(row).getByText('queued q-4471')).toBeInTheDocument()
-
-    const library = (await screen.findByText('out-20260920-1122')).closest('li') as HTMLElement
-    expect(within(library).getByText('in library lib-8790')).toBeInTheDocument()
+    expect(within(await row('Reagan')).getByText('queued #4471')).toBeInTheDocument()
+    expect(within(await row('Nova')).getByText('in library #8790')).toBeInTheDocument()
   })
 
   it('re-opens the customizer with that output loaded', async () => {
     render()
-    const row = (await screen.findByText('out-20260920-1122')).closest('li') as HTMLElement
-    expect(within(row).getByRole('button', { name: 'Re-open' })).toBeEnabled()
+    expect(within(await row('Nova')).getByRole('button', { name: 'Re-open' })).toBeEnabled()
   })
 
   it('deletes an output', async () => {
     const { user } = render()
-    const row = (await screen.findByText('out-20260918-0903')).closest('li') as HTMLElement
-    await user.click(within(row).getByRole('button', { name: 'Delete' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Delete' }))
 
-    await waitFor(() => expect(screen.queryByText('out-20260918-0903')).not.toBeInTheDocument())
+    await waitFor(() => expect(screen.queryAllByText('Workshop')).toHaveLength(0))
     expect(screen.getByTestId('outputs').children).toHaveLength(2)
   })
 
@@ -77,8 +85,7 @@ describe('HistoryPage', () => {
 
   it('offers to send an output again', async () => {
     const { user } = render()
-    const row = (await screen.findByText('out-20260918-0903')).closest('li') as HTMLElement
-    await user.click(within(row).getByRole('button', { name: 'Send again' }))
+    await user.click(within(await row('Workshop')).getByRole('button', { name: 'Send again' }))
 
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     expect(within(dialog).getByRole('radio', { name: /Slice and queue/ })).toBeChecked()

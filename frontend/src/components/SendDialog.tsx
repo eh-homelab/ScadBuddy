@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type { Output, SendMode, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { eligibilityIssues } from '../lib/problems'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -31,10 +32,12 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [copies, setCopies] = useState(1)
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [issues, setIssues] = useState<string[]>([])
   const [result, setResult] = useState<SendResult | null>(null)
 
   function close() {
     setError(null)
+    setIssues([])
     setResult(null)
     setSending(false)
     onClose()
@@ -44,12 +47,15 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
     if (!output) return
     setSending(true)
     setError(null)
+    setIssues([])
     try {
       const sent = await api.sendOutput(output.id, { mode, copies })
       setResult(sent)
       onSent(sent)
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Send failed. Check the connection.')
+      // Bambuddy's pipeline-eligibility report comes through verbatim; list what blocked it.
+      setIssues(cause instanceof ApiError ? eligibilityIssues(cause.problem) : [])
     } finally {
       setSending(false)
     }
@@ -65,9 +71,9 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
         result ? (
           <>
             <Button onClick={close}>Done</Button>
-            {result.queue_url && (
-              <Button variant="primary" onClick={() => openExternal(result.queue_url as string)}>
-                {result.queue_item_id ? 'Open in queue' : 'Open in library'}
+            {result.bambuddy_url && (
+              <Button variant="primary" onClick={() => openExternal(result.bambuddy_url as string)}>
+                {result.mode === 'queue' ? 'Open in queue' : 'Open in library'}
               </Button>
             )}
           </>
@@ -88,12 +94,18 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
         <p className="text-[13px] text-ink">
           {result.queue_item_id ? (
             <>
-              Queued as <span className="sb-num">{result.queue_item_id}</span> with{' '}
+              Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
+              <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
+            </>
+          ) : result.pipeline_run_id ? (
+            <>
+              Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
               <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
             </>
           ) : (
             <>
-              Added to the library as <span className="sb-num">{result.library_file_id}</span>.
+              Added to the library as{' '}
+              <span className="sb-num">{result.filename}</span> (#{result.library_file_id}).
             </>
           )}
         </p>
@@ -149,9 +161,16 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
           </div>
 
           {error && (
-            <p role="alert" className="mt-3 text-[13px] text-warn">
-              {error}
-            </p>
+            <div role="alert" className="mt-3 text-[13px] text-warn">
+              <p>{error}</p>
+              {issues.length > 0 && (
+                <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-[12px]">
+                  {issues.map((issue) => (
+                    <li key={issue}>{issue}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
           )}
         </>
       )}

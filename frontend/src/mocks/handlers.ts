@@ -1,12 +1,19 @@
 import { HttpResponse, delay, http } from 'msw'
-import type { Job, ModelSummary, Output, ParamValue, Settings } from '../api/types'
+import type {
+  BoundingBox,
+  Job,
+  ModelSummary,
+  Output,
+  ParamValue,
+  SendResult,
+  Settings,
+} from '../api/types'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
 
 const base = '/api/v1'
 
 interface MockJob extends Job {
-  params: Record<string, ParamValue>
   polls: number
 }
 
@@ -16,7 +23,7 @@ const state = {
   outputs: [...fixtures.outputs] as Output[],
   settings: { ...fixtures.settings } as Settings,
   jobs: new Map<string, MockJob>(),
-  sent: new Map<string, { library_file_id: string; queue_item_id?: string }>(),
+  sidebarLinkId: 0,
   seq: 0,
 }
 
@@ -27,13 +34,19 @@ export function resetMockState(): void {
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.settings = { ...fixtures.settings }
   state.jobs.clear()
-  state.sent.clear()
+  state.sidebarLinkId = 0
   state.seq = 0
 }
 
-function nextId(prefix: string): string {
+/** Job and output ids are 32 hex characters — the routes reject anything else. */
+function nextHexId(): string {
   state.seq += 1
-  return `${prefix}-${String(state.seq).padStart(4, '0')}`
+  return state.seq.toString(16).padStart(32, '0')
+}
+
+function nextNumber(): number {
+  state.seq += 1
+  return 8800 + state.seq
 }
 
 function num(params: Record<string, ParamValue>, key: string, fallback: number): number {
@@ -44,15 +57,14 @@ function num(params: Record<string, ParamValue>, key: string, fallback: number):
 function colorsOf(slug: string, params: Record<string, ParamValue>): string[] {
   const schema = state.schemas[slug]
   if (!schema) return []
-  const colors = schema.groups
-    .flatMap((group) => group.params)
+  const colors = (schema.parameters ?? [])
     .filter((param) => param.type === 'color')
     .map((param) => String(params[param.name] ?? param.initial))
   return colors.length > 0 ? colors : ['#9AA4B2']
 }
 
 /** Cheap stand-in for the real render: geometry that actually tracks the parameters. */
-function bboxOf(params: Record<string, ParamValue>) {
+function bboxOf(params: Record<string, ParamValue>): BoundingBox {
   const name = String(params['name'] ?? 'Model')
   const textSize = num(params, 'text_size', 14)
   const padding = num(params, 'padding', 6)
@@ -60,17 +72,17 @@ function bboxOf(params: Record<string, ParamValue>) {
   const depth = num(params, 'text_depth', 1.6)
   const unitsX = num(params, 'units_x', 0)
   if (unitsX > 0) {
-    return {
-      x: round(unitsX * 42),
-      y: round(num(params, 'units_y', 1) * 42),
-      z: round(num(params, 'height_units', 3) * 7),
-    }
+    return fixtures.bbox(
+      round(unitsX * 42),
+      round(num(params, 'units_y', 1) * 42),
+      round(num(params, 'height_units', 3) * 7),
+    )
   }
-  return {
-    x: round(Math.max(name.length, 1) * textSize * 0.62 + padding * 2),
-    y: round(textSize * 1.8 + padding * 2),
-    z: round(thickness + depth),
-  }
+  return fixtures.bbox(
+    round(Math.max(name.length, 1) * textSize * 0.62 + padding * 2),
+    round(textSize * 1.8 + padding * 2),
+    round(thickness + depth),
+  )
 }
 
 function round(value: number): number {
@@ -78,13 +90,13 @@ function round(value: number): number {
 }
 
 function jobView(job: MockJob): Job {
-  const { params: _params, polls: _polls, ...rest } = job
+  const { polls: _polls, ...rest } = job
   return rest
 }
 
-function problem(status: number, title: string, detail?: string) {
+function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
-    { type: 'about:blank', title, status, detail },
+    { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
 }
@@ -115,7 +127,8 @@ export const handlers = [
       description: 'Uploaded just now. Open it to see its parameters.',
       tags: ['uploaded'],
       updated_at: new Date().toISOString(),
-      output_count: 0,
+      has_thumbnail: false,
+      has_readme: false,
     }
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
     state.schemas[slug] = fixtures.keychainSchema
@@ -144,22 +157,26 @@ export const handlers = [
     const schema = state.schemas[slug]
     if (!schema) return problem(404, 'Model not found')
 
-    const known = new Set(schema.groups.flatMap((g) => g.params).map((p) => p.name))
+    const known = new Set((schema.parameters ?? []).map((p) => p.name))
     const unknown = Object.keys(body.params).filter((key) => !known.has(key))
     if (unknown.length > 0) {
       return problem(422, 'Unknown parameter', `Not in the model schema: ${unknown.join(', ')}`)
     }
 
-    const jobId = nextId('job')
+    const jobId = nextHexId()
     state.jobs.set(jobId, {
-      job_id: jobId,
+      id: jobId,
       slug,
       status: 'pending',
       created_at: new Date().toISOString(),
       params: body.params,
+      log_tail: [],
       polls: 0,
     })
-    return HttpResponse.json({ job_id: jobId }, { status: 202 })
+    return HttpResponse.json(
+      { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
+      { status: 202 },
+    )
   }),
 
   http.get(`${base}/jobs/:id`, ({ params }) => {
@@ -169,28 +186,30 @@ export const handlers = [
     job.polls += 1
     if (job.polls === 1) {
       job.status = 'running'
-      job.log_tail = 'Compiling design (CSG Tree generation)...'
+      job.log_tail = ['Compiling design (CSG Tree generation)...']
       return HttpResponse.json(jobView(job))
     }
 
-    if (String(job.params['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
+    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
       job.status = 'failed'
+      job.error = 'openscad exited with 1'
       job.log_tail = fixtures.OPENSCAD_LOG_TAIL
       return HttpResponse.json(jobView(job))
     }
 
     job.status = 'done'
-    job.bbox_mm = bboxOf(job.params)
-    job.colors = colorsOf(job.slug, job.params)
-    job.preview_url = `${base}/jobs/${job.job_id}/preview.glb`
-    job.log_tail = 'Geometries in cache: 12\nTotal rendering time: 0:00:00.412'
+    job.bbox_mm = bboxOf(job.params ?? {})
+    job.colors = colorsOf(job.slug, job.params ?? {})
+    job.preview_url = `${base}/jobs/${job.id}/preview.glb`
+    job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
     return HttpResponse.json(jobView(job))
   }),
 
   http.get(`${base}/jobs/:id/preview.glb`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job || !job.bbox_mm) return problem(404, 'Preview not ready')
-    const glb = keychainGlb(job.colors ?? ['#9AA4B2'], job.bbox_mm)
+    const [x, y, z] = job.bbox_mm.size
+    const glb = keychainGlb(job.colors ?? ['#9AA4B2'], { x, y, z })
     return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
       headers: { 'Content-Type': 'model/gltf-binary' },
     })
@@ -198,25 +217,25 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/outputs`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const body = (await request.json()) as { job_id: string }
+    const body = (await request.json()) as { job_id: string; name?: string | null }
     const job = state.jobs.get(body.job_id)
-    if (!job || job.status !== 'done') {
+    if (!job || job.status !== 'done' || !job.bbox_mm) {
       return problem(409, 'Job not finished', 'Wait for the render to finish before generating.')
     }
     const output: Output = {
-      id: nextId('out'),
+      id: nextHexId(),
       slug,
+      name: body.name ?? null,
+      job_id: job.id,
       created_at: new Date().toISOString(),
+      has_thumbnail: false,
       params: job.params,
       bbox_mm: job.bbox_mm,
       colors: job.colors ?? [],
+      parts: [],
+      warnings: [],
     }
     state.outputs = [output, ...state.outputs]
-    state.models = state.models.map((m) =>
-      m.slug === slug
-        ? { ...m, output_count: m.output_count + 1, last_generated_at: output.created_at }
-        : m,
-    )
     await delay(120)
     return HttpResponse.json(output, { status: 201 })
   }),
@@ -224,6 +243,11 @@ export const handlers = [
   http.get(`${base}/models/:slug/outputs`, ({ params }) =>
     HttpResponse.json(state.outputs.filter((o) => o.slug === params['slug'])),
   ),
+
+  http.get(`${base}/outputs/:id`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    return output ? HttpResponse.json(output) : problem(404, 'Output not found')
+  }),
 
   http.delete(`${base}/outputs/:id`, ({ params }) => {
     state.outputs = state.outputs.filter((o) => o.id !== params['id'])
@@ -236,40 +260,54 @@ export const handlers = [
     // A 3MF is a zip; the mock serves a stub so the download path is exercised.
     return HttpResponse.arrayBuffer(new Uint8Array([0x50, 0x4b, 0x03, 0x04]).buffer, {
       headers: {
-        'Content-Type': 'application/vnd.ms-package.3dmanufacturing-3dmodel+xml',
+        'Content-Type': 'model/3mf',
         'Content-Disposition': `attachment; filename="${output.slug}-${output.id}.3mf"`,
       },
     })
   }),
 
-  http.put(`${base}/outputs/:id/thumbnail.png`, async ({ request }) => {
-    await request.arrayBuffer()
+  // Multipart with a `file` part, at /thumbnail — not a raw PNG body at /thumbnail.png.
+  http.put(`${base}/outputs/:id/thumbnail`, async ({ params, request }) => {
+    const form = await request.formData()
+    if (!form.get('file')) return problem(422, 'Missing file')
+    state.outputs = state.outputs.map((o) =>
+      o.id === params['id'] ? { ...o, has_thumbnail: true } : o,
+    )
     return new HttpResponse(null, { status: 204 })
   }),
 
   http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies: number }
+    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
-    if (!state.settings.api_key_set) {
+    if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
-    const libraryFileId = output.library_file_id ?? nextId('lib')
-    const queueItemId = body.mode === 'queue' ? nextId('q') : undefined
+    const libraryFileId = output.library_file_id ?? nextNumber()
+    const queued = body.mode === 'queue'
+    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
+    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
     state.outputs = state.outputs.map((o) =>
-      o.id === id ? { ...o, library_file_id: libraryFileId, queue_item_id: queueItemId } : o,
+      o.id === id
+        ? {
+            ...o,
+            library_file_id: libraryFileId,
+            pipeline_run_id: pipelineRunId,
+            queue_item_id: queueItemId,
+          }
+        : o,
     )
-    state.sent.set(id, { library_file_id: libraryFileId, queue_item_id: queueItemId })
-    return HttpResponse.json({
+    const result: SendResult = {
       mode: body.mode,
       library_file_id: libraryFileId,
+      filename: `${output.slug}-${output.name ?? output.id}.3mf`,
+      pipeline_run_id: pipelineRunId,
       queue_item_id: queueItemId,
-      queue_url: queueItemId
-        ? `${state.settings.bambuddy_url}/queue?item=${queueItemId}`
-        : `${state.settings.bambuddy_url}/library/files/${libraryFileId}`,
-    })
+      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+    }
+    return HttpResponse.json(result)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(fixtures.fonts)),
@@ -278,50 +316,63 @@ export const handlers = [
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {
-      bambuddy_url: string
-      api_key?: string
-      library_folder_id?: string
-      pipeline_id?: string
+      bambuddy_url?: string | null
+      bambuddy_api_key?: string
+      public_url?: string | null
+      library_folder_id?: number | null
+      pipeline_id?: number | null
+      printer_id?: number | null
     }
     state.settings = {
       ...state.settings,
-      bambuddy_url: body.bambuddy_url,
-      library_folder_id: body.library_folder_id,
-      pipeline_id: body.pipeline_id,
-      api_key_set:
-        body.api_key === undefined ? state.settings.api_key_set : body.api_key.length > 0,
+      ...body,
+      has_api_key:
+        body.bambuddy_api_key === undefined
+          ? state.settings.has_api_key
+          : body.bambuddy_api_key.length > 0,
     }
+    delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
     await delay(120)
     return HttpResponse.json(state.settings)
   }),
 
-  http.post(`${base}/settings/test`, async ({ request }) => {
-    const body = (await request.json()) as { bambuddy_url: string; api_key?: string }
+  // Takes no body: the server tests what it has stored.
+  http.post(`${base}/settings/test`, async () => {
     await delay(200)
-    if (!body.bambuddy_url.startsWith('http')) {
-      return HttpResponse.json({ ok: false, detail: 'Enter a URL starting with http or https.' })
+    if (!state.settings.bambuddy_url?.startsWith('http')) {
+      return problem(409, 'Conflict', 'no Bambuddy URL is configured')
     }
-    if (body.api_key !== undefined && body.api_key.length === 0 && !state.settings.api_key_set) {
-      return HttpResponse.json({ ok: false, detail: 'No API key stored. Paste one and try again.' })
+    if (!state.settings.has_api_key) {
+      return HttpResponse.json({
+        ok: false,
+        detail: "Bambuddy refused the API key when asked to list the printers. The key needs the 'Read Status' scope",
+        printers: [],
+      })
     }
     return HttpResponse.json({
       ok: true,
-      detail: 'Connected. Manage Library, Manage Queue and Read Status are all granted.',
-      printers: [
-        { id: 'p1', name: 'X1C · Workshop' },
-        { id: 'p2', name: 'A1 mini · Office' },
-      ],
+      detail: 'Connected. Bambuddy reports 3DP-31B-598.',
+      printers: fixtures.targets.printers,
     })
   }),
 
-  http.get(`${base}/settings/targets`, () => HttpResponse.json(fixtures.targets)),
+  http.get(`${base}/settings/targets`, () => {
+    if (!state.settings.bambuddy_url) return problem(409, 'Conflict', 'no Bambuddy URL is configured')
+    return HttpResponse.json(fixtures.targets)
+  }),
 
   http.post(`${base}/settings/register-sidebar`, async () => {
     await delay(200)
-    state.settings = { ...state.settings, sidebar_registered: true }
+    const created = state.sidebarLinkId === 0
+    if (created) state.sidebarLinkId = 3
     return HttpResponse.json({
-      ok: true,
-      detail: 'ScadBuddy now appears in the Bambuddy sidebar as "Customize".',
+      id: state.sidebarLinkId,
+      name: 'Customize',
+      url: state.settings.public_url ?? '',
+      icon: 'shapes',
+      open_in_new_tab: false,
+      created,
+      embed_path: `/external/${state.sidebarLinkId}`,
     })
   }),
 ]
