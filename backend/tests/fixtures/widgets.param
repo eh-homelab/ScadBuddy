@@ -1,0 +1,114 @@
+{
+    "parameters": [
+        {
+            "caption": "Model quality",
+            "group": "Global",
+            "initial": 64.0,
+            "max": 128.0,
+            "min": 16.0,
+            "name": "quality",
+            "step": 16.0,
+            "type": "number"
+        },
+        {
+            "caption": "How many copies",
+            "group": "Shapes",
+            "initial": 3.0,
+            "name": "copies",
+            "type": "number"
+        },
+        {
+            "caption": "Wall thickness (mm)",
+            "group": "Shapes",
+            "initial": 1.2,
+            "name": "wall",
+            "type": "number"
+        },
+        {
+            "caption": "Label",
+            "group": "Shapes",
+            "initial": "hello",
+            "maxLength": 32,
+            "name": "label",
+            "type": "string"
+        },
+        {
+            "caption": "Shape family",
+            "group": "Shapes",
+            "initial": "round",
+            "name": "family",
+            "options": [
+                {
+                    "name": "round",
+                    "value": "round"
+                },
+                {
+                    "name": "square",
+                    "value": "square"
+                },
+                {
+                    "name": "hex",
+                    "value": "hex"
+                }
+            ],
+            "type": "string"
+        },
+        {
+            "caption": "Grid size",
+            "group": "Shapes",
+            "initial": 2.0,
+            "name": "grid",
+            "options": [
+                {
+                    "name": "1",
+                    "value": 1.0
+                },
+                {
+                    "name": "2",
+                    "value": 2.0
+                },
+                {
+                    "name": "4",
+                    "value": 4.0
+                },
+                {
+                    "name": "8",
+                    "value": 8.0
+                }
+            ],
+            "type": "number"
+        },
+        {
+            "caption": "Add a lid",
+            "group": "Shapes",
+            "initial": true,
+            "name": "lid",
+            "type": "boolean"
+        },
+        {
+            "caption": "Ramp angle",
+            "group": "Shapes",
+            "initial": 30.0,
+            "max": 90.0,
+            "min": 0.0,
+            "name": "ramp",
+            "step": 5.0,
+            "type": "number"
+        },
+        {
+            "caption": "Body colour",
+            "group": "Appearance",
+            "initial": "#00ff88",
+            "name": "body_colour",
+            "type": "string"
+        },
+        {
+            "caption": "Label font",
+            "group": "Appearance",
+            "initial": "DejaVu Sans",
+            "name": "label_font",
+            "type": "string"
+        }
+    ],
+    "title": "widgets"
+}
