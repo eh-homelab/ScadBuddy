@@ -286,7 +286,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       # --target test, and --load so it lands in the local docker daemon.
       #
