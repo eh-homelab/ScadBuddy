@@ -1,0 +1,57 @@
+---
+version: 2
+updates:
+  # GitHub Actions. `directory: "/"` is correct and non-obvious: Dependabot
+  # always reads .github/workflows/ relative to the repo root, never a
+  # workflows subdirectory.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels: ["dependencies", "ci"]
+
+  # Python. `uv` ecosystem, NOT `pip`: the backend is a uv project with a
+  # uv.lock, and the `pip` ecosystem would edit pyproject.toml while leaving
+  # the lockfile stale — which then fails `uv sync --frozen` in CI and in the
+  # Docker build, i.e. an update PR that cannot possibly go green.
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels: ["dependencies", "api"]
+
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels: ["dependencies", "frontend"]
+    groups:
+      # React and the three.js stack move together; separate PRs for
+      # react/react-dom or three/@react-three/* land a tree that does not build.
+      react:
+        patterns: ["react", "react-dom", "@types/react", "@types/react-dom"]
+      three:
+        patterns: ["three", "@types/three", "@react-three/*"]
+
+  # Docker: the Dockerfile's FROM lines. Three of the four are bumpable
+  # (node, ghcr.io/astral-sh/uv, hadolint's own image is not here); the fourth,
+  # openscad/openscad:dev, is a rolling tag Dependabot cannot version — it is
+  # pinned by the OPENSCAD_VERSION assertion in the Dockerfile instead, which
+  # fails the build when the nightly moves under it.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels: ["dependencies", "docker"]

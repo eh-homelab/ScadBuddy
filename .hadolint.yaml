@@ -1,0 +1,17 @@
+---
+# hadolint runs in CI (ci.yml's `lint` job) and must stay clean. Every ignore
+# here is a decision, not a silencer.
+ignored:
+  # DL3008 "pin versions in apt-get install". The runtime is
+  # openscad/openscad:dev — a rolling nightly on Debian trixie — so pinned apt
+  # versions would break the build the first time trixie's archive moves,
+  # against a base that is itself unpinned. Pinning the leaves of an unpinned
+  # tree buys nothing and costs a recurring breakage.
+  - DL3008
+
+# The only registries this image is allowed to pull from. Docker Hub and GHCR
+# are both proxied by the estate's Nexus cache; anything else would be an
+# unreviewed supply-chain addition.
+trustedRegistries:
+  - docker.io
+  - ghcr.io

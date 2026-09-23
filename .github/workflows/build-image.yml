@@ -1,0 +1,139 @@
+---
+name: Build Image
+
+# Publishes ghcr.io/eh-homelab/scadbuddy for the cluster to pull.
+#
+# THE PACKAGE MUST BE PUBLIC. Nodes on the target cluster pull ghcr.io through
+# an ANONYMOUS Nexus proxy (`ghcr-proxy`), so a per-pod imagePullSecret
+# authenticates the wrong hop and cannot pull a private package — the same
+# reason `actions-runner` and `dind-preload` are public. Package visibility is
+# a one-time GitHub UI step (Packages -> scadbuddy -> Package settings ->
+# Change visibility); it cannot be set from a workflow. If a node ever reports
+# `denied` / `unauthorized` pulling this image, check visibility FIRST.
+#
+# Not run on pull_request: a PR has no GHCR write token, and ci.yml already
+# builds the same Dockerfile (both targets) on every PR, so nothing about the
+# build is untested at merge time.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Never cancel a publish. Two concurrent pushes to main would otherwise race on
+# the `main` tag and the shared buildcache, and a cancelled push leaves a
+# half-written manifest list behind.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and push (amd64 + arm64)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      tags: ${{ steps.meta.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # arm64 is emulated: ubuntu-latest is amd64, so binfmt handlers are what
+      # make the second architecture possible at all. The spec pins the workload
+      # to amd64 nodes today, but the base image is multi-arch and the estate
+      # has arm64 hardware (wingnut), so building both keeps that door open at
+      # the cost of build minutes, not of correctness.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive tags and labels
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/eh-homelab/scadbuddy
+          # `sha-<short>` is the one tag the cluster manifests should pin to —
+          # it is immutable, unlike `main`. `main` exists for humans and for
+          # `docker run` convenience. The semver tags come from `v*` pushes.
+          tags: |
+            type=raw,value=main,enable={{is_default_branch}}
+            type=sha,format=short,prefix=sha-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+          labels: |
+            org.opencontainers.image.title=ScadBuddy
+            org.opencontainers.image.description=Self-hosted OpenSCAD customizer for Bambuddy
+            org.opencontainers.image.licenses=MIT
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          # `runtime`, explicitly. The Dockerfile's last stage IS runtime, so
+          # this is belt and braces — but a future stage appended below it would
+          # otherwise silently become the published image.
+          target: runtime
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          # `type=gha`, viable only because this is a GitHub-hosted runner —
+          # the eh-homelab self-hosted pools sit behind a TLS intercept that
+          # breaks the Actions cache protocol outright (it fails the build, it
+          # does not degrade). Writing from the default branch is what gives
+          # PRs a warm cache, since Actions cache scoping lets a PR read the
+          # default branch's entries.
+          #
+          # mode=max caches intermediate stages, which is what makes the
+          # frontend and dependency layers survive between runs. Two
+          # architectures at mode=max is the biggest consumer of the repo's
+          # 10 GB Actions cache ceiling — if entries start evicting before they
+          # are reused, move this one leg to
+          # `type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache`, which
+          # has no ceiling and sits next to the image being pushed anyway.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The digest is what a GitOps manifest should pin, and it is otherwise
+      # buried in the build log. Printed to the step summary so it can be
+      # copied straight into eh-homelab/clusters.
+      - name: Report the published digest
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Published \`ghcr.io/eh-homelab/scadbuddy\`"
+            echo
+            echo "**Digest:** \`${DIGEST}\`"
+            echo
+            echo "**Tags:**"
+            echo '```'
+            printf '%s\n' "$TAGS"
+            echo '```'
+            echo
+            echo "Pin the digest in \`eh-homelab/clusters\`:"
+            echo '```'
+            echo "ghcr.io/eh-homelab/scadbuddy@${DIGEST}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

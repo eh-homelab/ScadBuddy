@@ -1,0 +1,603 @@
+---
+name: CI
+
+# The required status check on `main` is the job DISPLAY NAME "CI Summary".
+# Renaming it silently unsatisfiable-ifies the merge gate, because the gate is
+# CODE and lives in ANOTHER repository: eh-homelab/clusters'
+# `infra/github/eh-homelab/main.tf` declares a `github_repository_ruleset` whose
+# `required_checks` pin the context string, applied by that repo's Tofu CI.
+# Nothing in THIS repo will fail if the two drift apart — the PR just stops
+# being mergeable with no stated cause. Rename here, change it there, same day.
+#
+# It is the only job here that is required, which is what lets every other job
+# be gated, skipped or reordered freely.
+#
+# ── Why ubuntu-latest and not the eh-homelab self-hosted pools ────────────────
+# ScadBuddy is PUBLIC. Free hosted minutes are the smaller half of the reason;
+# the load-bearing half is that `clusters-runner*` are ARC scale sets inside the
+# homelab cluster, on the LAN with Hindsight and the Nexus cache. Putting a
+# public repo on those pools means a fork PR can execute attacker-controlled
+# code in that network — an unreasonable trade for a build that needs nothing on
+# the LAN. (GitHub's own guard against this is an org runner group's
+# `allows_public_repositories`, default false; the right answer here is not to
+# turn it on but to stay off those pools.)
+#
+# Hosted also gets the `type=gha` buildx cache back, which the self-hosted
+# pools' TLS interception breaks outright.
+#
+# `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
+# build-image.yml, so no job here needs a bigger or different runner.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per ref. A newer push supersedes an older one — there are no
+# force-pushing auto-fixers in this repo, so cancelling costs nothing but the
+# wasted minutes.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Which halves of the tree exist ──────────────────────────────────────────
+  #
+  # This repo is being built by four concurrent branches (renderer, frontend,
+  # keychain model, and this one). Until they all land, `backend/` and
+  # `frontend/` genuinely do not exist on some heads, and a job that assumes
+  # they do would red every PR in the bootstrap window.
+  #
+  # The gate is NOT a fail-open hole, because `CI Summary` re-derives the same
+  # two booleans from its own checkout and fails if a directory exists whose
+  # job did not succeed. So "the directory is missing" is the ONLY way a check
+  # can legitimately be skipped, and the allowance disappears on its own the
+  # moment the other branches merge.
+  layout:
+    name: Detect layout
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      backend: ${{ steps.detect.outputs.backend }}
+      frontend: ${{ steps.detect.outputs.frontend }}
+      e2e: ${{ steps.detect.outputs.e2e }}
+      models: ${{ steps.detect.outputs.models }}
+      image: ${{ steps.detect.outputs.image }}
+      app: ${{ steps.detect.outputs.app }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Detect which trees are present
+        id: detect
+        run: |
+          set -euo pipefail
+
+          # `if`, not `[ -f x ] && y=true`. Every `run:` block here is
+          # `bash -e {0}`: a bare `[ ... ] && ...` whose test FAILS is a
+          # non-zero simple command, which aborts the step. The failure is
+          # asymmetric and so invisible in testing — the "present" path passes
+          # and only the "absent" path reds, which is exactly the case this
+          # job exists to detect.
+          backend=false
+          if [ -f backend/pyproject.toml ]; then backend=true; fi
+          frontend=false
+          if [ -f frontend/package.json ]; then frontend=true; fi
+          e2e=false
+          if [ -d frontend/e2e ]; then e2e=true; fi
+          models=false
+          if [ -d models ]; then models=true; fi
+
+          # Can the image actually SERVE yet? The Dockerfile's CMD is
+          # `uvicorn scadbuddy.main:app`. When this gate was written the API
+          # epic had not landed and starting the container died with
+          # `exec uvicorn failed`; it has landed since, so this now reads true.
+          # Kept because it is the honest precondition for the container smoke
+          # test, and because it costs one `[ -f ]`.
+          app=false
+          if [ -f backend/scadbuddy/main.py ]; then app=true; fi
+
+          # The image needs all THREE trees: the Node stage builds frontend/,
+          # the runtime stage installs backend/ and copies models/ as the seed
+          # catalogue. A missing `models/` is a `COPY` failure partway through
+          # the build, not a skip.
+          #
+          # Deliberately coarse: presence of `backend/pyproject.toml` is enough
+          # to run the image job, even though the build also needs
+          # `backend/uv.lock`. If the lockfile is missing the build FAILS —
+          # loudly, with the missing file named — which is the right outcome.
+          # Testing for every input here would turn a loud build error into a
+          # silent skip.
+          image=false
+          if [ "$backend" = true ] && [ "$frontend" = true ] && [ "$models" = true ]; then image=true; fi
+
+          {
+            echo "backend=$backend"
+            echo "frontend=$frontend"
+            echo "e2e=$e2e"
+            echo "models=$models"
+            echo "image=$image"
+            echo "app=$app"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  # ── Things that need neither half of the tree ───────────────────────────────
+  lint:
+    name: Workflow and Dockerfile lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # actionlint catches the two mistakes this repo's workflows are most
+      # exposed to: shell-injection via `${{ }}` interpolated straight into a
+      # `run:` block, and expressions that reference a job/step/output that does
+      # not exist (which GitHub itself accepts silently and evaluates to "").
+      # raven-actions/actionlint, not `rhysd/actionlint` — the upstream repo
+      # ships no action.yml, so `uses: rhysd/actionlint@...` fails to resolve.
+      #
+      # The one -ignore is for a stale entry in actionlint's BUNDLED
+      # action-metadata database, not a real problem: it still lists
+      # create-github-app-token's `app-id` as required and does not know
+      # `client-id`. Upstream is the other way round — `client-id` is current
+      # and `app-id` carries a deprecationMessage (verified against the action's
+      # own action.yml). The pattern is the action name rather than the two
+      # message texts because an -ignore regex containing quotes has to survive
+      # a shell round-trip through this action's `flags` input.
+      #
+      # Runner labels are NOT ignored — they are declared in
+      # .github/actionlint.yaml, because a typo'd pool name is a job that queues
+      # forever with no error and that check is the only thing that catches it.
+      - name: actionlint
+        uses: raven-actions/actionlint@v2.2.0
+        with:
+          fail-on-error: true
+          flags: -ignore create-github-app-token
+
+      # The config lives in .hadolint.yaml so the same rules apply to a local
+      # `hadolint Dockerfile` as to this job.
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+  # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
+  frontend:
+    name: Frontend lint, typecheck, test, build
+    needs: layout
+    if: ${{ needs.layout.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # Pin the Node major to the one the Dockerfile's Node stage uses, so a
+      # `pnpm build` that passes here is the same build the image performs.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
+      # corepack, not a pinned pnpm version: the version comes from
+      # frontend/package.json's `packageManager` field, which is also what the
+      # Dockerfile's Node stage reads. One source of truth for the pnpm version.
+      - name: Enable corepack
+        run: corepack enable
+
+      # --frozen-lockfile, never a plain install: a CI run that silently
+      # resolves a different dependency tree than the lockfile is testing
+      # something nobody will ever ship.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      # The e2e suite lives here and NOT in the image job, which is where it
+      # started. frontend/playwright.config.ts is self-contained: it runs its
+      # own `webServer` (`pnpm build && pnpm preview --port 4173`) against the
+      # production bundle with the msw worker mocking the API — by its own
+      # comment, "so it exercises the same build the backend will host". It
+      # never talks to the backend, so pointing it at the running container was
+      # simply wrong, and gating it on the container's entrypoint was wrong for
+      # the same reason. Here it also reuses the node_modules this job already
+      # installed instead of a second `pnpm install`.
+      - name: Install Playwright browsers
+        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Playwright smoke
+        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        # DEBUG=pw:webserver is load-bearing for diagnosis, not noise.
+        # Playwright pipes the webServer's STDERR but IGNORES its stdout, so a
+        # server that fails to come up produces only
+        # "Timed out waiting 180000ms from config.webServer" with no cause —
+        # vite's own startup banner and any build output are discarded. This
+        # channel prints the lifecycle instead.
+        env:
+          DEBUG: pw:webserver
+          # Why this is required on a GitHub-hosted runner, and not on a laptop:
+          # playwright.config.ts polls the LITERAL url `http://127.0.0.1:4173`,
+          # but `vite preview` binds vite's default host, the NAME `localhost`.
+          # Node 17+ resolves names `verbatim` (confirmed: Node 24's
+          # dns.getDefaultResultOrder() is `verbatim`), returning addresses in
+          # resolver order rather than IPv4-first. The runner's /etc/hosts maps
+          # `localhost` to BOTH 127.0.0.1 and ::1, so vite binds ::1 ONLY and
+          # every IPv4 poll is refused -- the server is up and unreachable.
+          # Run 35821833518 is the signature: `vite preview` logged
+          # "Local: http://localhost:4173/" at 05:19:17, then 183 consecutive
+          # ECONNREFUSED on 127.0.0.1:4173 until the 180s timeout at 05:22:13.
+          # It passes on a dev box only because a typical /etc/hosts maps
+          # `localhost` to 127.0.0.1 alone (::1 is `ip6-localhost`), so the same
+          # name resolves to IPv4 there.
+          #
+          # This pins the resolution to IPv4 so the bind matches the poll. The
+          # durable fix belongs in frontend/ (`preview: { host: '127.0.0.1' }`
+          # in vite.config.ts) and is owned by the frontend epic; this line is
+          # harmless once that lands and is the only lever available from CI.
+          NODE_OPTIONS: --dns-result-order=ipv4first
+        run: pnpm exec playwright test
+
+      - name: Upload the Playwright report
+        if: ${{ failure() && needs.layout.outputs.e2e == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ── Image build + everything that needs a real openscad ─────────────────────
+  #
+  # ONE job, on purpose. The backend's integration tests are marked
+  # `requires_openscad` and only run where the binary exists, which is inside
+  # this image and nowhere else. Splitting "build" from "test" would mean
+  # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
+  # to push a PR image to), which costs far more than it saves.
+  image:
+    name: Image build, backend checks, container smoke
+    needs: layout
+    if: ${{ needs.layout.outputs.image == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - uses: docker/setup-buildx-action@v3
+
+      # --target test, and --load so it lands in the local docker daemon.
+      #
+      # `type=gha` works here only because this is a GitHub-hosted runner — the
+      # self-hosted pools' TLS interception breaks the Actions cache protocol
+      # outright (it fails the build, it does not degrade). Read AND write:
+      # Actions cache scoping lets a PR read the default branch's entries, so a
+      # PR gets build-image.yml's layers from main, and writing its own scope
+      # means the SECOND push on a PR does not rebuild what the first one
+      # already built. A PR's writes land in the PR's own scope and cannot
+      # affect main.
+      #
+      # mode=max caches intermediate stages too, which is the only way the
+      # frontend and dependency layers survive; mode=min would keep the final
+      # layers and rebuild everything expensive. Watch the repo's 10 GB Actions
+      # cache ceiling if this ever starts thrashing — the fallback is
+      # `type=registry` against a GHCR `buildcache` tag, which has no ceiling.
+      #
+      # The `test` stage is a superset of `runtime` (same layers plus the dev
+      # dependency group), so building it warms every layer the smoke test
+      # below needs and `--target runtime` is then almost free.
+      - name: Build the test image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          load: true
+          tags: scadbuddy:ci-test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Exactly the commands the repo contract names, run where the real
+      # openscad is. `--no-sync` because the venv was already synced during the
+      # build: without it every `uv run` reinstalls the project package first.
+      - name: ruff check
+        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync ruff check .
+
+      - name: ruff format --check
+        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync ruff format --check .
+
+      - name: mypy
+        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync mypy
+
+      # No `-m` filter: inside the image `requires_openscad` tests are supposed
+      # to run, and the point of building the image at all is that they can.
+      - name: pytest
+        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
+
+      - name: Build the runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: scadbuddy:ci
+          # Read-only: the `test` build above already wrote every shared layer.
+          cache-from: type=gha
+
+      # The container's OWN healthcheck is the assertion, not a curl we write
+      # here: that way CI exercises the same probe Kubernetes will, and a
+      # HEALTHCHECK that is broken in the image cannot pass in CI.
+
+      - name: Start the container and wait for its healthcheck
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: |
+          set -euo pipefail
+          docker run -d --name scadbuddy-ci -p 18080:8080 scadbuddy:ci
+
+          # `|| true` on the inspect: under `bash -e` a failed inspect (the
+          # container exited and was reaped, or the image somehow carries no
+          # HEALTHCHECK) would abort the step before the diagnostics below ever
+          # print. The `{{if .State.Health}}` guard yields an empty string
+          # rather than a template error in that second case.
+          status=""
+          for _ in $(seq 1 60); do
+            status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' scadbuddy-ci 2>/dev/null || true)"
+            case "$status" in
+              healthy) echo "container healthy"; exit 0 ;;
+              unhealthy) break ;;
+            esac
+            sleep 2
+          done
+          echo "::error::container never became healthy (last status: ${status:-<none>})"
+          docker logs scadbuddy-ci
+          exit 1
+
+      - name: Probe /healthz from outside the container
+        if: ${{ needs.layout.outputs.app == 'true' }}
+        run: curl --fail --silent --show-error http://127.0.0.1:18080/healthz
+
+      - name: Container logs on failure
+        if: ${{ failure() && needs.layout.outputs.app == 'true' }}
+        run: docker logs scadbuddy-ci || true
+
+      - name: Tear down
+        if: always()
+        run: docker rm -f scadbuddy-ci || true
+
+  # ── The required check ──────────────────────────────────────────────────────
+  summary:
+    # THIS display name is the required status-check context. Renaming it
+    # silently unsatisfiable-ifies branch protection.
+    name: CI Summary
+    needs: [layout, lint, frontend, image]
+    # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
+    # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
+    # SATISFIED — a failing build would report green on the one check that
+    # gates merge. `!cancelled()` overrides the skip-on-failed-dependency
+    # default so the assertions below can turn a failure into a real red. A
+    # *cancelled* run still skips, which is right: the superseding run brings
+    # its own required check.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Checked out so the assertions can re-derive the layout from the TREE
+      # rather than trusting the `layout` job's outputs. That is what closes the
+      # bootstrap allowance: a skipped `frontend` job is only acceptable if
+      # frontend/ really is absent from this commit, and the only way to know
+      # that is to look.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Assert every job either succeeded or was legitimately skipped
+        env:
+          LAYOUT_RESULT: ${{ needs.layout.result }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: |
+          set -uo pipefail
+          failed=0
+
+          # $1 job label, $2 its result, $3 "true" when the job was REQUIRED to
+          # run on this tree. A skip is accepted only when $3 is false.
+          assert() {
+            local label="$1" result="$2" required="$3"
+            if [ "$result" = "success" ]; then
+              echo "  ok       ${label}"
+              return 0
+            fi
+            if [ "$result" = "skipped" ] && [ "$required" != "true" ]; then
+              echo "  skipped  ${label} (its source tree is not on this commit yet)"
+              return 0
+            fi
+            echo "::error::${label} concluded '${result}'"
+            failed=1
+          }
+
+          # Re-derived here, NOT read from needs.layout.outputs: an assertion
+          # that trusts the thing it is checking asserts nothing. `if` rather
+          # than `[ ... ] && ...` for the `bash -e` reason spelled out in the
+          # `layout` job.
+          has_backend=false
+          if [ -f backend/pyproject.toml ]; then has_backend=true; fi
+          has_frontend=false
+          if [ -f frontend/package.json ]; then has_frontend=true; fi
+          has_models=false
+          if [ -d models ]; then has_models=true; fi
+          has_image=false
+          if [ "$has_backend" = true ] && [ "$has_frontend" = true ] && [ "$has_models" = true ]; then has_image=true; fi
+
+          # `app` is reported, not asserted: it gates STEPS inside the image
+          # job, not a job of its own. It needs no assertion — when the API
+          # entrypoint lands, those steps run, and any failure reds the image
+          # job, which IS asserted below.
+          has_app=false
+          if [ -f backend/scadbuddy/main.py ]; then has_app=true; fi
+
+          echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} models=${has_models} image=${has_image}"
+          echo "Container smoke gated on the API entrypoint: app=${has_app}"
+          echo "Job results:"
+          assert "Detect layout"                          "$LAYOUT_RESULT"   true
+          assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
+          assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
+          assert "Image build, backend checks, smoke"     "$IMAGE_RESULT"    "$has_image"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::CI Summary failed — see the job results above."
+            exit 1
+          fi
+          echo "All required jobs succeeded."
+
+  # ── Hand off to the Claude review merge gate ────────────────────────────────
+  #
+  # `needs:` cannot cross workflow files, so claude-code-review.yml is
+  # `workflow_dispatch`-only and this job dispatches it. Ordering it behind the
+  # CI jobs means the review reads a tree whose tests have already reported,
+  # and keeps a ~$1-2 agent run from starting on a push that a later push in
+  # the same minute supersedes. It is NOT a quality gate — a red CI still gets
+  # a review, because that is exactly when a review is most useful.
+  #
+  # Dispatch, never poll. A polling job burns wall-clock holding a runner for
+  # something it cannot influence; on a capped self-hosted pool that is a real
+  # deadlock, and even on hosted runners it is just a job that does nothing.
+  dispatch-review:
+    name: Dispatch Claude Code Review
+    needs: [lint, frontend, image, summary]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # A job-level `permissions:` block REPLACES the workflow default rather than
+    # extending it, so every scope this job uses is listed.
+    permissions:
+      # workflow_dispatch of claude-code-review.yml.
+      actions: write
+      # The `claude-review` COMMIT STATUS seeded below. That context is the
+      # repo's second required check; claude-code-review.yml publishes its
+      # terminal value. It has to be a commit status and not a check run:
+      # branch protection evaluates the PR's status rollup, and a
+      # workflow_dispatch run's check suite is not associated with the PR, so
+      # its check runs never reach that rollup — green on the commit, invisible
+      # to the gate, read as never reported.
+      statuses: write
+      # Resolving the LIVE head sha, rather than trusting the event payload.
+      pull-requests: read
+    steps:
+      # Seeded BEFORE the dispatch, and the order is load-bearing rather than
+      # stylistic: statuses are last-write-wins per context, so seeding after
+      # `gh workflow run` could overwrite the dispatched review's terminal
+      # `success` with `pending` and leave the PR blocked until something
+      # dispatched again.
+      - name: Seed the claude-review status as pending
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state=pending \
+            -f context=claude-review \
+            -f description="Review dispatched; waiting for the merge gate." \
+            -f target_url="$RUN_URL" >/dev/null
+
+      - name: Dispatch Claude Code Review
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          # PR-author-controlled values go through env, never interpolated into
+          # the script: a branch name can contain shell metacharacters.
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+
+          if gh workflow run claude-code-review.yml \
+               --repo "$REPO" \
+               --ref "$HEAD_REF" \
+               -f pr_number="$PR_NUMBER"; then
+            echo "dispatched=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # BOOTSTRAP ONLY. workflow_dispatch requires the workflow to exist on
+          # the DEFAULT BRANCH, so on the very PR that introduces
+          # claude-code-review.yml the dispatch necessarily 404s. Distinguish
+          # that one case from a real dispatch failure by asking whether the
+          # file is on the default branch; anything else is a genuine error.
+          # This branch stops being reachable the moment this PR merges.
+          if gh api "repos/${REPO}/contents/.github/workflows/claude-code-review.yml?ref=${DEFAULT_BRANCH}" \
+               --silent >/dev/null 2>&1; then
+            echo "::error::Dispatch of claude-code-review.yml failed even though it exists on ${DEFAULT_BRANCH}."
+            exit 1
+          fi
+
+          echo "::warning::claude-code-review.yml is not on ${DEFAULT_BRANCH} yet, so it cannot be dispatched. This is the bootstrap PR that adds it."
+          echo "dispatched=false" >> "$GITHUB_OUTPUT"
+
+      # Only reachable on the bootstrap PR described above. Left green
+      # deliberately: the merge gate cannot review a workflow that the default
+      # branch has never seen, and the `ScadBuddy/main` ruleset is not declared
+      # in eh-homelab/clusters' `infra/github/eh-homelab/main.tf` until after
+      # this PR merges.
+      - name: Clear the claude-review status on the bootstrap PR
+        if: ${{ steps.dispatch.outputs.dispatched == 'false' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state=success \
+            -f context=claude-review \
+            -f description="Bootstrap: claude-code-review.yml is not on the default branch yet." \
+            -f target_url="$RUN_URL" >/dev/null
+
+      # Without this the required `claude-review` context would sit pending
+      # forever whenever the dispatch itself died — blocking, with nothing to
+      # point at. Not best-effort: a status POST that fails silently is the
+      # failure mode this exists to remove.
+      - name: Red the claude-review status when no review was dispatched
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq .head.sha)"
+          gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state=failure \
+            -f context=claude-review \
+            -f description="No review was dispatched (see Dispatch Claude Code Review)." \
+            -f target_url="$RUN_URL" >/dev/null
