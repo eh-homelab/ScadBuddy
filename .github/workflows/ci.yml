@@ -531,7 +531,7 @@ jobs:
 
       # Same Node major and the same corepack-driven pnpm as the `frontend`
       # job, so the msw the worker is copied from is the msw the tests run.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         if: ${{ steps.detect.outputs.frontend == 'true' }}
         with:
           node-version: "24"
