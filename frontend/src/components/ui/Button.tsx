@@ -33,7 +33,7 @@ export function Button({
     <button
       type="button"
       {...rest}
-      className={`inline-flex items-center justify-center gap-2 rounded-[6px] border transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${VARIANT[variant]} ${SIZE[size]} ${className}`}
+      className={`inline-flex shrink-0 items-center justify-center gap-2 rounded-[6px] border whitespace-nowrap transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${VARIANT[variant]} ${SIZE[size]} ${className}`}
     >
       {children}
     </button>
