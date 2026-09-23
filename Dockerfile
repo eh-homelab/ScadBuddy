@@ -15,7 +15,7 @@
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
 # can never reach the image (.dockerignore drops it from the context too).
-FROM node:24-bookworm-slim AS frontend
+FROM node:25-bookworm-slim AS frontend
 
 WORKDIR /src/frontend
 
