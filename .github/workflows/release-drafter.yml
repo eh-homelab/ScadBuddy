@@ -1,0 +1,103 @@
+---
+name: Release Drafter
+
+# Two different actions from the same repo, and they are not interchangeable:
+#   * `release-drafter/release-drafter@v7` maintains the draft release. Only
+#     meaningful on a push to the default branch.
+#   * `release-drafter/release-drafter/autolabeler@v7` — a DIFFERENT action at a
+#     subpath — applies labels to a PR from its title. The top-level action has
+#     no `disable-autolabeler` input; passing one is silently ignored.
+# Both read the same .github/release-drafter.yml.
+#
+# Nothing is published automatically. A human edits and publishes the draft,
+# which creates the `v*` tag that build-image.yml's semver tags key off.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  update_release_draft:
+    name: Update the release draft
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - uses: release-drafter/release-drafter@v7.7.0
+        with:
+          config-name: release-drafter.yml@${{ github.event.repository.default_branch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  autolabel:
+    name: Autolabel the PR
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # BOOTSTRAP GUARD. Pinning config-name to @default_branch (below) has one
+      # consequence that only bites once: on the PR that INTRODUCES
+      # .github/release-drafter.yml, the default branch does not have it yet, so
+      # the action 404s —
+      #   "Config not found in eh-homelab/ScadBuddy, falling back to
+      #    eh-homelab/.github"
+      #   "Repo load failed. Config file not found with error 404."
+      # — and reds the job for a reason that has nothing to do with the PR.
+      # Observed on this repo's own CI PR (run 35820488286).
+      #
+      # Probe the default branch and skip rather than fail. The condition is
+      # unreachable the moment that file is on main, so this guard removes
+      # itself; it is NOT a `continue-on-error`, which would swallow every
+      # later real failure of the same step.
+      - name: Is the config on the default branch yet?
+        id: config
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+          if gh api "repos/${REPO}/contents/.github/release-drafter.yml?ref=${DEFAULT_BRANCH}" --silent >/dev/null 2>&1; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::.github/release-drafter.yml is not on ${DEFAULT_BRANCH} yet; skipping autolabel. This is the PR that adds it."
+          fi
+
+      # `@${{ ...default_branch }}` on config-name is LOAD-BEARING, not
+      # decoration. With no explicit `@ref`, the action resolves its config at
+      # `github.context.ref`, which for a pull_request event is
+      # `refs/pull/<n>/merge` — an ephemeral commit GitHub DELETES the instant
+      # the PR merges. Any delay between the event firing and this job fetching
+      # its config is a race window, and auto-merge closes it routinely: the PR
+      # merges while the run is still queued, and the fetch 404s with "Config
+      # file not found" even though the file is plainly on main. (Diagnosed in
+      # WonderForgeLabs/forge: 15 failures in 29h, where a slow self-hosted
+      # queue widened the window; hosted runners narrow it but do not remove
+      # it.) Use `default_branch`, NOT `base.ref` — a stacked PR's base branch
+      # is also deleted on merge and reintroduces the same race.
+      #
+      # `pull_request`, not `pull_request_target`: this repo takes no fork
+      # contributions, and pull_request_target would hand a write token to a
+      # run triggered by an untrusted head for no gain.
+      - uses: release-drafter/release-drafter/autolabeler@v7.7.0
+        if: ${{ steps.config.outputs.present == 'true' }}
+        with:
+          config-name: release-drafter.yml@${{ github.event.repository.default_branch }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

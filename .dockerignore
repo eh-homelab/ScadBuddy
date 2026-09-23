@@ -1,0 +1,45 @@
+# The build context is the repo root (the Dockerfile's Node stage needs
+# frontend/, the runtime stage needs backend/ and models/). Everything that is
+# not one of those three is noise that invalidates layers.
+
+.git
+.gitignore
+.github
+.claude
+.claude-worktrees
+docs
+
+# Build output that MUST come from the Node stage, never from the host — a
+# stale local dist silently shipping instead of a fresh build is the whole
+# reason this entry exists.
+frontend/dist
+frontend/node_modules
+frontend/.vite
+frontend/playwright-report
+frontend/test-results
+frontend/coverage
+node_modules
+
+# Python build/test detritus. .venv in particular: a host venv has absolute
+# paths and the wrong interpreter, and copying it over the image's /opt/venv
+# would produce an image that works nowhere else.
+backend/.venv
+backend/.pytest_cache
+backend/.mypy_cache
+backend/.ruff_cache
+backend/htmlcov
+backend/.coverage
+**/__pycache__
+**/*.py[cod]
+
+# Editor / OS
+.editorconfig
+.vscode
+.idea
+.DS_Store
+*.swp
+
+Dockerfile
+.dockerignore
+LICENSE
+README.md

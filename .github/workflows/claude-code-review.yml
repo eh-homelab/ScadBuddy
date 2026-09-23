@@ -1,0 +1,806 @@
+---
+name: Claude Code Review
+
+# Dispatched by ci.yml's `dispatch-review` job once the CI jobs have finished —
+# never triggered by `pull_request` directly. `needs:` cannot cross workflow
+# files, so a dispatch is the closest thing to a real dependency edge this
+# workflow can get. It is explicitly NOT a poll: a polling job holds a slot
+# from the very capped pool it is waiting on, which is a real deadlock rather
+# than a theoretical one (this pattern is ported from eh-homelab/clusters,
+# where a render-wait poll had to be deleted for exactly that reason).
+#
+# track_progress + use_sticky_comment (tag mode) are NOT used, and cannot be:
+# claude-code-action treats workflow_dispatch as an "AutomationContext" event
+# outside the pull_request/issue family that tag mode supports, and setting
+# track_progress on one throws. The review step therefore runs in plain agent
+# mode and posts its own review as an ordinary PR comment via its own
+# `Bash(gh pr comment:*)` grant — a NEW comment each dispatch, not one edited
+# in place. The merge-gate classifier below only ever reads the latest one, so
+# that costs legibility, not correctness. The gate's own sticky comment is a
+# separate, hand-rolled mechanism (`<!-- merge-gate-sticky -->`) and is
+# unaffected.
+on:
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number to review"
+        required: true
+        type: string
+
+# Cancel an in-flight review when a newer dispatch supersedes it (each push on
+# the PR triggers its own CI -> dispatch chain, and each dispatch
+# targets the same branch ref, so this still groups correctly).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Runs the review + merge-gate classification. Split from the enforcement job
+  # below because the claude-code-action steps mint and revoke their own OIDC
+  # GitHub App installation token for their internal API calls; empirically a
+  # POST to the issues/comments API from a later step in this SAME job can 403
+  # ("Resource not accessible by integration") even though this job's own
+  # GITHUB_TOKEN correctly shows issues:write in its permissions banner (seen on
+  # eh-homelab/clusters#484, a sibling repo in this org, where the sticky
+  # merge-gate comment silently never posted). Giving enforcement its own job
+  # gets it a GITHUB_TOKEN nothing else in this workflow has touched.
+  claude-review-run:
+    # ubuntu-latest, like everything else in this repo — see ci.yml's header.
+    # This job has no LAN dependency: there is no Hindsight MCP server wired up
+    # here, and `git`/`gh`/`jq` are all on the hosted image.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # write, not read: the review step posts its own PR comment via
+      # Bash(gh pr comment:*) instead of tag mode's built-in posting (see the
+      # header comment). issues: write covers that (PR comments are issue
+      # comments); pull-requests: write is not required for a plain comment
+      # but costs nothing extra to keep.
+      pull-requests: write
+      issues: write
+      id-token: write
+      # actions: read so the action mints a GitHub App token that can install the
+      # github_ci MCP server (CI status checks); without it the action logs
+      # "Skipping CI server installation". Pair with additional_permissions below.
+      actions: read
+    outputs:
+      review_outcome: ${{ steps.review.outcome }}
+      review_execution: ${{ steps.review.outputs.execution_file }}
+      gate_outcome: ${{ steps.gate.outcome }}
+      gate_verdict: ${{ steps.gate.outputs.structured_output }}
+      # Why a Claude step failed, in its own words — see the two "Explain ..."
+      # steps below. Empty when the step succeeded or left no execution log.
+      review_error: ${{ steps.review_error.outputs.reason }}
+      gate_error: ${{ steps.gate_error.outputs.reason }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      # NOTE: no Hindsight MCP server here, unlike eh-homelab/clusters' copy of
+      # this workflow. This repo has no `.github/claude.mcp.json` yet; if one is
+      # ever added, materialize it from the BASE ref rather than the checkout —
+      # the checked-out tree is the PR author's, so reading an MCP config out of
+      # it would let any PR add tools to the very reviewer reviewing that PR.
+      - name: Run Claude Code Review
+        id: review
+        # The review step must never red the job on its own — it has succeeded as long
+        # as it completed the review. Whether the PR is mergeable is decided by the
+        # merge-gate steps below. continue-on-error keeps the job going so the gate runs
+        # and becomes the single source of pass/fail.
+        continue-on-error: true
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
+        env:
+          CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Review bot-authored PRs too (weekly cache-refresh, image digest bumps);
+          # the action otherwise hard-fails on non-human actors. Also covers the
+          # actor this run itself carries as a workflow_dispatch call.
+          allowed_bots: "*"
+          # Read-only tools plus `Bash(gh:*)`, which is what lets the review
+          # post its own comment now that tag mode is unavailable. No build or
+          # test tooling: this job reviews, it does not run the suite — ci.yml
+          # already did, on the same SHA.
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,LS,Bash(git:*),Bash(gh:*),Bash(shellcheck:*),Bash(jq:*),Bash(yq:*)" --model "claude-sonnet-5"
+
+          # Grant the action's GitHub App token actions: read so it installs the
+          # github_ci MCP server for CI status checks (mirrors the job permission).
+          additional_permissions: |
+            actions: read
+
+          # HARD STOP on the reviewer writing to the branch. Even in agent mode
+          # (no tag mode here, so no auto-granted git tools), keep this explicit:
+          # `permissions.deny` in `settings` always beats --allowedTools, so it
+          # holds regardless of what a future claude_args change might add.
+          # Auto-fixing is not lost: rendered manifests and generated runners are
+          # already fixed up by their own App-token jobs, and anything else the
+          # review finds is meant to land as a human commit or a `pr-feedback`
+          # issue (that is precisely what the merge gate below measures).
+          settings: |
+            {
+              "permissions": {
+                "deny": [
+                  "Edit",
+                  "MultiEdit",
+                  "Write",
+                  "NotebookEdit",
+                  "Bash(git add:*)",
+                  "Bash(git commit:*)",
+                  "Bash(git rm:*)",
+                  "Bash(git push:*)"
+                ]
+              }
+            }
+
+          # Review instructions
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.inputs.pr_number }}
+
+            ## Review Process
+
+            Review this pull request for ScadBuddy — a self-hosted OpenSCAD
+            customizer that reproduces MakerWorld's Parametric Model Maker
+            inside Bambuddy. One container: a Python 3.12 / FastAPI backend that
+            shells out to `openscad`, a React 19 + Vite frontend it serves as a
+            static bundle, and `.scad` models. No database; models and outputs
+            are files on a PVC.
+
+            **Read `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` first**
+            and treat it as the contract. Its §3 "Verified facts" were measured
+            against one specific OpenSCAD build; a change that contradicts a
+            measured fact is a finding, not a preference.
+
+            Focus on these areas:
+
+            1. **Python / FastAPI backend**
+               - Pydantic v2 models on every request and response body; RFC 9457
+                 problem details for errors, per §8.
+               - The OpenSCAD runner builds `-D` arguments FROM THE SCHEMA, never
+                 from raw user strings (§6.1). A parameter not in the schema must
+                 be rejected with 422. Quoting and escaping of string values is
+                 the injection surface here — check it specifically.
+               - Subprocess handling: the hard timeout is enforced and the child
+                 is actually killed, not just awaited.
+               - Type annotations complete enough for `mypy --strict`.
+
+            2. **React / TypeScript frontend**
+               - No `any`. Props and API payloads typed against the backend's
+                 schema, not re-invented.
+               - The preview render is debounced (400 ms per §5.3) and an
+                 in-flight render is superseded, not queued behind the user.
+               - react-three-fiber resources (geometries, materials, textures)
+                 disposed on unmount — the customizer re-renders on every
+                 parameter change, so a leak here compounds fast.
+
+            3. **The 3MF writer**
+               - Per-OBJECT `extruder` in `Metadata/model_settings.config`, since
+                 Bambuddy's pre-slice check reads that and ignores `paint_color`
+                 (§3). `Metadata/slice_info.config` must NOT be written.
+
+            4. **Dockerfile and CI**
+               - Layer order still lets the dependency layers cache.
+               - Nothing runs as root in the shipped stage.
+               - CI runs on GitHub-hosted `ubuntu-latest`, deliberately: this repo
+                 is public, and the eh-homelab self-hosted pools are on the LAN
+                 with Hindsight and Nexus. A PR that moves a job onto
+                 `clusters-runner*` is a finding — it would let a fork PR run
+                 code inside that network. (It is also what makes the `type=gha`
+                 buildx cache usable; those pools' TLS intercept breaks it.)
+               - A required check must not be able to SKIP into a pass: it needs
+                 a `needs:` edge, an `if:` guarded with `!cancelled()`, AND an
+                 explicit assertion on the upstream job's result. GitHub counts a
+                 SKIPPED required check as satisfied.
+               - Every `run:` block is `bash -e`, so a no-match `grep` ABORTS the
+                 step. Any grep in a change gate needs `|| true`.
+
+            5. **Secrets and Bambuddy integration**
+               - The Bambuddy API key stays server-side; it must never reach a
+                 browser payload or a log line (§7).
+               - No hardcoded credentials, hosts or tokens.
+
+            6. **Tests**
+               - Integration tests that need a real `openscad` are marked
+                 `requires_openscad`; unit tests must not silently depend on the
+                 binary being present.
+               - A test that stubs the very call under test proves nothing — say
+                 so when you see one.
+
+            7. **Shell scripts**
+               - ShellCheck compliance, `set -euo pipefail`, quoted expansions.
+
+            8. **Feedback Standards**
+               - Treat ALL feedback as important — never minimize findings with phrases like "minor observation", "nit", or "optional"
+               - Every piece of feedback must be clearly actionable
+
+            ## Output
+
+            Write your review as a single Markdown document listing all findings
+            grouped by concern, then post it as ONE top-level PR comment:
+
+              gh pr comment ${{ github.event.inputs.pr_number }} --repo ${{ github.repository }} --body-file <path-to-your-review.md>
+
+            This is a plain new comment each run, not an edited-in-place one — do
+            not attempt inline per-line review comments, and do not search for or
+            try to update a prior comment.
+
+            Do NOT create GitHub issues — use the `claude-make-follow-up-issues` label on the PR to trigger follow-up issue creation separately.
+
+            You are a REVIEWER, not a fixer. Never edit files, stage, commit, or push to
+            this branch — those tools are denied and attempting them only wastes the run.
+            A push from this job would make the PR head bot-authored, which gates every
+            required check behind manual workflow approval and blocks the PR entirely.
+            Report what should change; a human makes the change.
+
+      # ── Why the step failed, in Claude's own words ─────────────────────────
+      # Without this the ONLY thing a failed run says is "result is_error:true"
+      # — claude-code-action deliberately suppresses every message body unless
+      # `show_full_output: true`, and that dumps the whole transcript (prompt,
+      # tool output, the review itself) into the log, which is not an
+      # acceptable trade for one error string. But the action always writes the
+      # unsanitized message list to $RUNNER_TEMP/claude-execution-output.json,
+      # on the failure path too. So read the result message out of it and print
+      # ONLY its error text.
+      #
+      # This is not cosmetic. In eh-homelab/clusters every review from
+      # 2026-08-24T05:35Z onward failed with
+      # `is_error:true, num_turns:1, total_cost_usd:0` — a first-request
+      # rejection (auth/quota), indistinguishable in the log from a review that
+      # ran and found problems. `claude-review` is a required status check, so
+      # that made every PR in that repo unmergeable for five days with no stated
+      # cause. The same CLAUDE_CODE_OAUTH_TOKEN backs this repo.
+      #
+      # MUST run immediately after its claude-code-action step: the filename is
+      # fixed, so the next invocation of the action overwrites it.
+      #
+      # `.result` is only ever echoed when the run ERRORED. On a clean run that
+      # same field holds Claude's final message — the review text — which
+      # belongs in the PR comment, not in the job log.
+      - name: Explain a failed code review
+        id: review_error
+        if: always()
+        shell: bash
+        env:
+          # The step's true result — `continue-on-error` rewrites `conclusion`
+          # but never `outcome`. Needed for the no-error-but-still-failed case
+          # below, which the execution log alone cannot describe.
+          STEP_OUTCOME: ${{ steps.review.outcome }}
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/claude-execution-output.json"
+
+          emit() {
+            # $1 heading, $2 body text. Job log, step summary, and a one-line
+            # step output the merge gate quotes into its sticky PR comment.
+            echo "::error::code review did not complete: $2"
+            {
+              echo "### $1"
+              echo
+              echo "\`subtype=${subtype:-?}\` \`is_error=${is_error:-?}\` \`num_turns=${turns:-?}\` \`total_cost_usd=${cost:-?}\`"
+              echo
+              echo '```'
+              printf '%s\n' "$2"
+              echo '```'
+              # One turn with nothing billed means no tokens were ever accepted:
+              # the very first request bounced. That is the credential or its
+              # quota, never the PR under review, and saying so here is what
+              # stops the next person re-pushing at it.
+              if [ "${turns:-}" = "1" ] && [ "${cost:-}" = "0" ]; then
+                echo
+                echo "_No tokens were billed across a single turn, so the first request was rejected outright — an auth or quota problem with \`CLAUDE_CODE_OAUTH_TOKEN\`, not a problem with this PR._"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Single line: this value crosses a job boundary into the comment.
+            printf 'reason=%s\n' "$(printf '%s' "$2" | tr '\n\r' '  ')" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ ! -s "$log" ]; then
+            # The action was skipped by its workflow-validation guard —
+            # `Enforce merge gate` reads that case off an empty
+            # `review_execution` — or it died before Claude started.
+            echo "No execution log at $log — nothing to explain."
+            exit 0
+          fi
+
+          result="$(jq -c '[.[] | select(.type == "result")] | last // empty' "$log" 2>/dev/null || true)"
+          if [ -z "$result" ]; then
+            echo "Execution log has no result message — nothing to explain."
+            exit 0
+          fi
+
+          is_error="$(printf '%s' "$result" | jq -r '.is_error // false')"
+          subtype="$(printf '%s' "$result" | jq -r '.subtype // "?"')"
+          turns="$(printf '%s' "$result" | jq -r '.num_turns // 0')"
+          cost="$(printf '%s' "$result" | jq -r '.total_cost_usd // 0')"
+          echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
+
+          if [ "$is_error" != "true" ] && [ "$subtype" = "success" ]; then
+            # Claude itself was fine. If the step still failed anyway, the
+            # action rejected the run after the fact — say so rather than
+            # staying silent, which is the state this whole step exists
+            # to remove.
+            if [ "${STEP_OUTCOME:-success}" != "success" ]; then
+              emit "Code review did not complete" "Claude finished cleanly (subtype=$subtype, $turns turn(s)) but claude-code-action still failed the step — its own error is above this one in the job log."
+            fi
+            exit 0
+          fi
+
+          # `.result` carries the text on an errored `success`; the error
+          # subtypes carry `.errors` instead.
+          text="$(printf '%s' "$result" \
+            | jq -r 'if (.result | type) == "string" and (.result | length) > 0
+                     then .result
+                     else ((.errors // []) | join("; "))
+                     end' 2>/dev/null || true)"
+          [ -n "$text" ] || text="(the result message carried no error text)"
+
+          # 900 chars: long enough for an API error body, short enough to sit in
+          # a PR comment. Registered secrets are masked by the runner on the way
+          # out, so this cannot print CLAUDE_CODE_OAUTH_TOKEN.
+          emit "Code review did not complete" "$(printf '%s' "$text" | head -c 900)"
+
+      # Merge gate: a second, cheaper Claude run reads the review summary the step above
+      # just posted and decides whether the PR is mergeable. A finding is "addressed" when
+      # it is fixed in the branch (so it no longer appears in the latest review summary) or
+      # tracked in an open `pr-feedback` issue for this PR. Emits a structured verdict the
+      # enforce step turns into the job's pass/fail. Re-runs on every dispatch, so green
+      # follows once findings are fixed or filed as issues.
+      # Shared in substance with eh-homelab/clusters and WonderForgeLabs/forge — keep
+  # the three in sync when the gate logic changes.
+      - name: Merge-gate classification
+        id: gate
+        if: always()
+        uses: anthropics/claude-code-action@0a8d3c9443bbff909ab973b6a17a340b913f229f # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Classify bot-authored PRs too (weekly cache-refresh, image digest bumps);
+          # the action otherwise hard-fails on non-human actors and the gate then fails
+          # closed with no verdict. Must match the review step's allowed_bots.
+          allowed_bots: "*"
+          claude_args: |
+            --allowedTools "Read,Glob,Grep,LS,Bash(gh:*),Bash(jq:*)" --model "claude-sonnet-5"
+            --json-schema '{"type":"object","properties":{"verdict":{"type":"string","enum":["pass","fail"]},"outstanding_findings":{"type":"array","items":{"type":"object","properties":{"title":{"type":"string"},"severity":{"type":"string"}},"required":["title"]}},"addressed_count":{"type":"integer"},"reason":{"type":"string"}},"required":["verdict","reason"]}'
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.inputs.pr_number }}
+
+            ## Task: Merge-gate classification
+
+            The previous step ran a comprehensive code review and posted a summary comment
+            on this PR. Decide whether the PR is ready to merge. It is ready ONLY when every
+            actionable finding from the LATEST review is already addressed — either fixed in
+            the branch (so it no longer appears in the latest review summary) or tracked in an
+            open `pr-feedback` GitHub issue for this PR.
+
+            ## Steps
+
+            1. Find the latest review summary written by the review bot:
+               - `gh api --paginate repos/${{ github.repository }}/issues/${{ github.event.inputs.pr_number }}/comments`
+                 and pick the MOST RECENT comment authored by `claude[bot]` that is a
+                 code-review summary (it lists findings grouped by concern). Ignore
+                 progress-tracking checklist comments.
+               - Also read review bodies:
+                 `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.inputs.pr_number }}/reviews`.
+            2. Extract every actionable finding from that latest summary. Treat ALL findings
+               as actionable — nits included; the review is instructed never to minimize them.
+            3. Fetch open follow-up issues for this PR:
+               `gh issue list --repo ${{ github.repository }} --state open --label pr-feedback --search "[PR #${{ github.event.inputs.pr_number }} feedback]" --json number,title,body`
+            4. For each finding, mark it ADDRESSED if a matching open `pr-feedback` issue
+               covers it. A finding the latest review no longer lists is already fixed in the
+               branch and need not be considered.
+            5. If the latest review summary reports NO actionable findings, the verdict is `pass`.
+
+            ## Verdict
+
+            - `pass` only if EVERY actionable finding in the latest review summary is covered
+              by an open `pr-feedback` issue (or there are no findings at all).
+            - `fail` if ANY actionable finding is neither fixed nor tracked.
+            - If you cannot locate a review summary comment at all, return `fail` with a reason
+              that says so (fail closed).
+
+            Return the structured result: `verdict`, `outstanding_findings` (each a short
+            `title` + `severity`), `addressed_count`, and a one-paragraph `reason`.
+
+      # The same explainer for the classifier step — see the long comment on
+      # "Explain a failed code review" above for why this exists and why it has
+      # to sit immediately after the action step it explains.
+      - name: Explain a failed merge-gate classification
+        id: gate_error
+        if: always()
+        shell: bash
+        env:
+          # The step's true result — `continue-on-error` rewrites `conclusion`
+          # but never `outcome`. Needed for the no-error-but-still-failed case
+          # below, which the execution log alone cannot describe.
+          STEP_OUTCOME: ${{ steps.gate.outcome }}
+        run: |
+          set -uo pipefail
+          log="$RUNNER_TEMP/claude-execution-output.json"
+
+          emit() {
+            # $1 heading, $2 body text. Job log, step summary, and a one-line
+            # step output the merge gate quotes into its sticky PR comment.
+            echo "::error::merge-gate classification did not complete: $2"
+            {
+              echo "### $1"
+              echo
+              echo "\`subtype=${subtype:-?}\` \`is_error=${is_error:-?}\` \`num_turns=${turns:-?}\` \`total_cost_usd=${cost:-?}\`"
+              echo
+              echo '```'
+              printf '%s\n' "$2"
+              echo '```'
+              # One turn with nothing billed means no tokens were ever accepted:
+              # the very first request bounced. That is the credential or its
+              # quota, never the PR under review, and saying so here is what
+              # stops the next person re-pushing at it.
+              if [ "${turns:-}" = "1" ] && [ "${cost:-}" = "0" ]; then
+                echo
+                echo "_No tokens were billed across a single turn, so the first request was rejected outright — an auth or quota problem with \`CLAUDE_CODE_OAUTH_TOKEN\`, not a problem with this PR._"
+              fi
+            } >> "$GITHUB_STEP_SUMMARY"
+            # Single line: this value crosses a job boundary into the comment.
+            printf 'reason=%s\n' "$(printf '%s' "$2" | tr '\n\r' '  ')" >> "$GITHUB_OUTPUT"
+          }
+
+          if [ ! -s "$log" ]; then
+            # The action was skipped by its workflow-validation guard, or
+            # died before Claude started.
+            echo "No execution log at $log — nothing to explain."
+            exit 0
+          fi
+
+          result="$(jq -c '[.[] | select(.type == "result")] | last // empty' "$log" 2>/dev/null || true)"
+          if [ -z "$result" ]; then
+            echo "Execution log has no result message — nothing to explain."
+            exit 0
+          fi
+
+          is_error="$(printf '%s' "$result" | jq -r '.is_error // false')"
+          subtype="$(printf '%s' "$result" | jq -r '.subtype // "?"')"
+          turns="$(printf '%s' "$result" | jq -r '.num_turns // 0')"
+          cost="$(printf '%s' "$result" | jq -r '.total_cost_usd // 0')"
+          echo "subtype=$subtype is_error=$is_error num_turns=$turns total_cost_usd=$cost"
+
+          if [ "$is_error" != "true" ] && [ "$subtype" = "success" ]; then
+            # Claude itself was fine, so the action rejected the run after
+            # the fact. On this step that is almost always --json-schema
+            # getting no structured_output back — the one failure mode the
+            # execution log cannot describe on its own.
+            if [ "${STEP_OUTCOME:-success}" != "success" ]; then
+              emit "Merge-gate classification did not complete" "Claude finished cleanly (subtype=$subtype, $turns turn(s)) but claude-code-action still failed the step — with --json-schema set, this is what a missing structured_output looks like."
+            fi
+            exit 0
+          fi
+
+          # `.result` carries the text on an errored `success`; the error
+          # subtypes carry `.errors` instead.
+          text="$(printf '%s' "$result" \
+            | jq -r 'if (.result | type) == "string" and (.result | length) > 0
+                     then .result
+                     else ((.errors // []) | join("; "))
+                     end' 2>/dev/null || true)"
+          [ -n "$text" ] || text="(the result message carried no error text)"
+
+          # 900 chars: long enough for an API error body, short enough to sit in
+          # a PR comment. Registered secrets are masked by the runner on the way
+          # out, so this cannot print CLAUDE_CODE_OAUTH_TOKEN.
+          emit "Merge-gate classification did not complete" "$(printf '%s' "$text" | head -c 900)"
+
+  # Deterministic decider: turns the review outcome + structured verdict into this job's
+  # pass/fail. Fails closed if the review or the evaluator did not complete. Values are
+  # passed via env (not inline interpolation) to avoid workflow injection. Kept as its own
+  # job (not a step in claude-review-run) so its GITHUB_TOKEN is freshly minted for this
+  # job alone — see the comment on claude-review-run above. Job id stays `claude-review`
+  # since that's the exact required-status-check name configured in the repo ruleset.
+  # Shared in substance with eh-homelab/clusters and WonderForgeLabs/forge — keep
+  # the three in sync when the gate logic changes.
+  claude-review:
+    # DISPLAY NAME DELIBERATELY NOT `claude-review`, and this is load-bearing.
+    #
+    # `claude-review` is the required status-check context on `main`, and it is
+    # satisfied by a COMMIT STATUS this job posts (see the last two steps). If
+    # this job were still NAMED `claude-review`, the SHA would carry two
+    # different objects claiming that one context — a check run and a commit
+    # status — that can be green and red independently, and GitHub does not
+    # document which one a required-check evaluation honours when both exist.
+    #
+    # Today the check run is invisible to the gate anyway (workflow_dispatch, so
+    # its check suite is not associated with the PR and never reaches the
+    # rollup) — but that invisibility is a property of the TRIGGER, not of
+    # anything guaranteed. Anyone moving this
+    # workflow back to `on: pull_request` would silently create the ambiguous
+    # two-object case. Renaming removes the possibility instead of relying on it
+    # not arising, so the gating rule stays stateable in one sentence: exactly
+    # one object on the SHA is named `claude-review`, and it is the commit
+    # status.
+    #
+    # The job ID stays `claude-review` — it is referenced by nothing outside this
+    # file, and keeping it makes the history legible.
+    name: Claude Review Gate
+    needs: claude-review-run
+    if: always()
+    # A handful of `gh` API calls. Worth knowing that this job publishes the
+    # REQUIRED `claude-review` status, so if it never runs the context stays
+    # pending and PRs block — recoverable, since statuses are last-write-wins
+    # per context and re-running this workflow overwrites it.
+    runs-on: ubuntu-latest
+    permissions:
+      # issues: write so this step can upsert a sticky PR comment (PR comments are
+      # issue comments) explaining a failure / flipping it to passing.
+      issues: write
+      # statuses: write to publish the `claude-review` commit status that IS the
+      # merge gate. Note which token that step uses and why — the App token used
+      # for the comment cannot do this; see the step's own comment.
+      statuses: write
+    steps:
+      # Root cause of the original 403 ("Resource not accessible by integration"):
+      # org policy caps the default GITHUB_TOKEN's issue-comment write, regardless of
+      # the job's declared `issues: write` (confirmed by WonderForgeLabs/forge, which
+      # hit the identical 403 and fixed it this way — not with a job split). Mint a
+      # token from the eh-homelab-org-runners App instead; its installation already
+      # holds `issues: write` and isn't subject to that cap.
+      #
+      # `continue-on-error` is what MAKES the documented fallback real. The
+      # enforce step below reads `steps.app-token.outputs.token || github.token`,
+      # but without this the action hard-fails on absent/empty inputs, every
+      # later step without an `if:` is skipped, and that `||` becomes dead code —
+      # the gate then reds purely because the App secrets are missing.
+      #
+      # They ARE missing here today: RUNNER_APP_ID / RUNNER_APP_PRIVATE_KEY are
+      # REPO-level secrets in eh-homelab/clusters, not org-level, so this repo
+      # does not inherit them (only CLAUDE_CODE_OAUTH_TOKEN is org-wide). Until
+      # they are added the gate still works on the ambient token; only the
+      # sticky comment degrades, and a comment-API failure is already a
+      # `::warning::` that never changes the verdict.
+      - name: Generate app token
+        id: app-token
+        if: always()
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+
+      # `continue-on-error`, with the job's real pass/fail moved to the LAST step.
+      #
+      # Nothing about the gate's verdict changes: this step still exits non-zero
+      # on exactly the same conditions it always did, and `steps.enforce.outcome`
+      # records that faithfully (`outcome` is the true result; only `conclusion`
+      # is rewritten by continue-on-error). What it buys is a step AFTER this one
+      # that always runs, so the `claude-review` commit status gets published on
+      # the failure path too. Without it, `fail()`'s `exit 1` would end the job
+      # here and a red gate would publish nothing at all — leaving the required
+      # context pending forever, which is the same unsatisfiable-gate failure
+      # this shape exists to remove.
+      - name: Enforce merge gate
+        id: enforce
+        # `if: always()` because the App-token step above can fail (see its
+        # comment); the default skip-on-failed-step would otherwise take the
+        # gate's whole verdict out of the run and leave the status step below
+        # reading an empty outcome.
+        if: always()
+        continue-on-error: true
+        env:
+          REVIEW_OUTCOME: ${{ needs.claude-review-run.outputs.review_outcome }}
+          REVIEW_EXECUTION: ${{ needs.claude-review-run.outputs.review_execution }}
+          GATE_OUTCOME: ${{ needs.claude-review-run.outputs.gate_outcome }}
+          VERDICT_JSON: ${{ needs.claude-review-run.outputs.gate_verdict }}
+          # Claude's own error text for whichever step died, lifted out of the
+          # execution log by the two "Explain a failed ..." steps. Empty when the
+          # step succeeded. Quoted into the sticky comment so the PR says WHY it
+          # is blocked instead of only that it is.
+          REVIEW_ERROR: ${{ needs.claude-review-run.outputs.review_error }}
+          GATE_ERROR: ${{ needs.claude-review-run.outputs.gate_error }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number }}
+        run: |
+          set -euo pipefail
+
+          # Sticky PR comment marker — lets us find and update our own comment across runs
+          # instead of spamming a new one each push. Best-effort: a comment-API failure
+          # degrades to a warning and never changes the gate verdict (the check result
+          # below is authoritative).
+          STICKY_MARKER="<!-- merge-gate-sticky -->"
+
+          sticky_id() {
+            gh api --paginate "repos/$REPO/issues/$PR_NUMBER/comments" \
+              --jq "[.[] | select(.body | startswith(\"$STICKY_MARKER\"))] | last | .id // empty" 2>/dev/null || true
+          }
+
+          # Upsert the sticky failure comment, then exit non-zero. $1 is the markdown body.
+          fail() {
+            local body id
+            body="$STICKY_MARKER
+          ### ❌ Merge gate failed
+
+          $1
+
+          _The gate re-evaluates on the next push._"
+            id="$(sticky_id)"
+            if [ -n "$id" ]; then
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null \
+                || echo "::warning::Failed to update sticky merge-gate comment."
+            else
+              gh api -X POST "repos/$REPO/issues/$PR_NUMBER/comments" -f body="$body" >/dev/null \
+                || echo "::warning::Failed to post sticky merge-gate comment."
+            fi
+            exit 1
+          }
+
+          # On a pass/skip path, flip an EXISTING sticky comment to a passing state. Never
+          # creates one where none existed (no noise on PRs that never failed), then exit 0.
+          pass() {
+            local id body
+            id="$(sticky_id)"
+            if [ -n "$id" ]; then
+              body="$STICKY_MARKER
+          ### ✅ Merge gate passing
+
+          $1"
+              gh api -X PATCH "repos/$REPO/issues/comments/$id" -f body="$body" >/dev/null \
+                || echo "::warning::Failed to update sticky merge-gate comment."
+            fi
+            exit 0
+          }
+
+          echo "Review step outcome:    $REVIEW_OUTCOME"
+          echo "Gate evaluator outcome: $GATE_OUTCOME"
+
+          # Renders "**Claude said:** ...", or nothing when the step left no error
+          # text. Used by the two job-failure branches below.
+          said() {
+            [ -n "${1:-}" ] || return 0
+            printf '\n\n**Claude said:**\n\n> %s' "$1"
+          }
+
+          # A genuine review crash (continue-on-error records it as failure) blocks: we
+          # could not review, so we cannot clear the PR.
+          if [ "$REVIEW_OUTCOME" != "success" ]; then
+            echo "::error::Code review did not complete successfully (outcome=$REVIEW_OUTCOME). Failing the merge gate; it re-runs on the next dispatch."
+            [ -z "${REVIEW_ERROR:-}" ] || echo "Review error: $REVIEW_ERROR"
+            fail "The code review step did not complete successfully (outcome \`$REVIEW_OUTCOME\`), so the PR could not be cleared. Failing closed.$(said "${REVIEW_ERROR:-}")
+
+          This is a failure of the review job itself, not a finding about this PR — pushing a change will not clear it on its own."
+          fi
+
+          # claude-code-action SKIPS (exits success, but runs nothing and sets no
+          # execution_file) when this PR's workflow file differs from the copy on the
+          # default branch — its guard against a PR rewriting the review workflow to
+          # misuse secrets. The review genuinely could not run, so there is nothing to
+          # enforce: pass. Workflow edits are still gated by human review + branch
+          # protection, and this is what lets the PR that introduces/edits this very
+          # workflow go green. A normal run always sets execution_file.
+          if [ -z "${REVIEW_EXECUTION:-}" ]; then
+            echo "Claude review action was skipped (no execution_file; workflow-validation guard). Merge gate not enforced on this run."
+            pass "The code review action was skipped (workflow-validation guard), so the merge gate was not enforced on this run."
+          fi
+
+          if [ "$GATE_OUTCOME" != "success" ]; then
+            echo "::error::Merge-gate evaluator did not complete (outcome=$GATE_OUTCOME). Failing closed."
+            [ -z "${GATE_ERROR:-}" ] || echo "Gate error: $GATE_ERROR"
+            fail "The merge-gate evaluator did not complete (outcome \`$GATE_OUTCOME\`). Failing closed.$(said "${GATE_ERROR:-}")
+
+          This is a failure of the merge-gate job itself, not a finding about this PR — pushing a change will not clear it on its own."
+          fi
+
+          if [ -z "${VERDICT_JSON:-}" ]; then
+            echo "::error::Merge-gate evaluator produced no structured output. Failing closed."
+            fail "The merge-gate evaluator produced no structured output. Failing closed."
+          fi
+
+          VERDICT="$(printf '%s' "$VERDICT_JSON" | jq -r '.verdict')"
+          REASON="$(printf '%s' "$VERDICT_JSON" | jq -r '.reason // ""')"
+          FINDINGS="$(printf '%s' "$VERDICT_JSON" | jq -r '.outstanding_findings[]? | "- [\(.severity // "?")] \(.title)"' || true)"
+
+          echo "Verdict: $VERDICT"
+          echo "Reason:  $REASON"
+          echo "Outstanding findings:"
+          printf '%s\n' "$FINDINGS" | sed 's/^/  /' || true
+
+          if [ "$VERDICT" = "pass" ]; then
+            echo "All review findings are addressed (fixed in branch or tracked in a pr-feedback issue). Merge gate passes."
+            pass "All review findings are addressed (fixed in this branch or tracked in a \`pr-feedback\` issue)."
+          fi
+
+          echo "::error::Merge gate failed: review findings are neither fixed in this branch nor tracked in a pr-feedback issue. Push a fix, or apply the 'claude-make-follow-up-issues' label to file them — the gate re-evaluates on the next dispatch."
+          fail "Review findings are neither fixed in this branch nor tracked in a \`pr-feedback\` issue.
+
+          **Why:** ${REASON:-_no reason provided_}
+
+          **Outstanding findings**
+          ${FINDINGS:-_none listed_}
+
+          Push a fix, or apply the \`claude-make-follow-up-issues\` label to file them as \`pr-feedback\` issues."
+
+      # ── THIS is the merge gate ──────────────────────────────────────────────
+      #
+      # A COMMIT STATUS, not a check run, and the difference is the entire point
+      # of #1084. A commit status attaches to the SHA, so it always appears in
+      # the PR's statusCheckRollup — the only thing branch protection evaluates.
+      # A check run appears there only if its CHECK SUITE is associated with the
+      # pull request, and this workflow is `workflow_dispatch`, so its suite
+      # never is. The `claude-review` check run was therefore green on the commit
+      # and absent from the rollup, i.e. read as NEVER REPORTED: every PR blocked
+      # permanently, hidden only by the ruleset's repo-admin bypass. Verified on
+      # PR #1078 (`5dc107fa`) — the check run existed and was `success`, and the
+      # rollup's nine entries did not include it. This is also how third-party
+      # integrations have always reported into PRs, which is the shape the repo
+      # owner asked for.
+      #
+      # ── Which SHA ───────────────────────────────────────────────────────────
+      # `github.sha`: for a workflow_dispatch on a branch ref that is the tip of
+      # that branch at dispatch time, which is also what the review step checked
+      # out and reviewed. So the status blesses exactly the tree that was
+      # reviewed — never a commit that landed mid-review. `dispatch-review` fires
+      # only after `render` (and, when it runs, `update-generated-runners`) have
+      # finished force-pushing, so that tip is the settled PR head rather than a
+      # commit about to be rewritten. If a push DOES land mid-review, this run is
+      # cancelled by the workflow's own `concurrency` group and the new head gets
+      # its own review and its own status.
+      #
+      # ── Which token ─────────────────────────────────────────────────────────
+      # `github.token`, NOT the eh-homelab-org-runners App token the comment
+      # steps use. That App's installation carries no `statuses` permission at
+      # all (`gh api /orgs/eh-homelab/installations` lists actions, contents,
+      # environments, issues, merge_queues, metadata, packages, pages,
+      # pull_requests, repository_hooks, repository_projects, secrets, workflows
+      # — and no statuses), so it physically cannot post this. The job's declared
+      # `statuses: write` is what authorises it.
+      #
+      # NOT best-effort, unlike the sticky comment. A comment that fails to post
+      # is cosmetic; a status that fails to post leaves the required context
+      # pending with nothing to point at. So no `|| true`: a failed POST reds
+      # this job loudly, and the message names the permission to check first.
+      - name: Publish the claude-review commit status
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD_SHA: ${{ github.sha }}
+          ENFORCE_OUTCOME: ${{ steps.enforce.outcome }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Anything that is not a clean pass is a FAILURE, never a skip and
+          # never an absent status. `cancelled` lands here too: a cancelled gate
+          # has not cleared the PR, and reporting it as anything but red would
+          # let a cancellation merge the change.
+          if [ "$ENFORCE_OUTCOME" = "success" ]; then
+            state=success
+            description="Review findings are addressed."
+          else
+            state=failure
+            description="Merge gate did not pass (enforce step: ${ENFORCE_OUTCOME})."
+          fi
+
+          echo "Publishing commit status claude-review=${state} on ${HEAD_SHA}"
+          if ! gh api -X POST "repos/${REPO}/statuses/${HEAD_SHA}" \
+            -f state="$state" \
+            -f context=claude-review \
+            -f description="$description" \
+            -f target_url="$RUN_URL" >/dev/null; then
+            echo "::error::Could not publish the 'claude-review' commit status on ${HEAD_SHA}. That status IS the required check, so the PR will sit pending until this succeeds. Check this job's 'statuses: write' permission first."
+            exit 1
+          fi
+
+      # The job's real verdict. `Enforce merge gate` above runs
+      # continue-on-error so the status always publishes, so its pass/fail has to
+      # be re-asserted here or a failed gate would leave this job green in the
+      # Actions UI while the commit status said otherwise.
+      - name: Fail the job when the gate did not pass
+        if: ${{ steps.enforce.outcome != 'success' }}
+        env:
+          # Through env rather than interpolated into `run:`, matching this
+          # repo's house rule from actionlint's script-injection guidance. The
+          # value is a fixed Actions enum here, not user input, but the rule is
+          # worth keeping mechanical rather than case-by-case.
+          ENFORCE_OUTCOME: ${{ steps.enforce.outcome }}
+        run: |
+          echo "::error::Merge gate outcome was '${ENFORCE_OUTCOME}' — see 'Enforce merge gate' above."
+          exit 1

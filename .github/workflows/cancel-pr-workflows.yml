@@ -1,0 +1,140 @@
+---
+name: Cancel PR Workflows on Close
+
+on:
+  pull_request:
+    types: [closed]
+
+# Note: for runs whose originating event came from a fork PR, GitHub caps the
+# effective GITHUB_TOKEN to read-only regardless of this block, so
+# `gh run cancel` 403s and falls through the per-run error handling below —
+# fork-contributed PRs silently reclaim nothing. Accepted: this repo's
+# contribution model is all-internal.
+permissions:
+  actions: write
+  pull-requests: read
+
+concurrency:
+  group: cancel-pr-workflows-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  cancel-runs:
+    name: Cancel in-progress workflow runs for PR branch
+    # Every workflow in this repo is GitHub-hosted (see ci.yml's header), so
+    # this job carries no special runner argument any more — but the reason it
+    # exists still holds. Cancelling superseded runs on a closed PR reclaims
+    # minutes and, more usefully, stops a ~$1-2 Claude review agent from
+    # finishing work on a branch nobody will merge.
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Cancel active runs on PR head branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          CURRENT_RUN_ID: ${{ github.run_id }}
+        run: |
+          set -euo pipefail
+
+          # Resolve the PR head branch via the API (avoids interpolating
+          # untrusted refs into the workflow file).
+          BRANCH=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}" --jq '.head.ref')
+          if [ -z "${BRANCH}" ]; then
+            echo "Could not resolve head branch for PR #${PR_NUMBER}" >&2
+            exit 1
+          fi
+
+          echo "PR #${PR_NUMBER} closed — cancelling active runs on branch '${BRANCH}'"
+
+          # Workflows that legitimately run on PR-close or must not be
+          # interrupted. Match by display name (the `name:` field at the top
+          # of each workflow file).
+          #
+          # - "Create Follow-Up Issues from PR" fires on the
+          #   `claude-make-follow-up-issues` label, which is typically applied
+          #   right around close/merge; cancelling it silently drops the
+          #   follow-up issues the merge gate counts on.
+          # - "Claude Code" has `contents: write` and can push commits;
+          #   cancelling mid-run can leave a half-applied edit committed but
+          #   not pushed (per the serialization note in claude.yml).
+          # - "Build Image" only runs on `push` to main/tags, so it never has a
+          #   PR head branch to match — listed anyway because a cancelled
+          #   publish leaves a half-written manifest list in GHCR, and the cost
+          #   of the entry is zero while the cost of discovering the omission is
+          #   not.
+          # - "Claude Code Review" is deliberately NOT skipped: after close its
+          #   sticky comment protects an artifact nobody reads, and the review
+          #   boots a full Claude Code agent — the most expensive thing on the
+          #   branch.
+          # - "CI" is deliberately NOT skipped either. Its `image` job builds
+          #   two container images on the scarce docker pool; reclaiming that on
+          #   a PR nobody will merge is the entire point of this workflow.
+          SKIP_WORKFLOWS=(
+            "Cancel PR Workflows on Close"
+            "Create Follow-Up Issues from PR"
+            "Claude Code"
+            "Build Image"
+          )
+
+          # Collect queued + in_progress runs for the PR's head branch.
+          # The list API filters one status at a time, so query both and
+          # dedup. Output format: <databaseId>\t<workflowName>
+          #
+          # Matching is by head-branch NAME only — not scoped to this PR's
+          # head SHA (older-commit runs are exactly what we want to cancel)
+          # or head repo. Fine while contributions are all-internal and
+          # branch names aren't reused across concurrent PRs; revisit if
+          # either assumption changes.
+          #
+          # Collected in the main shell via a temp file, not a process
+          # substitution: `set -e` cannot see a `gh run list` failure inside
+          # `< <(...)`, which would silently truncate the list (or read as
+          # "no active runs" on total failure). This way an API error fails
+          # the job loudly.
+          RUNS_FILE="$(mktemp)"
+          for status in queued in_progress; do
+            gh run list \
+              --repo "${REPO}" \
+              --branch "${BRANCH}" \
+              --status "${status}" \
+              --limit 200 \
+              --json databaseId,workflowName \
+              --jq '.[] | "\(.databaseId)\t\(.workflowName)"' \
+              >>"${RUNS_FILE}"
+          done
+          mapfile -t RUN_ENTRIES < <(sort -u "${RUNS_FILE}")
+
+          if [ ${#RUN_ENTRIES[@]} -eq 0 ]; then
+            echo "No active runs found for branch '${BRANCH}'"
+            exit 0
+          fi
+
+          echo "Found ${#RUN_ENTRIES[@]} active run(s) on branch"
+          for ENTRY in "${RUN_ENTRIES[@]}"; do
+            RUN_ID="${ENTRY%%$'\t'*}"
+            WF_NAME="${ENTRY#*$'\t'}"
+
+            if [ "${RUN_ID}" = "${CURRENT_RUN_ID}" ]; then
+              echo "  skip ${RUN_ID} (${WF_NAME}) — current run"
+              continue
+            fi
+
+            skip=0
+            for s in "${SKIP_WORKFLOWS[@]}"; do
+              if [ "${WF_NAME}" = "${s}" ]; then
+                skip=1
+                break
+              fi
+            done
+            if [ "${skip}" -eq 1 ]; then
+              echo "  skip ${RUN_ID} (${WF_NAME}) — in exclusion list"
+              continue
+            fi
+
+            echo "  cancel ${RUN_ID} (${WF_NAME})"
+            gh run cancel "${RUN_ID}" --repo "${REPO}" \
+              || echo "    could not cancel ${RUN_ID} (may have just finished)"
+          done
