@@ -1,0 +1,29 @@
+{
+    "parameters": [
+        {
+            "group": "Parameters",
+            "initial": 20.0,
+            "name": "width",
+            "type": "number"
+        },
+        {
+            "group": "Parameters",
+            "initial": 10.0,
+            "name": "height",
+            "type": "number"
+        },
+        {
+            "group": "Parameters",
+            "initial": "plain",
+            "name": "label",
+            "type": "string"
+        },
+        {
+            "group": "Parameters",
+            "initial": false,
+            "name": "solid",
+            "type": "boolean"
+        }
+    ],
+    "title": "plain"
+}

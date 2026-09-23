@@ -65,9 +65,26 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
 - `openscad --backend=Manifold -o out.3mf model.scad` emits a **single object
   with `<basematerials>`** and a **per-triangle material index**
   (`<triangle pid="1" p1="N"/>`), one material per distinct `color()` value
-  plus a `Default` for uncoloured geometry. Splitting the mesh by `p1` gives
-  one closed mesh per colour with no re-render. (Known nightly quirk: the
+  plus a `Default` for uncoloured geometry. (Known nightly quirk: the
   `displaycolor` alpha byte is written as `00`; ignore alpha.)
+- **Splitting that mesh by `p1` does *not* give closed meshes.** OpenSCAD
+  unions the top-level coloured solids and deletes the faces where they meet,
+  so every part that touches another part comes back open — measured
+  2026-09-22 on `models/name-keychain/model.scad`: both parts
+  `is_watertight == False`, while their union is closed. Only genuinely
+  disjoint colour solids split into closed meshes. The split is still exactly
+  right for the *preview*, and it is the only way to learn the colour list; the
+  printable parts come from the re-renders in §6.3.
+- **`--enable=lazy-union` is not the way out.** It does emit one closed object
+  per top-level child, but this nightly writes `p1="1"` on every one of them,
+  so the colour attribution is lost. Measured 2026-09-22.
+- **A user-defined `color` module shadows the builtin.** That is what makes
+  §6.3 work: a wrapper that defines `module color(c, alpha = 1)` and keeps only
+  the children whose colour matches a target renders one colour on its own, as
+  a closed solid. `-D` still overrides the model's parameters through the
+  wrapper's `include <model.scad>` (verified), and a target no `color()` call
+  matches exits **1** with `Current top level object is empty.` and writes no
+  file — which is the signal to fall back.
 - `-p params.json -P <set>` supplies parameter values in the customizer's own
   file format; `-D var=val` also works and is what we use (one value per flag,
   strings quoted).
@@ -185,12 +202,17 @@ that take longer show a progress state and the previous preview stays up.
 
 ## 6. Render pipeline
 
+There are **two render paths**, because one render cannot serve both ends: the
+material split gives the colour list and an accurate picture of the union, but
+its parts are open (§3), and an open part is not something to hand a slicer.
+
 ```
-params → openscad -D … --backend=Manifold -o work/out.3mf --summary all
-       → parse 3MF (trimesh): vertices, triangles, per-triangle material index, basematerials
+params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
+       → parse 3MF: vertices, triangles, per-triangle material index, basematerials
        → split by material → [ {colour, mesh} ], drop Default if empty
-       → preview.glb (one mesh per colour, PBR material with the colour)
-       → model.3mf (Bambu-style, §6.2)
+       → preview.glb (one mesh per colour, PBR material with the colour)  ← open meshes are fine here
+       → per colour, one wrapper re-render → one CLOSED solid each (§6.3)
+       → model.3mf (Bambu-style, §6.2) built from the solids
        → thumbnail.png (rendered from the GLB server-side with a headless
          three.js/pyrender is NOT required for v1: the frontend captures the
          canvas on Generate and POSTs it)
@@ -229,6 +251,45 @@ Output mirrors the structure of the known-good MakerWorld file:
 Acceptance: the file opens in Bambu Studio as N parts with N filaments
 assigned, and Bambuddy's `/library/files/{id}/slice` slices it with a
 `filament_presets` list of length N without a colour/extruder warning.
+
+### 6.3 Closed parts: one solid render per colour
+
+A user-defined `color` module shadows the builtin (§3), so ScadBuddy writes a
+wrapper next to the model and renders it once per colour:
+
+```scad
+_sb_targets = ["#0047BB"];          // set per render with -D
+// … _sb_hex(c) normalises "#rrggbb" → "#RRGGBB", [r,g,b] → "#RRGGBB",
+//   and a CSS name → "name:<lowercase>" …
+module color(c, alpha = 1) { if (_sb_match(_sb_hex(c))) children(); }
+include <model.scad>
+```
+
+Each render is a single Manifold object with no materials, and it **is
+watertight** — measured on `models/name-keychain/model.scad`: base z 0–4.0,
+text z 4.0–6.8, both closed. The wrapper lives in the model's own directory so
+`include`/`import` still resolve, and is deleted afterwards.
+
+Three details are load-bearing:
+
+- **Colour names.** `color("red")` normalises in-SCAD to `name:red` while the
+  basematerials side shows `#FF0000`, so a target is sent as a *list* of every
+  literal that could have produced that material — the hex plus every CSS name
+  mapping to it. The 147-entry name→hex table is read off OpenSCAD itself
+  rather than written by hand (`color("<name>") cube(1);` per name).
+- **No match, or any other OpenSCAD failure, is a fallback, not an error.**
+  The split mesh for that colour is used instead and the job result carries a
+  `warnings` entry naming the colour.
+- **Uncoloured geometry disables the whole path.** If the `Default` material
+  has triangles, every wrapper render would duplicate that geometry into every
+  part, so the job falls back to the split parts for *all* colours and warns
+  `uncoloured geometry present; parts are not closed`.
+
+Known limitation: a `color()` nested inside a *non-matching* `color()` is
+dropped, because the outer module discards its children before the inner one
+runs. Models that recolour a subtree get the fallback's open parts for the
+affected colour, not wrong geometry, since the outer colour still renders its
+own subtree.
 
 ## 7. Bambuddy integration
 
@@ -329,8 +390,12 @@ required, linear history, auto-merge allowed.
   `-D` argument construction (quoting, rejection of unknown params), mesh
   split by material, 3MF writer (XML golden files), Bambuddy client (respx).
 - Integration (inside the image): render `models/name-keychain/model.scad`
-  with `name="Reagan"` → 2 parts, bounding box 95.7 × 34.6 × 6.8 mm ± 0.1,
-  extruders 1 and 2, opens with `trimesh` again.
+  with `name="Reagan"` → 2 parts, bounding box 95.576 × 34.776 × 6.8 mm ± 0.1,
+  extruders 1 and 2, **both watertight**, opens with `trimesh` again. The
+  image must carry `fonts-lobster`/`fonts-lobstertwo`: without them
+  `Lobster Two` silently falls back to DejaVu and the model measures
+  107.21 × 32.00 × 6.80 instead. Skip the check rather than assert the wrong
+  numbers when `fc-list` does not list the face.
 - E2E (playwright): open model, change name, wait for preview, Generate,
   download, assert 3MF part count. Send-to-Bambuddy is exercised against a
   recorded mock, not the live instance.

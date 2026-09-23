@@ -1,0 +1,75 @@
+{
+    "parameters": [
+        {
+            "caption": "Text on the tag",
+            "group": "Text",
+            "initial": "Reagan",
+            "maxLength": 20,
+            "name": "name",
+            "type": "string"
+        },
+        {
+            "caption": "Text colour",
+            "group": "Text",
+            "initial": "#1f6feb",
+            "name": "text_colour",
+            "type": "string"
+        },
+        {
+            "caption": "Text font",
+            "group": "Text",
+            "initial": "DejaVu Sans:style=Bold",
+            "name": "text_font",
+            "type": "string"
+        },
+        {
+            "caption": "Text size (mm)",
+            "group": "Text",
+            "initial": 10.0,
+            "max": 20.0,
+            "min": 4.0,
+            "name": "text_size",
+            "step": 0.5,
+            "type": "number"
+        },
+        {
+            "caption": "Text depth (mm)",
+            "group": "Text",
+            "initial": 2.0,
+            "max": 4.0,
+            "min": 1.0,
+            "name": "text_depth",
+            "step": 0.5,
+            "type": "number"
+        },
+        {
+            "caption": "Base colour",
+            "group": "Base",
+            "initial": "#ff6ac1",
+            "name": "base_colour",
+            "type": "string"
+        },
+        {
+            "caption": "Base length (mm)",
+            "group": "Base",
+            "initial": 60.0,
+            "name": "base_length",
+            "type": "number"
+        },
+        {
+            "caption": "Base width (mm)",
+            "group": "Base",
+            "initial": 25.0,
+            "name": "base_width",
+            "type": "number"
+        },
+        {
+            "caption": "Base thickness (mm)",
+            "group": "Base",
+            "initial": 4.0,
+            "name": "base_thickness",
+            "type": "number"
+        }
+    ],
+    "title": "name_keychain"
+}

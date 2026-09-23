@@ -1,0 +1,6 @@
+{
+  "name": "Name Keychain",
+  "description": "A name in a bold connected script, raised on a base plate cut to the outline of the word, with a keyring hole at the left. Two colours: the base and border print on extruder 1, the letters on extruder 2. Defaults reproduce the 95.7 x 34.6 x 6.8 mm reference keychain for a six-letter name.",
+  "tags": ["keychain", "text", "two-colour"],
+  "source": "inspired by MakerWorld Name Keychain (Font Basic)"
+}
