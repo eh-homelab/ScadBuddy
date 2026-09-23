@@ -1,0 +1,117 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+import type { Job } from '../api/types'
+import { renderPage } from '../test/utils'
+import { CustomizePage } from './CustomizePage'
+
+// WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
+// The viewer itself is covered by the Playwright smoke test.
+vi.mock('../components/Preview', () => ({
+  Preview: ({ job, rendering }: { job?: Job; rendering: boolean }) => (
+    <div data-testid="preview">
+      {rendering && <span>rendering</span>}
+      {job?.status === 'failed' && <pre data-testid="render-log">{job.log_tail}</pre>}
+      {job?.bbox_mm && (
+        <span data-testid="bbox">
+          {job.bbox_mm.x} × {job.bbox_mm.y} × {job.bbox_mm.z} mm
+        </span>
+      )}
+    </div>
+  ),
+}))
+
+function render(route = '/m/name-keychain') {
+  return renderPage(<CustomizePage />, { route, path: '/m/:slug' })
+}
+
+async function firstRender() {
+  await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
+}
+
+describe('CustomizePage', () => {
+  it('renders the defaults without being asked', async () => {
+    render()
+    await firstRender()
+    expect(screen.getByTestId('bbox')).toHaveTextContent('64.1 × 37.2 × 6.8 mm')
+  })
+
+  it('re-renders after a parameter change and updates the dimensions', async () => {
+    const { user } = render()
+    await firstRender()
+
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Nova')
+
+    await waitFor(() => expect(screen.getByTestId('bbox')).toHaveTextContent('46.7'), {
+      timeout: 4000,
+    })
+  })
+
+  it('shows the OpenSCAD log when a render fails', async () => {
+    const { user } = render()
+    await firstRender()
+
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'boom')
+
+    const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
+    expect(log).toHaveTextContent('Compilation failed')
+  })
+
+  it('disables Generate while a render is in flight', async () => {
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), '!')
+    expect(screen.getByTestId('generate')).toBeDisabled()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled(), { timeout: 4000 })
+  })
+
+  it('generates an output, then enables download and send', async () => {
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeDisabled()
+    await user.click(screen.getByTestId('generate'))
+
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Download 3MF' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
+  })
+
+  it('sends a generated output and links to the Bambuddy queue', async () => {
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(within(dialog).getByText(/Queued as/)).toBeInTheDocument())
+    expect(within(dialog).getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
+  })
+
+  it('reopens an earlier output with its parameters', async () => {
+    render('/m/name-keychain?from=out-20260920-1122')
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
+    expect(screen.getByText('reopened from out-20260920-1122')).toBeInTheDocument()
+  })
+
+  it('counts changes against the model defaults', async () => {
+    const { user } = render()
+    await firstRender()
+    expect(screen.getByText('Defaults')).toBeInTheDocument()
+
+    await user.clear(screen.getByRole('textbox', { name: 'Name on the tag' }))
+    expect(screen.getByText('1 changed from defaults')).toBeInTheDocument()
+  })
+})
