@@ -127,9 +127,21 @@ jobs:
             - Links to each created issue with its group title
             - Which groups can be fixed concurrently vs. which need sequencing
 
+  # `always()` ALONE is wrong here, and it is wrong in a way that only shows up
+  # on unrelated labels. This workflow triggers on `pull_request: labeled` — any
+  # label — and the job above filters to `claude-make-follow-up-issues` with a
+  # job-level `if:`. A bare `always()` overrides skip-on-skipped-dependency too,
+  # so labelling a PR `ci` or `bug` still schedules THIS job, which claims a
+  # slot on the capped pool and then runs `gh pr edit --remove-label` for a
+  # label that was never applied.
+  #
+  # `!= 'skipped'` keeps the intended behaviour — the label must come off even
+  # when the agent run fails, or it stays stuck on the PR and the next labeling
+  # is a no-op — while making "the trigger label was not the one applied" a
+  # skip rather than a wasted, failing job.
   remove-label:
     needs: create-follow-up-issues
-    if: always()
+    if: always() && needs.create-follow-up-issues.result != 'skipped'
     runs-on: clusters-runner-light
     timeout-minutes: 5
     permissions:
