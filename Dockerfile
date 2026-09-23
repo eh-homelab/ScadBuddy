@@ -23,9 +23,17 @@ WORKDIR /src/frontend
 # version is pinned by the frontend's own lockfile rather than by this file.
 RUN corepack enable
 
-# Manifest + lockfile first: `pnpm install` is the expensive layer and only the
-# lockfile can invalidate it.
-COPY frontend/package.json frontend/pnpm-lock.yaml ./
+# Manifest + lockfile + workspace config first: `pnpm install` is the expensive
+# layer and only these can invalidate it.
+#
+# pnpm-workspace.yaml is NOT optional and is easy to leave out. pnpm 10+ refuses
+# to silently skip a dependency's build scripts — it hard-errors with
+# ERR_PNPM_IGNORED_BUILDS — and the approvals live in that file
+# (`allowBuilds: {esbuild, msw}`), not in package.json. Copying only the
+# manifest and lockfile produced an install that worked in the `frontend` CI job
+# (whole tree checked out) and failed only here, which is the worst shape for
+# this class of bug. Verified on CI run 35820566117.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY frontend/ ./
