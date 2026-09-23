@@ -17,7 +17,7 @@ concurrency:
 jobs:
   create-follow-up-issues:
     if: github.event.label.name == 'claude-make-follow-up-issues'
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
@@ -142,7 +142,7 @@ jobs:
   remove-label:
     needs: create-follow-up-issues
     if: always() && needs.create-follow-up-issues.result != 'skipped'
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       pull-requests: write

@@ -29,7 +29,7 @@ jobs:
   update_release_draft:
     name: Update the release draft
     if: github.event_name == 'push'
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
@@ -44,7 +44,7 @@ jobs:
   autolabel:
     name: Autolabel the PR
     if: github.event_name == 'pull_request'
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
@@ -54,12 +54,14 @@ jobs:
       # decoration. With no explicit `@ref`, the action resolves its config at
       # `github.context.ref`, which for a pull_request event is
       # `refs/pull/<n>/merge` — an ephemeral commit GitHub DELETES the instant
-      # the PR merges. Jobs on this capped self-hosted pool routinely queue for
-      # 10-20 minutes, so any PR that merges while its run is still queued 404s
-      # with "Config file not found" even though the file is plainly on main.
-      # (Diagnosed in WonderForgeLabs/forge: 15 failures in 29h; fixed there by
-      # this exact pin.) Use `default_branch`, NOT `base.ref` — a stacked PR's
-      # base branch is also deleted on merge and reintroduces the same race.
+      # the PR merges. Any delay between the event firing and this job fetching
+      # its config is a race window, and auto-merge closes it routinely: the PR
+      # merges while the run is still queued, and the fetch 404s with "Config
+      # file not found" even though the file is plainly on main. (Diagnosed in
+      # WonderForgeLabs/forge: 15 failures in 29h, where a slow self-hosted
+      # queue widened the window; hosted runners narrow it but do not remove
+      # it.) Use `default_branch`, NOT `base.ref` — a stacked PR's base branch
+      # is also deleted on merge and reintroduces the same race.
       #
       # `pull_request`, not `pull_request_target`: this repo takes no fork
       # contributions, and pull_request_target would hand a write token to a

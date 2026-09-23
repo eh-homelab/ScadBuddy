@@ -12,30 +12,21 @@ name: CI
 # It is the only job here that is required, which is what lets every other job
 # be gated, skipped or reordered freely.
 #
-# Runner pools: everything defaults to `clusters-runner-light` (the capped,
-# docker-free org pool). Only jobs that actually drive Docker go to
-# `clusters-runner` — its dind sidecar has 8Gi against light's 1Gi, so an image
-# build on the light pool OOMs the sidecar rather than failing legibly.
-# `ubuntu-latest` is deliberately unused: nothing here needs GitHub-hosted
-# capacity, and the house rule is self-hosted by default.
+# ── Why ubuntu-latest and not the eh-homelab self-hosted pools ────────────────
+# ScadBuddy is PUBLIC. Free hosted minutes are the smaller half of the reason;
+# the load-bearing half is that `clusters-runner*` are ARC scale sets inside the
+# homelab cluster, on the LAN with Hindsight and the Nexus cache. Putting a
+# public repo on those pools means a fork PR can execute attacker-controlled
+# code in that network — an unreasonable trade for a build that needs nothing on
+# the LAN. (GitHub's own guard against this is an org runner group's
+# `allows_public_repositories`, default false; the right answer here is not to
+# turn it on but to stay off those pools.)
 #
-# ── ONE-TIME ORG SETTING THIS DEPENDS ON ──────────────────────────────────────
-# ScadBuddy is the first PUBLIC repo in eh-homelab; every other consumer of
-# these pools (clusters, and the forge-* pools) is private. A GitHub org runner
-# group carries `allows_public_repositories`, which defaults to FALSE, and a
-# public repo simply never has jobs assigned to that group's runners — no
-# error, no warning, the run just sits `queued` until the 24h expiry.
+# Hosted also gets the `type=gha` buildx cache back, which the self-hosted
+# pools' TLS interception breaks outright.
 #
-# Measured here 2026-09-23: the `clusters-runner-light` listener was healthy
-# (up 3h50m, 7 runners, 5 idle) and assigning clusters' jobs in the same
-# minutes that this repo's run sat queued for 12+ minutes with nothing
-# assigned.
-#
-# The fix is an org-owner action, not a workflow change: on the runner group
-# serving clusters-runner*, enable "Allow public repositories" and make sure
-# ScadBuddy is in scope. If a run here is queued with no runner in sight, check
-# that FIRST — it looks exactly like a saturated or wedged pool and is neither.
-
+# `ubuntu-latest` provides docker + buildx, and QEMU binfmt for the arm64 leg of
+# build-image.yml, so no job here needs a bigger or different runner.
 on:
   pull_request:
   push:
@@ -66,7 +57,7 @@ jobs:
   # moment the other branches merge.
   layout:
     name: Detect layout
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
       backend: ${{ steps.detect.outputs.backend }}
@@ -74,6 +65,7 @@ jobs:
       e2e: ${{ steps.detect.outputs.e2e }}
       models: ${{ steps.detect.outputs.models }}
       image: ${{ steps.detect.outputs.image }}
+      app: ${{ steps.detect.outputs.app }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -99,6 +91,16 @@ jobs:
           models=false
           if [ -d models ]; then models=true; fi
 
+          # Can the image actually SERVE yet? The Dockerfile's CMD is
+          # `uvicorn scadbuddy.main:app`, and the API epic that adds both the
+          # entrypoint and the uvicorn dependency has not landed. Until it
+          # does, the image builds and its test stage runs, but starting the
+          # container dies with `exec uvicorn failed` — so the smoke test and
+          # the Playwright suite are gated on the entrypoint existing rather
+          # than asserting against a server that cannot exist.
+          app=false
+          if [ -f backend/scadbuddy/main.py ]; then app=true; fi
+
           # The image needs all THREE trees: the Node stage builds frontend/,
           # the runtime stage installs backend/ and copies models/ as the seed
           # catalogue. A missing `models/` is a `COPY` failure partway through
@@ -119,12 +121,13 @@ jobs:
             echo "e2e=$e2e"
             echo "models=$models"
             echo "image=$image"
+            echo "app=$app"
           } | tee -a "$GITHUB_OUTPUT"
 
   # ── Things that need neither half of the tree ───────────────────────────────
   lint:
     name: Workflow and Dockerfile lint
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -170,7 +173,7 @@ jobs:
     name: Frontend lint, typecheck, test, build
     needs: layout
     if: ${{ needs.layout.outputs.frontend == 'true' }}
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     defaults:
       run:
@@ -180,12 +183,12 @@ jobs:
         with:
           fetch-depth: 1
 
-      # No actions/setup-node. The org runner image already bakes Node LTS,
-      # npm, npx and corepack, plus a ~/.npmrc pointing at the estate's Nexus
-      # npm proxy that pnpm inherits. setup-node would re-download a toolchain
-      # over a TLS-intercepting proxy on every run — the same recurring flake
-      # that got the kustomize setup action removed from the clusters repo.
-      #
+      # Pin the Node major to the one the Dockerfile's Node stage uses, so a
+      # `pnpm build` that passes here is the same build the image performs.
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+
       # corepack, not a pinned pnpm version: the version comes from
       # frontend/package.json's `packageManager` field, which is also what the
       # Dockerfile's Node stage reads. One source of truth for the pnpm version.
@@ -221,9 +224,7 @@ jobs:
     name: Image build, backend checks, container smoke
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
-    # clusters-runner, not -light: this is the only pool whose dind sidecar is
-    # sized for an image build (8Gi vs 1Gi).
-    runs-on: clusters-runner
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
@@ -234,11 +235,20 @@ jobs:
 
       # --target test, and --load so it lands in the local docker daemon.
       #
-      # NO `cache-to: type=gha`. These runners sit behind a TLS-intercepting
-      # proxy that breaks the GitHub Actions cache protocol; the estate's
-      # standing rule is registry cache instead. This job only READS the cache
-      # that build-image.yml publishes on main — a PR must not be able to
-      # poison the shared cache, and it has no GHCR write token anyway.
+      # `type=gha` works here only because this is a GitHub-hosted runner — the
+      # self-hosted pools' TLS interception breaks the Actions cache protocol
+      # outright (it fails the build, it does not degrade). Read AND write:
+      # Actions cache scoping lets a PR read the default branch's entries, so a
+      # PR gets build-image.yml's layers from main, and writing its own scope
+      # means the SECOND push on a PR does not rebuild what the first one
+      # already built. A PR's writes land in the PR's own scope and cannot
+      # affect main.
+      #
+      # mode=max caches intermediate stages too, which is the only way the
+      # frontend and dependency layers survive; mode=min would keep the final
+      # layers and rebuild everything expensive. Watch the repo's 10 GB Actions
+      # cache ceiling if this ever starts thrashing — the fallback is
+      # `type=registry` against a GHCR `buildcache` tag, which has no ceiling.
       #
       # The `test` stage is a superset of `runtime` (same layers plus the dev
       # dependency group), so building it warms every layer the smoke test
@@ -250,7 +260,8 @@ jobs:
           target: test
           load: true
           tags: scadbuddy:ci-test
-          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # Exactly the commands the repo contract names, run where the real
       # openscad is. `--no-sync` because the venv was already synced during the
@@ -276,18 +287,15 @@ jobs:
           target: runtime
           load: true
           tags: scadbuddy:ci
-          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache
+          # Read-only: the `test` build above already wrote every shared layer.
+          cache-from: type=gha
 
       # The container's OWN healthcheck is the assertion, not a curl we write
       # here: that way CI exercises the same probe Kubernetes will, and a
       # HEALTHCHECK that is broken in the image cannot pass in CI.
-      #
-      # `-p 18080:8080` is reachable from the RUNNER container, which is not
-      # obvious: dockerd lives in a dind SIDECAR, but sidecar and runner are
-      # containers in one Kubernetes pod and therefore share one network
-      # namespace, so a port dockerd publishes lands in the same namespace the
-      # runner's `curl` (and Playwright, below) resolves 127.0.0.1 in.
+
       - name: Start the container and wait for its healthcheck
+        if: ${{ needs.layout.outputs.app == 'true' }}
         run: |
           set -euo pipefail
           docker run -d --name scadbuddy-ci -p 18080:8080 scadbuddy:ci
@@ -311,18 +319,17 @@ jobs:
           exit 1
 
       - name: Probe /healthz from outside the container
+        if: ${{ needs.layout.outputs.app == 'true' }}
         run: curl --fail --silent --show-error http://127.0.0.1:18080/healthz
 
       # Playwright only when the suite exists — the frontend branch adds
       # frontend/e2e/ separately. Browsers are installed here rather than baked
       # into the runner image because this is the only job that needs them.
-      # `--with-deps` shells out to apt via sudo, which the org runner image
-      # provides passwordless. If that ever stops being true, run the suite in
-      # mcr.microsoft.com/playwright (reachable through the Nexus mcr proxy)
-      # instead of dropping the system libraries — chromium will not start
-      # without them.
+      # `--with-deps` shells out to apt via sudo, which ubuntu-latest provides
+      # passwordless. Do not drop it to avoid the apt step — chromium will not
+      # start without those system libraries.
       - name: Install Playwright browsers
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        if: ${{ needs.layout.outputs.e2e == 'true' && needs.layout.outputs.app == 'true' }}
         working-directory: frontend
         run: |
           set -euo pipefail
@@ -331,7 +338,7 @@ jobs:
           pnpm exec playwright install --with-deps chromium
 
       - name: Playwright smoke
-        if: ${{ needs.layout.outputs.e2e == 'true' }}
+        if: ${{ needs.layout.outputs.e2e == 'true' && needs.layout.outputs.app == 'true' }}
         working-directory: frontend
         env:
           # The container started above, not a `pnpm dev` server: the smoke test
@@ -341,7 +348,7 @@ jobs:
         run: pnpm exec playwright test
 
       - name: Container logs on failure
-        if: failure()
+        if: ${{ failure() && needs.layout.outputs.app == 'true' }}
         run: docker logs scadbuddy-ci || true
 
       - name: Tear down
@@ -362,7 +369,7 @@ jobs:
     # *cancelled* run still skips, which is right: the superseding run brings
     # its own required check.
     if: ${{ !cancelled() }}
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       # Checked out so the assertions can re-derive the layout from the TREE
@@ -413,7 +420,15 @@ jobs:
           has_image=false
           if [ "$has_backend" = true ] && [ "$has_frontend" = true ] && [ "$has_models" = true ]; then has_image=true; fi
 
+          # `app` is reported, not asserted: it gates STEPS inside the image
+          # job, not a job of its own. It needs no assertion — when the API
+          # entrypoint lands, those steps run, and any failure reds the image
+          # job, which IS asserted below.
+          has_app=false
+          if [ -f backend/scadbuddy/main.py ]; then has_app=true; fi
+
           echo "Tree on this commit: backend=${has_backend} frontend=${has_frontend} models=${has_models} image=${has_image}"
+          echo "Container smoke + Playwright gated on the API entrypoint: app=${has_app}"
           echo "Job results:"
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
@@ -430,20 +445,19 @@ jobs:
   #
   # `needs:` cannot cross workflow files, so claude-code-review.yml is
   # `workflow_dispatch`-only and this job dispatches it. Ordering it behind the
-  # CI jobs is purely about runner slots: the review agent runs on
-  # clusters-runner-light, the same capped pool `lint`/`frontend`/`summary` use,
-  # and dispatching only once they have freed their slots avoids competing with
-  # them. It is NOT a quality gate — a red CI still gets a review, because that
-  # is exactly when the review is most useful.
+  # CI jobs means the review reads a tree whose tests have already reported,
+  # and keeps a ~$1-2 agent run from starting on a push that a later push in
+  # the same minute supersedes. It is NOT a quality gate — a red CI still gets
+  # a review, because that is exactly when a review is most useful.
   #
-  # NEVER replace this with a poll. A polling job holds a slot from the same
-  # capped pool it is waiting on, which is a real deadlock, not a theoretical
-  # one.
+  # Dispatch, never poll. A polling job burns wall-clock holding a runner for
+  # something it cannot influence; on a capped self-hosted pool that is a real
+  # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
     needs: [lint, frontend, image, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     # A job-level `permissions:` block REPLACES the workflow default rather than
     # extending it, so every scope this job uses is listed.

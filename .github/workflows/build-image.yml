@@ -34,9 +34,7 @@ permissions:
 jobs:
   build:
     name: Build and push (amd64 + arm64)
-    # clusters-runner, not -light: the light pool's dind sidecar is capped at
-    # 1Gi, which a two-architecture build exhausts.
-    runs-on: clusters-runner
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     permissions:
       contents: read
@@ -49,11 +47,11 @@ jobs:
         with:
           fetch-depth: 1
 
-      # arm64 is emulated: these runners are amd64-only, so binfmt handlers are
-      # what makes the second architecture possible at all. The spec pins the
-      # workload to amd64 nodes today, but the base image is multi-arch and the
-      # estate has arm64 hardware (wingnut), so building both keeps that door
-      # open at the cost of build minutes, not of correctness.
+      # arm64 is emulated: ubuntu-latest is amd64, so binfmt handlers are what
+      # make the second architecture possible at all. The spec pins the workload
+      # to amd64 nodes today, but the base image is multi-arch and the estate
+      # has arm64 hardware (wingnut), so building both keeps that door open at
+      # the cost of build minutes, not of correctness.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -98,17 +96,22 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
-          # type=registry, NEVER type=gha. These runners sit behind a
-          # TLS-intercepting proxy that breaks the Actions cache protocol
-          # outright — `type=gha` does not degrade, it fails the build. The
-          # cache lives as an ordinary GHCR tag that ci.yml reads (read-only)
-          # on PRs.
+          # `type=gha`, viable only because this is a GitHub-hosted runner —
+          # the eh-homelab self-hosted pools sit behind a TLS intercept that
+          # breaks the Actions cache protocol outright (it fails the build, it
+          # does not degrade). Writing from the default branch is what gives
+          # PRs a warm cache, since Actions cache scoping lets a PR read the
+          # default branch's entries.
           #
-          # mode=max caches intermediate stages too, which is what makes the
-          # frontend and dependency layers survive between runs; mode=min would
-          # only keep the final layers and rebuild everything expensive.
-          cache-from: type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache
-          cache-to: type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache,mode=max
+          # mode=max caches intermediate stages, which is what makes the
+          # frontend and dependency layers survive between runs. Two
+          # architectures at mode=max is the biggest consumer of the repo's
+          # 10 GB Actions cache ceiling — if entries start evicting before they
+          # are reused, move this one leg to
+          # `type=registry,ref=ghcr.io/eh-homelab/scadbuddy:buildcache`, which
+          # has no ceiling and sits next to the image being pushed anyway.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       # The digest is what a GitOps manifest should pin, and it is otherwise
       # buried in the build log. Printed to the step summary so it can be

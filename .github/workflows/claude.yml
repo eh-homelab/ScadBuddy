@@ -58,7 +58,7 @@ jobs:
         github.event_name == 'issues' &&
         (contains(github.event.issue.body, '@claude') || contains(github.event.issue.title, '@claude'))
       )
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     permissions:
       contents: read
     outputs:
@@ -123,7 +123,7 @@ jobs:
     # write-capable agent (the @claude mention alone is not enough). Stops an
     # unprivileged commenter from driving the elevated bot.
     if: needs.gate.outputs.allowed == 'true'
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     permissions:
       contents: write # Enable creating commits and pushing changes
       pull-requests: write # Enable creating and modifying PRs
@@ -172,5 +172,5 @@ jobs:
             - Frontend checks: cd frontend && pnpm install --frozen-lockfile && pnpm lint && pnpm typecheck && pnpm test && pnpm build
             - Integration tests that need a real openscad binary are marked requires_openscad and only run inside the container image.
             - Only the script font family "Lobster Two" exists in the image; there is no family called "Lobster".
-            - Never add a type=gha buildx cache: the self-hosted runners sit behind a TLS intercept that breaks it.
+            - CI runs on GitHub-hosted ubuntu-latest on purpose. This repo is public and the eh-homelab self-hosted pools are on the homelab LAN, so never move a job onto clusters-runner*.
             - Every GitHub Actions run: block is bash -e, so a no-match grep aborts the step. Any grep in a change gate needs || true.'

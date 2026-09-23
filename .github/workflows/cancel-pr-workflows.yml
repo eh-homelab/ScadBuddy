@@ -21,23 +21,11 @@ concurrency:
 jobs:
   cancel-runs:
     name: Cancel in-progress workflow runs for PR branch
-    # Unconditionally GitHub-hosted — the ONE documented exception to
-    # "self-hosted is the default" in this repo, and it is about *availability*,
-    # not tooling.
-    #
-    # This workflow's whole purpose is to RECLAIM self-hosted capacity.
-    # Running it on that same capacity is circular: exactly when there is most
-    # to cancel (a saturated pool, or a wedged ARC listener leaving runs
-    # queued for hours), there is least room to run the canceller. An overflow
-    # valve does not fix this either (WonderForgeLabs/forge tried): the valve
-    # job has to sit on SOME pool, and `timeout-minutes` counts from job START,
-    # not queue entry, so a queued valve hangs until GHA's 24h queue expiry
-    # instead of failing fast.
-    #
-    # Hosted is the correct substrate for this specific job regardless of
-    # pool health: a handful of `gh` API calls, no checkout, no homelab
-    # network dependency, and it must be able to run when the estate is at
-    # its worst. Cost is one smallest-tier job per PR close (~30s).
+    # Every workflow in this repo is GitHub-hosted (see ci.yml's header), so
+    # this job carries no special runner argument any more — but the reason it
+    # exists still holds. Cancelling superseded runs on a closed PR reclaims
+    # minutes and, more usefully, stops a ~$1-2 Claude review agent from
+    # finishing work on a branch nobody will merge.
     runs-on: ubuntu-latest
     timeout-minutes: 5
 

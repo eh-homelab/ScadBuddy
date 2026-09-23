@@ -45,10 +45,10 @@ jobs:
   # merge-gate comment silently never posted). Giving enforcement its own job
   # gets it a GITHUB_TOKEN nothing else in this workflow has touched.
   claude-review-run:
-    # The org's capped, docker-free pool. Self-hosted by default here: nothing
-    # in this job needs GitHub-hosted capacity, and the runner image already
-    # bakes the git/gh/jq/yq the allowlist below shells out to.
-    runs-on: clusters-runner-light
+    # ubuntu-latest, like everything else in this repo — see ci.yml's header.
+    # This job has no LAN dependency: there is no Hindsight MCP server wired up
+    # here, and `git`/`gh`/`jq` are all on the hosted image.
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       # write, not read: the review step posts its own PR comment via
@@ -185,8 +185,12 @@ jobs:
             4. **Dockerfile and CI**
                - Layer order still lets the dependency layers cache.
                - Nothing runs as root in the shipped stage.
-               - No `type=gha` buildx cache anywhere — the self-hosted runners sit
-                 behind a TLS intercept that breaks it outright.
+               - CI runs on GitHub-hosted `ubuntu-latest`, deliberately: this repo
+                 is public, and the eh-homelab self-hosted pools are on the LAN
+                 with Hindsight and Nexus. A PR that moves a job onto
+                 `clusters-runner*` is a finding — it would let a fork PR run
+                 code inside that network. (It is also what makes the `type=gha`
+                 buildx cache usable; those pools' TLS intercept breaks it.)
                - A required check must not be able to SKIP into a pass: it needs
                  a `needs:` edge, an `if:` guarded with `!cancelled()`, AND an
                  explicit assertion on the upstream job's result. GitHub counts a
@@ -519,15 +523,11 @@ jobs:
     name: Claude Review Gate
     needs: claude-review-run
     if: always()
-    # clusters-runner-light, not ubuntu-latest. Self-hosted is this estate's
-    # default and nothing here needs hosted capacity — a handful of `gh` API
-    # calls. The trade-off worth knowing: this job publishes the REQUIRED
-    # `claude-review` status, so if the pool is wedged the context stays
-    # pending and PRs block. That is recoverable (statuses are last-write-wins
-    # per context, so re-running this workflow overwrites it), which is why the
-    # availability argument that puts cancel-pr-workflows.yml on hosted does
-    # not apply here.
-    runs-on: clusters-runner-light
+    # A handful of `gh` API calls. Worth knowing that this job publishes the
+    # REQUIRED `claude-review` status, so if it never runs the context stays
+    # pending and PRs block — recoverable, since statuses are last-write-wins
+    # per context and re-running this workflow overwrites it.
+    runs-on: ubuntu-latest
     permissions:
       # issues: write so this step can upsert a sticky PR comment (PR comments are
       # issue comments) explaining a failure / flipping it to passing.

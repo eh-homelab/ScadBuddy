@@ -62,7 +62,7 @@ jobs:
         github.event.action == 'labeled' &&
         github.event.label.name == 'needs-triage'
       )
-    runs-on: clusters-runner-light
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:
       contents: read
@@ -139,10 +139,7 @@ jobs:
   intake:
     needs: gate
     if: needs.gate.outputs.allowed == 'true'
-    # The org's 3Gi agent tier. Almost nothing targets it, so a long agent run
-    # here cannot starve `CI Summary` or `claude-review` of the capped
-    # clusters-runner-light slots they share.
-    runs-on: clusters-runner-agent
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     # `issues: write` and `actions: read` are on the AMBIENT GITHUB_TOKEN and
     # look unused, since every GitHub write below explicitly passes the App

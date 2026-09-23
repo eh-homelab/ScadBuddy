@@ -2,19 +2,21 @@
 name: GHCR Cleanup
 
 # Prunes old untagged versions of ghcr.io/eh-homelab/scadbuddy. Every
-# build-image.yml run pushes a full set of new blobs for TWO architectures plus
-# a `buildcache` tag; nothing else ever deletes the superseded versions, so
-# untagged manifests accumulate indefinitely in GHCR and, downstream, keep the
-# Nexus ghcr-proxy blob store growing.
+# build-image.yml run pushes a full set of new blobs for TWO architectures;
+# nothing else ever deletes the superseded versions, so untagged manifests
+# accumulate indefinitely in GHCR and, downstream, keep the Nexus ghcr-proxy
+# blob store growing.
 #
 # dataaxiom/ghcr-cleanup-action is used (rather than
 # actions/delete-package-versions) because it is multi-arch/manifest aware: it
 # never deletes an untagged child manifest that a tagged manifest list still
 # references, and `validate: true` checks tag integrity after the prune.
-# Tagged versions (main / sha-* / semver / buildcache) are never touched —
-# keep-n-tagged is deliberately unset. `buildcache` in particular MUST survive:
-# deleting it does not break anything, but it throws away the registry cache
-# every PR build reads and turns the next few CI runs into cold builds.
+# Tagged versions (main / sha-* / semver) are never touched — keep-n-tagged is
+# deliberately unset. The build cache is NOT here: it lives in the Actions
+# cache (`type=gha`), which GitHub evicts on its own. If build-image.yml is
+# ever moved back to a `type=registry` cache, add `buildcache` to the
+# never-touch reasoning — deleting it turns the next few CI runs into cold
+# builds.
 #
 # FIRST RUN: once this lands on the default branch, dispatch it manually (it
 # defaults to dry-run) and review the deletion set before the first cron fires.
