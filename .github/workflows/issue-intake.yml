@@ -173,6 +173,19 @@ jobs:
       # `issues: write` (#484, and the reason claude-code-review.yml's gate
       # job mints one too). That — not forge's organization Projects: write,
       # which this port has no use for — is what the App token is for.
+      #
+      # NOT AVAILABLE YET, and this job will fail loudly until it is.
+      # RUNNER_APP_ID / RUNNER_APP_PRIVATE_KEY are REPO-level secrets in
+      # eh-homelab/clusters, not org-level, so this repo does not inherit them
+      # (`gh api repos/eh-homelab/ScadBuddy/actions/organization-secrets`
+      # returns CLAUDE_CODE_OAUTH_TOKEN and nothing else, measured 2026-09-23).
+      # Deliberately NOT given a `github.token` fallback the way the review
+      # gate's is: every GitHub write below passes this token explicitly
+      # because the ambient one's issue-comment write is capped, so a fallback
+      # would just move the 403 later and make it look like the agent no-op'd.
+      # Add them with:
+      #   gh secret set RUNNER_APP_ID          -R eh-homelab/ScadBuddy
+      #   gh secret set RUNNER_APP_PRIVATE_KEY -R eh-homelab/ScadBuddy < key.pem
       - name: Generate app token
         id: app-token
         uses: actions/create-github-app-token@v3

@@ -1,9 +1,16 @@
 ---
 name: CI
 
-# The required status check on `main` is the job DISPLAY NAME "CI Summary"
-# (see .github/BRANCH_PROTECTION.md). It is the only job here that is required,
-# which is what lets every other job be gated, skipped or reordered freely.
+# The required status check on `main` is the job DISPLAY NAME "CI Summary".
+# Renaming it silently unsatisfiable-ifies the merge gate, because the gate is
+# CODE and lives in ANOTHER repository: eh-homelab/clusters'
+# `infra/github/eh-homelab/main.tf` declares a `github_repository_ruleset` whose
+# `required_checks` pin the context string, applied by that repo's Tofu CI.
+# Nothing in THIS repo will fail if the two drift apart — the PR just stops
+# being mergeable with no stated cause. Rename here, change it there, same day.
+#
+# It is the only job here that is required, which is what lets every other job
+# be gated, skipped or reordered freely.
 #
 # Runner pools: everything defaults to `clusters-runner-light` (the capped,
 # docker-free org pool). Only jobs that actually drive Docker go to
@@ -512,8 +519,9 @@ jobs:
 
       # Only reachable on the bootstrap PR described above. Left green
       # deliberately: the merge gate cannot review a workflow that the default
-      # branch has never seen, and branch protection is not applied until after
-      # this PR merges (.github/BRANCH_PROTECTION.md).
+      # branch has never seen, and the `ScadBuddy/main` ruleset is not declared
+      # in eh-homelab/clusters' `infra/github/eh-homelab/main.tf` until after
+      # this PR merges.
       - name: Clear the claude-review status on the bootstrap PR
         if: ${{ steps.dispatch.outputs.dispatched == 'false' }}
         env:
