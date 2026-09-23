@@ -1,6 +1,13 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('customizer', () => {
+  // These drive the msw worker. Against a real backend the numbers are the real
+  // renderer's, which e2e/real-backend.spec.ts covers instead.
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
   test('opens a model, changes a parameter and generates an output', async ({ page }) => {
     await page.goto('/')
 

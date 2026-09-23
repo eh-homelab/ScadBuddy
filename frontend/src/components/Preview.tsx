@@ -221,8 +221,11 @@ function FitCamera({ bbox }: { bbox?: BoundingBox }) {
 }
 
 /**
- * The GLB is authored z-up in millimetres, the way OpenSCAD emits it; three.js is
- * y-up, so the whole model is rotated a quarter turn about X and dropped onto z=0.
+ * The GLB arrives **Y-up already** — the backend's writer applies its own
+ * `Z_UP_TO_Y_UP` before serialising — so it drops straight into the three.js scene.
+ * An earlier version rotated it a quarter turn about X on the assumption it was
+ * OpenSCAD's Z-up, which stood the model on its edge; the msw fixture happened to be
+ * authored Z-up too, so every mocked test agreed with it.
  */
 function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
   const gltf = useLoader(GLTFLoader, url)
@@ -231,16 +234,18 @@ function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
 
   const edges = useMemo(() => {
     if (!bbox) return null
-    return new THREE.BoxGeometry(...bbox.size)
+    // bbox.size is model space (wide, deep, tall); the scene is Y-up.
+    const [width, depth, height] = bbox.size
+    return new THREE.BoxGeometry(width, height, depth)
   }, [bbox])
 
   useEffect(() => () => edges?.dispose(), [edges])
 
   return (
-    <group ref={group} rotation={[-Math.PI / 2, 0, 0]}>
+    <group ref={group}>
       <primitive object={scene} />
       {edges && (
-        <lineSegments position={[0, 0, bbox ? bbox.size[2] / 2 : 0]}>
+        <lineSegments position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
           <edgesGeometry args={[edges]} attach="geometry" />
           <lineBasicMaterial
             color="#f2a93b"
