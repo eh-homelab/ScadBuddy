@@ -149,9 +149,11 @@ jobs:
       # message texts because an -ignore regex containing quotes has to survive
       # a shell round-trip through this action's `flags` input.
       #
-      # Runner labels are NOT ignored — they are declared in
-      # .github/actionlint.yaml, because a typo'd pool name is a job that queues
-      # forever with no error and that check is the only thing that catches it.
+      # There is no .github/actionlint.yaml. It existed only to declare the
+      # self-hosted ARC pool labels (a typo'd pool name queues forever with no
+      # error, and actionlint was the only thing that caught it); every job now
+      # runs on ubuntu-latest, so there is no custom label left to declare.
+      # Bring it back with the file if a job ever moves back onto a pool.
       - name: actionlint
         uses: raven-actions/actionlint@v2.2.0
         with:
