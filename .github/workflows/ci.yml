@@ -517,9 +517,14 @@ jobs:
       # whichever uv did the resolving — which is why this does not need to be
       # pinned to the Dockerfile's `ghcr.io/astral-sh/uv:0.9.9`. openscad is
       # not needed: `export_openapi` only builds the app object.
+      #
+      # Pinned to a full version, not `@v10`: astral-sh stopped publishing
+      # floating major tags after v7 (`v10` does not exist and the job fails at
+      # "Set up job" with `unable to find version`). Dependabot's
+      # github-actions ecosystem bumps this line.
       - name: Set up uv
         if: ${{ steps.detect.outputs.backend == 'true' }}
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.2.0
         with:
           enable-cache: true
           cache-dependency-glob: backend/uv.lock
