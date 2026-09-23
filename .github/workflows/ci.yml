@@ -184,7 +184,7 @@ jobs:
 
       # Pin the Node major to the one the Dockerfile's Node stage uses, so a
       # `pnpm build` that passes here is the same build the image performs.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "24"
 
