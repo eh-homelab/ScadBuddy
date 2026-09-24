@@ -164,9 +164,11 @@ CSS_COLOURS: dict[str, str] = {
     "yellowgreen": "#9ACD32",
 }
 
-# The wrapper is written NEXT TO the model so `include <>` resolves without a
-# library path -- which puts a generated file inside the versioned models
-# repository, so `library/history.py` writes this prefix into its .gitignore.
+#: The wrapper has to live beside the model so its ``include <>`` resolves, which
+#: puts a transient .scad inside the directory `provenance.source_version` hashes —
+#: it skips anything with this prefix, so the two must stay in step. Since #90 that
+#: directory is also a git repository, so `library/history.py` writes this same
+#: prefix into its .gitignore: three places, one constant.
 WRAPPER_PREFIX = "_scadbuddy_solid_"
 
 # A user-defined `color` module shadows the builtin, so a wrapper that keeps only the

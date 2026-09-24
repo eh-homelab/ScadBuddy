@@ -72,6 +72,24 @@ Added for #88 on 2026-09-24 (a `GET`):
   booleans. `layer_inspect` and `timelapse` default to `false`, not `true`.
 - **`POST /library/files/{id}/slice` spells the plate `plate`**; `POST /queue/` spells it
   `plate_id`.
+- **A library file has no `url` field.** `FileUpdate` takes `filename`, `folder_id`,
+  `project_id` and `notes`, and `notes` is the only free text on one — see
+  "Where an Edit in ScadBuddy link can live" below.
+- **`PUT /library/files/{id}` is a partial update**, so sending `notes` alone cannot
+  clear the file's folder or project. This one could not be settled by reading — the
+  schema shows every field as `anyOf [type, null]` with no `required` list, which is
+  equally consistent with a full replace — and it could not be settled by measuring
+  either, because that would mean writing to the live instance. It was settled from
+  Bambuddy's **source**: `update_file` guards every assignment with
+  `if data.<field> is not None`, and `FileUpdate` defaults each field to `None`
+  ([library.py#L5103-L5136](https://github.com/maziggy/bambuddy/blob/9e9c08ba2cc08bf1e746ed98bef2b46b7bedea02/backend/app/api/routes/library.py#L5103-L5136)).
+  Two details from the same lines: the sentinel that *clears* `folder_id`/`project_id`
+  is **`0`**, not `null`, and an empty `notes` string is stored as `NULL`.
+- **`notes` is still a whole-field write, and a person may have typed in it.** The
+  partial update above is about the *other* fields; `notes` itself is replaced by
+  whatever is sent. `GET /api/v1/library/files/{file_id}` (`openapi/routes.txt`) is
+  therefore read first and the "Edit in ScadBuddy" line merged into what is there —
+  replacing an earlier one of ours, keeping everything else.
 - **An AMS `id` is the printer's numbering, not a list index.** The recorded H2C
   reports units `[0, 1, 128, 2]` — unsorted, with the single-slot AMS-HT at `128`,
   which is also how `ams_switch_inlet` keys them (as **strings**; JSON has no integer
@@ -183,3 +201,21 @@ Added for #88 on 2026-09-24 (a `GET`):
   `can_manage_library`, `can_queue`, `can_manage_projects`, …); the pipeline routes are
   mapped to `Manage Queue` on the reasoning that running one queues prints, and that
   mapping is the one thing here that is inferred rather than measured.
+
+## Where an "Edit in ScadBuddy" link can live (#80)
+
+Measured against the live 1.x on 2026-09-23 — `GET /openapi.json` plus the deployed
+web bundle, which is what says whether a field is *rendered*, not merely stored.
+
+| Candidate | Verdict |
+|---|---|
+| Library file `notes` (`PUT /library/files/{id}`) | **Chosen.** The only per-file free text Bambuddy declares. One call, no new scope. |
+| Library file `url` | Does not exist. `external_url` is on an **archive**, not a file. |
+| Archive `external_url` / `PATCH /archives/{id}/project-page` | Unreachable from a send: an archive is created by Bambuddy *after* a print, so ScadBuddy has no archive id to write to. |
+| 3MF root-model metadata (`Title`/`Description`/`Designer`) | Bambuddy's project page does read exactly these keys — but Bambu Studio **rewrites them on slice**. Archive 13's sliced 3MF carries `Title`, `Description`, `Designer` and `Origin` as empty strings. Kept for the file itself, not as the Bambuddy surface. |
+| Folder README (`GET /library/folders/{id}/readme`) | Rendered as markdown with live anchors, but read-only over the API — the only write path is dropping a `.md` into the folder, which the library's upload may reject and which cannot be verified without writing to the live instance. Also folder-scoped, so concurrent sends would race on one file. |
+
+Known limitation: the deployed web UI renders a library row's filename, tags and print
+count, and only ever `PUT`s `{"filename": …}` — it does not render `notes` today. The
+link is attached to the file in Bambuddy's own data model and readable over its API;
+showing it as an **Edit in ScadBuddy** action is a change on the Bambuddy side.

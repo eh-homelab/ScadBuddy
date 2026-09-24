@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -38,6 +39,7 @@ def _result() -> JobResult:
     return JobResult(
         model_3mf="jobs/x.work/model.3mf",
         preview_glb="jobs/x.work/preview.glb",
+        source_version="sha256:test",
         parts=[PartInfo(name="Color 1", colour="#FF6AC1", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
     )
@@ -210,6 +212,23 @@ async def test_the_plate_thumbnail_is_rendered_off_the_event_loop() -> None:
     assert ran_on and threading.main_thread().name not in ran_on
 
 
+async def test_the_model_hash_is_taken_off_the_event_loop(paths: DataPaths) -> None:
+    """It reads every file under the model directory, and §5.3's debounce fires one
+    render per keystroke — on the loop that is the whole server, not one job."""
+    paths.model_dir("demo").mkdir(parents=True, exist_ok=True)
+    paths.model_source("demo").write_text("cube(10);\n", encoding="utf-8")
+    ran_on: list[str] = []
+
+    def record(directory: Path) -> str:
+        ran_on.append(threading.current_thread().name)
+        raise OpenSCADError("far enough", [])
+
+    with mock.patch.object(jobs, "source_version", record), pytest.raises(OpenSCADError):
+        await jobs.render_job(_job("h"), config=CONFIG, paths=paths)
+
+    assert ran_on and threading.main_thread().name not in ran_on
+
+
 async def test_a_thumbnail_that_blows_its_budget_costs_the_cover_not_the_job() -> None:
     """§6.1 promises a bounded job, and `SCADBUDDY_RENDER_TIMEOUT` used to deliver
     that by killing an `openscad` child. The rasteriser has no child to kill, so
@@ -235,3 +254,18 @@ async def test_a_thumbnail_that_blows_its_budget_costs_the_cover_not_the_job() -
 
     assert rendered is None
     assert warnings == [THUMBNAIL_TIMEOUT_WARNING]
+
+
+def test_a_job_written_before_the_source_hash_existed_still_loads(paths: DataPaths) -> None:
+    """Job files outlive a deploy on the PVC, and the queue reads every one at startup —
+    a field the old writer never wrote must not turn an upgrade into a crash loop."""
+    store = JobStore(paths)
+    job = _job("old", state="done", result=_result())
+    store.write(job)
+    raw = json.loads(paths.job_file("old").read_text(encoding="utf-8"))
+    del raw["result"]["source_version"]
+    paths.job_file("old").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read("old")
+    assert loaded.result is not None
+    assert loaded.result.source_version == ""

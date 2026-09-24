@@ -411,6 +411,77 @@
         "title": "CustomizerSchema",
         "type": "object"
       },
+      "EditTarget": {
+        "description": "What ``/edit/{output_id}`` needs to reopen the customizer.",
+        "properties": {
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "output_id": {
+            "title": "Output Id",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Params",
+            "type": "object"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "record",
+              "3mf"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "output_id",
+          "slug",
+          "name",
+          "source"
+        ],
+        "title": "EditTarget",
+        "type": "object"
+      },
       "EligibilityCheck": {
         "description": "``pipeline_ids`` omitted means every pipeline Bambuddy has.",
         "properties": {
@@ -3581,6 +3652,17 @@
             ],
             "title": "Bambuddy Url"
           },
+          "edit_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edit Url"
+          },
           "filename": {
             "title": "Filename",
             "type": "string"
@@ -5310,6 +5392,50 @@
           }
         },
         "summary": "Output detail",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
+    "/api/v1/outputs/{output_id}/edit": {
+      "get": {
+        "description": "Where ``/edit/{output_id}`` should land, and with which values.\n\nThe record answers first. When it is gone \u2014 the directory restored without its\nsidecars, or hand-pruned \u2014 the 3MF still carries the same provenance, so the\nlink keeps working from the file alone.",
+        "operationId": "get_edit_target_api_v1_outputs__output_id__edit_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditTarget"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Resolve an edit deep link",
         "tags": [
           "outputs"
         ]

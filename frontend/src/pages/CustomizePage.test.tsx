@@ -1,10 +1,12 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
+import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
-import { printOptions, versionIds } from '../mocks/fixtures'
+import { printOptions, settings as settingsFixture, versionIds } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
@@ -25,8 +27,14 @@ vi.mock('../components/Preview', () => ({
   ),
 }))
 
-function render(route = '/m/name-keychain') {
-  return renderPage(<CustomizePage />, { route, path: '/m/:slug' })
+function render(route = '/m/name-keychain', state?: unknown) {
+  return renderPage(<CustomizePage />, { route, path: '/m/:slug', state })
+}
+
+/** Reads back where the router ended up, so a redirect is observable. */
+function Where() {
+  const { pathname, search } = useLocation()
+  return <div data-testid="where">{pathname + search}</div>
 }
 
 /**
@@ -127,6 +135,70 @@ describe('CustomizePage', () => {
     // rather than queueing the plate itself.
     await waitFor(() => expect(within(dialog).getByText(/Pipeline run/)).toBeInTheDocument())
     expect(within(dialog).getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
+    // A public URL is configured in the fixtures, so the note went on the file.
+    expect(within(dialog).getByText(/Bambuddy has the link back/)).toBeInTheDocument()
+  })
+
+  it('says when no link back to the parameters was attached', async () => {
+    server.use(
+      http.post('/api/v1/outputs/:id/send', () =>
+        HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain-reagan.3mf',
+          pipeline_run_id: 12,
+          queue_item_id: null,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    // A public URL is configured, so no link back means Bambuddy refused the note —
+    // not that the feature was never switched on.
+    await waitFor(() =>
+      expect(within(dialog).getByText(/would not take the link/)).toBeInTheDocument(),
+    )
+  })
+
+  it('says nothing about the link when no public URL is configured', async () => {
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...settingsFixture, public_url: null }),
+      ),
+      http.post('/api/v1/outputs/:id/send', () =>
+        HttpResponse.json({
+          mode: 'library',
+          library_file_id: 41,
+          filename: 'name-keychain-reagan.3mf',
+          pipeline_run_id: null,
+          queue_item_id: null,
+          bambuddy_url: 'https://bambuddy.test/library',
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(within(dialog).getByText(/Added to the library/)).toBeInTheDocument())
+    expect(within(dialog).queryByText(/link back to these parameters/)).not.toBeInTheDocument()
   })
 
   it('sends the per-send print options the Options disclosure collected (#88)', async () => {
@@ -383,6 +455,166 @@ describe('CustomizePage', () => {
       'href',
       '/m/name-keychain/versions',
     )
+  })
+
+  it('reopens from the 3MF alone when the output record is gone', async () => {
+    const id = 'd'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: null,
+          params: { name: 'Salvaged' },
+          model_version: `sha256:${'ab'.repeat(32)}`,
+          source: '3mf',
+        }),
+      ),
+    )
+    render(`/m/name-keychain?from=${id}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Salvaged'),
+    )
+    expect(screen.getByText(`reopened from ${id.slice(0, 8)}`)).toBeInTheDocument()
+  })
+
+  it('uses the target EditPage already resolved rather than fetching it again', async () => {
+    const id = 'c'.repeat(32)
+    let calls = 0
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () => {
+        calls += 1
+        return HttpResponse.json({ title: 'Should not be called', status: 500 }, { status: 500 })
+      }),
+    )
+    render(`/m/name-keychain?from=${id}`, {
+      editTarget: {
+        output_id: id,
+        slug: 'name-keychain',
+        name: 'Handed over',
+        params: { name: 'Handed over' },
+        model_version: null,
+        source: 'record',
+      },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Handed over'),
+    )
+    expect(calls).toBe(0)
+  })
+
+  it('still resolves the target when opened without it — a pasted link or a reload', async () => {
+    const id = 'c'.repeat(32)
+    render(`/m/name-keychain?from=${id}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
+  })
+
+  it('sends a hand-typed link on to the model the output belongs to', async () => {
+    // EditPage always builds the URL from the resolved slug, so only a typed or
+    // bookmarked one can name the wrong model — and applying another model's
+    // values to this schema silently is worse than moving to the right one.
+    const id = 'c'.repeat(32)
+    renderPage(
+      <Routes>
+        <Route
+          path="/m/:slug"
+          element={
+            <>
+              <Where />
+              <CustomizePage />
+            </>
+          }
+        />
+      </Routes>,
+      { route: `/m/some-other-model?from=${id}` },
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('where')).toHaveTextContent(`/m/name-keychain?from=${id}`),
+    )
+  })
+
+  it('never paints the schema defaults before a handed-over output\'s values', async () => {
+    // The panel mounts with whatever `values` holds at that commit, so the value the
+    // input carries when it first enters the DOM is the one the user would see.
+    const id = 'c'.repeat(32)
+    const first: string[] = []
+    const observer = new MutationObserver(() => {
+      const input = document.querySelector<HTMLInputElement>('input[type="text"]')
+      if (input && first.length === 0) first.push(input.value)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    render(`/m/name-keychain?from=${id}`, {
+      editTarget: {
+        output_id: id,
+        slug: 'name-keychain',
+        name: 'Handed over',
+        params: { name: 'Handed over' },
+        model_version: null,
+        source: 'record',
+      },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Handed over'),
+    )
+    observer.disconnect()
+    expect(first).toEqual(['Handed over'])
+  })
+
+  it('does not open a blank customizer when the link is dead', async () => {
+    // A pasted /m/{slug}?from={id} whose output and 3MF are both gone has to say so,
+    // the way /edit/{id} does, rather than quietly showing a fresh model.
+    const id = '0'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () =>
+        HttpResponse.json({ title: 'Not found', status: 404 }, { status: 404 }),
+      ),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+        <Route path="/edit/:outputId" element={<div data-testid="gone" />} />
+      </Routes>,
+      { route: `/m/name-keychain?from=${id}` },
+    )
+    expect(await screen.findByTestId('gone')).toBeInTheDocument()
+  })
+
+  it('renders nothing for a page it is only passing through', async () => {
+    // The hooks run before the redirects below them, so without a guard the wrong
+    // model gets a real OpenSCAD job — one render-concurrency slot for nothing.
+    const id = 'c'.repeat(32)
+    const rendered: string[] = []
+    server.use(
+      // Slower than the debounce on purpose: that is the window in which the page
+      // holds a slug it is about to leave, and the only one where this can go wrong.
+      http.get('/api/v1/outputs/:outputId/edit', async () => {
+        await delay(RENDER_DEBOUNCE_MS * 2)
+        return HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Nova',
+          params: { name: 'Nova' },
+          model_version: null,
+          source: 'record',
+        })
+      }),
+      http.post('/api/v1/models/:slug/render', ({ params }) => {
+        rendered.push(String(params.slug))
+        return HttpResponse.json({ job_id: `job-${String(params.slug)}` }, { status: 202 })
+      }),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+      </Routes>,
+      { route: `/m/some-other-model?from=${id}` },
+    )
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 4))
+    // The model the link actually belongs to may render; the one in the URL may not.
+    expect(rendered).not.toContain('some-other-model')
   })
 
   it('counts changes against the model defaults', async () => {

@@ -1,5 +1,5 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router'
+import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
+import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { Output, ParamValue } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
@@ -9,10 +9,14 @@ import type { PreviewCapture } from '../components/Preview'
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
+import { editPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
+
+/** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
+const NOTHING: ParamValues = Object.freeze({})
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
@@ -24,55 +28,105 @@ export function CustomizePage() {
   const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // Resolved through /edit, not the history list: that route falls back to the 3MF's
+  // own provenance when the output record is gone. EditPage has usually resolved it
+  // already and passed it in state, so arriving that way costs no second request.
+  const handedOver = useLocation().state as EditNavigationState | null
+  const preloaded = handedOver?.editTarget?.output_id === reopenId ? handedOver.editTarget : null
+  const reopenState = useAsync(
+    async () => (reopenId && !preloaded ? await api.getEditTarget(reopenId) : null),
+    [reopenId, preloaded !== null],
+  )
 
-  // The values carry the revision they were derived from. `version` changes the
-  // moment the URL does, but the new schema is a fetch away and the values a
-  // debounce beyond that — so a bare `useRenderJob(slug, debounced, version)`
-  // fires at once, pairing the NEW revision id with the PREVIOUS revision's
-  // parameters. That renders the wrong thing, and 422s outright (§6.1) on a
-  // parameter the old schema had and the new one does not. Tagging the values
-  // is what lets the render wait for its own revision.
-  const [pending, setPending] = useState<{ version: string; values: ParamValues }>({
-    version: '',
-    values: {},
+  // `edited` is what the user has changed; `seed` is what the page opened on. Keeping
+  // them apart is what lets the first paint already carry the right values — seeding
+  // through an effect runs after that paint, which is one frame of the wrong numbers.
+  const [edits, setEdits] = useState<{ of: ParamValues | null; values: ParamValues | null }>({
+    of: null,
+    values: null,
   })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
 
   const schema = schemaState.data
-  const reopened = reopenId ? outputsState.data?.find((o) => o.id === reopenId) : undefined
-  const values = pending.values
+  const resolved = preloaded ?? reopenState.data ?? undefined
+  // An output belongs to one model. EditPage builds the URL from the resolved slug,
+  // so only a typed or bookmarked link can pair an id with the wrong model — and
+  // spreading another model's values onto this schema is a silent wrong answer.
+  const foreign = resolved && resolved.slug !== slug ? resolved : undefined
+  const reopened = foreign ? undefined : resolved
+  // Every hook below runs before the redirects further down, so a page this one is
+  // only passing through must not seed any values: with none there is nothing to
+  // debounce, and no render — an OpenSCAD process and a concurrency slot — is started
+  // for a model the reader is not going to see.
+  const leaving = foreign !== undefined || Boolean(reopenId && reopenState.error)
 
-  useEffect(() => {
-    if (!schema) return
-    setPending({
-      version: version ?? '',
-      values: reopened ? { ...defaultValues(schema), ...reopened.params } : defaultValues(schema),
-    })
-  }, [schema, reopened, version])
+  // useAsync reports loading whether or not it has anything to fetch, so reading it
+  // directly would hold the values back for a render even when the target is already
+  // in hand — long enough to paint the schema defaults and snap off them.
+  const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
+
+  const seed = useMemo(
+    // Null until there is something to show: the schema has to be here, and a deep
+    // link's values have to have arrived, before the defaults are the right answer.
+    () =>
+      schema && !resolving && !leaving
+        ? reopened
+          ? { ...defaultValues(schema), ...reopened.params }
+          : defaultValues(schema)
+        : null,
+    [schema, reopened, resolving, leaving],
+  )
+  // A different model, or a different output, discards edits made against the old one.
+  if (edits.of !== seed) setEdits({ of: seed, values: null })
+  const values = edits.values ?? seed ?? NOTHING
 
   // One debounce over the pair, so the tag can never lag the values it labels.
-  const debounced = useDebounced(pending, RENDER_DEBOUNCE_MS)
-  const current = debounced.version === (version ?? '')
+  const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
+  // True once the debounce has caught up with the values on screen. #90: the render
+  // waits for it, because `version` flips the instant the URL does while the
+  // matching schema — and so the values seeded from it — are a fetch behind. Passing
+  // `debounced` unconditionally pairs the NEW revision id with the PREVIOUS
+  // revision's parameters for one submission: the wrong render at best, and a 422
+  // (§6.1) on a parameter the old schema had and the new one does not.
+  const settled = debounced === values
   const {
     job,
     rendering,
     error: renderError,
-  } = useRenderJob(slug, current ? debounced.values : undefined, version)
+  } = useRenderJob(slug, settled ? debounced : undefined, version)
 
   // A parameter change invalidates the saved output — Generate has to run again.
-  const settled = current && debounced === pending
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const onChange = useCallback((name: string, value: ParamValue) => {
-    setPending((state) => ({ ...state, values: { ...state.values, [name]: value } }))
+    setEdits((current) => ({
+      of: current.of,
+      values: { ...(current.values ?? current.of ?? NOTHING), [name]: value },
+    }))
   }, [])
 
   const onReset = useCallback(() => {
-    if (schema) setPending((state) => ({ ...state, values: defaultValues(schema) }))
+    if (schema) setEdits((current) => ({ of: current.of, values: defaultValues(schema) }))
   }, [schema])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+
+  if (reopenId && reopenState.error) {
+    // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
+    // that message; sending the reader there keeps one copy of it.
+    return <Navigate to={editPath(reopenId)} replace />
+  }
+
+  if (foreign) {
+    return (
+      <Navigate
+        to={`/m/${foreign.slug}?from=${foreign.output_id}`}
+        state={{ editTarget: foreign } satisfies EditNavigationState}
+        replace
+      />
+    )
+  }
 
   if (schemaState.loading) {
     return (
@@ -107,7 +161,7 @@ export function CustomizePage() {
           <h1 className="truncate text-[13px] font-medium">{schema.title}</h1>
           {reopened && (
             <span className="sb-num shrink-0 text-[11px] text-faint">
-              reopened from {reopened.name ?? reopened.id.slice(0, 8)}
+              reopened from {reopened.name ?? reopened.output_id.slice(0, 8)}
             </span>
           )}
           {version && (

@@ -22,6 +22,7 @@ from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
+from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.solids import render_solids
@@ -52,6 +53,13 @@ class PartInfo(BaseModel):
 class JobResult(BaseModel):
     model_3mf: str
     preview_glb: str
+    #: The model's sources as this render read them. Taken here rather than when the
+    #: output is saved: Generate persists a render that already happened, and the
+    #: files on the PVC can be edited in between.
+    #: Empty only on a job written before this field existed — job files outlive a
+    #: deploy on the PVC and the queue validates every one at startup, so a required
+    #: field here would turn an upgrade into a crash loop rather than one bad job.
+    source_version: str = ""
     parts: list[PartInfo]
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
@@ -327,6 +335,15 @@ async def render_job(
     # render newer source while claiming the older revision.
     source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
     scad = source.scad
+    # #90 stamps the model's own commit id, which `provenance.source_version` was
+    # written to accept (a free string, never a structured field). The content hash
+    # remains the answer when there is no repository to name a revision -- and it
+    # hashes what was actually rendered, which for an old revision is its export,
+    # not the live model directory. Reads every file under it; off the loop, like
+    # the other two.
+    version = source.version
+    if version is None:
+        version = await asyncio.to_thread(source_version, scad.parent)
     schema = await cached_schema(scad, source.schema_cache, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
@@ -353,6 +370,7 @@ async def render_job(
     result = JobResult(
         model_3mf=str(model_path.relative_to(paths.root)),
         preview_glb=str(preview_path.relative_to(paths.root)),
+        source_version=version,
         parts=[
             PartInfo(
                 name=part.name,

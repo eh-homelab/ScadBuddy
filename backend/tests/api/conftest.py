@@ -19,6 +19,7 @@ from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, JobResult, PartInfo, RenderQueue
+from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.split import ColourPart
 
@@ -126,8 +127,9 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
     (work / "preview.glb").write_bytes(b"glTF\x02\x00\x00\x00fake")
-    # A real archive, not a stub: the send path re-places the 3MF for the target
-    # printer's plate before uploading it, so it has to be readable (#105).
+    # A real archive, not a stub: saving an output stamps its provenance into the
+    # file, and the send path re-places it for the target printer's plate before
+    # uploading, so it has to be readable (#105).
     write_bambu_3mf(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 5)))],
         work / "model.3mf",
@@ -137,6 +139,9 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     return JobResult(
         model_3mf=str((work / "model.3mf").relative_to(paths.root)),
         preview_glb=str((work / "preview.glb").relative_to(paths.root)),
+        # As `render_job` does: the revision the job was resolved to when there is a
+        # repository (#90), the content hash only when there is none.
+        source_version=job.model_version or source_version(paths.model_dir(job.slug)),
         parts=[PartInfo(name="Color 1", colour="#FF0000", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],

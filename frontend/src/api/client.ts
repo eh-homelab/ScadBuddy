@@ -3,6 +3,7 @@ import type {
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
+  EditTarget,
   EligibilityOverview,
   FilamentOptions,
   FontCatalogue,
@@ -159,6 +160,9 @@ export const api = {
   listOutputs: (slug: string) => request<Output[]>(`/models/${seg(slug)}/outputs`),
 
   getOutput: (id: string) => request<Output>(`/outputs/${seg(id)}`),
+
+  /** Resolves an `/edit/{id}` deep link — from the record, or from the 3MF. */
+  getEditTarget: (id: string) => request<EditTarget>(`/outputs/${seg(id)}/edit`),
 
   deleteOutput: (id: string) => request<void>(`/outputs/${seg(id)}`, { method: 'DELETE' }),
 

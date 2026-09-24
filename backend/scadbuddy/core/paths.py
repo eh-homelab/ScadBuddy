@@ -6,7 +6,8 @@ from pathlib import Path
 from scadbuddy.core.fontconfig import fonts_dir
 
 SOURCE_NAME = "model.scad"
-META_NAME = "model.json"
+#: The model's own metadata. Since #90 it is NOT the schema cache -- see below.
+MODEL_META_NAME = "model.json"
 # The DERIVED customizer schema. Never `model.json` and never inside `models/`:
 # it is written lazily by the first render or schema read, outside any commit,
 # so keeping it in the versioned tree would leave the repository permanently
@@ -45,7 +46,7 @@ class DataPaths:
         return self.model_dir(slug) / SOURCE_NAME
 
     def model_meta(self, slug: str) -> Path:
-        return self.model_dir(slug) / META_NAME
+        return self.model_dir(slug) / MODEL_META_NAME
 
     def model_schema_cache(self, slug: str) -> Path:
         """Where the live model's derived schema is cached -- under ``cache/``,
