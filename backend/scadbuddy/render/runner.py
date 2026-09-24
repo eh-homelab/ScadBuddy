@@ -124,6 +124,13 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         raise RenderTimeoutError(
             f"openscad timed out after {config.render_timeout:g}s", tail
         ) from None
+    except asyncio.CancelledError:
+        # A cancelled caller (a superseded parse check, a shutting-down worker) must not
+        # leave the subprocess running: it would hold the CPU the next one needs.
+        process.kill()
+        await process.wait()
+        drain.cancel()
+        raise
     await drain
     duration = time.monotonic() - started
     if returncode != 0:

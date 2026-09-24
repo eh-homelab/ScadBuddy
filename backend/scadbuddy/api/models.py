@@ -11,6 +11,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import CatalogueDep, ChecksDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
@@ -358,6 +359,7 @@ async def _create(
     ),
 )
 async def check_model_source(
+    request: Request,
     body: CheckRequest,
     config: ConfigDep,
     checks: ChecksDep,
@@ -365,7 +367,15 @@ async def check_model_source(
     paths: PathsDep,
 ) -> SourceCheck:
     context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
-    return await check_source(body.source, config=config, limit=checks, context=context)
+    try:
+        return await unless_the_client_leaves(
+            request, check_source(body.source, config=config, limit=checks, context=context)
+        )
+    except ClientGoneError as error:
+        # 499, as nginx writes it: the request was not answered because there was no
+        # longer anyone to answer. Nothing reads this body; what matters is that the
+        # check was cancelled and gave its permit back.
+        raise ApiError(499, str(error)) from None
 
 
 @router.get("/models/{slug}", response_model=ModelRecord, summary="Model metadata")

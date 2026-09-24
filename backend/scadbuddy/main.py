@@ -9,6 +9,7 @@ from fastapi import APIRouter, FastAPI
 from scadbuddy import __version__
 from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.problems import install_problem_handlers
@@ -72,6 +73,8 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     setattr(app.state, STATE_ATTR, build_state(app_settings))
     install_problem_handlers(app)
+    # Outermost, so an oversized paste is refused on its headers rather than buffered.
+    app.add_middleware(BodySizeGate, limit=MAX_TEXT_BODY_BYTES)
 
     app.include_router(health.router)
     app.include_router(_api_router())
