@@ -44,8 +44,6 @@ LIBRARY_PATH = "/library"
 QUEUE_BED_LEVELLING: CalibrationMode = "off"
 QUEUE_FLOW_CALI: CalibrationMode = "off"
 
-#: Prefix for the note attached to the library file, so the link is legible as text.
-
 
 class SendRequest(BaseModel):
     mode: SendMode = "library"

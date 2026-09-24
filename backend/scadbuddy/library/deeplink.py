@@ -8,6 +8,8 @@ cannot infer its own external URL from a request behind a proxy.
 
 from __future__ import annotations
 
+import re
+
 EDIT_ROUTE = "/edit"
 #: How the link is introduced wherever it appears as prose — the 3MF's own
 #: Description metadata and the note on the Bambuddy library file.
@@ -18,8 +20,18 @@ def edit_path(output_id: str) -> str:
     return f"{EDIT_ROUTE}/{output_id}"
 
 
+#: What XML 1.0 cannot represent at all, escaped or not. The link is the one piece
+#: of settable text that reaches the 3MF as prose rather than through JSON, so a
+#: setting holding one of these would corrupt every file written after it was saved.
+_UNWRITABLE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
 def edit_url(public_url: str | None, output_id: str) -> str | None:
-    """None when no public URL is configured, so callers can leave the link out."""
-    if not public_url:
+    """None when no public URL is configured, so callers can leave the link out.
+
+    A URL that cannot be written is treated the same way: there is nothing to show,
+    and dropping the link costs one feature rather than every output's 3MF.
+    """
+    if not public_url or _UNWRITABLE.search(public_url):
         return None
     return f"{public_url.rstrip('/')}{edit_path(output_id)}"

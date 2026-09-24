@@ -10,7 +10,7 @@ from xml.etree import ElementTree as ET
 import pytest
 import trimesh
 
-from scadbuddy.library.deeplink import EDIT_NOTE
+from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
 from scadbuddy.render.bambu3mf import CORE_NS, PRODUCTION_NS, write_bambu_3mf
 from scadbuddy.render.provenance import (
     NS_PREFIX,
@@ -292,3 +292,19 @@ def test_a_hostile_parameter_value_cannot_break_the_root_model(written: Path) ->
     ) == 0
     assert not any(character in xml for character in "\x07\x0b\x0c\x1f")
     assert read(written) == hostile
+
+
+def test_a_public_url_that_cannot_be_written_as_xml_yields_no_link(written: Path) -> None:
+    """The one piece of settable text that is not JSON-encoded on its way in.
+
+    ``params`` reach the file through ``model_dump_json``, which escapes what XML
+    cannot represent; ``edit_url`` is spliced as prose with only ``escape()``. So a
+    ``public_url`` holding a raw control character would corrupt every 3MF written
+    after it was saved — the link is dropped instead, exactly as when none is set.
+    """
+    assert edit_url("https://scad\x0b.test/", "f" * 32) is None
+
+    stamp(written, PROVENANCE.model_copy(update={"edit_url": None}))
+    with zipfile.ZipFile(written) as archive:
+        ET.fromstring(archive.read(ROOT_MODEL).decode("utf-8"))
+    assert "Description" not in _metadata(written)
