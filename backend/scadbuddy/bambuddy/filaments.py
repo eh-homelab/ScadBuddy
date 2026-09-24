@@ -32,6 +32,7 @@ working as filaments are added, which a hand-kept list does not.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Callable
@@ -860,17 +861,23 @@ async def gather_options(
         status = await client.printer_status(printer_id)
         slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
-    wanted = {
+    wanted = sorted(
         spool.id
         for spool in spools
         if any(
             not need.material or need.material.upper() == spool.material.upper()
             for need in requirements
         )
-    }
-    presets_by_spool = {
-        spool_id: await client.spool_filament_presets(spool_id) for spool_id in sorted(wanted)
-    }
+    )
+    # Concurrently, and for the same reason ``check_pipelines`` gathers its eligibility
+    # checks: the picker cannot open until the last answer arrives, so a sequential loop
+    # would cost the sum of every spool's latency rather than the slowest one's. An
+    # unsliced plate declares no material, so "could serve a slot" is the whole
+    # inventory — a dozen round trips one after another is the dialog's opening delay.
+    fetched = await asyncio.gather(
+        *(client.spool_filament_presets(spool_id) for spool_id in wanted)
+    )
+    presets_by_spool = dict(zip(wanted, fetched, strict=True))
 
     return build_options(
         library_file_id=library_file_id,

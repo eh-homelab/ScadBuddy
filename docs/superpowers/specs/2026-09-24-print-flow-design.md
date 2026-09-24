@@ -143,6 +143,16 @@ a `PrintProgress`:
   `/slicer-pipelines/{id}/runs` is a list and is not needed). Reports `status`,
   `copies_completed` / `_failed`, `error_message`, and `jobs[]` with
   `assigned_printer_name`, `queue_entry_id`, `status`, `error_message`.
+
+  **`status` and the copy counters both lie on a failed run**, so `completed_at` is
+  what settles the poll. A real run recorded on 2026-09-24
+  (`recordings/pipeline-run.json`) reports `status: "in_progress"` and
+  `copies_in_progress: 1` while also carrying `completed_at` and
+  `error_message: "Slice failed: …"`; neither the status nor the counters ever move.
+  The fix is likewise chosen by *where* it failed — `slice_job_id` set with
+  `sliced_library_file_id` still null is the slicer's refusal, a failed copy with a
+  `queue_entry_id` was refused at the queue, one without never matched a printer — so
+  none of it depends on parsing Bambuddy's wording.
 - `route="slice_queue"` → `GET /slice-jobs/{id}` until finished, then
   `GET /queue/{item_id}` for `status`, `waiting_reason`, `error_message`.
 
@@ -160,7 +170,14 @@ plus `GET /library/folders/by-project/{id}`. The picker's project choice replace
 `settings.library_folder_id` for that send, so the 3MF uploads into the project's
 folder; afterwards the produced archives go to `POST /projects/{id}/add-archives` and
 the queue entries to `POST /projects/{id}/add-queue`. On the queue route `project_id`
-also rides on the queue item itself.
+also rides on the queue item itself, so there is no window in which the entry exists
+unfiled.
+
+Attaching is a **separate call**, not part of the run: a pipeline run's
+`jobs[].queue_entry_id` is null when the 202 returns, and an archive only exists once a
+print has finished. Attaching at run time would attach nothing on one route and half on
+the other, so `POST /print/outputs/{id}/project` is called once the ids are known and
+again when the archives appear.
 
 Scope: the project routes map to `Manage Projects`, which the current key may not
 carry — the settings page's connection test reports the missing scope by name rather
