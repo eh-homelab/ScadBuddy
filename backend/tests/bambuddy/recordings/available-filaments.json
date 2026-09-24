@@ -1,0 +1,51 @@
+[
+  {
+    "type": "PETG",
+    "color": "#0086D6FF",
+    "tray_info_idx": "GFG00",
+    "tray_sub_brands": "PETG Basic",
+    "extruder_id": null
+  },
+  {
+    "type": "PETG",
+    "color": "#688197FF",
+    "tray_info_idx": "GFG00",
+    "tray_sub_brands": "PETG Basic",
+    "extruder_id": null
+  },
+  {
+    "type": "PETG",
+    "color": "#00000000",
+    "tray_info_idx": "GFS05",
+    "tray_sub_brands": "",
+    "extruder_id": null
+  },
+  {
+    "type": "PLA",
+    "color": "#E3E5E5FF",
+    "tray_info_idx": "GFL99",
+    "tray_sub_brands": "",
+    "extruder_id": null
+  },
+  {
+    "type": "PLA",
+    "color": "#0047BBFF",
+    "tray_info_idx": "GFA05",
+    "tray_sub_brands": "PLA Silk",
+    "extruder_id": null
+  },
+  {
+    "type": "PLA",
+    "color": "#F5547CFF",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "PLA Basic",
+    "extruder_id": null
+  },
+  {
+    "type": "PLA",
+    "color": "#000000FF",
+    "tray_info_idx": "GFA00",
+    "tray_sub_brands": "",
+    "extruder_id": null
+  }
+]

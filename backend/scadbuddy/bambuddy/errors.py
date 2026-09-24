@@ -26,11 +26,21 @@ NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured
 
 
 class Scope(StrEnum):
-    """Bambuddy's API-key scopes, spelled as its own settings UI spells them."""
+    """Bambuddy's API-key scopes, spelled as its own settings UI spells them.
+
+    The authoritative list is ``APIKeyCreate``'s ``can_*`` flags in Bambuddy's
+    ``openapi.json`` — ``can_read_status``, ``can_manage_library``, ``can_queue``,
+    ``can_manage_projects`` are the four ScadBuddy needs. Which flag guards
+    ``/slicer-pipelines/`` could **not** be verified: the homelab instance runs with
+    authentication disabled, so every call succeeds whatever the key says. Those
+    methods declare ``MANAGE_QUEUE`` because running a pipeline queues prints; if a
+    key with that scope still 403s there, this is the line to correct.
+    """
 
     READ_STATUS = "Read Status"
     MANAGE_LIBRARY = "Manage Library"
     MANAGE_QUEUE = "Manage Queue"
+    MANAGE_PROJECTS = "Manage Projects"
 
 
 def not_configured(detail: str) -> ApiError:
