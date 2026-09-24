@@ -36,7 +36,7 @@ router = APIRouter(prefix="/print", tags=["print"])
 
 
 class EligibilityCheck(BaseModel):
-    """``pipeline_ids`` omitted means every pipeline Bambuddy has (freshness probe)."""
+    """``pipeline_ids`` omitted means every pipeline Bambuddy has."""
 
     pipeline_ids: list[int] | None = None
 
