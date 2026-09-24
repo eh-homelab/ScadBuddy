@@ -44,7 +44,7 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
-from scadbuddy.bambuddy.send import ensure_uploaded
+from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -364,7 +364,10 @@ async def check_pipelines(
     than the slowest one's. ``gather`` keeps the order of ``pipeline_ids``, and a failure
     in any one of them is raised as it would have been in a loop.
     """
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    # Eligibility is judged against one uploaded file, so it is placed for the plate
+    # this model would actually print on — the same choice Run will make.
+    plate = await target_plate(client, settings, meta.slug)
+    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
     if pipeline_ids is None:
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
@@ -397,7 +400,10 @@ async def run_for_output(
             "no slicer pipeline is set for this model and there is no default, "
             "so there is nothing to print with"
         )
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    # Placed for the pipeline being run, which ``request.pipeline_id`` may have
+    # overridden — not for whatever the settings would have defaulted to.
+    plate = await target_plate(client, settings, meta.slug, pipeline_id=pipeline_id)
+    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
     run = await client.run_pipeline(
         pipeline_id,
         PipelineRunRequest(

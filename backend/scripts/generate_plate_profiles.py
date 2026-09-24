@@ -142,10 +142,20 @@ def collect(root: Path) -> dict[str, tuple[Any, ...]]:
         model = resolved.get("printer_model")
         if not model:
             continue
+        exclusion = _polygon(resolved.get("bed_exclude_area"))
+        if len(exclusion) not in (0, 4):
+            # The table holds one polygon per model and the writer reduces it to a
+            # bounding rectangle, so several cutouts concatenated into one list would
+            # silently become one oversized rectangle spanning the gap between them.
+            # Every BBL profile has a single rectangle today; fail loudly if that ends.
+            raise SystemExit(
+                f"{model}: bed_exclude_area has {len(exclusion)} points, which is not one "
+                "rectangle; the table's single-polygon shape no longer holds"
+            )
         entry = (
             _polygon(resolved.get("printable_area")),
             tuple(_polygon([one]) for one in resolved.get("extruder_printable_area") or []),
-            _polygon(resolved.get("bed_exclude_area")),
+            exclusion,
             float(resolved.get("printable_height") or 0.0),
         )
         previous = table.setdefault(model, entry)

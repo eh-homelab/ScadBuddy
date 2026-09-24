@@ -40,6 +40,11 @@ class OutputMeta(BaseModel):
     # Bambuddy ids, filled in by POST /outputs/{id}/send. Integers, matching
     # Bambuddy's own OpenAPI.
     library_file_id: int | None = None
+    #: Which plate ``library_file_id`` was laid out for (:attr:`PlateGeometry.key`).
+    #: The 3MF on disk is placed for the fallback plate, and the send re-places it
+    #: for the printer in play, so a cached id is only reusable while the target
+    #: has not changed. ``None`` on records written before #105.
+    library_file_plate: str | None = None
     pipeline_run_id: int | None = None
     queue_item_id: int | None = None
 
@@ -112,6 +117,7 @@ class OutputStore:
         output_id: str,
         *,
         library_file_id: int | None = None,
+        library_file_plate: str | None = None,
         pipeline_run_id: int | None = None,
         queue_item_id: int | None = None,
     ) -> OutputMeta:
@@ -123,11 +129,26 @@ class OutputStore:
                 key: value
                 for key, value in (
                     ("library_file_id", library_file_id),
+                    ("library_file_plate", library_file_plate),
                     ("pipeline_run_id", pipeline_run_id),
                     ("queue_item_id", queue_item_id),
                 )
                 if value is not None
             }
+        )
+        self._write_meta(directory, updated)
+        return updated
+
+    def forget_library_file(self, output_id: str) -> OutputMeta:
+        """Drop the recorded library file id, for when the file is about to go away.
+
+        ``record_send`` leaves omitted ids alone by design, so it cannot clear one.
+        Clearing it *before* the delete is what keeps a failed re-send from leaving a
+        pointer to a file that is no longer in Bambuddy.
+        """
+        directory = self._find_dir(output_id)
+        updated = self.get(output_id).model_copy(
+            update={"library_file_id": None, "library_file_plate": None}
         )
         self._write_meta(directory, updated)
         return updated

@@ -5,7 +5,9 @@ import pytest
 
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
+    PRIME_TOWER_BRIM,
     PRIME_TOWER_SIDE,
+    TOWER_CLEARANCE,
     PlateFitError,
     place_on_plate,
     plate_for,
@@ -115,9 +117,38 @@ class TestPlacement:
         assert not (x < cutout.max_x and y < cutout.max_y)
 
     def test_a_large_object_moves_over_to_leave_the_tower_room(self) -> None:
+        # 280 x 180 leaves 140 mm of depth free, more than the tower's 60 + brim +
+        # clearance, so the object gives up the centre and the tower takes the strip.
         plate = plate_for("H2C")
         placement = place_on_plate(_bounds(280.0, 180.0), plate)
-        assert placement.offset[1] != plate.usable.centre[1]
+        assert placement.tower is not None
+        centre_y = placement.offset[1] + 90.0
+        assert centre_y > plate.usable.centre[1], "the object should have moved off centre"
+        tower_top = placement.tower[1] + PRIME_TOWER_BRIM + PRIME_TOWER_SIDE
+        assert placement.offset[1] - tower_top >= TOWER_CLEARANCE
+
+    @pytest.mark.parametrize("depth", [46.0, 140.0, 170.0, 180.0, 190.0, 230.0])
+    def test_the_tower_always_keeps_its_clearance_from_the_object(self, depth: float) -> None:
+        # Whether the object keeps the centre or gives it up, the gap the constant
+        # promises has to hold. The unmoved path used to skip the check: a 280 x 180
+        # model on an H2C sat 2 mm from its tower and nothing failed.
+        plate = plate_for("H2C")
+        placement = place_on_plate(_bounds(280.0, depth), plate)
+        assert placement.tower is not None
+        corner = (
+            placement.tower[0] - PRIME_TOWER_BRIM,
+            placement.tower[1] - PRIME_TOWER_BRIM,
+        )
+        # ``tower`` names the tower itself; the brim sits outside it on every side,
+        # so the footprint that has to stay clear is wider than PRIME_TOWER_SIDE.
+        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        gaps = [
+            placement.offset[1] - (corner[1] + reserved),
+            corner[1] - (placement.offset[1] + depth),
+            placement.offset[0] - (corner[0] + reserved),
+            corner[0] - (placement.offset[0] + 280.0),
+        ]
+        assert max(gaps) >= TOWER_CLEARANCE, f"tower is too close to the object: {gaps}"
 
     def test_an_object_wider_than_the_plate_is_refused_naming_the_axis(self) -> None:
         with pytest.raises(PlateFitError, match=r"340.*on X.*300"):

@@ -94,6 +94,11 @@ class PlateGeometry:
     exclusions: tuple[Rect, ...]
     extruders: int
 
+    @property
+    def key(self) -> str:
+        """Stable identity for "was the sent file laid out for this plate?"."""
+        return self.model or "default"
+
 
 @dataclass(frozen=True)
 class Placement:
@@ -200,7 +205,13 @@ def _tower_sides(area: Rect, tower: float) -> list[tuple[str, Rect, Rect]]:
 def _tower_corner(
     side: str, strip: Rect, object_rect: Rect, plate: PlateGeometry, tower: float
 ) -> tuple[float, float] | None:
-    """Centre the tower in ``strip`` on the object's cross axis, then check it."""
+    """Centre the tower in ``strip`` on the object's cross axis, then check it.
+
+    ``object_rect`` is grown by :data:`TOWER_CLEARANCE` before the overlap test, so
+    the gap the constant promises holds on this path too and not only where a strip
+    was reserved. Without that a tower could end up flush against the object — 2 mm
+    away for a 280x180 model on an H2C — while every assertion still passed.
+    """
     if side in ("front", "back"):
         x = object_rect.centre[0] - tower / 2
         x = min(max(x, strip.min_x), strip.max_x - tower)
@@ -210,7 +221,13 @@ def _tower_corner(
         y = object_rect.centre[1] - tower / 2
         y = min(max(y, strip.min_y), strip.max_y - tower)
     footprint = Rect(x, y, x + tower, y + tower)
-    if footprint.overlaps(object_rect):
+    keep_clear = Rect(
+        object_rect.min_x - TOWER_CLEARANCE,
+        object_rect.min_y - TOWER_CLEARANCE,
+        object_rect.max_x + TOWER_CLEARANCE,
+        object_rect.max_y + TOWER_CLEARANCE,
+    )
+    if footprint.overlaps(keep_clear):
         return None
     if any(footprint.overlaps(cutout) for cutout in plate.exclusions):
         return None
@@ -306,9 +323,10 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
         if corner is not None:
             return Placement(offset=_offset(remainder.centre), tower=corner)
 
+    reach = f"reachable by all {plate.extruders} extruders" if plate.extruders > 1 else "printable"
     raise PlateFitError(
         f"the model is {width:.1f} x {depth:.1f} mm, which leaves no room for the "
         f"{PRIME_TOWER_SIDE:.0f} mm prime tower a multi-colour print needs on "
         f"{plate.model or 'the default plate'} "
-        f"({area.width:.0f} x {area.depth:.0f} mm reachable by every extruder)"
+        f"({area.width:.0f} x {area.depth:.0f} mm {reach})"
     )

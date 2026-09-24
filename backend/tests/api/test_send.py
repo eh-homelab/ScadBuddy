@@ -500,3 +500,56 @@ def _uploaded_3mf(route: respx.Route) -> bytes:
         if b'name="file"' in head:
             return body.rsplit(b"\r\n", 1)[0]
     raise AssertionError("the upload carried no file part")
+
+
+@respx.mock
+def test_a_refused_re_send_leaves_the_previous_file_in_place(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The fit check runs before the delete, so a refusal costs nothing.
+
+    Deleting first would strand ``library_file_id`` pointing at a file that is no
+    longer in Bambuddy: the button would report 409 and the deep link would 404.
+    """
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(200, json={"pipelines": []})
+    )
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 1, "name": "big", "model": "H2C", "is_active": True, "nozzle_count": 2},
+                {
+                    "id": 2,
+                    "name": "small",
+                    "model": "A1 mini",
+                    "is_active": True,
+                    "nozzle_count": 1,
+                },
+            ],
+        )
+    )
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    assert (
+        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
+            "library_file_id"
+        ]
+        == 41
+    )
+
+    delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    # Same output, but now aimed at a printer it cannot possibly fit on.
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
+        paths.output_dir(model, output_id) / "model.3mf",
+        model_name=model,
+    )
+    configure(client, printer_id=2)
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.status_code == 409
+    assert not delete.called, "the old file was removed before the refusal"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41

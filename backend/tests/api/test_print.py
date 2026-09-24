@@ -505,6 +505,9 @@ def test_run_uses_the_named_pipeline_with_copies_and_records_the_run(
     client: TestClient, model: str
 ) -> None:
     configure(client)
+    # The run reads these to lay the 3MF out for the pipeline's printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
@@ -584,6 +587,8 @@ def test_a_blocking_issue_surfaces_bambuddys_report_and_force_overrides_it(
     client: TestClient, model: str
 ) -> None:
     configure(client)
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     blocked = report(
@@ -641,6 +646,8 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
 ) -> None:
     """Printing straight from the picker, without pressing Send first."""
     configure(client)
+    pipelines_route()
+    printers_route()
     job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}).json()[
         "job_id"
     ]
@@ -655,3 +662,90 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
 
     assert upload.called
     assert body["library_file_id"] == 41
+
+
+def _two_pipelines() -> dict[str, Any]:
+    """Pipeline 1 aims at an H2C, pipeline 2 at a P1S — two different plates."""
+    base = recording("slicer-pipelines-configured.json")["pipelines"][0]
+    return {
+        "pipelines": [
+            {
+                **base,
+                "id": 1,
+                "target_kind": "printer_class",
+                "target_printer_id": None,
+                "target_model_class": "H2C",
+            },
+            {
+                **base,
+                "id": 2,
+                "target_kind": "printer_class",
+                "target_printer_id": None,
+                "target_model_class": "P1S",
+            },
+        ]
+    }
+
+
+@respx.mock
+def test_changing_the_target_printer_re_uploads_instead_of_reusing_the_old_placement(
+    client: TestClient, model: str
+) -> None:
+    """A recorded library file id is only good while the plate it was placed for holds.
+
+    The 3MF is centred on the target printer's reachable area and carries that
+    printer's prime-tower position (#105), so reusing it after the pipeline changed
+    would hand Bambuddy a file laid out for the previous machine.
+    """
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    # Re-placing means replacing: the previous file is deleted, not duplicated.
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    for pipeline_id in (1, 2):
+        respx.post(f"{API}/slicer-pipelines/{pipeline_id}/check-eligibility").mock(
+            return_value=httpx.Response(200, json=report())
+        )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+    assert upload.call_count == 1
+
+    # Same output, same 3MF on disk — but now heading for a different printer.
+    configure(client, pipeline_id=2)
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+
+    assert upload.call_count == 2, "the file was reused although the plate changed"
+
+    # And back to the first: still re-placed, never reused across a change.
+    configure(client, pipeline_id=1)
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+    assert upload.call_count == 3
+
+
+@respx.mock
+def test_running_a_pipeline_lays_the_file_out_for_that_pipeline_not_the_default(
+    client: TestClient, model: str
+) -> None:
+    """``pipeline_id`` in the run request overrides the model's default (#86), so the
+    plate has to follow the pipeline being run rather than the one settings would pick."""
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+    respx.post(f"{API}/slicer-pipelines/2/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    assert upload.call_count == 1
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 2})
+
+    assert upload.call_count == 2, "the P1S run reused a file laid out for the H2C"
