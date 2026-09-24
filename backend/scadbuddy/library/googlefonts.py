@@ -97,8 +97,8 @@ class CatalogueFont(BaseModel):
 
 class FontFile(BaseModel):
     variant: FontVariant
-    """Google's own filename, kept verbatim: it is what the family ships as."""
     filename: str
+    """Google's own filename, kept verbatim: it is what the family ships as."""
     url: str
 
 
