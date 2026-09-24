@@ -183,6 +183,14 @@ jobs:
           fail-on-error: true
           flags: -ignore create-github-app-token
 
+      # `.github/scripts/fonts-probe.sh` decides whether the image job's
+      # install-on-demand e2e test runs at all, and a wrong verdict there is
+      # invisible — it skips a test and stays green. Its branches are covered
+      # by a stub-driven suite that needs neither docker nor the network, so it
+      # belongs in this job rather than behind the image build.
+      - name: fonts-probe unit tests
+        run: .github/scripts/fonts-probe.test.sh
+
       # The config lives in .hadolint.yaml so the same rules apply to a local
       # `hadolint Dockerfile` as to this job.
       - name: hadolint
@@ -445,129 +453,27 @@ jobs:
 
       # The install-on-demand test is the only thing in this repo that depends
       # on a service outside it, and `CI Summary` — the one required check —
-      # asserts this job. Left unguarded that makes a Google-side outage or a
-      # rate-limited raw.githubusercontent.com a hard red on somebody else's
-      # unrelated PR, and it contradicts the design's own position that a 503
-      # from the catalogue is a SUPPORTED state (§5.4: the picker says so and
-      # falls back to what `fc-list` reports) rather than an error. A fresh
-      # container has no Pacifico for that fallback to offer, so an outage does
-      # not make the test skip — the row simply never appears and it times out
-      # 60s later, naming the wrong culprit.
+      # asserts this job. Left unguarded that makes a Google-side outage a hard
+      # red on somebody else's unrelated PR, and it contradicts the design's own
+      # position that a 503 from the catalogue is a SUPPORTED state (§5.4)
+      # rather than an error. A fresh container has no Pacifico for that
+      # fallback to offer, so an outage does not make the test skip — the row
+      # simply never appears and it times out 60s later, naming the wrong
+      # culprit.
       #
-      # So the state is DETECTED rather than left to a human to spot from the
-      # failure pattern. Both probes run `docker exec`, inside the container,
-      # because the container's egress is what the test actually needs — the
-      # runner's own connectivity is a proxy for it and can differ. They cover
-      # the two different hosts the feature uses, which fail independently: the
-      # keyless catalogue (fonts.google.com, no API key — the backend answers
-      # 503 when it cannot reach it, which is what `--fail` sees) and the TTF
-      # download (raw.githubusercontent.com).
-      #
-      # The second probe names NO path inside google/fonts, deliberately. Which
-      # licence directory holds a family is the application's business —
-      # `googlefonts.py`'s `LICENCE_DIRECTORIES` probes `ofl`, `apache` and
-      # `ufl` in turn precisely because neither catalogue says — so hardcoding
-      # `ofl/pacifico` here would be a second, silent copy of that layout: the
-      # day upstream relicenses the family, the real install would still work
-      # while this step called the host unreachable and skipped the test. So
-      # the probe asks only whether the host ANSWERS: any HTTP status is a
-      # working path (the bare host 301s, and a 404 would prove the same
-      # thing), while `000` or a 5xx is the outage this guard exists for. If
-      # the host answers and the app still cannot find the family, the test
-      # runs and reds — which is the right way round.
-      #
-      # REACHABILITY decides `offline`, and CONTENT deliberately does not. An
-      # earlier version of this step folded the two together by grepping the
-      # body for the family, which turned "the catalogue no longer names
-      # Pacifico" — an upstream removal, or a regression in this repo's own
-      # `get_catalogue` filtering — into a skip that printed "unreachable", a
-      # lie, and suppressed the one test that would have caught it. That is the
-      # vacuous green this PR exists to remove, and it was worse than the
-      # original problem because it arrived wearing a warning that said
-      # something else. The body is still inspected, but only to ANNOUNCE that
-      # the test is about to fail for that reason, never to skip it.
-      #
-      # The budget is READ OUT of the backend rather than written here, and it
-      # sums BOTH of the timeouts the route can spend — the httpx request and
-      # the `fc-list` subprocess — so the two cannot drift from a number of
-      # this file's own choosing. The fallback only applies if that read itself
-      # fails, which it cannot do silently: the step says so.
-      #
-      # This fails OPEN by construction — an unreachable dependency skips one
-      # test rather than reding the gate — so it is written to be impossible to
-      # mistake for a pass: the skip is a `::warning::` in the log and the run
-      # summary, and it cannot mask a product bug, because if the hosts answer
-      # the test runs and any failure is real.
+      # The decision lives in `.github/scripts/fonts-probe.sh` rather than in
+      # this file, because it turned out to be the subtle half of this change —
+      # only an unreachable DEPENDENCY may skip, everything this application
+      # does wrong must red — and a `run:` block cannot be tested. The script
+      # explains its own rules, and `fonts-probe.test.sh` (in the `lint` job)
+      # drives all thirteen of its branches through a stub, including the ones
+      # a healthy CI run never reaches.
       - name: Probe the Google Fonts path from inside the container
         id: fonts-probe
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
-        run: |
-          set -euo pipefail
-          offline=
-
-          # Headroom over what the endpoint can legitimately spend, read out of
-          # the container rather than written here: ONE httpx request bounded by
-          # `googlefonts.DEFAULT_TIMEOUT`, plus the `fc-list` subprocess bounded
-          # by `fonts.FC_TIMEOUT` that the same route runs through
-          # `asyncio.to_thread`. Summing both is the honest worst case; budgeting
-          # for the first alone turned a slow-but-working stack into "offline".
-          # `|| true` so a failed read cannot abort the step before the fallback
-          # below can say so.
-          budget="$(docker exec scadbuddy-ci python -c \
-            'from scadbuddy.library.fonts import FC_TIMEOUT; from scadbuddy.library.googlefonts import DEFAULT_TIMEOUT; print(int(DEFAULT_TIMEOUT) + int(FC_TIMEOUT) + 10)' \
-            2>/dev/null || true)"
-          case "$budget" in
-            ''|*[!0-9]*)
-              budget=70
-              echo "::warning::Could not read the backend's own timeouts out of the container; the reachability probes are using ${budget}s. If either has been raised past that, a slow network can now read as an outage here."
-              ;;
-          esac
-          echo "probe budget: ${budget}s (googlefonts.DEFAULT_TIMEOUT + fonts.FC_TIMEOUT + 10)"
-
-          # The STATUS decides, not `--fail`. `--fail` collapses every non-2xx
-          # into one outcome, and this route has two very different ones: it maps
-          # an unreachable upstream to 503 and lets everything else reach the
-          # catch-all as a 500 — a schema drift in Google's undocumented metadata
-          # payload, or a cache write error, are 500s. Reading a 500 as "offline"
-          # would skip the acceptance test precisely when this app has broken.
-          # So 503 (and a transport failure, which curl reports as 000) is the
-          # outage; any other status falls through and the test runs.
-          answer="$(docker exec scadbuddy-ci curl --silent --show-error --max-time "$budget" \
-                      -w '%{http_code}' \
-                      'http://127.0.0.1:8080/api/v1/fonts/catalogue?q=Pacifico&limit=1' || true)"
-          status="${answer: -3}"
-          body="${answer%???}"
-          case "$status" in
-            ''|*[!0-9]*) status=000 ;;
-          esac
-
-          if [ "$status" = 000 ] || [ "$status" = 503 ]; then
-            offline=1
-            echo "::warning::The Google Fonts catalogue is unreachable from the container (status ${status}; 503 is the route's own mapping for an unreachable upstream), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
-          else
-            # Reachability only, and no path inside google/fonts: which licence
-            # directory holds a family is the application's business (it probes
-            # ofl, apache and ufl in turn), so naming one here would make an
-            # upstream relicence look like an outage. Any HTTP answer is a
-            # working path — the bare host 301s; 000 or a 5xx is the outage.
-            download="$(docker exec scadbuddy-ci curl --silent --show-error --max-time "$budget" \
-                          -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/ || true)"
-            case "$download" in
-              ''|*[!0-9]*) download=000 ;;
-            esac
-
-            if [ "$download" = 000 ] || [ "$download" -ge 500 ]; then
-              offline=1
-              echo "::warning::raw.githubusercontent.com, where the font files are downloaded from, did not answer from the container (status ${download}), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue answered, so this is the download host alone."
-            elif [ "$status" != 200 ]; then
-              # Both hosts are fine and our own route still failed. `offline`
-              # stays empty on purpose: the test runs and reds.
-              echo "::warning::The catalogue route answered ${status} while both upstreams are reachable, so this is ScadBuddy failing rather than an outage. NOT a skip: the install-on-demand test will RUN and is expected to fail."
-            elif ! printf '%s' "$body" | grep -q '"family":"Pacifico"'; then
-              echo "::warning::The catalogue answered but does not name Pacifico. This is NOT an outage, so the install-on-demand test will RUN and is expected to fail on its missing row — an upstream removal or a regression in this repo's catalogue search is a red, not a skip."
-            fi
-          fi
-          echo "offline=${offline}" | tee -a "$GITHUB_OUTPUT"
+        env:
+          CONTAINER: scadbuddy-ci
+        run: .github/scripts/fonts-probe.sh
 
       # No webServer: `E2E_BASE_URL` makes playwright.config.ts use the URL
       # as-is, so this drives the container published on 18080 above — its own
