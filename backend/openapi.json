@@ -735,6 +735,7 @@
         "type": "object"
       },
       "Folder": {
+        "description": "A row of ``GET /api/v1/library/folders``.\n\n**The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their\nparent's ``children`` rather than returning them alongside it, so a folder linked to\na project is invisible to a scan of the top level if it happens to live under\nanother folder. :func:`walk` is what flattens it.",
         "properties": {
           "archive_id": {
             "anyOf": [
@@ -746,6 +747,13 @@
               }
             ],
             "title": "Archive Id"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/Folder"
+            },
+            "title": "Children",
+            "type": "array"
           },
           "file_count": {
             "anyOf": [
