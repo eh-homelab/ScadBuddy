@@ -45,10 +45,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      tags: ${{ steps.meta.outputs.tags }}
-      version: ${{ steps.label.outputs.version }}
+    # No job outputs on purpose: the only downstream consumer, deploy-main.yml,
+    # is triggered by `workflow_run`, which cannot read another run's outputs.
+    # It re-derives `sha-<short>` from the run's head_sha under the 7-character
+    # contract pinned and asserted below, and reads the digest off GHCR.
     steps:
       - uses: actions/checkout@v7
         with:
