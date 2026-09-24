@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import struct
 import subprocess
 import zipfile
+import zlib
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pytest
 
 from scadbuddy.core.config import load_config
@@ -81,3 +84,42 @@ def write_openscad_3mf(
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("3D/3dmodel.model", model)
     return path
+
+
+def read_png(data: bytes) -> np.ndarray:
+    """Decode an 8-bit RGBA PNG to an HxWx4 array.
+
+    Only what `scadbuddy.render.thumbnail.encode_png` emits: colour type 6, bit
+    depth 8, no interlacing, filter type 0 on every row. Anything else raises, so
+    a reader that silently coped with a malformed image cannot make a test pass.
+    """
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError("not a PNG")
+    chunks: dict[bytes, bytes] = {}
+    idat = b""
+    offset = 8
+    while offset < len(data):
+        (length,) = struct.unpack(">I", data[offset : offset + 4])
+        kind = data[offset + 4 : offset + 8]
+        payload = data[offset + 8 : offset + 8 + length]
+        (checksum,) = struct.unpack(">I", data[offset + 8 + length : offset + 12 + length])
+        if zlib.crc32(kind + payload) != checksum:
+            raise ValueError(f"bad CRC on {kind!r}")
+        if kind == b"IDAT":
+            idat += payload
+        else:
+            chunks[kind] = payload
+        offset += 12 + length
+    width, height, depth, colour, compression, filtering, interlace = struct.unpack(
+        ">IIBBBBB", chunks[b"IHDR"]
+    )
+    if (depth, colour, compression, filtering, interlace) != (8, 6, 0, 0, 0):
+        raise ValueError("expected an uninterlaced 8-bit RGBA PNG")
+    stride = width * 4
+    raw = zlib.decompress(idat)
+    if len(raw) != height * (stride + 1):
+        raise ValueError("truncated image data")
+    rows = np.frombuffer(raw, dtype=np.uint8).reshape(height, stride + 1)
+    if rows[:, 0].any():
+        raise ValueError("expected filter type 0 on every row")
+    return rows[:, 1:].reshape(height, width, 4)

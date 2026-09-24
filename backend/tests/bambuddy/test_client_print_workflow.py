@@ -555,6 +555,27 @@ def test_a_bool_is_not_a_calibration_mode(bad: object) -> None:
         QueueItemCreate(printer_id=1, bed_levelling=bad)  # type: ignore[arg-type]
 
 
+# --- #88: reading one pipeline -------------------------------------------------------
+
+
+@respx.mock
+async def test_reading_one_pipeline_returns_its_presets_and_target(
+    bambuddy: BambuddyClient,
+) -> None:
+    """A send carrying print options slices with these rather than running the pipeline."""
+    respx.get(f"{API}/slicer-pipelines/1").mock(
+        return_value=httpx.Response(200, json=recording("slicer-pipeline.json"))
+    )
+
+    pipeline = await bambuddy.pipeline(1)
+
+    assert pipeline.id == 1
+    assert pipeline.printer_preset == PresetRef(source="cloud", id="GM041")
+    assert pipeline.bed_type == "Textured PEI Plate"
+    assert pipeline.target_kind == "specific_printer"
+    assert pipeline.target_printer_id == 1
+
+
 # --- scopes ------------------------------------------------------------------------
 
 
@@ -601,6 +622,7 @@ def test_a_bool_is_not_a_calibration_mode(bad: object) -> None:
             "post",
             Scope.MANAGE_PROJECTS,
         ),
+        (lambda c: c.pipeline(1), "/slicer-pipelines/1", "get", Scope.MANAGE_QUEUE),
         (
             lambda c: c.check_eligibility(1, EligibilityRequest(source_archive_id=1)),
             "/slicer-pipelines/1/check-eligibility",

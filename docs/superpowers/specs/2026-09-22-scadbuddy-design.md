@@ -323,11 +323,51 @@ Output mirrors the structure of the known-good MakerWorld file:
   and nothing else printer-specific — the slicer pipeline supplies printer,
   process and filament presets, so we deliberately do not embed
   `use_embedded_settings`-style presets.
+- `Metadata/plate_1.png` (512x512) and `Metadata/plate_1_small.png` (128x128),
+  plus `Metadata/top_1.png` and `Metadata/pick_1.png` — the plate cover images,
+  named and sized exactly as Bambu Studio writes them (`bbs_3mf.hpp`). They are
+  declared three ways, because three different readers look in three different
+  places: a `png` Default in `[Content_Types].xml`; the `metadata/thumbnail`,
+  `cover-thumbnail-middle` and `cover-thumbnail-small` relationships in
+  `_rels/.rels`; and `thumbnail_file` / `top_file` / `pick_file` on the `<plate>`
+  in `model_settings.config`. `Metadata/plate_1.png` is the load-bearing one:
+  Bambuddy's `ThreeMFParser._extract_thumbnail` tries it first on an unsliced
+  upload and it becomes the library file's `thumbnail_path`. Rendered by
+  `render/thumbnail.py` — see §6.2.1.
 - `Metadata/slice_info.config` is **not** written (unsliced project).
 
 Acceptance: the file opens in Bambu Studio as N parts with N filaments
 assigned, and Bambuddy's `/library/files/{id}/slice` slices it with a
 `filament_presets` list of length N without a colour/extruder warning.
+
+### 6.2.1 Plate cover images
+
+Bambuddy's viewer hard-codes `filament_colors: []` for every LIBRARY file (only
+archives fetch real colours), so an unsliced 3MF's 3D preview is single-colour
+there no matter what the file says — including Bambu Studio's own. The cover
+image is what carries the real colours onto the library card, and it is also
+what the printer and the handheld app show. See issue #104.
+
+The renderer is a hand-written rasteriser over numpy, deliberately: `pyrender`
+needs OSMesa or EGL and a `libGL` the OpenSCAD base image does not ship,
+OpenSCAD's own `--render` PNG export needs an offscreen GL context a headless
+container has no display for, and matplotlib — what Bambuddy itself uses
+server-side — is a 40 MB dependency for one 512x512 image. A z-buffer, a dot
+product and a PNG writer are the whole requirement, and numpy plus stdlib
+`zlib` already carry all three. The output is then a pure function of the mesh,
+with no driver or GL implementation in it.
+
+It runs off the event loop and under the same `SCADBUDDY_RENDER_TIMEOUT` budget
+as a render (`render.jobs.plate_thumbnails`). §6.1's guarantee is that a job is
+time-bounded, and until now that was delivered by killing an `openscad` child;
+this step has no child to kill, and its cost rises with face count, so a mesh
+each OpenSCAD pass produced well inside its own budget could still rasterise for
+far longer than the whole job is meant to take. Blowing the budget costs the
+cover images, not the job: the 3MF is written without them, and the `png`
+content type, the three cover relationships and the plate's `thumbnail_file` /
+`top_file` / `pick_file` come out with them, so the package never carries a
+reference to an entry it does not hold. The job reports
+`plate thumbnail timed out; the 3MF carries no cover image` in `warnings`.
 
 ### 6.3 Closed parts: one solid render per colour
 
@@ -387,9 +427,13 @@ Flows (all server-side, so the browser never sees the API key):
    `use_ams: true`. The AMS mapping is left to Bambuddy's dispatch; the
    response's queue item id is stored so the UI can deep-link to it.
 3. **Register in the sidebar** — a one-shot `POST /api/v1/external-links/`
-   with `{name:"Customize", url:<scadbuddy url>, icon:"shapes",
+   with `{name:"ScadBuddy", url:<scadbuddy url>, icon:"shapes",
    open_in_new_tab:false}` from the settings page ("Add to Bambuddy sidebar"),
-   idempotent by name.
+   idempotent by name: an existing `"ScadBuddy"` link is PATCHed in place. A
+   link still named `"Customize"` (what earlier builds registered) is adopted
+   and renamed only when its URL matches the configured public URL, so
+   re-registering never leaves two sidebar entries and never touches an
+   unrelated `"Customize"` link.
 
 Colour → filament: the order of `color` parameters in the schema is the
 extruder order (extruder 1 = first colour parameter). Colours that appear in

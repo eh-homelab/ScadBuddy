@@ -4,6 +4,8 @@ import type {
   FilamentOptions,
   PipelineView,
   PresetChoice,
+  PrintOptions,
+  PrintOptionsState,
   BoundingBox,
   CatalogueFont,
   CustomizerSchema,
@@ -462,6 +464,31 @@ export const BED_TYPES = [
   'Textured PEI Plate',
   'Smooth PEI Plate',
 ]
+/** Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults, as the backend serves them. */
+export const printOptionDefaults: PrintOptions = {
+  bed_levelling: 'auto',
+  flow_cali: 'auto',
+  vibration_cali: true,
+  nozzle_offset_cali: 'auto',
+  layer_inspect: false,
+  timelapse: false,
+  use_ams: true,
+  quantity: 1,
+  manual_start: false,
+  insert_at_top: false,
+  auto_off_after: false,
+  project_id: null,
+  preheat_override: 'inherit',
+  preheat_chamber_target_override: null,
+}
+
+export const printOptions: PrintOptionsState = {
+  defaults: printOptionDefaults,
+  global_options: {},
+  printers: {},
+  models: {},
+  printer_id: 1,
+}
 
 export const targets: BambuddyTargets = {
   // `is_external`, `target_kind` and `fanout_strategy` carry defaults on the wire, so the

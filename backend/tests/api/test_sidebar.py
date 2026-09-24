@@ -17,7 +17,7 @@ PUBLIC = "https://scadbuddy.internal.example"
 
 LINK: dict[str, Any] = {
     "id": 3,
-    "name": "Customize",
+    "name": "ScadBuddy",
     "url": PUBLIC,
     "icon": "shapes",
     "open_in_new_tab": False,
@@ -52,7 +52,7 @@ def test_registering_creates_the_link_when_there_is_none(client: TestClient) -> 
     # Bambuddy renders an open_in_new_tab=false link in a sandboxed iframe here.
     assert body["embed_path"] == "/external/3"
     assert json.loads(create.calls.last.request.read()) == {
-        "name": "Customize",
+        "name": "ScadBuddy",
         "url": PUBLIC,
         "icon": "shapes",
         "open_in_new_tab": False,
@@ -76,6 +76,39 @@ def test_registering_again_patches_the_existing_link_by_name(client: TestClient)
     assert body["url"] == f"{PUBLIC}/moved"
     assert not create.called
     assert json.loads(patch.calls.last.request.read())["url"] == f"{PUBLIC}/moved"
+
+
+@respx.mock
+def test_a_legacy_customize_link_to_this_url_is_renamed_not_duplicated(
+    client: TestClient,
+) -> None:
+    configure(client)
+    respx.get(f"{API}/external-links/").mock(
+        return_value=httpx.Response(200, json=[{**LINK, "name": "Customize"}])
+    )
+    create = respx.post(f"{API}/external-links/")
+    patch = respx.patch(f"{API}/external-links/3").mock(return_value=httpx.Response(200, json=LINK))
+
+    body = client.post("/api/v1/settings/register-sidebar").json()
+
+    assert body["created"] is False
+    assert not create.called
+    assert json.loads(patch.calls.last.request.read())["name"] == "ScadBuddy"
+
+
+@respx.mock
+def test_a_customize_link_to_another_url_is_left_alone(client: TestClient) -> None:
+    configure(client)
+    respx.get(f"{API}/external-links/").mock(
+        return_value=httpx.Response(
+            200, json=[{**LINK, "id": 1, "name": "Customize", "url": "https://elsewhere.example"}]
+        )
+    )
+    respx.post(f"{API}/external-links/").mock(return_value=httpx.Response(200, json=LINK))
+    patch = respx.patch(f"{API}/external-links/1")
+
+    assert client.post("/api/v1/settings/register-sidebar").json()["created"] is True
+    assert not patch.called
 
 
 @respx.mock
