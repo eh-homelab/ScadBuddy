@@ -51,7 +51,10 @@ class JobResult(BaseModel):
     #: The model's sources as this render read them. Taken here rather than when the
     #: output is saved: Generate persists a render that already happened, and the
     #: files on the PVC can be edited in between.
-    source_version: str
+    #: Empty only on a job written before this field existed — job files outlive a
+    #: deploy on the PVC and the queue validates every one at startup, so a required
+    #: field here would turn an upgrade into a crash loop rather than one bad job.
+    source_version: str = ""
     parts: list[PartInfo]
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)

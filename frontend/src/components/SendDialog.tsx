@@ -46,8 +46,11 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   // disclosure's Quantity row showing a number that was no longer going to be sent.
   const [options, setOptions] = useState<PrintOptions>({})
   // Only to tell "no link was configured" apart from "Bambuddy refused the note":
-  // the send result reports an absent link the same way for both.
-  const publicUrl = useAsync(() => api.getSettings(), []).data?.public_url ?? null
+  // the send result reports an absent link the same way for both. Read each time the
+  // dialog opens, not once per mount — the dialog outlives every send on the page,
+  // and the setting can change between them.
+  const settings = useAsync(async () => (open ? await api.getSettings() : null), [open])
+  const publicUrl = settings.data?.public_url ?? null
   const [effective, setEffective] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)

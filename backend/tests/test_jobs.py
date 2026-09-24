@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -236,3 +237,18 @@ async def test_a_thumbnail_that_blows_its_budget_costs_the_cover_not_the_job() -
 
     assert rendered is None
     assert warnings == [THUMBNAIL_TIMEOUT_WARNING]
+
+
+def test_a_job_written_before_the_source_hash_existed_still_loads(paths: DataPaths) -> None:
+    """Job files outlive a deploy on the PVC, and the queue reads every one at startup —
+    a field the old writer never wrote must not turn an upgrade into a crash loop."""
+    store = JobStore(paths)
+    job = _job("old", state="done", result=_result())
+    store.write(job)
+    raw = json.loads(paths.job_file("old").read_text(encoding="utf-8"))
+    del raw["result"]["source_version"]
+    paths.job_file("old").write_text(json.dumps(raw), encoding="utf-8")
+
+    loaded = store.read("old")
+    assert loaded.result is not None
+    assert loaded.result.source_version == ""

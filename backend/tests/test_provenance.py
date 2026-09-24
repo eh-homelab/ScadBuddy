@@ -348,3 +348,15 @@ def test_a_failed_rewrite_leaves_the_original_3mf_alone(
 
     assert written.read_bytes() == original
     assert list(written.parent.iterdir()) == [written]
+
+
+def test_each_entry_keeps_the_compression_the_writer_chose(written: Path) -> None:
+    """#107 stores the cover PNGs uncompressed on purpose; re-deflating them undoes it."""
+    with zipfile.ZipFile(written) as archive:
+        before = {info.filename: info.compress_type for info in archive.infolist()}
+
+    stamp(written, PROVENANCE)
+
+    with zipfile.ZipFile(written) as archive:
+        after = {info.filename: info.compress_type for info in archive.infolist()}
+    assert after == before

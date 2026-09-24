@@ -125,15 +125,19 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
 def stamp(path: Path, provenance: Provenance) -> None:
     """Rewrite ``path`` with the provenance on its root model, leaving the rest alone."""
     with zipfile.ZipFile(path) as archive:
-        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+        entries = [
+            (info.filename, info.compress_type, archive.read(info.filename))
+            for info in archive.infolist()
+        ]
     rewritten = [
         (
             name,
+            compression,
             _stamped_root_model(payload.decode("utf-8"), provenance).encode("utf-8")
             if name == ROOT_MODEL
             else payload,
         )
-        for name, payload in entries
+        for name, compression, payload in entries
     ]
     # Written beside the original and moved over it, never truncated in place: the 3MF
     # is the deliverable, and a rewrite that dies halfway would otherwise leave a
@@ -141,9 +145,12 @@ def stamp(path: Path, provenance: Provenance) -> None:
     temporary = path.with_name(path.name + ".stamping")
     try:
         with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
-            for name, payload in rewritten:
+            for name, compression, payload in rewritten:
                 info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-                info.compress_type = zipfile.ZIP_DEFLATED
+                # Each entry is rewritten the way it was written: the 3MF writer stores
+                # the cover PNGs uncompressed on purpose (#107), and deflating already
+                # compressed image data here would spend CPU to no effect.
+                info.compress_type = compression
                 archive.writestr(info, payload)
         os.replace(temporary, path)
     finally:
