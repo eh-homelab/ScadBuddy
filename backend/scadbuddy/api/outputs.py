@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
@@ -45,6 +45,21 @@ class OutputDetail(OutputSummary):
 class CreateOutputRequest(BaseModel):
     job_id: str
     name: str | None = None
+
+
+class EditTarget(BaseModel):
+    """What ``/edit/{output_id}`` needs to reopen the customizer."""
+
+    output_id: str
+    slug: str
+    name: str | None
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    model_version: str | None = None
+    #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
+    source: Literal["record", "3mf"]
+
+    # "model_version" trips pydantic's reserved "model_" prefix; see OutputMeta.
+    model_config = ConfigDict(protected_namespaces=())
 
 
 def _detail(store: OutputStore, meta: OutputMeta) -> OutputDetail:
@@ -102,6 +117,45 @@ def list_outputs(
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
 def get_output(output_id: OutputIdPath, outputs: OutputsDep) -> OutputDetail:
     return _detail(outputs, require_output(outputs, output_id))
+
+
+@router.get(
+    "/outputs/{output_id}/edit",
+    response_model=EditTarget,
+    summary="Resolve an edit deep link",
+)
+def get_edit_target(output_id: OutputIdPath, outputs: OutputsDep) -> EditTarget:
+    """Where ``/edit/{output_id}`` should land, and with which values.
+
+    The record answers first. When it is gone — the directory restored without its
+    sidecars, or hand-pruned — the 3MF still carries the same provenance, so the
+    link keeps working from the file alone.
+    """
+    try:
+        meta = outputs.get(output_id)
+    except OutputNotFoundError:
+        stamped = outputs.provenance(output_id)
+        if stamped is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"no output with id {output_id!r}, and no 3MF left to read it from",
+            ) from None
+        return EditTarget(
+            output_id=output_id,
+            slug=stamped.model,
+            name=None,
+            params=stamped.params,
+            model_version=stamped.version,
+            source="3mf",
+        )
+    return EditTarget(
+        output_id=meta.id,
+        slug=meta.slug,
+        name=meta.name,
+        params=outputs.params(output_id),
+        model_version=meta.model_version,
+        source="record",
+    )
 
 
 @router.delete(

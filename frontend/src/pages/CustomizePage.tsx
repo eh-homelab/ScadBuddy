@@ -22,18 +22,25 @@ export function CustomizePage() {
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // Resolved through /edit, not the history list: that route falls back to the 3MF's
+  // own provenance when the output record is gone.
+  const reopenState = useAsync(
+    async () => (reopenId ? await api.getEditTarget(reopenId) : null),
+    [reopenId],
+  )
 
   const [values, setValues] = useState<ParamValues>({})
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
 
   const schema = schemaState.data
-  const reopened = reopenId ? outputsState.data?.find((o) => o.id === reopenId) : undefined
+  const reopened = reopenState.data ?? undefined
 
   useEffect(() => {
-    if (!schema) return
+    // Wait for the reopened values rather than rendering the defaults first.
+    if (!schema || reopenState.loading) return
     setValues(reopened ? { ...defaultValues(schema), ...reopened.params } : defaultValues(schema))
-  }, [schema, reopened])
+  }, [schema, reopened, reopenState.loading])
 
   const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
   const { job, rendering, error: renderError } = useRenderJob(slug, debounced)
@@ -85,7 +92,7 @@ export function CustomizePage() {
           <h1 className="truncate text-[13px] font-medium">{schema.title}</h1>
           {reopened && (
             <span className="sb-num shrink-0 text-[11px] text-faint">
-              reopened from {reopened.name ?? reopened.id.slice(0, 8)}
+              reopened from {reopened.name ?? reopened.output_id.slice(0, 8)}
             </span>
           )}
         </div>

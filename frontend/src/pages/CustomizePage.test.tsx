@@ -1,6 +1,8 @@
 import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
+import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
 
@@ -108,6 +110,27 @@ describe('CustomizePage', () => {
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
     )
     expect(screen.getByText('reopened from Nova')).toBeInTheDocument()
+  })
+
+  it('reopens from the 3MF alone when the output record is gone', async () => {
+    const id = 'd'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: null,
+          params: { name: 'Salvaged' },
+          model_version: `sha256:${'ab'.repeat(32)}`,
+          source: '3mf',
+        }),
+      ),
+    )
+    render(`/m/name-keychain?from=${id}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Salvaged'),
+    )
+    expect(screen.getByText(`reopened from ${id.slice(0, 8)}`)).toBeInTheDocument()
   })
 
   it('counts changes against the model defaults', async () => {

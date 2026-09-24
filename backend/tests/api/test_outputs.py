@@ -189,3 +189,52 @@ def test_the_stamp_leaves_out_a_link_when_no_public_url_is_set(
     stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
     assert stamped is not None
     assert stamped.edit_url is None
+
+
+# --- #80 the edit deep link ----------------------------------------------------------
+
+
+def test_the_edit_target_comes_from_the_record(client: TestClient, model: str) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model), "name": "Reagan"},
+    ).json()
+
+    body = client.get(f"/api/v1/outputs/{created['id']}/edit").json()
+    assert body == {
+        "output_id": created["id"],
+        "slug": model,
+        "name": "Reagan",
+        "params": {"width": 12},
+        "model_version": created["model_version"],
+        "source": "record",
+    }
+
+
+def test_the_edit_target_falls_back_to_the_3mf_when_the_record_is_gone(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs",
+        json={"job_id": _finished_job(client, model), "name": "Reagan"},
+    ).json()
+    directory = paths.output_dir(model, created["id"])
+    (directory / "meta.json").unlink()
+    (directory / "params.json").unlink()
+
+    assert client.get(f"/api/v1/outputs/{created['id']}").status_code == 404
+    body = client.get(f"/api/v1/outputs/{created['id']}/edit").json()
+    assert body == {
+        "output_id": created["id"],
+        "slug": model,
+        "name": None,
+        "params": {"width": 12},
+        "model_version": created["model_version"],
+        "source": "3mf",
+    }
+
+
+def test_an_edit_link_to_nothing_at_all_is_a_404(client: TestClient, model: str) -> None:
+    response = client.get(f"/api/v1/outputs/{'0' * 32}/edit")
+    assert response.status_code == 404
+    assert "0" * 32 in response.json()["detail"]
