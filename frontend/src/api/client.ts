@@ -131,8 +131,7 @@ export const api = {
    * Parse-only: runs OpenSCAD over the source and saves nothing. `slug` names the
    * model the source belongs to, so its `include` of a sibling file resolves against
    * that model's directory instead of an empty one.
-   */
-  /**
+   *
    * `signal` matters here: the server runs these checks under its own small
    * concurrency budget, so a superseded keystroke's check must be abandoned on the
    * wire rather than merely ignored on arrival — otherwise it holds a permit the
