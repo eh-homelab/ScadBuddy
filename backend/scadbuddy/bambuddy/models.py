@@ -565,6 +565,9 @@ class QueueItem(BambuddyModel):
     id: int
     printer_id: int | None = None
     printer_name: str | None = None
+    #: Filled in once the print has produced one; this is what a project's timeline and
+    #: BOM read, and it is why archives are attached after the print rather than at it.
+    archive_id: int | None = None
     library_file_id: int | None = None
     library_file_name: str | None = None
     position: int | None = None

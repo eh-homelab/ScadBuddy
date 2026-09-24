@@ -510,6 +510,17 @@ class BambuddyClient:
         )
         return [Project.model_validate(row) for row in self._rows(response, what=what)]
 
+    async def project(self, project_id: int) -> Project:
+        """``GET /api/v1/projects/{id}`` — the same model the list route returns, minus
+        the roll-up counters, which is why they default rather than being required."""
+        response = await self._send(
+            "GET",
+            f"/projects/{project_id}",
+            scope=Scope.MANAGE_PROJECTS,
+            what=f"read project {project_id}",
+        )
+        return Project.model_validate(response.json())
+
     async def create_project(self, project: ProjectCreate) -> Project:
         response = await self._send(
             "POST",

@@ -1,6 +1,34 @@
 {
   "components": {
     "schemas": {
+      "AttachResult": {
+        "description": "What was attached, so the UI can say so rather than claiming more than happened.",
+        "properties": {
+          "archive_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Archive Ids",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "title": "AttachResult",
+        "type": "object"
+      },
       "BambuddyTargets": {
         "description": "Everything the settings page needs to fill its pickers.",
         "properties": {
@@ -1235,6 +1263,48 @@
           }
         },
         "title": "ModelPatch",
+        "type": "object"
+      },
+      "ModelProject": {
+        "properties": {
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug"
+        ],
+        "title": "ModelProject",
+        "type": "object"
+      },
+      "ModelProjectPatch": {
+        "description": "``null`` clears this model's project. There is no global fallback.",
+        "properties": {
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          }
+        },
+        "title": "ModelProjectPatch",
         "type": "object"
       },
       "ModelRecord": {
@@ -2803,6 +2873,17 @@
               }
             ],
             "title": "Printer Id"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
           }
         },
         "title": "PrintRunRequest",
@@ -2814,6 +2895,17 @@
           "bambuddy_url": {
             "title": "Bambuddy Url",
             "type": "string"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
           },
           "library_file_id": {
             "title": "Library File Id",
@@ -2833,6 +2925,17 @@
               }
             ],
             "title": "Printer Id"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
           },
           "queue_item_ids": {
             "items": {
@@ -2942,6 +3045,217 @@
           "name"
         ],
         "title": "Printer",
+        "type": "object"
+      },
+      "ProjectAttach": {
+        "description": "Which of this output's queue entries to file under the project.\n\nThe ids come from the progress read (#89): a pipeline run's\n``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the\nonly one that knows them, and only once it has polled.",
+        "properties": {
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          }
+        },
+        "title": "ProjectAttach",
+        "type": "object"
+      },
+      "ProjectChoices": {
+        "properties": {
+          "model_project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Project Id"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectView"
+            },
+            "title": "Projects",
+            "type": "array"
+          }
+        },
+        "title": "ProjectChoices",
+        "type": "object"
+      },
+      "ProjectRequest": {
+        "description": "Create a project, or link an existing one.\n\n``project_id`` set means \"link that one\"; otherwise ``name`` is required and a new\nproject is created. Only the fields ScadBuddy has an opinion about are sent \u2014\n``ProjectCreate`` also carries ``target_count``, ``due_date``, ``budget`` and more,\nand inventing values for them would put numbers on Bambuddy's project page that\nnobody chose.",
+        "properties": {
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "ProjectRequest",
+        "type": "object"
+      },
+      "ProjectView": {
+        "description": "A Bambuddy project and the library folder sends to it land in.\n\n``folder_id`` is ``None`` for a project that has no folder yet \u2014 an existing\nBambuddy project made outside ScadBuddy usually does not, and linking one creates\nit rather than refusing.",
+        "properties": {
+          "archive_count": {
+            "default": 0,
+            "title": "Archive Count",
+            "type": "integer"
+          },
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "folder_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Name"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "queue_count": {
+            "default": 0,
+            "title": "Queue Count",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "title": "ProjectView",
         "type": "object"
       },
       "RenderAccepted": {
@@ -4648,6 +4962,61 @@
         ]
       }
     },
+    "/api/v1/print/models/{slug}/project": {
+      "put": {
+        "description": "ScadBuddy's own preference, stored per slug; needs no Bambuddy.",
+        "operationId": "put_model_project_api_v1_print_models__slug__project_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelProjectPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelProject"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remember this model's project",
+        "tags": [
+          "print"
+        ]
+      }
+    },
     "/api/v1/print/outputs/{output_id}/eligibility": {
       "post": {
         "description": "Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.\n\nBambuddy judges a *library file*, so there is no eligibility answer before an\nupload. The upload happens once per output: an output is immutable, so a recorded\n``library_file_id`` still describes this 3MF.\n\nEvery report comes back as Bambuddy sent it, including ``printer_reports`` \u2014 under\n``target_kind=\"printer_class\"`` that is where the per-printer reasons are, and the\ntop-level ``ok`` means only that *some* printer passes.",
@@ -4841,6 +5210,60 @@
         ]
       }
     },
+    "/api/v1/print/outputs/{output_id}/project": {
+      "post": {
+        "description": "``add-queue`` now, and ``add-archives`` for whatever the entries have produced.\n\nSeparate from the run because neither id exists when a print starts: a pipeline\nrun's queue entries are created by a background task, and an archive only exists\nonce a print has finished. Calling this again later is how the archives eventually\nland on the project's page, and attaching the same id twice is Bambuddy's to dedupe.",
+        "operationId": "post_attach_project_api_v1_print_outputs__output_id__project_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectAttach"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "File this output's queue entries under its project",
+        "tags": [
+          "print"
+        ]
+      }
+    },
     "/api/v1/print/outputs/{output_id}/run": {
       "post": {
         "description": "``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit\n``force``.\n\nWithout ``pipeline_id`` the model's own default is used, then the global one. A\nblocking eligibility issue is Bambuddy's 409, whose body this passes through as the\n``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records\n``eligibility_overridden``.\n\nThere is deliberately no printer here. ``PipelineRunRequest`` carries none, so a\nclass-targeted pipeline fans out by its own ``fanout_strategy`` and reports the\nprinter per copy in ``run.jobs[]``.",
@@ -5004,6 +5427,96 @@
           }
         },
         "summary": "Presets a new pipeline can be built from",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/projects": {
+      "get": {
+        "description": "Every Bambuddy project, with the library folder that belongs to it (#79).\n\n``slug`` names a model, and reports which project that model's sends are filed\nunder \u2014 a per-model memory in the same shape as its default pipeline (#86).",
+        "operationId": "get_projects_api_v1_print_projects_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectChoices"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Bambuddy's projects",
+        "tags": [
+          "print"
+        ]
+      },
+      "post": {
+        "description": "``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with\n``project_id``, which is the pairing Bambuddy's own UI makes.\n\nWith ``project_id`` an existing project is linked instead of created, and its folder\nis left alone if it already has one \u2014 linking twice must not leave Bambuddy with two\nfolders of the same name.",
+        "operationId": "post_project_api_v1_print_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create or link a project",
         "tags": [
           "print"
         ]

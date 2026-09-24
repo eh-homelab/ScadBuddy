@@ -70,6 +70,7 @@ async def slice_and_queue(
     filaments: QueueFilaments | None = None,
     plate_id: int = 1,
     copies: int = 1,
+    project_id: int | None = None,
 ) -> QueueOutcome:
     """Slice with the pipeline's presets, wait for it, then queue the result once.
 
@@ -124,6 +125,10 @@ async def slice_and_queue(
             ams_mapping=filaments.ams_mapping if filaments else None,
             filament_overrides=filaments.filament_overrides if filaments else None,
             required_filament_types=filaments.required_filament_types if filaments else None,
+            # On this route the project can ride on the item itself, so there is no
+            # window in which the entry exists unfiled. The pipeline route has no such
+            # field and has to attach afterwards (#79).
+            project_id=project_id,
         )
     )
     return QueueOutcome(

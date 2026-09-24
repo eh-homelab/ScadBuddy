@@ -44,6 +44,17 @@ class StoredSettings(BambuddyIds):
     #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
 
+    #: Model slug -> the Bambuddy project its sends belong to (#79). Stored the same
+    #: way as ``model_pipelines`` and for the same reason: a patch replaces a whole
+    #: value, while this has to be settable one model at a time.
+    model_projects: dict[str, int] = Field(default_factory=dict)
+
+    def project_for(self, slug: str) -> int | None:
+        """This model's project, if one has been remembered. There is no global
+        fallback: a project is a grouping someone chose, and defaulting every model into
+        one would file prints under a project nobody picked."""
+        return self.model_projects.get(slug)
+
     def pipeline_for(self, slug: str) -> int | None:
         """This model's own pipeline, else the global fallback (#86)."""
         return self.model_pipelines.get(slug, self.pipeline_id)
@@ -115,6 +126,16 @@ class SettingsStore:
         else:
             pipelines[slug] = pipeline_id
         return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
+
+    def set_model_project(self, slug: str, project_id: int | None) -> StoredSettings:
+        """Point one model at a Bambuddy project, or clear it."""
+        settings = self.load()
+        projects = dict(settings.model_projects)
+        if project_id is None:
+            projects.pop(slug, None)
+        else:
+            projects[slug] = project_id
+        return self._write(settings.model_copy(update={"model_projects": projects}))
 
     def _write(self, settings: StoredSettings) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)

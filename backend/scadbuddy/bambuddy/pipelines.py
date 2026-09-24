@@ -55,6 +55,7 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
+from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import ensure_uploaded
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -197,6 +198,10 @@ class PrintRunRequest(BaseModel):
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     plate_id: int = Field(default=1, ge=1)
+    #: The Bambuddy project this print belongs to (#79). Omitted means "this model's
+    #: remembered project, if it has one"; an explicit ``null`` cannot be expressed and
+    #: does not need to be — a print with no project is simply one nobody filed.
+    project_id: int | None = None
 
 
 class PrintRunResult(BaseModel):
@@ -222,6 +227,9 @@ class PrintRunResult(BaseModel):
     #: ScadBuddy's own advisories about the chosen filaments, carried through so the
     #: dialog can keep showing them after the click.
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: The project this print was filed under, and the folder its 3MF went into (#79).
+    project_id: int | None = None
+    folder_id: int | None = None
     bambuddy_url: str
 
 
@@ -536,7 +544,15 @@ async def run_for_output(
             "no slicer pipeline is set for this model and there is no default, "
             "so there is nothing to print with"
         )
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    # A project's folder replaces the one from Settings for this send, which is what
+    # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
+    # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
+    # there.
+    project_id = request.project_id or settings.project_for(meta.slug)
+    folder_id = await folder_for(client, project_id) if project_id is not None else None
+    meta, library_file_id = await ensure_uploaded(
+        client, store, meta, settings, folder_id=folder_id
+    )
 
     if request.filament_plan is None:
         run = await client.run_pipeline(
@@ -553,6 +569,8 @@ async def run_for_output(
             library_file_id=library_file_id,
             route="pipeline",
             run=run,
+            project_id=project_id,
+            folder_id=folder_id,
             bambuddy_url=client.config.web_url(QUEUE_PATH),
         )
 
@@ -588,6 +606,7 @@ async def run_for_output(
         filaments=queue_filaments(options, request.filament_plan),
         plate_id=request.plate_id,
         copies=request.copies,
+        project_id=project_id,
     )
     for queue_item_id in outcome.queue_item_ids:
         store.record_send(
@@ -605,5 +624,7 @@ async def run_for_output(
         queue_item_ids=outcome.queue_item_ids,
         printer_id=outcome.printer_id,
         warnings=warnings + preset_warnings,
+        project_id=project_id,
+        folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
     )
