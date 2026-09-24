@@ -220,6 +220,37 @@ describe('CustomizePage', () => {
     expect(bodies[0]).toEqual({ mode: 'queue', options: { quantity: 2 } })
   })
 
+  it('reports the quantity the server resolved, not one guessed locally (#88)', async () => {
+    // Never answers, so the disclosure's merge never lands and only the send result can
+    // say what was queued — the shape of a Send that beats a slow Bambuddy.
+    server.use(http.get('/api/v1/settings/print-options', () => new Promise(() => {})))
+    server.use(
+      http.post('/api/v1/outputs/:id/send', () =>
+        HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain.3mf',
+          queue_item_id: 7,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          options: { quantity: 4 },
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(within(dialog).getByText(/Queued as/)).toBeInTheDocument())
+    expect(within(dialog).getByText(/copies\./)).toBeInTheDocument()
+    expect(within(dialog).getByText('4')).toBeInTheDocument()
+  })
+
   it('reopens an earlier output with its parameters', async () => {
     render(`/m/name-keychain?from=${'c'.repeat(32)}`)
     await waitFor(() =>

@@ -91,6 +91,10 @@ export function PrintOptionsDisclosure({
   // nowhere — hence the disabled option and the note below.
   const resolvedPrinterId = printerId ?? serverPrinterId
   const printerKey = resolvedPrinterId === null ? null : String(resolvedPrinterId)
+  // A `<select>` keeps a disabled option as its value, so "This printer" can still be
+  // selected when no printer is known. Falling back here means a click always does
+  // something visible, rather than hitting a guard and changing nothing on screen.
+  const activeScope: OptionScope = scope === 'printer' && !printerKey ? 'model' : scope
 
   const layers = useMemo<OptionLayer[]>(
     () => [
@@ -125,21 +129,21 @@ export function PrintOptionsDisclosure({
   }
 
   async function remember(clear: boolean) {
-    if (scope === 'printer' && !printerKey) return
     setBusy(true)
     setError(null)
     setSavedScope(null)
     try {
       const view = await api.putPrintOptions({
-        scope,
-        key: scope === 'global' ? null : scope === 'printer' ? printerKey : slug,
+        scope: activeScope,
+        key:
+          activeScope === 'global' ? null : activeScope === 'printer' ? printerKey : slug,
         // Merged with what that scope already holds, never just this dialog's edits: the
         // PUT replaces a scope wholesale, so sending only the current overlay would
         // delete every option remembered there on an earlier visit.
-        options: clear ? {} : resolveOptions(storedFor(scope), value),
+        options: clear ? {} : resolveOptions(storedFor(activeScope), value),
       })
       setRemembered(view)
-      setSavedScope(scope)
+      setSavedScope(activeScope)
       if (!clear) onChange({})
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Could not save the options.')
@@ -188,7 +192,7 @@ export function PrintOptionsDisclosure({
               </label>
               <select
                 id="option-scope"
-                value={scope}
+                value={activeScope}
                 onChange={(event) => setScope(event.target.value as OptionScope)}
                 className="sb-field"
               >
@@ -198,7 +202,7 @@ export function PrintOptionsDisclosure({
                 <option value="model">This model</option>
                 <option value="global">Every print</option>
               </select>
-              <Button onClick={() => void remember(false)} disabled={busy}>
+              <Button onClick={() => void remember(false)} disabled={busy || !remembered}>
                 {busy && <Spinner />}
                 Remember
               </Button>
@@ -216,6 +220,12 @@ export function PrintOptionsDisclosure({
               Remember merges these into what that scope already holds; Forget clears the
               whole scope.
             </p>
+            {!remembered && (
+              <p className="mt-2 text-[12px] text-warn">
+                What is already remembered could not be read, so Remember is unavailable —
+                it would replace that scope with only these edits. Forget still works.
+              </p>
+            )}
             {!printerKey && (
               <p className="mt-2 text-[12px] text-faint">
                 No printer is picked yet, so options can only be remembered for this model or
@@ -235,13 +245,15 @@ export function PrintOptionsDisclosure({
 }
 
 /**
- * `min`/`max` on a number input are advisory: a browser enforces them on form submission,
- * not on what the user types, and this disclosure never submits a form. Clamping here is
- * what stops an out-of-range value reaching the server, where a Pydantic 422 arrives as
- * "the request did not match the expected shape" and names no field.
+ * `min`/`max`/`step` on a number input are advisory: a browser enforces them on form
+ * submission, not on what the user types, and this disclosure never submits a form. This
+ * is what stops an out-of-range *or* fractional value reaching the server, where every one
+ * of these fields is an `int` and a Pydantic 422 names no field. Rounding matters as much
+ * as bounding: `Math.min`/`Math.max` leave `3.5` alone.
  */
 function clamp(value: number, spec: OptionSpec): number {
-  const lower = spec.min === undefined ? value : Math.max(spec.min, value)
+  const whole = Math.round(value)
+  const lower = spec.min === undefined ? whole : Math.max(spec.min, whole)
   return spec.max === undefined ? lower : Math.min(spec.max, lower)
 }
 
@@ -320,6 +332,7 @@ function OptionControl({
         type="number"
         min={spec.min}
         max={spec.max}
+        step={1}
         value={isSet(value) ? String(value) : UNSET}
         placeholder={isSet(fallback) ? String(fallback) : ''}
         onChange={(event) =>

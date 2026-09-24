@@ -212,6 +212,21 @@ describe('PrintOptionsDisclosure', () => {
     )
   })
 
+  it('rounds a decimal, since every one of these fields is an integer server-side', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3.5' } })
+    fireEvent.change(screen.getByLabelText('Chamber preheat target'), {
+      target: { value: '20.4' },
+    })
+
+    expect(screen.getByTestId('sent')).toHaveTextContent(
+      '{"quantity":4,"preheat_chamber_target_override":20}',
+    )
+  })
+
   it('forgets a scope', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
@@ -259,6 +274,58 @@ describe('PrintOptionsDisclosure', () => {
     await open(user)
 
     expect(within(row('Timelapse')).getByText(/Off · from this printer/)).toBeInTheDocument()
+  })
+
+  it('will not Remember when the prior state could not be read, but will still Forget', async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ title: 'Bad Gateway', status: 502, detail: 'Bambuddy said no' }, {
+          status: 502,
+        }),
+      ),
+    )
+    const user = userEvent.setup()
+    render(<Harness />)
+    await user.click(screen.getByText('Options'))
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument())
+
+    // Remembering would replace the scope with only these edits, deleting whatever it held.
+    expect(screen.getByRole('button', { name: 'Remember' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Forget' })).toBeEnabled()
+    expect(screen.getByText(/Remember is unavailable/)).toBeInTheDocument()
+  })
+
+  it('saves to the model when This printer is selected but unavailable', async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...printOptionsFixture, printer_id: null }),
+      ),
+    )
+    const puts: unknown[] = []
+    server.use(
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        puts.push(await request.json())
+        return HttpResponse.json({
+          defaults: printOptionsFixture.defaults,
+          global_options: {},
+          printers: {},
+          models: { 'name-keychain': { timelapse: true } },
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<Harness printerId={null} />)
+    await open(user)
+    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+
+    // "This printer" is disabled but still the select's value, so the click must not
+    // silently do nothing.
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() => expect(screen.getByText('Remembered for this model.')).toBeInTheDocument())
+    expect(puts).toEqual([
+      { scope: 'model', key: 'name-keychain', options: { timelapse: true } },
+    ])
   })
 
   it('reports a failure to read the remembered options instead of pretending', async () => {

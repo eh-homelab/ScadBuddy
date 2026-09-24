@@ -47,7 +47,11 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   // What the print will actually be queued with. `options.quantity` first, not just
   // `effective`, because the disclosure reports the merge back through an effect and a
   // controlled input cannot wait a render for the keystroke it was just given.
-  const quantity = options.quantity ?? effective.quantity ?? 1
+  //
+  // Once a send has happened the server's own answer wins outright: it resolves the four
+  // scopes itself, and a Send that beat the disclosure's fetch would otherwise have the
+  // confirmation claim one copy while a remembered quantity had been queued.
+  const quantity = result?.options?.quantity ?? options.quantity ?? effective.quantity ?? 1
 
   function close() {
     setError(null)
@@ -167,14 +171,16 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
               // The same bound the Quantity row uses, because it is the same field.
               min={QUANTITY_MIN}
               max={QUANTITY_MAX}
+              step={1}
               value={quantity}
               disabled={mode !== 'queue'}
               onChange={(event) =>
                 setOptions((current) => ({
                   ...current,
+                  // Rounded as well as bounded: the field is an `int` server-side.
                   quantity: Math.min(
                     QUANTITY_MAX,
-                    Math.max(QUANTITY_MIN, Number(event.target.value)),
+                    Math.max(QUANTITY_MIN, Math.round(Number(event.target.value))),
                   ),
                 }))
               }
