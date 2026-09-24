@@ -6,6 +6,7 @@ import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { editPath } from '../lib/deeplink'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
@@ -77,7 +78,7 @@ export function HistoryPage() {
                 output={output}
                 schema={schema}
                 deleting={deleting === output.id}
-                onReopen={() => void navigate(`/m/${slug}?from=${output.id}`)}
+                onEdit={() => void navigate(editPath(output.id))}
                 onSend={() => setSendFor(output)}
                 onDelete={() => void remove(output.id)}
               />
@@ -100,14 +101,14 @@ function OutputRow({
   output,
   schema,
   deleting,
-  onReopen,
+  onEdit,
   onSend,
   onDelete,
 }: {
   output: Output
   schema: CustomizerSchema
   deleting: boolean
-  onReopen: () => void
+  onEdit: () => void
   onSend: () => void
   onDelete: () => void
 }) {
@@ -137,8 +138,8 @@ function OutputRow({
         </div>
 
         <div className="flex shrink-0 items-center gap-2">
-          <Button size="sm" onClick={onReopen}>
-            Re-open
+          <Button size="sm" onClick={onEdit}>
+            Edit
           </Button>
           <Button size="sm" onClick={onSend}>
             Send again
