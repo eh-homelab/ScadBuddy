@@ -140,6 +140,37 @@ async def ensure_uploaded(
     return meta, meta.library_file_id
 
 
+async def attach_edit_link(
+    client: BambuddyClient,
+    library_file_id: int,
+    meta: OutputMeta,
+    settings: StoredSettings,
+) -> str | None:
+    """Best-effort: note the "Edit in ScadBuddy" link on the uploaded library file.
+
+    Deliberately the last thing a send does, and deliberately swallowing every
+    ApiError. The note is cosmetic — the file is already uploaded and the print
+    already queued — so letting a timeout or a rejected note abort the send would
+    fail the request for work that had in fact succeeded. Same reasoning as the
+    tolerated 404 in upload_output.
+
+    Returns the link only when Bambuddy took it, so the result never claims a link
+    that is not actually on the file.
+    """
+    link = edit_url(settings.public_url, meta.id)
+    if link is None:
+        return None
+    try:
+        await client.annotate_library_file(library_file_id, f"{EDIT_NOTE}{link}")
+    except ApiError:
+        logger.warning(
+            "could not attach the edit link to the library file",
+            extra={"library_file_id": library_file_id, "output_id": meta.id},
+        )
+        return None
+    return link
+
+
 def _slice_request(settings: StoredSettings, meta: OutputMeta) -> SliceRequest:
     if settings.printer_preset is None or settings.process_preset is None:
         raise not_configured(
@@ -177,9 +208,6 @@ async def send_output(
     if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
         raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
     library_file_id = meta.library_file_id
-    link = edit_url(settings.public_url, meta.id)
-    if link is not None:
-        await client.annotate_library_file(library_file_id, f"{EDIT_NOTE}{link}")
 
     if request.mode == "library":
         return SendResult(
@@ -187,7 +215,7 @@ async def send_output(
             library_file_id=library_file_id,
             filename=filename,
             bambuddy_url=client.config.web_url(LIBRARY_PATH),
-            edit_url=link,
+            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
         )
 
     # The model's own default pipeline wins over the global one (#86); before that
@@ -205,7 +233,7 @@ async def send_output(
             filename=filename,
             pipeline_run_id=run.id,
             bambuddy_url=client.config.web_url(QUEUE_PATH),
-            edit_url=link,
+            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
         )
 
     if settings.printer_id is None:
@@ -244,7 +272,7 @@ async def send_output(
         filename=filename,
         queue_item_id=item.id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
-        edit_url=link,
+        edit_url=await attach_edit_link(client, library_file_id, meta, settings),
     )
 
 

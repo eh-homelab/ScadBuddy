@@ -394,3 +394,87 @@ def test_nothing_is_attached_when_no_public_url_is_configured(
 
     assert body["edit_url"] is None
     assert not annotate.called
+
+
+def pipeline_run_route(run_id: int = 12) -> respx.Route:
+    return respx.post(f"{API}/slicer-pipelines/4/run").mock(
+        return_value=httpx.Response(
+            202,
+            json={
+                "id": run_id,
+                "pipeline_id": 4,
+                "source_library_file_id": 41,
+                "copies": 1,
+                "status": "queued",
+                "slice_job_id": None,
+                "sliced_library_file_id": None,
+                "eligibility_overridden": False,
+                "created_by": None,
+                "created_at": "2026-09-23T01:00:00Z",
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+    )
+
+
+@respx.mock
+def test_a_failed_annotation_still_queues_the_print(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The note is cosmetic; queueing the print is the point of the request."""
+    configure(client, pipeline_id=4, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    run = pipeline_run_route()
+    annotate = respx.put(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pipeline_run_id"] == 12
+    # Nothing was attached, so the result does not claim a link.
+    assert body["edit_url"] is None
+    assert annotate.called
+    assert run.called
+
+    meta = json.loads(
+        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["pipeline_run_id"] == 12
+
+
+@respx.mock
+def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
+    """A slow or broken annotate must not sit in front of the pipeline run."""
+    configure(client, pipeline_id=4, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    pipeline_run_route()
+    annotate_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    order = [(call.request.method, call.request.url.path) for call in respx.calls]
+    assert order.index(("POST", "/api/v1/slicer-pipelines/4/run")) < order.index(
+        ("PUT", "/api/v1/library/files/41")
+    )
+
+
+@respx.mock
+def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, model: str) -> None:
+    """Bambuddy's ``update_file`` guards every assignment with ``if data.X is not
+    None``, so an omitted field is left alone — see the citation in client.py."""
+    configure(client, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
+    }
