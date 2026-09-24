@@ -307,6 +307,164 @@
         "title": "CustomizerSchema",
         "type": "object"
       },
+      "EligibilityCheck": {
+        "description": "``pipeline_ids`` omitted means every pipeline Bambuddy has.",
+        "properties": {
+          "pipeline_ids": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "integer"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Ids"
+          }
+        },
+        "title": "EligibilityCheck",
+        "type": "object"
+      },
+      "EligibilityIssue": {
+        "description": "``kind`` is an open enum here on purpose \u2014 Bambuddy adds kinds between\nreleases and an unknown one must still render, not 502 the whole report.",
+        "properties": {
+          "actual": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Actual"
+          },
+          "expected": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected"
+          },
+          "kind": {
+            "title": "Kind",
+            "type": "string"
+          },
+          "slot_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Index"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "EligibilityIssue",
+        "type": "object"
+      },
+      "EligibilityOverview": {
+        "properties": {
+          "library_file_id": {
+            "title": "Library File Id",
+            "type": "integer"
+          },
+          "reports": {
+            "items": {
+              "$ref": "#/components/schemas/PipelineReport"
+            },
+            "title": "Reports",
+            "type": "array"
+          }
+        },
+        "required": [
+          "library_file_id"
+        ],
+        "title": "EligibilityOverview",
+        "type": "object"
+      },
+      "EligibilityReport": {
+        "description": "Returned by ``check-eligibility`` and, on a 409, by ``run``.\n\nUnder ``target_kind=\"printer_class\"`` ``ok`` is true when *at least one* matching\nprinter passes, and the per-printer detail moves to ``printer_reports`` \u2014 ``issues``\nthen carries only class-level problems. Reading ``ok`` as \"every printer is ready\"\nis wrong for that target kind.",
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/EligibilityIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "printer_reports": {
+            "items": {
+              "$ref": "#/components/schemas/PerPrinterReport"
+            },
+            "title": "Printer Reports",
+            "type": "array"
+          },
+          "target_kind": {
+            "default": "specific_printer",
+            "enum": [
+              "specific_printer",
+              "printer_class"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "target_model_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Model Class"
+          },
+          "target_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Id"
+          },
+          "target_printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Name"
+          }
+        },
+        "required": [
+          "ok"
+        ],
+        "title": "EligibilityReport",
+        "type": "object"
+      },
       "Folder": {
         "properties": {
           "archive_id": {
@@ -1130,6 +1288,36 @@
         "title": "PartInfo",
         "type": "object"
       },
+      "PerPrinterReport": {
+        "properties": {
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/EligibilityIssue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "printer_id": {
+            "title": "Printer Id",
+            "type": "integer"
+          },
+          "printer_name": {
+            "title": "Printer Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "printer_id",
+          "printer_name",
+          "ok"
+        ],
+        "title": "PerPrinterReport",
+        "type": "object"
+      },
       "Pipeline": {
         "properties": {
           "bed_type": {
@@ -1238,6 +1426,723 @@
         "title": "Pipeline",
         "type": "object"
       },
+      "PipelineChoices": {
+        "properties": {
+          "default_pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Pipeline Id"
+          },
+          "global_pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Pipeline Id"
+          },
+          "model_pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Pipeline Id"
+          },
+          "pipelines": {
+            "items": {
+              "$ref": "#/components/schemas/PipelineView"
+            },
+            "title": "Pipelines",
+            "type": "array"
+          },
+          "printers": {
+            "items": {
+              "$ref": "#/components/schemas/Printer"
+            },
+            "title": "Printers",
+            "type": "array"
+          }
+        },
+        "title": "PipelineChoices",
+        "type": "object"
+      },
+      "PipelineCreate": {
+        "description": "``POST /api/v1/slicer-pipelines/``.\n\n``SlicerPipelineCreate`` carries **no** target or fanout fields even though\n``SlicerPipelineResponse`` returns them \u2014 a pipeline is created against the\ndefaults and re-targeted with ``PUT``, which ScadBuddy does not do.",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "filament_presets": {
+            "items": {
+              "$ref": "#/components/schemas/PresetRef"
+            },
+            "title": "Filament Presets",
+            "type": "array"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "printer_preset": {
+            "$ref": "#/components/schemas/PresetRef"
+          },
+          "process_preset": {
+            "$ref": "#/components/schemas/PresetRef"
+          }
+        },
+        "required": [
+          "name",
+          "printer_preset",
+          "process_preset",
+          "filament_presets"
+        ],
+        "title": "PipelineCreate",
+        "type": "object"
+      },
+      "PipelineDefault": {
+        "properties": {
+          "global_pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Global Pipeline Id"
+          },
+          "pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Id"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug"
+        ],
+        "title": "PipelineDefault",
+        "type": "object"
+      },
+      "PipelineDefaultPatch": {
+        "description": "``null`` clears this model's default, falling back to the global one.",
+        "properties": {
+          "pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Id"
+          }
+        },
+        "title": "PipelineDefaultPatch",
+        "type": "object"
+      },
+      "PipelineJob": {
+        "description": "One copy of a run: the queue entry it became and the printer it landed on.",
+        "properties": {
+          "assigned_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigned Printer Id"
+          },
+          "assigned_printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assigned Printer Name"
+          },
+          "copy_index": {
+            "title": "Copy Index",
+            "type": "integer"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "pipeline_run_id": {
+            "title": "Pipeline Run Id",
+            "type": "integer"
+          },
+          "queue_entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Entry Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "pipeline_run_id",
+          "copy_index",
+          "status"
+        ],
+        "title": "PipelineJob",
+        "type": "object"
+      },
+      "PipelineReport": {
+        "description": "Bambuddy's report for one pipeline, passed through as it came.\n\n``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be\njudged, which is neither ready nor blocked, and the picker says so rather than\nguessing either way. That either-or is enforced below rather than merely described,\nbecause the browser branches on it: a row with neither would render as silently\nabsent, and one with both would claim two states at once.",
+        "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "pipeline_id": {
+            "title": "Pipeline Id",
+            "type": "integer"
+          },
+          "report": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EligibilityReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "pipeline_id"
+        ],
+        "title": "PipelineReport",
+        "type": "object"
+      },
+      "PipelineRun": {
+        "properties": {
+          "copies": {
+            "default": 1,
+            "title": "Copies",
+            "type": "integer"
+          },
+          "copies_cancelled": {
+            "default": 0,
+            "title": "Copies Cancelled",
+            "type": "integer"
+          },
+          "copies_completed": {
+            "default": 0,
+            "title": "Copies Completed",
+            "type": "integer"
+          },
+          "copies_failed": {
+            "default": 0,
+            "title": "Copies Failed",
+            "type": "integer"
+          },
+          "copies_in_progress": {
+            "default": 0,
+            "title": "Copies In Progress",
+            "type": "integer"
+          },
+          "eligibility_overridden": {
+            "default": false,
+            "title": "Eligibility Overridden",
+            "type": "boolean"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "fanout_strategy": {
+            "anyOf": [
+              {
+                "enum": [
+                  "max_parallel",
+                  "fill_one_first",
+                  "round_robin"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fanout Strategy"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "jobs": {
+            "items": {
+              "$ref": "#/components/schemas/PipelineJob"
+            },
+            "title": "Jobs",
+            "type": "array"
+          },
+          "pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Id"
+          },
+          "pipeline_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Name"
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
+          },
+          "sliced_library_file_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sliced Library File Id"
+          },
+          "source_archive_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Archive Id"
+          },
+          "source_filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Filename"
+          },
+          "source_library_file_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Source Library File Id"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "target_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "specific_printer",
+                  "printer_class"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Kind"
+          },
+          "target_model_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Model Class"
+          },
+          "target_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Id"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "title": "PipelineRun",
+        "type": "object"
+      },
+      "PipelineView": {
+        "description": "A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and\nthe printers its target comes out as.",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "fanout_strategy": {
+            "enum": [
+              "max_parallel",
+              "fill_one_first",
+              "round_robin"
+            ],
+            "title": "Fanout Strategy",
+            "type": "string"
+          },
+          "filament_preset_names": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "title": "Filament Preset Names",
+            "type": "array"
+          },
+          "filament_presets": {
+            "items": {
+              "$ref": "#/components/schemas/PresetRef"
+            },
+            "title": "Filament Presets",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "printer_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Printer Ids",
+            "type": "array"
+          },
+          "printer_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "printer_preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Preset Name"
+          },
+          "process_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process_preset_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Preset Name"
+          },
+          "target_kind": {
+            "enum": [
+              "specific_printer",
+              "printer_class"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "target_model_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Model Class"
+          },
+          "target_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Id"
+          },
+          "target_printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Name"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "target_kind",
+          "fanout_strategy"
+        ],
+        "title": "PipelineView",
+        "type": "object"
+      },
+      "PresetChoice": {
+        "description": "One row of the \"New pipeline\" form's pickers.\n\n``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns\none, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.\nAn empty list means the preset declares no restriction, not that it fits nothing.",
+        "properties": {
+          "compatible_printers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Compatible Printers",
+            "type": "array"
+          },
+          "filament_colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Colour"
+          },
+          "filament_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Type"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "$ref": "#/components/schemas/PresetRef"
+          }
+        },
+        "required": [
+          "ref",
+          "name"
+        ],
+        "title": "PresetChoice",
+        "type": "object"
+      },
+      "PresetOptions": {
+        "description": "Printer presets and bed types always; process and filament only once a printer\npreset is named, because unfiltered those two tiers are thousands of rows.",
+        "properties": {
+          "bed_types": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Bed Types",
+            "type": "array"
+          },
+          "filament": {
+            "items": {
+              "$ref": "#/components/schemas/PresetChoice"
+            },
+            "title": "Filament",
+            "type": "array"
+          },
+          "printer": {
+            "items": {
+              "$ref": "#/components/schemas/PresetChoice"
+            },
+            "title": "Printer",
+            "type": "array"
+          },
+          "printer_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process": {
+            "items": {
+              "$ref": "#/components/schemas/PresetChoice"
+            },
+            "title": "Process",
+            "type": "array"
+          }
+        },
+        "title": "PresetOptions",
+        "type": "object"
+      },
       "PresetRef": {
         "description": "A slicer preset, identified by tier and id (``{\"source\":\"cloud\",\"id\":\"GM041\"}``).",
         "properties": {
@@ -1261,6 +2166,63 @@
           "id"
         ],
         "title": "PresetRef",
+        "type": "object"
+      },
+      "PrintRunRequest": {
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.",
+        "properties": {
+          "copies": {
+            "default": 1,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Copies",
+            "type": "integer"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          },
+          "pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Id"
+          }
+        },
+        "title": "PrintRunRequest",
+        "type": "object"
+      },
+      "PrintRunResult": {
+        "properties": {
+          "bambuddy_url": {
+            "title": "Bambuddy Url",
+            "type": "string"
+          },
+          "library_file_id": {
+            "title": "Library File Id",
+            "type": "integer"
+          },
+          "pipeline_id": {
+            "title": "Pipeline Id",
+            "type": "integer"
+          },
+          "run": {
+            "$ref": "#/components/schemas/PipelineRun"
+          }
+        },
+        "required": [
+          "pipeline_id",
+          "library_file_id",
+          "run",
+          "bambuddy_url"
+        ],
+        "title": "PrintRunResult",
         "type": "object"
       },
       "Printer": {
@@ -2690,6 +3652,327 @@
         "summary": "Upload the canvas capture",
         "tags": [
           "outputs"
+        ]
+      }
+    },
+    "/api/v1/print/models/{slug}/pipeline": {
+      "put": {
+        "description": "Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug.",
+        "operationId": "put_model_pipeline_api_v1_print_models__slug__pipeline_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineDefaultPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineDefault"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remember this model's pipeline",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/models/{slug}/pipelines": {
+      "get": {
+        "operationId": "get_model_pipelines_api_v1_print_models__slug__pipelines_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineChoices"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pipelines, with this model's default",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/eligibility": {
+      "post": {
+        "description": "Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.\n\nBambuddy judges a *library file*, so there is no eligibility answer before an\nupload. The upload happens once per output: an output is immutable, so a recorded\n``library_file_id`` still describes this 3MF.\n\nEvery report comes back as Bambuddy sent it, including ``printer_reports`` \u2014 under\n``target_kind=\"printer_class\"`` that is where the per-printer reasons are, and the\ntop-level ``ok`` means only that *some* printer passes.",
+        "operationId": "post_eligibility_api_v1_print_outputs__output_id__eligibility_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EligibilityCheck"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EligibilityOverview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Which pipelines would accept this output",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/run": {
+      "post": {
+        "description": "``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit\n``force``.\n\nWithout ``pipeline_id`` the model's own default is used, then the global one. A\nblocking eligibility issue is Bambuddy's 409, whose body this passes through as the\n``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records\n``eligibility_overridden``.\n\nThere is deliberately no printer here. ``PipelineRunRequest`` carries none, so a\nclass-targeted pipeline fans out by its own ``fanout_strategy`` and reports the\nprinter per copy in ``run.jobs[]``.",
+        "operationId": "post_run_api_v1_print_outputs__output_id__run_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrintRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrintRunResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run a pipeline for this output",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/pipelines": {
+      "post": {
+        "description": "``POST /api/v1/slicer-pipelines/`` verbatim.\n\n``SlicerPipelineCreate`` carries no target or fanout fields, so the new pipeline\ncannot be created pre-aimed at a printer \u2014 Bambuddy targets it and the response\nreports what it chose. Re-targeting is a ``PUT`` ScadBuddy does not make.",
+        "operationId": "post_pipeline_api_v1_print_pipelines_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PipelineCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PipelineView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create a pipeline from presets",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/presets": {
+      "get": {
+        "description": "Printer presets and bed types, plus \u2014 once a printer preset is named \u2014 the\nprocess and filament presets compatible with it.\n\nThe filter is server-side on purpose: the live instance holds ~4000 process and\nfilament presets across the cloud and standard tiers, which is not a payload to\nhand a browser so it can filter them itself. Nozzle diameter is not a field\nanywhere; it lives in the process preset's *name* (\"\u2026 H2C 0.2 nozzle\"), which is\nwhy the form picks a process preset rather than a diameter.",
+        "operationId": "get_presets_api_v1_print_presets_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "printer_preset_source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "orca_cloud",
+                    "cloud",
+                    "local",
+                    "standard"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Printer Preset Source"
+            }
+          },
+          {
+            "in": "query",
+            "name": "printer_preset_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Printer Preset Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PresetOptions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Presets a new pipeline can be built from",
+        "tags": [
+          "print"
         ]
       }
     },

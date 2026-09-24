@@ -2,6 +2,7 @@ import type {
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
+  EligibilityOverview,
   FontCatalogue,
   FontFamily,
   InstalledFamily,
@@ -9,6 +10,14 @@ import type {
   ModelSummary,
   Output,
   ParamValue,
+  PipelineChoices,
+  PipelineCreate,
+  PipelineDefault,
+  PipelineView,
+  PresetOptions,
+  PresetRef,
+  PrintRunRequest,
+  PrintRunResult,
   Problem,
   RenderAccepted,
   SendRequest,
@@ -124,6 +133,44 @@ export const api = {
     body.append('file', png, 'thumbnail.png')
     return request<void>(`/outputs/${seg(outputId)}/thumbnail`, { method: 'PUT', body })
   },
+
+  /**
+   * #86 — the print picker. `printerPreset` is what narrows the process and filament
+   * tiers: unfiltered they are thousands of rows, so the server only sends them once a
+   * printer preset is named.
+   */
+  getPrintPresets: (printerPreset?: PresetRef) => {
+    const query = printerPreset
+      ? `?printer_preset_source=${seg(printerPreset.source)}&printer_preset_id=${seg(printerPreset.id)}`
+      : ''
+    return request<PresetOptions>(`/print/presets${query}`)
+  },
+
+  createPipeline: (body: PipelineCreate) =>
+    request<PipelineView>('/print/pipelines', { method: 'POST', body: JSON.stringify(body) }),
+
+  getModelPipelines: (slug: string) =>
+    request<PipelineChoices>(`/print/models/${seg(slug)}/pipelines`),
+
+  /** `null` clears this model's default, falling back to the global one. */
+  putModelPipeline: (slug: string, pipelineId: number | null) =>
+    request<PipelineDefault>(`/print/models/${seg(slug)}/pipeline`, {
+      method: 'PUT',
+      body: JSON.stringify({ pipeline_id: pipelineId }),
+    }),
+
+  /** Uploads the 3MF if Bambuddy has not got it yet, then asks each pipeline. */
+  checkEligibility: (outputId: string, pipelineIds?: number[]) =>
+    request<EligibilityOverview>(`/print/outputs/${seg(outputId)}/eligibility`, {
+      method: 'POST',
+      body: JSON.stringify({ pipeline_ids: pipelineIds ?? null }),
+    }),
+
+  runPipeline: (outputId: string, body: PrintRunRequest) =>
+    request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

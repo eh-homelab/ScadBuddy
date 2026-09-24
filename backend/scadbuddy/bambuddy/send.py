@@ -113,6 +113,27 @@ async def upload_output(
     return store.record_send(meta.id, library_file_id=uploaded.id), uploaded.filename
 
 
+async def ensure_uploaded(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+) -> tuple[OutputMeta, int]:
+    """The library file id to slice, judge or print, uploading the 3MF if there is none.
+
+    An output is immutable once generated — changing a parameter produces a new one — so
+    a recorded id still describes this exact 3MF and is reused rather than re-uploaded.
+    The print picker (#86) leans on that: opening it checks eligibility, which needs a
+    file in Bambuddy, and must not re-upload on every open.
+    """
+    if meta.library_file_id is not None:
+        return meta, meta.library_file_id
+    meta, _ = await upload_output(client, store, meta, settings)
+    if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
+        raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
+    return meta, meta.library_file_id
+
+
 def _slice_request(settings: StoredSettings, meta: OutputMeta) -> SliceRequest:
     if settings.printer_preset is None or settings.process_preset is None:
         raise not_configured(
@@ -159,9 +180,12 @@ async def send_output(
             bambuddy_url=client.config.web_url(LIBRARY_PATH),
         )
 
-    if settings.pipeline_id is not None:
+    # The model's own default pipeline wins over the global one (#86); before that
+    # issue there was only the global ``pipeline_id``, which is now the fallback.
+    pipeline_id = settings.pipeline_for(meta.slug)
+    if pipeline_id is not None:
         run = await client.run_pipeline(
-            settings.pipeline_id,
+            pipeline_id,
             PipelineRunRequest(source_library_file_id=library_file_id, copies=request.copies),
         )
         store.record_send(meta.id, pipeline_run_id=run.id)
