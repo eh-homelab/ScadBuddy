@@ -15,7 +15,12 @@ from scadbuddy.bambuddy.errors import (
     UNAVAILABLE_PROBLEM,
     Scope,
 )
-from scadbuddy.bambuddy.models import PresetRef, SliceRequest
+from scadbuddy.bambuddy.models import (
+    PipelineRunRequest,
+    PresetRef,
+    QueueItemCreate,
+    SliceRequest,
+)
 from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
 
@@ -174,7 +179,16 @@ async def test_enqueue_sends_the_enum_calibration_flags(bambuddy: BambuddyClient
         return_value=httpx.Response(200, json=recording("queue-item.json"))
     )
 
-    item = await bambuddy.enqueue(printer_id=1, library_file_id=52, quantity=3)
+    item = await bambuddy.enqueue(
+        QueueItemCreate(
+            printer_id=1,
+            library_file_id=52,
+            quantity=3,
+            plate_id=1,
+            bed_levelling="off",
+            flow_cali="off",
+        )
+    )
 
     assert item.id == 9
     sent = respx.calls.last.request.read()
@@ -211,7 +225,7 @@ async def test_run_pipeline_passes_copies_and_force(bambuddy: BambuddyClient) ->
         )
     )
 
-    run = await bambuddy.run_pipeline(4, source_library_file_id=41, copies=2)
+    run = await bambuddy.run_pipeline(4, PipelineRunRequest(source_library_file_id=41, copies=2))
 
     assert (run.id, run.status, run.copies) == (12, "queued", 2)
     import json as _json
@@ -338,7 +352,7 @@ async def test_the_queue_calls_name_the_manage_queue_scope(bambuddy: BambuddyCli
     respx.post(f"{API}/queue/").mock(return_value=httpx.Response(401, json={}))
 
     with pytest.raises(ApiError) as caught:
-        await bambuddy.enqueue(printer_id=1, library_file_id=2)
+        await bambuddy.enqueue(QueueItemCreate(printer_id=1, library_file_id=2))
 
     assert Scope.MANAGE_QUEUE.value in caught.value.detail
 
@@ -370,7 +384,7 @@ async def test_a_409_carries_the_eligibility_report_verbatim(bambuddy: BambuddyC
     respx.post(f"{API}/slicer-pipelines/4/run").mock(return_value=httpx.Response(409, json=report))
 
     with pytest.raises(ApiError) as caught:
-        await bambuddy.run_pipeline(4, source_library_file_id=41)
+        await bambuddy.run_pipeline(4, PipelineRunRequest(source_library_file_id=41))
 
     assert caught.value.status == 409
     assert caught.value.type == ELIGIBILITY_PROBLEM
@@ -383,7 +397,7 @@ async def test_a_422_is_passed_through_with_its_body(bambuddy: BambuddyClient) -
     respx.post(f"{API}/queue/").mock(return_value=httpx.Response(422, json=detail))
 
     with pytest.raises(ApiError) as caught:
-        await bambuddy.enqueue(printer_id=1, library_file_id=2)
+        await bambuddy.enqueue(QueueItemCreate(printer_id=1, library_file_id=2))
 
     assert caught.value.status == 422
     assert caught.value.type == REJECTED_PROBLEM

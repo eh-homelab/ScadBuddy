@@ -268,6 +268,17 @@
       },
       "Folder": {
         "properties": {
+          "archive_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Archive Id"
+          },
           "file_count": {
             "anyOf": [
               {
@@ -283,6 +294,11 @@
             "title": "Id",
             "type": "integer"
           },
+          "is_external": {
+            "default": false,
+            "title": "Is External",
+            "type": "boolean"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -297,6 +313,28 @@
               }
             ],
             "title": "Parent Id"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "project_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Name"
           }
         },
         "required": [
@@ -954,6 +992,16 @@
             ],
             "title": "Description"
           },
+          "fanout_strategy": {
+            "default": "max_parallel",
+            "enum": [
+              "max_parallel",
+              "fill_one_first",
+              "round_robin"
+            ],
+            "title": "Fanout Strategy",
+            "type": "string"
+          },
           "filament_presets": {
             "items": {
               "$ref": "#/components/schemas/PresetRef"
@@ -988,6 +1036,37 @@
                 "type": "null"
               }
             ]
+          },
+          "target_kind": {
+            "default": "printer_class",
+            "enum": [
+              "specific_printer",
+              "printer_class"
+            ],
+            "title": "Target Kind",
+            "type": "string"
+          },
+          "target_model_class": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Model Class"
+          },
+          "target_printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Printer Id"
           }
         },
         "required": [
@@ -1023,6 +1102,7 @@
         "type": "object"
       },
       "Printer": {
+        "description": "``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` \u2014 the same shape.\n\n``access_code`` is deliberately absent: Bambuddy withholds it from API-keyed\ncallers, so a model that carried it would be null in production and populated\nonly when auth is disabled.",
         "properties": {
           "id": {
             "title": "Id",

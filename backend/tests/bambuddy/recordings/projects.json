@@ -1,0 +1,45 @@
+[
+  {
+    "id": 1,
+    "name": "Reagan Keychain",
+    "description": null,
+    "color": "#ef4444",
+    "status": "active",
+    "target_count": null,
+    "target_parts_count": null,
+    "target_sets": null,
+    "budget": null,
+    "tags": null,
+    "due_date": "2026-09-22T00:00:00",
+    "priority": "normal",
+    "created_at": "2026-09-21T13:25:09.333880",
+    "archive_count": 1,
+    "total_items": 1,
+    "completed_count": 1,
+    "failed_count": 0,
+    "queue_count": 0,
+    "progress_percent": null,
+    "parent_id": null,
+    "child_count": 0,
+    "archives": [
+      {
+        "id": 4,
+        "print_name": "Reagan_Plate 1",
+        "thumbnail_path": "archive/unassigned/20260922_000710_Reagan_Plate 1/thumbnail.png",
+        "status": "archived",
+        "filament_type": "PLA",
+        "filament_color": "#0047BB,#F5547C"
+      },
+      {
+        "id": 2,
+        "print_name": "Reagan-Keychain(2)_Plate 1",
+        "thumbnail_path": "archive/unassigned/20260921_093228_Reagan-Keychain(2)_Plate 1/thumbnail.png",
+        "status": "completed",
+        "filament_type": "PLA",
+        "filament_color": "#0047BB,#EC008C"
+      }
+    ],
+    "url": "https://makerworld.com/en/models/000000",
+    "cover_image_filename": null
+  }
+]

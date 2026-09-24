@@ -7,6 +7,14 @@ than read off the design spec:
   with a bare list whose ``id`` is an integer.
 * ``/api/v1/library/folders`` and ``/api/v1/external-links/`` also answer with bare
   lists, while ``/api/v1/slicer-pipelines/`` wraps its rows in ``{"pipelines": [...]}``.
+* **Reading** folders is that slashless path; **creating** one is
+  ``/api/v1/library/folders/`` **with** the slash. Both routes are real here.
+* ``/api/v1/printers/available-filaments`` takes a *required* ``model`` query
+  parameter — without it the answer is a 422, not every printer.
+
+Requests bodies are built from the models in ``models.py``, which mirror Bambuddy's own
+``openapi.json`` field for field, and are serialised with ``exclude_none`` so an unset
+optional is omitted rather than sent as an explicit ``null``.
 """
 
 from __future__ import annotations
@@ -24,15 +32,27 @@ from fastapi import status
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
+    AvailableFilament,
+    EligibilityReport,
+    EligibilityRequest,
     ExternalLink,
     Folder,
+    FolderCreate,
     LibraryFile,
+    LocalPresetCatalogue,
     Pipeline,
+    PipelineCreate,
     PipelineList,
     PipelineRun,
+    PipelineRunList,
+    PipelineRunRequest,
     PresetCatalogue,
     Printer,
+    PrinterStatus,
+    Project,
+    ProjectCreate,
     QueueItem,
+    QueueItemCreate,
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
@@ -44,12 +64,6 @@ logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/v1"
 THREE_MF_MEDIA_TYPE = "model/3mf"
-
-# Queue defaults. bed_levelling and flow_cali are three-way enums on this API
-# ("off" | "on" | "auto"), not the booleans the design spec assumed — sending a
-# bool 422s.
-QUEUE_BED_LEVELLING = "off"
-QUEUE_FLOW_CALI = "off"
 
 DEFAULT_TIMEOUT = 30.0
 DEFAULT_UPLOAD_TIMEOUT = 180.0
@@ -154,6 +168,46 @@ class BambuddyClient:
         response = await self._send("GET", "/printers/", scope=Scope.READ_STATUS, what=what)
         return [Printer.model_validate(row) for row in self._rows(response, what=what)]
 
+    async def printer(self, printer_id: int) -> Printer:
+        """``GET /api/v1/printers/{id}`` — the same shape the list route returns."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}",
+            scope=Scope.READ_STATUS,
+            what=f"read printer {printer_id}",
+        )
+        return Printer.model_validate(response.json())
+
+    async def printer_status(self, printer_id: int) -> PrinterStatus:
+        """Live MQTT state: nozzles, AMS trays and the inlet each AMS is switched to."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/status",
+            scope=Scope.READ_STATUS,
+            what=f"read the status of printer {printer_id}",
+        )
+        return PrinterStatus.model_validate(response.json())
+
+    async def available_filaments(
+        self, model: str, *, location: str | None = None
+    ) -> list[AvailableFilament]:
+        """Filaments loaded across every active printer of ``model``, deduplicated.
+
+        ``model`` is required by Bambuddy — omitting it is a 422, not "all printers".
+        """
+        what = f"list the filaments available on {model} printers"
+        params: dict[str, Any] = {"model": model}
+        if location is not None:
+            params["location"] = location
+        response = await self._send(
+            "GET",
+            "/printers/available-filaments",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params=params,
+        )
+        return [AvailableFilament.model_validate(row) for row in self._rows(response, what=what)]
+
     async def folders(self) -> list[Folder]:
         what = "list the library folders"
         response = await self._send(
@@ -176,7 +230,39 @@ class BambuddyClient:
         )
         return PresetCatalogue.model_validate(response.json())
 
+    async def local_presets(self) -> LocalPresetCatalogue:
+        """``GET /api/v1/local-presets/`` — OrcaSlicer profiles imported into Bambuddy.
+
+        These do not appear in :meth:`presets`' ``local`` tier unless Bambuddy has
+        classified them, so the two calls are not interchangeable.
+        """
+        response = await self._send(
+            "GET", "/local-presets/", scope=Scope.MANAGE_LIBRARY, what="list the local presets"
+        )
+        return LocalPresetCatalogue.model_validate(response.json())
+
     # --- library -------------------------------------------------------------
+
+    async def folders_by_project(self, project_id: int) -> list[Folder]:
+        what = f"list the library folders of project {project_id}"
+        response = await self._send(
+            "GET",
+            f"/library/folders/by-project/{project_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            what=what,
+        )
+        return [Folder.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_folder(self, folder: FolderCreate) -> Folder:
+        """``POST /api/v1/library/folders/`` — the trailing slash is the write route."""
+        response = await self._send(
+            "POST",
+            "/library/folders/",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"create the {folder.name!r} library folder",
+            json=folder.model_dump(mode="json", exclude_none=True),
+        )
+        return Folder.model_validate(response.json())
 
     async def upload_library_file(
         self, filename: str, content: bytes, *, folder_id: int | None = None
@@ -240,52 +326,115 @@ class BambuddyClient:
 
     # --- pipelines and queue -------------------------------------------------
 
-    async def run_pipeline(
-        self, pipeline_id: int, *, source_library_file_id: int, copies: int = 1, force: bool = False
-    ) -> PipelineRun:
+    async def create_pipeline(self, pipeline: PipelineCreate) -> Pipeline:
+        response = await self._send(
+            "POST",
+            "/slicer-pipelines/",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"create the {pipeline.name!r} slicer pipeline",
+            json=pipeline.model_dump(mode="json", exclude_none=True),
+        )
+        return Pipeline.model_validate(response.json())
+
+    async def check_eligibility(
+        self, pipeline_id: int, request: EligibilityRequest
+    ) -> EligibilityReport:
+        """Ask whether a run would be refused, without starting one.
+
+        Unlike :meth:`run_pipeline` an ineligible answer is a **200** carrying the
+        report — it is not the 409 path, so nothing raises here.
+        """
+        response = await self._send(
+            "POST",
+            f"/slicer-pipelines/{pipeline_id}/check-eligibility",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"check slicer pipeline {pipeline_id} for eligibility",
+            json=request.model_dump(mode="json", exclude_none=True),
+        )
+        return EligibilityReport.model_validate(response.json())
+
+    async def run_pipeline(self, pipeline_id: int, request: PipelineRunRequest) -> PipelineRun:
+        """Slice and queue ``copies`` prints.
+
+        A blocking eligibility issue answers 409 with the same report
+        :meth:`check_eligibility` returns; ``map_response`` passes that body through
+        verbatim. ``request.force`` runs anyway.
+        """
         response = await self._send(
             "POST",
             f"/slicer-pipelines/{pipeline_id}/run",
             scope=Scope.MANAGE_QUEUE,
             what=f"run slicer pipeline {pipeline_id}",
-            json={
-                "source_library_file_id": source_library_file_id,
-                "copies": copies,
-                "force": force,
-            },
+            json=request.model_dump(mode="json", exclude_none=True),
         )
         return PipelineRun.model_validate(response.json())
 
-    async def enqueue(
-        self,
-        *,
-        printer_id: int,
-        library_file_id: int,
-        quantity: int = 1,
-        plate_id: int = 1,
-        use_ams: bool = True,
-        manual_start: bool = False,
-    ) -> QueueItem:
+    async def pipeline_runs(self, pipeline_id: int, *, limit: int = 10) -> PipelineRunList:
+        response = await self._send(
+            "GET",
+            f"/slicer-pipelines/{pipeline_id}/runs",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"list the runs of slicer pipeline {pipeline_id}",
+            params={"limit": limit},
+        )
+        return PipelineRunList.model_validate(response.json())
+
+    async def enqueue(self, item: QueueItemCreate) -> QueueItem:
+        """``POST /api/v1/queue/`` with the whole ``PrintQueueItemCreate``.
+
+        ``exclude_none`` keeps an unset optional out of the body rather than sending
+        an explicit ``null``; every remaining default is Bambuddy's own.
+        """
         response = await self._send(
             "POST",
             "/queue/",
             scope=Scope.MANAGE_QUEUE,
-            what=f"queue library file {library_file_id}",
-            json={
-                "printer_id": printer_id,
-                "library_file_id": library_file_id,
-                "quantity": quantity,
-                "plate_id": plate_id,
-                "use_ams": use_ams,
-                "bed_levelling": QUEUE_BED_LEVELLING,
-                "flow_cali": QUEUE_FLOW_CALI,
-                "vibration_cali": True,
-                "layer_inspect": True,
-                "timelapse": True,
-                "manual_start": manual_start,
-            },
+            what=f"queue library file {item.library_file_id}",
+            json=item.model_dump(mode="json", exclude_none=True),
         )
         return QueueItem.model_validate(response.json())
+
+    # --- projects ------------------------------------------------------------
+
+    async def projects(self, *, status_filter: str | None = None) -> list[Project]:
+        what = "list the projects"
+        response = await self._send(
+            "GET",
+            "/projects/",
+            scope=Scope.MANAGE_PROJECTS,
+            what=what,
+            params={"status": status_filter} if status_filter is not None else None,
+        )
+        return [Project.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def create_project(self, project: ProjectCreate) -> Project:
+        response = await self._send(
+            "POST",
+            "/projects/",
+            scope=Scope.MANAGE_PROJECTS,
+            what=f"create the {project.name!r} project",
+            json=project.model_dump(mode="json", exclude_none=True),
+        )
+        return Project.model_validate(response.json())
+
+    async def add_archives_to_project(self, project_id: int, archive_ids: list[int]) -> None:
+        """Bambuddy documents no response body for this route, so none is parsed."""
+        await self._send(
+            "POST",
+            f"/projects/{project_id}/add-archives",
+            scope=Scope.MANAGE_PROJECTS,
+            what=f"add archives to project {project_id}",
+            json={"archive_ids": archive_ids},
+        )
+
+    async def add_queue_items_to_project(self, project_id: int, queue_item_ids: list[int]) -> None:
+        await self._send(
+            "POST",
+            f"/projects/{project_id}/add-queue",
+            scope=Scope.MANAGE_PROJECTS,
+            what=f"add queue items to project {project_id}",
+            json={"queue_item_ids": queue_item_ids},
+        )
 
     # --- external links ------------------------------------------------------
 

@@ -22,6 +22,19 @@ Every request was a `GET`. Access codes are nulled and serials/IPs replaced.
 | `openapi/routes.txt` | every route of `GET /openapi.json`, unfiltered |
 | `openapi/scadbuddy-routes.json` | the routes ScadBuddy calls, with their schemas |
 
+Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
+
+| File | Source |
+|---|---|
+| `printer.json` | `GET /api/v1/printers/1` |
+| `printer-status.json` | `GET /api/v1/printers/1/status` |
+| `available-filaments.json` | `GET /api/v1/printers/available-filaments?model=H2C` |
+| `local-presets.json` | `GET /api/v1/local-presets/` |
+| `projects.json` | `GET /api/v1/projects/` |
+| `folders-by-project.json` | `GET /api/v1/library/folders/by-project/1` |
+| `slicer-pipelines-configured.json` | `GET /api/v1/slicer-pipelines/`, now that one exists |
+| `pipeline-runs.json` | `GET /api/v1/slicer-pipelines/1/runs` |
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
@@ -33,6 +46,28 @@ Every request was a `GET`. Access codes are nulled and serials/IPs replaced.
   booleans. `layer_inspect` and `timelapse` default to `false`, not `true`.
 - **`POST /library/files/{id}/slice` spells the plate `plate`**; `POST /queue/` spells it
   `plate_id`.
+- **An AMS `id` is the printer's numbering, not a list index.** The recorded H2C
+  reports units `[0, 1, 128, 2]` — unsorted, with the single-slot AMS-HT at `128`,
+  which is also how `ams_switch_inlet` keys them (as **strings**; JSON has no integer
+  keys). `status.ams[2]` is the AMS-HT, not AMS 2. The external spool is not an AMS at
+  all: it arrives on `vt_tray`, ids 254/255.
+- **`remain: -1` means "unknown", not "empty"** — that is what an untagged spool reports.
+- **`nozzle_diameter` is a string** (`"0.4"`) on `/printers/{id}/status`, while the queue
+  route reports the same quantity back as a float.
+- **`available-filaments` requires `model`** (a 422 without it, not "all printers"), and
+  spells colours `#RRGGBBAA` *with* a leading `#` — the AMS tray they came from spells
+  the same colour without one.
+- **`local-presets` is not the `local` tier of `/slicer/presets`.** It is grouped by type
+  rather than source, its ids are integers, and `compatible_printers` /
+  `default_filament_colour` are JSON-encoded **strings** there, not lists.
+- **`SlicerPipelineCreate` carries no target or fanout fields** even though
+  `SlicerPipelineResponse` returns them, so a pipeline cannot be created pre-targeted.
+- **`check-eligibility` answers 200 with the report**; only `run` turns the same report
+  into a 409. Under `target_kind: "printer_class"` its `ok` means *at least one* printer
+  passes, and the per-printer reasons are in `printer_reports`, not `issues`.
+- **`POST /api/v1/library/folders/` needs the trailing slash**, while `folders()` reads
+  the slashless `GET /api/v1/library/folders`. Both are real routes here, unlike
+  `/printers`.
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
 
@@ -45,3 +80,13 @@ Every request was a `GET`. Access codes are nulled and serials/IPs replaced.
 - **Slice-job and enqueue responses.** Both need a `POST` against the live instance, which
   was out of bounds. `queue-item.json` is a real `PrintQueueItemResponse` read back from
   `GET /api/v1/queue/` — the same schema `POST /api/v1/queue/` returns.
+- **A `PipelineRunResponse` with `jobs[]`, and an eligibility report.** Same reason: both
+  need a `POST`. `pipeline-runs.json` is genuinely `{"runs": [], "total": 0}` — no run has
+  ever been made against this pipeline — so the run-shape tests build their bodies from
+  Bambuddy's `openapi.json` inline instead.
+- **Which API-key scope guards `/slicer-pipelines/`.** This instance runs with
+  authentication disabled, so a key's `can_*` flags are never consulted. The authoritative
+  scope list is `APIKeyCreate` in Bambuddy's `openapi.json` (`can_read_status`,
+  `can_manage_library`, `can_queue`, `can_manage_projects`, …); the pipeline routes are
+  mapped to `Manage Queue` on the reasoning that running one queues prints, and that
+  mapping is the one thing here that is inferred rather than measured.

@@ -15,7 +15,13 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, not_configured
-from scadbuddy.bambuddy.models import ExternalLink, SliceRequest
+from scadbuddy.bambuddy.models import (
+    CalibrationMode,
+    ExternalLink,
+    PipelineRunRequest,
+    QueueItemCreate,
+    SliceRequest,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
@@ -29,6 +35,13 @@ SIDEBAR_ICON = "shapes"
 
 QUEUE_PATH = "/queue"
 LIBRARY_PATH = "/library"
+
+# ScadBuddy's own queue policy, not Bambuddy's defaults — it defaults both of these to
+# "auto". They are three-way enums ("off" | "on" | "auto"), so a bool 422s. ScadBuddy
+# sends an already-sliced plate for a shape the user just previewed, and asks for
+# neither calibration pass so the print starts without a bed-levelling delay.
+QUEUE_BED_LEVELLING: CalibrationMode = "off"
+QUEUE_FLOW_CALI: CalibrationMode = "off"
 
 
 class SendRequest(BaseModel):
@@ -149,8 +162,7 @@ async def send_output(
     if settings.pipeline_id is not None:
         run = await client.run_pipeline(
             settings.pipeline_id,
-            source_library_file_id=library_file_id,
-            copies=request.copies,
+            PipelineRunRequest(source_library_file_id=library_file_id, copies=request.copies),
         )
         store.record_send(meta.id, pipeline_run_id=run.id)
         return SendResult(
@@ -179,9 +191,16 @@ async def send_output(
         )
 
     item = await client.enqueue(
-        printer_id=settings.printer_id,
-        library_file_id=sliced,
-        quantity=request.copies,
+        QueueItemCreate(
+            printer_id=settings.printer_id,
+            library_file_id=sliced,
+            quantity=request.copies,
+            plate_id=1,
+            bed_levelling=QUEUE_BED_LEVELLING,
+            flow_cali=QUEUE_FLOW_CALI,
+            layer_inspect=True,
+            timelapse=True,
+        )
     )
     store.record_send(meta.id, queue_item_id=item.id)
     return SendResult(
