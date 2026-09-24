@@ -18,13 +18,13 @@ function Landing() {
   )
 }
 
-function render(outputId: string) {
+function render(outputId: string, state?: unknown) {
   return renderPage(
     <Routes>
       <Route path="/edit/:outputId" element={<EditPage />} />
       <Route path="/m/:slug" element={<Landing />} />
     </Routes>,
-    { route: `/edit/${outputId}` },
+    { route: `/edit/${outputId}`, state },
   )
 }
 
@@ -39,6 +39,28 @@ describe('EditPage', () => {
     render('c'.repeat(32))
     // The name proves the payload travelled, not just the id in the query string.
     expect(await screen.findByTestId('landing')).toHaveTextContent(':Nova')
+  })
+
+  it('uses a target the caller already had instead of resolving it again', async () => {
+    const id = 'c'.repeat(32)
+    // The route 404s, so landing at all proves the handed-over target was used.
+    server.use(
+      http.get('/api/v1/outputs/:id/edit', () =>
+        HttpResponse.json({ title: 'Not found', status: 404 }, { status: 404 }),
+      ),
+    )
+    const editTarget = {
+      output_id: id,
+      slug: 'name-keychain',
+      name: 'Handed over',
+      params: {},
+      model_version: null,
+      source: 'record',
+    }
+    render(id, { editTarget })
+    expect(await screen.findByTestId('landing')).toHaveTextContent(
+      `name-keychain:${id}:Handed over`,
+    )
   })
 
   it('says so when neither the record nor a 3MF is left', async () => {

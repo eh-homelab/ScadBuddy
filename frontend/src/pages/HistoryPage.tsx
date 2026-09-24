@@ -6,7 +6,7 @@ import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
-import { editPath } from '../lib/deeplink'
+import { editPath, editTargetFor, type EditNavigationState } from '../lib/deeplink'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
@@ -78,7 +78,11 @@ export function HistoryPage() {
                 output={output}
                 schema={schema}
                 deleting={deleting === output.id}
-                onEdit={() => void navigate(editPath(output.id))}
+                onEdit={() =>
+                  void navigate(editPath(output.id), {
+                    state: { editTarget: editTargetFor(output) } satisfies EditNavigationState,
+                  })
+                }
                 onSend={() => setSendFor(output)}
                 onDelete={() => void remove(output.id)}
               />

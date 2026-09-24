@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useParams } from 'react-router'
+import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
 import { server } from '../mocks/server'
@@ -17,10 +17,11 @@ function render() {
   )
 }
 
-/** Stands in for the deep-link page so the test can read the id it was given. */
+/** Stands in for the deep-link page so the test can read what it was given. */
 function EditRoute() {
   const { outputId } = useParams()
-  return <div data-testid="edit-route">{outputId}</div>
+  const state = useLocation().state as { editTarget?: { name?: string | null } } | null
+  return <div data-testid="edit-route">{`${outputId ?? ''}:${state?.editTarget?.name ?? 'no-state'}`}</div>
 }
 
 /**
@@ -81,6 +82,12 @@ describe('HistoryPage', () => {
     const { user } = render()
     await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
     expect(await screen.findByTestId('edit-route')).toHaveTextContent('c'.repeat(32))
+  })
+
+  it('hands the row it already rendered over rather than making it be resolved again', async () => {
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    expect(await screen.findByTestId('edit-route')).toHaveTextContent(':Nova')
   })
 
   it('deletes an output', async () => {

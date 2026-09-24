@@ -1,4 +1,4 @@
-import type { EditTarget } from '../api/types'
+import type { EditTarget, Output } from '../api/types'
 
 /**
  * The "Edit in ScadBuddy" deep link, mirrored from `scadbuddy/library/deeplink.py`.
@@ -16,4 +16,20 @@ export function editPath(outputId: string): string {
  */
 export interface EditNavigationState {
   editTarget: EditTarget
+}
+
+/**
+ * The same target `/outputs/{id}/edit` would answer with, built from an output the
+ * page has already loaded. A history row holds every field of it, so clicking Edit
+ * there need not ask the backend to resolve what the row is showing.
+ */
+export function editTargetFor(output: Output): EditTarget {
+  return {
+    output_id: output.id,
+    slug: output.slug,
+    name: output.name ?? null,
+    params: output.params,
+    model_version: output.model_version,
+    source: 'record',
+  }
 }

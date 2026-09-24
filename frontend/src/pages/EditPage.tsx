@@ -1,4 +1,4 @@
-import { Link, Navigate, useParams } from 'react-router'
+import { Link, Navigate, useLocation, useParams } from 'react-router'
 import { api } from '../api/client'
 import type { EditNavigationState } from '../lib/deeplink'
 import { Spinner } from '../components/ui/Spinner'
@@ -11,7 +11,16 @@ import { useAsync } from '../lib/useAsync'
  */
 export function EditPage() {
   const { outputId = '' } = useParams()
-  const target = useAsync(() => api.getEditTarget(outputId), [outputId])
+  // A caller that already holds the output — the history list — hands it over rather
+  // than making this route resolve what it just rendered. A pasted link carries no
+  // state, so the fetch is still the general case.
+  const handedOver = useLocation().state as EditNavigationState | null
+  const preloaded = handedOver?.editTarget?.output_id === outputId ? handedOver.editTarget : null
+  const fetched = useAsync(
+    async () => (preloaded ? null : await api.getEditTarget(outputId)),
+    [outputId, preloaded !== null],
+  )
+  const target = { ...fetched, data: preloaded ?? fetched.data }
 
   if (target.loading) {
     return (
