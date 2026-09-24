@@ -323,11 +323,39 @@ Output mirrors the structure of the known-good MakerWorld file:
   and nothing else printer-specific — the slicer pipeline supplies printer,
   process and filament presets, so we deliberately do not embed
   `use_embedded_settings`-style presets.
+- `Metadata/plate_1.png` (512x512) and `Metadata/plate_1_small.png` (128x128),
+  plus `Metadata/top_1.png` and `Metadata/pick_1.png` — the plate cover images,
+  named and sized exactly as Bambu Studio writes them (`bbs_3mf.hpp`). They are
+  declared three ways, because three different readers look in three different
+  places: a `png` Default in `[Content_Types].xml`; the `metadata/thumbnail`,
+  `cover-thumbnail-middle` and `cover-thumbnail-small` relationships in
+  `_rels/.rels`; and `thumbnail_file` / `top_file` / `pick_file` on the `<plate>`
+  in `model_settings.config`. `Metadata/plate_1.png` is the load-bearing one:
+  Bambuddy's `ThreeMFParser._extract_thumbnail` tries it first on an unsliced
+  upload and it becomes the library file's `thumbnail_path`. Rendered by
+  `render/thumbnail.py` — see §6.2.1.
 - `Metadata/slice_info.config` is **not** written (unsliced project).
 
 Acceptance: the file opens in Bambu Studio as N parts with N filaments
 assigned, and Bambuddy's `/library/files/{id}/slice` slices it with a
 `filament_presets` list of length N without a colour/extruder warning.
+
+### 6.2.1 Plate cover images
+
+Bambuddy's viewer hard-codes `filament_colors: []` for every LIBRARY file (only
+archives fetch real colours), so an unsliced 3MF's 3D preview is single-colour
+there no matter what the file says — including Bambu Studio's own. The cover
+image is what carries the real colours onto the library card, and it is also
+what the printer and the handheld app show. See issue #104.
+
+The renderer is a hand-written rasteriser over numpy, deliberately: `pyrender`
+needs OSMesa or EGL and a `libGL` the OpenSCAD base image does not ship,
+OpenSCAD's own `--render` PNG export needs an offscreen GL context a headless
+container has no display for, and matplotlib — what Bambuddy itself uses
+server-side — is a 40 MB dependency for one 512x512 image. A z-buffer, a dot
+product and a PNG writer are the whole requirement, and numpy plus stdlib
+`zlib` already carry all three. The output is then a pure function of the mesh,
+with no driver or GL implementation in it.
 
 ### 6.3 Closed parts: one solid render per colour
 

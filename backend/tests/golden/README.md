@@ -37,6 +37,16 @@ piece, which the weld in the model exists to guarantee) and `euler_number`
 `hole=false` base is 2 because it has no hole). Those are invariants of the
 shape, not of how it was triangulated.
 
+## The cover images are pinned by name, not by bytes
+
+`Metadata/plate_1.png` and its three companions appear in `archive_entries`, so
+losing one fails a golden. Their pixels do not: the renderer is a pure function
+of the mesh, but a recorded PNG would turn every lighting or framing tweak into
+a binary diff nobody can review, and the same retessellation that moves the mesh
+moves the image. `tests/test_thumbnail.py` pins them as properties instead —
+size, transparent background, and that a two-colour model really does show two
+colours, which is the whole point of them.
+
 ## The two files that are stored verbatim
 
 `3D/3dmodel.model` and `Metadata/model_settings.config` — the Bambu Studio

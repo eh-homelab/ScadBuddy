@@ -10,12 +10,20 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.bambu3mf import (
+    PLATE_PICK,
+    PLATE_THUMBNAIL,
+    PLATE_THUMBNAIL_SMALL,
+    PLATE_TOP,
+    write_bambu_3mf,
+)
 from scadbuddy.render.split import ColourPart
-from tests.conftest import GOLDEN
+from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, PLATE_SMALL_PNG_SIZE
+from tests.conftest import GOLDEN, read_png
 
 GOLDEN_DIR = GOLDEN / "two_boxes"
-ENTRIES = [
+# The text half of the archive, compared byte for byte against the golden.
+TEXT_ENTRIES = [
     "[Content_Types].xml",
     "_rels/.rels",
     "3D/3dmodel.model",
@@ -25,6 +33,12 @@ ENTRIES = [
     "Metadata/model_settings.config",
     "Metadata/project_settings.config",
 ]
+# The cover images. Deliberately NOT golden bytes: they are a pure function of
+# the mesh, but a recorded PNG would turn every lighting or framing tweak into a
+# binary diff nobody can review. `tests/test_thumbnail.py` pins them as
+# properties instead.
+IMAGE_ENTRIES = [PLATE_THUMBNAIL, PLATE_THUMBNAIL_SMALL, PLATE_TOP, PLATE_PICK]
+ENTRIES = TEXT_ENTRIES + IMAGE_ENTRIES
 
 
 def _translate(x: float, y: float, z: float) -> np.ndarray:
@@ -59,7 +73,7 @@ def test_archive_entries_are_the_bambu_layout(written: Path) -> None:
 
 def test_matches_the_golden_files(written: Path) -> None:
     with zipfile.ZipFile(written) as archive:
-        for entry in ENTRIES:
+        for entry in TEXT_ENTRIES:
             produced = archive.read(entry).decode("utf-8")
             golden = GOLDEN_DIR / entry
             if os.environ.get("SCADBUDDY_UPDATE_GOLDEN"):
@@ -116,3 +130,78 @@ def test_trimesh_reads_the_written_file_back(written: Path) -> None:
 def test_empty_part_list_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one colour part"):
         write_bambu_3mf([], tmp_path / "empty.3mf")
+
+
+def test_the_cover_images_are_where_bambuddy_looks(written: Path) -> None:
+    """`Metadata/plate_1.png` is the first entry Bambuddy's `ThreeMFParser`
+    (`services/archive.py::_extract_thumbnail`) tries on an unsliced upload, and
+    what becomes the library file's `thumbnail_path`. This is that contract."""
+    with zipfile.ZipFile(written) as archive:
+        assert PLATE_THUMBNAIL == "Metadata/plate_1.png"
+        assert read_png(archive.read(PLATE_THUMBNAIL)).shape == (
+            PLATE_PNG_SIZE,
+            PLATE_PNG_SIZE,
+            4,
+        )
+        assert read_png(archive.read(PLATE_THUMBNAIL_SMALL)).shape == (
+            PLATE_SMALL_PNG_SIZE,
+            PLATE_SMALL_PNG_SIZE,
+            4,
+        )
+
+
+def test_the_cover_image_carries_both_part_colours(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        image = read_png(archive.read(PLATE_THUMBNAIL))
+    opaque = image[..., 3] == 255
+    assert (opaque & (image[..., 0] > image[..., 2])).any()
+    assert (opaque & (image[..., 2] > image[..., 0])).any()
+
+
+def test_png_entries_declare_their_content_type(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        types = ET.fromstring(archive.read("[Content_Types].xml"))
+    defaults = {
+        default.get("Extension"): default.get("ContentType")
+        for default in types.findall("{*}Default")
+    }
+    assert defaults["png"] == "image/png"
+
+
+def test_the_package_relationships_point_at_the_covers(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        rels = ET.fromstring(archive.read("_rels/.rels"))
+        names = archive.namelist()
+    targets = {
+        relationship.get("Type"): relationship.get("Target")
+        for relationship in rels.findall("{*}Relationship")
+    }
+    assert (
+        targets["http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"]
+        == f"/{PLATE_THUMBNAIL}"
+    )
+    assert (
+        targets["http://schemas.bambulab.com/package/2021/cover-thumbnail-middle"]
+        == f"/{PLATE_THUMBNAIL}"
+    )
+    assert (
+        targets["http://schemas.bambulab.com/package/2021/cover-thumbnail-small"]
+        == f"/{PLATE_THUMBNAIL_SMALL}"
+    )
+    # Every relationship target resolves to a real entry; a dangling one is how
+    # a reader ends up with no cover at all.
+    for target in targets.values():
+        assert (target or "").lstrip("/") in names
+
+
+def test_the_plate_names_its_cover_images(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        plate = ET.fromstring(archive.read("Metadata/model_settings.config")).find("./plate")
+        names = archive.namelist()
+    assert plate is not None
+    metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
+    assert metadata["thumbnail_file"] == PLATE_THUMBNAIL
+    assert metadata["top_file"] == PLATE_TOP
+    assert metadata["pick_file"] == PLATE_PICK
+    for key in ("thumbnail_file", "top_file", "pick_file"):
+        assert metadata[key] in names
