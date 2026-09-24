@@ -282,9 +282,7 @@ async def attach_edit_link(
         return None
     try:
         existing = await client.library_file(library_file_id)
-        await client.annotate_library_file(
-            library_file_id, merge_edit_note(existing.notes, link)
-        )
+        await client.annotate_library_file(library_file_id, merge_edit_note(existing.notes, link))
     except ApiError:
         logger.warning(
             "could not attach the edit link to the library file",
