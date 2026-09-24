@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import re
+import zipfile
 
 from fastapi.testclient import TestClient
 
@@ -238,3 +240,28 @@ def test_an_edit_link_to_nothing_at_all_is_a_404(client: TestClient, model: str)
     response = client.get(f"/api/v1/outputs/{'0' * 32}/edit")
     assert response.status_code == 404
     assert "0" * 32 in response.json()["detail"]
+
+
+def test_an_unreadable_stamp_404s_rather_than_500s(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The record is gone and the 3MF's stamp does not parse as today's shape."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    directory = paths.output_dir(model, created["id"])
+    (directory / "meta.json").unlink()
+    (directory / "params.json").unlink()
+
+    path = directory / "model.3mf"
+    with zipfile.ZipFile(path) as archive:
+        entries = [(name, archive.read(name)) for name in archive.namelist()]
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in entries:
+            if name == "3D/3dmodel.model":
+                payload = re.sub(rb'(name="ScadBuddy:provenance">)[^<]*', rb"\1{}", payload)
+            archive.writestr(name, payload)
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/edit")
+    assert response.status_code == 404
+    assert created["id"] in response.json()["detail"]

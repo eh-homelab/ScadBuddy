@@ -145,3 +145,50 @@ def test_the_version_ignores_what_the_renderer_writes_back(tmp_path: Path) -> No
     (model / "model.json").write_text('{"name": "Keychain"}\n', encoding="utf-8")
     (model / "thumbnail.png").write_bytes(b"\x89PNG\r\n\x1a\n")
     assert source_version(model) == before
+
+
+def test_a_stamp_that_does_not_parse_is_a_miss_not_a_crash(written: Path) -> None:
+    """A 3MF stamped by a future ScadBuddy, or hand-edited, must degrade to the same
+    404 as one carrying no stamp at all — not a 500 with a ValidationError in it."""
+    stamp(written, PROVENANCE)
+    with zipfile.ZipFile(written) as archive:
+        entries = [(name, archive.read(name)) for name in archive.namelist()]
+    broken = [
+        (
+            name,
+            payload.replace(
+                PROVENANCE.model_dump_json(exclude_none=True).encode("utf-8"),
+                b'{"model": "keychain"}',
+            )
+            if name == "3D/3dmodel.model"
+            else payload,
+        )
+        for name, payload in entries
+    ]
+    with zipfile.ZipFile(written, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in broken:
+            archive.writestr(name, payload)
+
+    assert read(written) is None
+
+
+def test_a_stamp_that_is_not_json_at_all_is_a_miss(written: Path) -> None:
+    stamp(written, PROVENANCE)
+    with zipfile.ZipFile(written) as archive:
+        entries = [(name, archive.read(name)) for name in archive.namelist()]
+    broken = [
+        (
+            name,
+            payload.replace(
+                PROVENANCE.model_dump_json(exclude_none=True).encode("utf-8"), b"not json"
+            )
+            if name == "3D/3dmodel.model"
+            else payload,
+        )
+        for name, payload in entries
+    ]
+    with zipfile.ZipFile(written, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in broken:
+            archive.writestr(name, payload)
+
+    assert read(written) is None

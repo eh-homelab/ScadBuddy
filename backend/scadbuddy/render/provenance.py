@@ -19,7 +19,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from xml.sax.saxutils import escape
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.render.bambu3mf import CORE_NS, ZIP_TIMESTAMP
 from scadbuddy.render.schema import ParamValue
@@ -131,5 +131,11 @@ def read(path: Path) -> Provenance | None:
         return None
     for element in root.findall(f"{{{CORE_NS}}}metadata"):
         if element.get("name") == PROVENANCE_KEY and element.text:
-            return Provenance.model_validate_json(element.text)
+            try:
+                return Provenance.model_validate_json(element.text)
+            except ValidationError:
+                # A stamp this version cannot read — corrupted, hand-edited, or
+                # written by a later ScadBuddy — is a miss like any other, so the
+                # caller 404s instead of surfacing a ValidationError as a 500.
+                return None
     return None
