@@ -2,11 +2,18 @@ import { HttpResponse, delay, http } from 'msw'
 import type {
   BoundingBox,
   CatalogueFont,
+  EligibilityOverview,
   FontFamily,
   Job,
   ModelSummary,
   Output,
   ParamValue,
+  PipelineChoices,
+  PipelineCreate,
+  PipelineView,
+  PresetOptions,
+  PresetRef,
+  PrintRunResult,
   SendResult,
   Settings,
 } from '../api/types'
@@ -25,6 +32,9 @@ const state = {
   outputs: [...fixtures.outputs] as Output[],
   settings: { ...fixtures.settings } as Settings,
   jobs: new Map<string, MockJob>(),
+  pipelines: [...fixtures.pipelineViews] as PipelineView[],
+  /** #86 — per-model default pipelines, the store's `model_pipelines`. */
+  modelPipelines: {} as Record<string, number>,
   fonts: [...fixtures.fonts] as FontFamily[],
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
@@ -39,6 +49,8 @@ export function resetMockState(): void {
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.settings = { ...fixtures.settings }
   state.jobs.clear()
+  state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
+  state.modelPipelines = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
@@ -319,6 +331,190 @@ export const handlers = [
       pipeline_run_id: pipelineRunId,
       queue_item_id: queueItemId,
       bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+    }
+    return HttpResponse.json(result)
+  }),
+
+  // --- #86 print picker -------------------------------------------------------------
+
+  http.get(`${base}/print/presets`, ({ request }) => {
+    const url = new URL(request.url)
+    const source = url.searchParams.get('printer_preset_source') as PresetRef['source'] | null
+    const id = url.searchParams.get('printer_preset_id')
+    const options: PresetOptions = {
+      printer: fixtures.printerPresets,
+      process: [],
+      filament: [],
+      bed_types: fixtures.BED_TYPES,
+      printer_preset: null,
+    }
+    if (!source || !id) return HttpResponse.json(options)
+    // Process and filament arrive only once a printer preset is named, filtered to the
+    // presets whose `compatible_printers` lists that preset's NAME.
+    const chosen = fixtures.printerPresets.find(
+      (choice) => choice.ref.source === source && choice.ref.id === id,
+    )
+    const fits = (compatible: string[] | undefined) =>
+      !compatible?.length || !chosen?.name || compatible.includes(chosen.name)
+    return HttpResponse.json({
+      ...options,
+      printer_preset: { source, id },
+      process: fixtures.processPresets.filter((c) => fits(c.compatible_printers ?? [])),
+      filament: fixtures.filamentPresets.filter((c) => fits(c.compatible_printers ?? [])),
+    } satisfies PresetOptions)
+  }),
+
+  http.post(`${base}/print/pipelines`, async ({ request }) => {
+    const body = (await request.json()) as PipelineCreate
+    const named = (ref: { source: string; id: string } | null | undefined) =>
+      [...fixtures.printerPresets, ...fixtures.processPresets, ...fixtures.filamentPresets].find(
+        (choice) => choice.ref.source === ref?.source && choice.ref.id === ref?.id,
+      )?.name ?? null
+    // SlicerPipelineCreate has no target fields: Bambuddy targets the new pipeline itself.
+    const created: PipelineView = {
+      id: nextNumber(),
+      name: body.name,
+      description: body.description ?? null,
+      bed_type: body.bed_type ?? null,
+      target_kind: 'specific_printer',
+      target_printer_id: 1,
+      target_printer_name: '3DP-31B-598',
+      target_model_class: null,
+      fanout_strategy: 'max_parallel',
+      printer_preset: body.printer_preset,
+      process_preset: body.process_preset,
+      filament_presets: body.filament_presets,
+      printer_preset_name: named(body.printer_preset),
+      process_preset_name: named(body.process_preset),
+      filament_preset_names: body.filament_presets.map(named),
+      printer_ids: [1],
+    }
+    state.pipelines = [...state.pipelines, created]
+    await delay(150)
+    return HttpResponse.json(created)
+  }),
+
+  http.get(`${base}/print/models/:slug/pipelines`, ({ params }) => {
+    const slug = String(params['slug'])
+    const modelPipelineId = state.modelPipelines[slug] ?? null
+    return HttpResponse.json({
+      pipelines: state.pipelines,
+      printers: fixtures.targets.printers,
+      model_pipeline_id: modelPipelineId,
+      global_pipeline_id: state.settings.pipeline_id ?? null,
+      default_pipeline_id: modelPipelineId ?? state.settings.pipeline_id ?? null,
+    } satisfies PipelineChoices)
+  }),
+
+  http.put(`${base}/print/models/:slug/pipeline`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as { pipeline_id: number | null }
+    if (body.pipeline_id === null) delete state.modelPipelines[slug]
+    else state.modelPipelines[slug] = body.pipeline_id
+    return HttpResponse.json({
+      slug,
+      pipeline_id: state.modelPipelines[slug] ?? null,
+      global_pipeline_id: state.settings.pipeline_id ?? null,
+    })
+  }),
+
+  http.post(`${base}/print/outputs/:id/eligibility`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { pipeline_ids: number[] | null }
+    const ids = body.pipeline_ids ?? state.pipelines.map((pipeline) => pipeline.id)
+    const libraryFileId = output.library_file_id ?? nextNumber()
+    state.outputs = state.outputs.map((o) =>
+      o.id === output.id ? { ...o, library_file_id: libraryFileId } : o,
+    )
+    await delay(150)
+    return HttpResponse.json({
+      library_file_id: libraryFileId,
+      reports: ids.map((pipelineId) => ({
+        pipeline_id: pipelineId,
+        // A pipeline created in this session has no recorded report; treat it as ready,
+        // which is what a fresh pipeline built for this plate would answer.
+        report: fixtures.eligibilityReports[pipelineId] ?? {
+          ok: true,
+          target_kind: 'specific_printer',
+          target_printer_id: 1,
+          target_printer_name: '3DP-31B-598',
+          target_model_class: null,
+          issues: [],
+          printer_reports: [],
+        },
+      })),
+    } satisfies EligibilityOverview)
+  }),
+
+  http.post(`${base}/print/outputs/:id/run`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as {
+      pipeline_id?: number | null
+      copies?: number
+      force?: boolean
+    }
+    const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
+    if (pipelineId === null) {
+      return problem(409, 'Conflict', 'no slicer pipeline is set for this model')
+    }
+    const report = fixtures.eligibilityReports[pipelineId]
+    if (report && !report.ok && !body.force) {
+      // Bambuddy turns the SAME report into a 409 here; the backend passes the body
+      // through as the `bambuddy_body` extension rather than paraphrasing it.
+      return problem(
+        409,
+        'Conflict',
+        `Bambuddy reported a conflict when asked to run slicer pipeline ${pipelineId}`,
+        { type: 'https://scadbuddy.dev/problems/pipeline-ineligible', bambuddy_body: report },
+      )
+    }
+    const copies = body.copies ?? 1
+    const runId = nextNumber()
+    const libraryFileId = output.library_file_id ?? nextNumber()
+    state.outputs = state.outputs.map((o) =>
+      o.id === output.id
+        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: runId }
+        : o,
+    )
+    await delay(200)
+    const result: PrintRunResult = {
+      pipeline_id: pipelineId,
+      library_file_id: libraryFileId,
+      run: {
+        id: runId,
+        pipeline_id: pipelineId,
+        pipeline_name: state.pipelines.find((p) => p.id === pipelineId)?.name ?? null,
+        source_library_file_id: libraryFileId,
+        source_archive_id: null,
+        source_filename: null,
+        copies,
+        copies_completed: 0,
+        copies_failed: 0,
+        copies_cancelled: 0,
+        copies_in_progress: copies,
+        status: 'queued',
+        slice_job_id: nextNumber(),
+        sliced_library_file_id: nextNumber(),
+        eligibility_overridden: Boolean(body.force) && Boolean(report && !report.ok),
+        error_message: null,
+        jobs: Array.from({ length: copies }, (_unused, index) => ({
+          id: nextNumber(),
+          pipeline_run_id: runId,
+          copy_index: index,
+          assigned_printer_id: 1,
+          assigned_printer_name: '3DP-31B-598',
+          queue_entry_id: nextNumber(),
+          status: 'queued',
+          error_message: null,
+        })),
+        target_kind: 'specific_printer',
+        target_printer_id: 1,
+        target_model_class: null,
+        fanout_strategy: 'max_parallel',
+      },
+      bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
   }),
