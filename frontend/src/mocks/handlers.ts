@@ -3,6 +3,7 @@ import type {
   BoundingBox,
   CatalogueFont,
   EligibilityOverview,
+  FilamentOptions,
   FontFamily,
   Job,
   ModelSummary,
@@ -447,6 +448,22 @@ export const handlers = [
     } satisfies EligibilityOverview)
   }),
 
+  /**
+   * #87 — the aggregation the picker reads. `printer_id` scopes it: the server reports
+   * `loaded` against that printer, so without one a spool in the other machine would
+   * look local. The recorded estate is in `fixtures.filamentOptions`.
+   */
+  http.get(`${base}/print/outputs/:id/filaments`, ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const printerId = new URL(request.url).searchParams.get('printer_id')
+    return HttpResponse.json({
+      ...fixtures.filamentOptions,
+      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      printer_id: printerId === null ? null : Number(printerId),
+    } satisfies FilamentOptions)
+  }),
+
   http.post(`${base}/print/outputs/:id/run`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
@@ -454,6 +471,9 @@ export const handlers = [
       pipeline_id?: number | null
       copies?: number
       force?: boolean
+      printer_id?: number | null
+      plate_id?: number
+      filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
     }
     const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
     if (pipelineId === null) {
@@ -479,7 +499,34 @@ export const handlers = [
         : o,
     )
     await delay(200)
+
+    /**
+     * #87 — the escalation. A `PipelineRunCreateRequest` carries no printer and no
+     * filament mapping, so a request that names either cannot go down the pipeline
+     * route at all: the backend slices the library file with the pipeline's own presets
+     * and posts queue entries itself. `run` is null on that route — there is no
+     * pipeline run to report — which is why the success panel has to guard it.
+     */
+    if (body.filament_plan || typeof body.printer_id === 'number') {
+      const sliceJobId = nextNumber()
+      const queueItemIds = Array.from({ length: copies }, () => nextNumber())
+      const queued: PrintRunResult = {
+        route: 'slice_queue',
+        pipeline_id: pipelineId,
+        library_file_id: libraryFileId,
+        printer_id: body.printer_id ?? null,
+        run: null,
+        slice_job_id: sliceJobId,
+        sliced_library_file_id: nextNumber(),
+        queue_item_ids: queueItemIds,
+        warnings: fixtures.filamentOptions.warnings,
+        bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+      }
+      return HttpResponse.json(queued)
+    }
+
     const result: PrintRunResult = {
+      route: 'pipeline',
       pipeline_id: pipelineId,
       library_file_id: libraryFileId,
       run: {

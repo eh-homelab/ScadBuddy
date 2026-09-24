@@ -359,6 +359,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/outputs/{output_id}/filaments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Spools that can print this output, and what the plate needs
+         * @description Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
+         *
+         *     One route rather than six calls from the browser, because the join is the part with
+         *     the traps in it: an AMS id is the printer's numbering and not a list index, the flat
+         *     tray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,
+         *     ``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle
+         *     temperature window is on the AMS tray rather than on the spool row.
+         *
+         *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
+         *     this printer": without one the spools are still listed, with their last known
+         *     assignment, but nothing that depends on live AMS state is reported. ``pipeline_id``
+         *     is read only for its process preset's *name*, which is the one place a nozzle
+         *     diameter is written down.
+         */
+        get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/outputs/{output_id}/run": {
         parameters: {
             query?: never;
@@ -720,6 +752,76 @@ export interface components {
             /** Target Printer Name */
             target_printer_name?: string | null;
         };
+        /**
+         * FilamentOptions
+         * @description Everything the filament step of the dialog needs, in one answer.
+         *
+         *     One route rather than six, because the join — inventory against assignments against
+         *     the live AMS against the per-slot remaining weights — is the part that is easy to
+         *     get wrong, and doing it in the browser would mean shipping every spool's history to
+         *     do it.
+         */
+        FilamentOptions: {
+            /** Ams Switch Inlet */
+            ams_switch_inlet?: {
+                [key: string]: string;
+            };
+            /** Library File Id */
+            library_file_id: number;
+            /** Nozzle Diameters */
+            nozzle_diameters?: string[];
+            /** Nozzle Rack */
+            nozzle_rack?: components["schemas"]["NozzleRackSlot"][];
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printer Model */
+            printer_model?: string | null;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Process Nozzle Diameter */
+            process_nozzle_diameter?: string | null;
+            /** Slots */
+            slots?: components["schemas"]["SlotNeed"][];
+            /** Spools */
+            spools?: components["schemas"]["SpoolOption"][];
+            /** Suggested */
+            suggested?: components["schemas"]["SlotChoice"][];
+            /** Warnings */
+            warnings?: components["schemas"]["FilamentWarning"][];
+        };
+        /**
+         * FilamentPlan
+         * @description What the dialog submits: one spool per slot, and how hard to insist on it.
+         *
+         *     ``force_colour_match`` becomes ``force_color_match`` on every override, which is
+         *     the flag Bambuddy's scheduler reads to require an exact type+colour match rather
+         *     than merely preferring one. It is off by default because it only bites on a
+         *     model-targeted queue item, where insisting can leave the job unschedulable.
+         */
+        FilamentPlan: {
+            /**
+             * Force Colour Match
+             * @default false
+             */
+            force_colour_match: boolean;
+            /** Slots */
+            slots?: components["schemas"]["SlotChoice"][];
+        };
+        /**
+         * FilamentWarning
+         * @description Advisory, never blocking. Bambuddy's own refusals are the eligibility report.
+         */
+        FilamentWarning: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "temperature" | "not-loaded" | "low-filament" | "nozzle-mismatch" | "unreachable" | "no-choice" | "unknown-temperature";
+            /** Message */
+            message: string;
+            /** Slot Id */
+            slot_id?: number | null;
+        };
         /** Folder */
         Folder: {
             /** Archive Id */
@@ -862,6 +964,36 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
+        /**
+         * LoadedAt
+         * @description Where a spool physically is, when Bambuddy says it is loaded somewhere.
+         */
+        LoadedAt: {
+            /** Ams Id */
+            ams_id: number;
+            /** Extruder */
+            extruder?: number | null;
+            /** Global Tray Id */
+            global_tray_id: number;
+            /** Inlet */
+            inlet?: string | null;
+            /**
+             * Is Ams Ht
+             * @default false
+             */
+            is_ams_ht: boolean;
+            /**
+             * Is External
+             * @default false
+             */
+            is_external: boolean;
+            /** Printer Id */
+            printer_id: number;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Tray Id */
+            tray_id: number;
+        };
         /** ModelPatch */
         ModelPatch: {
             /** Description */
@@ -895,6 +1027,41 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+        };
+        /**
+         * NozzleRackSlot
+         * @description A slot of an H2-series nozzle rack — what ``nozzle_rack_choice`` picks from.
+         */
+        NozzleRackSlot: {
+            /**
+             * Filament Color
+             * @default
+             */
+            filament_color: string;
+            /**
+             * Filament Type
+             * @default
+             */
+            filament_type: string;
+            /**
+             * Id
+             * @default 0
+             */
+            id: number;
+            /**
+             * Nozzle Diameter
+             * @default
+             */
+            nozzle_diameter: string;
+            /**
+             * Nozzle Type
+             * @default
+             */
+            nozzle_type: string;
+            /** Stat */
+            stat?: number | null;
+            /** Wear */
+            wear?: number | null;
         };
         /** Option */
         Option: {
@@ -1269,6 +1436,11 @@ export interface components {
          *
          *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
          *     only offers it once the issues have been shown.
+         *
+         *     ``filament_plan`` is what makes this request choose its route rather than its
+         *     caller. A plan names one spool per plate slot, and those three queue-item fields
+         *     exist on no other Bambuddy call — so a request carrying one is sliced and queued,
+         *     and one without one runs the pipeline exactly as it did before (#87).
          */
         PrintRunRequest: {
             /**
@@ -1276,6 +1448,7 @@ export interface components {
              * @default 1
              */
             copies: number;
+            filament_plan?: components["schemas"]["FilamentPlan"] | null;
             /**
              * Force
              * @default false
@@ -1283,8 +1456,22 @@ export interface components {
             force: boolean;
             /** Pipeline Id */
             pipeline_id?: number | null;
+            /**
+             * Plate Id
+             * @default 1
+             */
+            plate_id: number;
+            /** Printer Id */
+            printer_id?: number | null;
         };
-        /** PrintRunResult */
+        /**
+         * PrintRunResult
+         * @description One shape for both routes, so the caller need not know which one ran.
+         *
+         *     ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
+         *     populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
+         *     is a single row carrying ``quantity``. Following either to completion is #89.
+         */
         PrintRunResult: {
             /** Bambuddy Url */
             bambuddy_url: string;
@@ -1292,7 +1479,23 @@ export interface components {
             library_file_id: number;
             /** Pipeline Id */
             pipeline_id: number;
-            run: components["schemas"]["PipelineRun"];
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+            /**
+             * Route
+             * @default pipeline
+             * @enum {string}
+             */
+            route: "pipeline" | "slice_queue";
+            run?: components["schemas"]["PipelineRun"] | null;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
+            /** Sliced Library File Id */
+            sliced_library_file_id?: number | null;
+            /** Warnings */
+            warnings?: components["schemas"]["FilamentWarning"][];
         };
         /**
          * Printer
@@ -1433,6 +1636,70 @@ export interface components {
             open_in_new_tab: boolean;
             /** Url */
             url: string;
+        };
+        /** SlotChoice */
+        SlotChoice: {
+            /** Slot Id */
+            slot_id: number;
+            /** Spool Id */
+            spool_id: number;
+        };
+        /**
+         * SlotNeed
+         * @description One filament slot of the plate, as Bambuddy reads the 3MF.
+         *
+         *     ``slot_id`` is **1-based**: ``ams_mapping`` is indexed by ``slot_id - 1``.
+         */
+        SlotNeed: {
+            /** Colour */
+            colour?: string | null;
+            /** Material */
+            material?: string | null;
+            /** Slot Id */
+            slot_id: number;
+            /** Used Grams */
+            used_grams?: number | null;
+        };
+        /**
+         * SpoolOption
+         * @description One row of the picker: a spool, plus where it is and what it can print.
+         */
+        SpoolOption: {
+            /** Brand */
+            brand?: string | null;
+            /** Color Name */
+            color_name?: string | null;
+            /** Colour */
+            colour?: string | null;
+            loaded?: components["schemas"]["LoadedAt"] | null;
+            /** Material */
+            material: string;
+            /** Nozzle Presets */
+            nozzle_presets?: {
+                [key: string]: string;
+            };
+            /** Nozzle Temp Max */
+            nozzle_temp_max?: number | null;
+            /** Nozzle Temp Min */
+            nozzle_temp_min?: number | null;
+            /** Remaining G */
+            remaining_g?: number | null;
+            /** Slicer Filament */
+            slicer_filament?: string | null;
+            /** Slicer Filament Name */
+            slicer_filament_name?: string | null;
+            /** Spool Id */
+            spool_id: number;
+            /** Storage Location */
+            storage_location?: string | null;
+            /** Subtype */
+            subtype?: string | null;
+            /**
+             * Temperature From
+             * @default unknown
+             * @enum {string}
+             */
+            temperature_from: "tray" | "spool" | "unknown";
         };
         /** ValidationError */
         ValidationError: {
@@ -2224,6 +2491,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EligibilityOverview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_filaments_api_v1_print_outputs__output_id__filaments_get: {
+        parameters: {
+            query?: {
+                printer_id?: number | null;
+                pipeline_id?: number | null;
+                plate_id?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilamentOptions"];
                 };
             };
             /** @description Validation Error */

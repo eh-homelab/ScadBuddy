@@ -1,14 +1,18 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type {
+  FilamentOptions,
   Output,
   PipelineReport,
   PipelineChoices,
   PipelineView,
+  PrintRunRequest,
   PrintRunResult,
+  SlotChoice,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { eligibilityIssues, verdictFor, type Verdict } from '../lib/problems'
+import { FilamentPicker } from './FilamentPicker'
 import { NewPipelineForm } from './NewPipelineForm'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -37,6 +41,13 @@ import { Spinner } from './ui/Spinner'
  */
 
 const MAX_COPIES = 50
+
+/**
+ * Choosing a plate is #83. Until then every print is plate 1, which is also the
+ * server's own default — so sending it explicitly changes nothing about what runs and
+ * keeps the request shape the same whichever route it takes.
+ */
+const PLATE_ID = 1
 
 function targetLabel(pipeline: PipelineView): string {
   if (pipeline.target_kind === 'specific_printer') {
@@ -74,6 +85,11 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const [asDefault, setAsDefault] = useState(false)
   const [force, setForce] = useState(false)
   const [creating, setCreating] = useState(false)
+  /** #87 — the inventory behind the filament picker, and the plan built on it. */
+  const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
+  const [filamentError, setFilamentError] = useState<string | null>(null)
+  const [plan, setPlan] = useState<SlotChoice[]>([])
+  const [exact, setExact] = useState(false)
 
   const [loading, setLoading] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -168,6 +184,69 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   )
   const derivedPrinterId = asksForPrinter ? printerId : (current?.printer_ids?.[0] ?? null)
   const verdict: Verdict | undefined = report ? verdictFor(report, derivedPrinterId) : undefined
+
+  /**
+   * #87 — the inventory, read once a pipeline and (for a class target) a printer are
+   * settled. It needs the printer: `loaded` means "loaded in *this* machine", and a
+   * spool's reachability is a property of that printer's filament switcher, so asking
+   * before one is chosen would answer about the wrong hardware.
+   *
+   * Its own attempt counter rather than the panel's: `printerId` and `selected` change
+   * without touching `attempt`, so two reads can be in flight for the same output and
+   * the older one must not land last.
+   */
+  const filamentAttempt = useRef(0)
+  const awaitingPrinter = asksForPrinter && printerId === null
+  useEffect(() => {
+    if (!open || !outputId || selected === null || awaitingPrinter) {
+      setFilaments(null)
+      setPlan([])
+      // Cleared too: the message names an output and a printer, so leaving it up while
+      // the panel shows a different one attributes the failure to the wrong thing.
+      setFilamentError(null)
+      return
+    }
+    const token = (filamentAttempt.current += 1)
+    setFilamentError(null)
+    void (async () => {
+      try {
+        const next = await api.getFilaments(outputId, {
+          printerId: derivedPrinterId,
+          pipelineId: selected,
+          plateId: PLATE_ID,
+        })
+        if (token !== filamentAttempt.current) return
+        setFilaments(next)
+        setFilamentError(null)
+        // The server's auto-match seeds the selection; every slot stays editable.
+        setPlan((next.suggested ?? []).map((choice) => ({ ...choice })))
+        // A different printer makes the escalation mean something different — it names
+        // the machine the copies land on — so the consent is asked for again.
+        setExact(false)
+      } catch (cause) {
+        if (token !== filamentAttempt.current) return
+        setFilaments(null)
+        setPlan([])
+        setFilamentError(
+          cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
+        )
+      }
+    })()
+  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter])
+
+  /**
+   * Whether the user has moved a slot off the server's suggestion. That is what makes
+   * sending a plan *meaningful*: re-sending the suggestion would escalate an otherwise
+   * ordinary pipeline run onto the slice-and-queue route for no gain.
+   */
+  const suggested = filaments?.suggested ?? []
+  const planChanged =
+    plan.length !== suggested.length ||
+    suggested.some(
+      (choice) =>
+        plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
+    )
+  const sendsPlan = filaments !== null && (exact || planChanged)
   // `force` is only offered once the issues have actually been shown.
   const issuesShown = (verdict !== undefined && !verdict.ok) || runIssues.length > 0
   const printers = (choices?.printers ?? []).filter((printer) =>
@@ -216,11 +295,24 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
       }
       if (asDefault && stored !== selected) await remember(selected)
       else if (!asDefault && stored === selected) await remember(null)
-      const ran = await api.runPipeline(outputId, {
+      const body: PrintRunRequest = {
         pipeline_id: selected,
         copies,
         force,
-      })
+        plate_id: PLATE_ID,
+      }
+      /**
+       * #87 — naming a printer or a filament plan is what escalates this off the
+       * pipeline route: `PipelineRunCreateRequest` can express neither, so the backend
+       * has to slice the library file and post queue entries instead. That changes
+       * which printer the copies land on, so it is only done when the user has actually
+       * asked — by moving a slot, or by ticking the box that says so.
+       */
+      if (sendsPlan) {
+        body.printer_id = derivedPrinterId
+        body.filament_plan = { slots: plan, force_colour_match: false }
+      }
+      const ran = await api.runPipeline(outputId, body)
       setResult(ran)
       onRan(ran)
     } catch (cause) {
@@ -269,29 +361,68 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
     >
       {result ? (
         <div className="space-y-2 text-[13px] text-ink">
-          <p>
-            Pipeline run <span className="sb-num">#{result.run.id}</span> started for{' '}
-            <span className="sb-num">{result.run.copies}</span>{' '}
-            {result.run.copies === 1 ? 'copy' : 'copies'}.
-          </p>
-          {(result.run.jobs ?? []).length > 0 && (
-            <ul className="space-y-0.5 text-[12px] text-muted" data-testid="run-jobs">
-              {(result.run.jobs ?? []).map((job) => (
-                <li key={job.id}>
-                  Copy <span className="sb-num">{job.copy_index + 1}</span> on{' '}
-                  {job.assigned_printer_name ?? 'a printer Bambuddy picks'}
-                  {job.queue_entry_id ? (
-                    <>
-                      {' '}
-                      as queue <span className="sb-num">#{job.queue_entry_id}</span>
-                    </>
-                  ) : null}
-                </li>
+          {/* `run` is null on the slice-and-queue route — there is no pipeline run to
+              report there, only a slice job and the queue entries it produced. */}
+          {result.run && (
+            <>
+              <p>
+                Pipeline run <span className="sb-num">#{result.run.id}</span> started for{' '}
+                <span className="sb-num">{result.run.copies}</span>{' '}
+                {result.run.copies === 1 ? 'copy' : 'copies'}.
+              </p>
+              {(result.run.jobs ?? []).length > 0 && (
+                <ul className="space-y-0.5 text-[12px] text-muted" data-testid="run-jobs">
+                  {(result.run.jobs ?? []).map((job) => (
+                    <li key={job.id}>
+                      Copy <span className="sb-num">{job.copy_index + 1}</span> on{' '}
+                      {job.assigned_printer_name ?? 'a printer Bambuddy picks'}
+                      {job.queue_entry_id ? (
+                        <>
+                          {' '}
+                          as queue <span className="sb-num">#{job.queue_entry_id}</span>
+                        </>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {result.run.eligibility_overridden && (
+                <p className="text-[12px] text-warn">
+                  Started with the eligibility check overridden.
+                </p>
+              )}
+            </>
+          )}
+          {result.route === 'slice_queue' && (
+            <div data-testid="queued-items">
+              <p>
+                Sliced and queued for{' '}
+                {filaments?.printer_name ?? 'the printer you chose'} —{' '}
+                <span className="sb-num">{(result.queue_item_ids ?? []).length}</span>{' '}
+                {(result.queue_item_ids ?? []).length === 1 ? 'item' : 'items'}.
+              </p>
+              {(result.queue_item_ids ?? []).length > 0 && (
+                <ul className="mt-1 space-y-0.5 text-[12px] text-muted">
+                  {(result.queue_item_ids ?? []).map((itemId) => (
+                    <li key={itemId}>
+                      Queue <span className="sb-num">#{itemId}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {result.slice_job_id !== null && result.slice_job_id !== undefined && (
+                <p className="mt-1 text-[12px] text-faint">
+                  Slice job <span className="sb-num">#{result.slice_job_id}</span>.
+                </p>
+              )}
+            </div>
+          )}
+          {(result.warnings ?? []).length > 0 && (
+            <ul className="space-y-0.5 text-[12px] text-muted" data-testid="run-warnings">
+              {(result.warnings ?? []).map((warning, index) => (
+                <li key={`${warning.kind}-${index}`}>{warning.message}</li>
               ))}
             </ul>
-          )}
-          {result.run.eligibility_overridden && (
-            <p className="text-[12px] text-warn">Started with the eligibility check overridden.</p>
           )}
           {/* Following the run to completion is #89; this reports what Bambuddy answered. */}
         </div>
@@ -491,6 +622,52 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
               Otherwise the pipeline set in Settings is the fallback.
             </p>
           ) : null}
+
+          {filamentError && (
+            <p className="mt-3 text-[12px] text-muted" data-testid="filaments-unavailable">
+              ScadBuddy could not read the filament inventory: {filamentError}. The pipeline
+              will use its own filament presets.
+            </p>
+          )}
+
+          {filaments && (
+            <>
+              <FilamentPicker
+                options={filaments}
+                plan={plan}
+                onChange={setPlan}
+                copies={copies}
+              />
+              {/**
+               * Off by default, and it says what it costs. Ticking it pins the printer,
+               * which is exactly what a pipeline run cannot express — so the backend
+               * slices and queues instead, and a class-targeted pipeline stops fanning
+               * out across its printers. Changing a slot implies the same thing and is
+               * treated as the same consent, which is why the box is only the way to
+               * ask for it *without* changing anything.
+               */}
+              <label className="mt-3 flex cursor-pointer items-start gap-2 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={exact}
+                  onChange={(event) => setExact(event.target.checked)}
+                  className="mt-0.5 accent-[var(--sb-accent)]"
+                  data-testid="use-exact-filaments"
+                />
+                <span>
+                  Use exactly these spools — ScadBuddy will slice and queue this for{' '}
+                  {filaments.printer_name ?? 'the chosen printer'}, instead of letting the
+                  pipeline choose a printer.
+                </span>
+              </label>
+              {planChanged && !exact && (
+                <p className="mt-1 text-[12px] text-faint">
+                  A slot has been changed, so this print will be sliced and queued for{' '}
+                  {filaments.printer_name ?? 'the chosen printer'} either way.
+                </p>
+              )}
+            </>
+          )}
 
           {/* #88 adds the rest of PrintQueueItemCreate here as an options disclosure. */}
 

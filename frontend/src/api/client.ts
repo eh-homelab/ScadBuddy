@@ -3,6 +3,7 @@ import type {
   ConnectionTest,
   CustomizerSchema,
   EligibilityOverview,
+  FilamentOptions,
   FontCatalogue,
   FontFamily,
   InstalledFamily,
@@ -165,6 +166,32 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ pipeline_ids: pipelineIds ?? null }),
     }),
+
+  /**
+   * #87 — one read per output, because the join is the server's job. The spool
+   * inventory, where each spool is assigned, the printer's live AMS state and the
+   * per-nozzle slicer presets are four separate Bambuddy routes; doing that join in the
+   * browser would mean four round trips and ScadBuddy's own copy of the rules.
+   *
+   * `printerId` is what makes `loaded` mean "loaded *here*" and what makes reachability
+   * answerable at all — without one the server can say where a spool is but not whether
+   * the chosen slot can reach it.
+   */
+  getFilaments: (
+    outputId: string,
+    query: { printerId?: number | null; pipelineId?: number | null; plateId?: number } = {},
+  ) => {
+    const search = new URLSearchParams()
+    if (query.printerId !== null && query.printerId !== undefined) {
+      search.set('printer_id', String(query.printerId))
+    }
+    if (query.pipelineId !== null && query.pipelineId !== undefined) {
+      search.set('pipeline_id', String(query.pipelineId))
+    }
+    if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
+  },
 
   runPipeline: (outputId: string, body: PrintRunRequest) =>
     request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {

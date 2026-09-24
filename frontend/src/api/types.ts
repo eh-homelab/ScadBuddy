@@ -60,6 +60,15 @@ export type PerPrinterReport = Schemas['PerPrinterReport']
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
 
+/** #87 — the filament picker's wire types. */
+export type FilamentOptions = Schemas['FilamentOptions']
+export type SpoolOption = Schemas['SpoolOption']
+export type SlotNeed = Schemas['SlotNeed']
+export type SlotChoice = Schemas['SlotChoice']
+export type FilamentPlan = Schemas['FilamentPlan']
+export type FilamentWarning = Schemas['FilamentWarning']
+export type LoadedAt = Schemas['LoadedAt']
+
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
 export type SendMode = SendResult['mode']
