@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Body, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -151,7 +151,7 @@ class SourceUpdate(BaseModel):
 )
 async def put_source(
     slug: SlugPath,
-    body: Annotated[SourceUpdate, Body()],
+    body: SourceUpdate,
     catalogue: CatalogueDep,
     config: ConfigDep,
 ) -> ModelRecord:

@@ -26,10 +26,6 @@ class ModelExistsError(ValueError):
     pass
 
 
-class HistoryUnavailableError(RuntimeError):
-    pass
-
-
 class ModelMeta(BaseModel):
     """The editable half of ``model.json``. The renderer owns the ``schema`` key."""
 
@@ -173,16 +169,6 @@ class Catalogue:
             self.write_raw_meta(slug, raw)
         self._commit(message or f"Edit {slug} source", slug)
         return self.record(slug)
-
-    def restore(self, slug: str, commit: str) -> ModelRecord:
-        """Put a model back as it was at ``commit`` — as a new commit, never a rewrite."""
-        self._require_history().restore(slug, commit)
-        return self.record(slug)
-
-    def _require_history(self) -> ModelHistory:
-        if self.history is None or not self.history.available:
-            raise HistoryUnavailableError("model history is not available")
-        return self.history
 
     def delete(self, slug: str) -> None:
         self._require(slug)

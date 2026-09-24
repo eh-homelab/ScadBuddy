@@ -122,8 +122,10 @@ def list_versions(
         revisions = history.log(slug, limit=limit)
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    head = revisions[0].commit if revisions else None
-    return [_version(revision, slug, current=revision.commit == head) for revision in revisions]
+    # Newest first, so the head of the list is the revision the model is at.
+    return [
+        _version(revision, slug, current=index == 0) for index, revision in enumerate(revisions)
+    ]
 
 
 @router.get(

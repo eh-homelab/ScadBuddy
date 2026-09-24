@@ -331,13 +331,15 @@ def test_seeding_records_the_seed_as_a_commit(catalogue: Catalogue, tmp_path: Pa
     assert catalogue.seed(seed) == []
 
 
-def test_restore_through_the_catalogue(catalogue: Catalogue) -> None:
+def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:
     first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain")).version
     catalogue.write_source("keychain", "cube(20);\n")
     assert first is not None
 
-    record = catalogue.restore("keychain", first)
+    assert catalogue.history is not None
+    catalogue.history.restore("keychain", first)
 
+    record = catalogue.record("keychain")
     assert catalogue.paths.model_source("keychain").read_text(encoding="utf-8") == "cube(10);\n"
     assert record.version is not None
     assert record.version != first
