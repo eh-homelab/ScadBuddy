@@ -1,6 +1,7 @@
 import type {
   BambuddyTargets,
   EligibilityReport,
+  FilamentOptions,
   PipelineView,
   PresetChoice,
   BoundingBox,
@@ -612,3 +613,233 @@ export const OPENSCAD_LOG_TAIL = [
   'WARNING: Object may not be a valid 2-manifold and may need repair!',
   'Execution aborted',
 ]
+
+/**
+ * #87 — what `GET /print/outputs/{id}/filaments` answers for the two-colour keychain,
+ * built from the recorded H2C in `backend/tests/bambuddy/recordings/`.
+ *
+ * The shape of the estate is the point, because every trap in the picker is one of
+ * these rows:
+ *
+ * - **The AMS ids are the printer's, not indices.** The recorded machine reports
+ *   `[0, 1, 128, 2]`, with the AMS-HT at `128` holding one spool; `ams_switch_inlet`
+ *   keys them as strings and has AMS 1 on inlet B and the AMS-HT on inlet A, which is
+ *   what makes the two extruders' reachability a real question here.
+ * - **Two spools are the same colour, one loaded and one nearly spent on a shelf.**
+ *   That is what the "loaded only" and "enough for this print" filters are for, and the
+ *   spent one (2 g) is the row the sufficiency rule has to hide only when the grams are
+ *   actually known.
+ * - **One spool has no remaining weight at all.** An untagged spool reports `remain: -1`
+ *   and the backend normalises it to `null`; it renders as an em dash and must survive
+ *   every filter, because unknown is not empty.
+ * - **`suggested` picks a spool that is NOT loaded** for slot 2: the exact colour match
+ *   is the Elegoo pink on the shelf, and the auto-matcher prefers an exact colour to a
+ *   loaded near-miss. The `not-loaded` warning that follows is an instruction, not a
+ *   fault, which is why it reads as an advisory.
+ *
+ * The server returns `spools` already sorted — loaded in this printer, then loaded
+ * elsewhere, then the shelf; most remaining first within each band — so the order here
+ * is load-bearing and not alphabetical.
+ */
+export const filamentOptions: FilamentOptions = {
+  library_file_id: 8812,
+  printer_id: 1,
+  printer_name: '3DP-31B-598',
+  printer_model: 'H2C',
+  nozzle_diameters: ['0.2', '0.4'],
+  nozzle_rack: [
+    { id: 0, nozzle_type: 'HS00', nozzle_diameter: '0.2', filament_color: '0047BBFF', filament_type: '', wear: 128, stat: 0 },
+    { id: 1, nozzle_type: 'HS01', nozzle_diameter: '0.4', filament_color: '00000000', filament_type: '', wear: 0, stat: 0 },
+  ],
+  ams_switch_inlet: { '0': 'B', '1': 'B', '128': 'A', '2': 'A' },
+  process_nozzle_diameter: '0.4',
+  slots: [
+    // A sliced plate, so the grams are real. `PrintPicker.test.tsx` overrides these to
+    // null for the unsliced case, which is what an unmodified upload actually answers.
+    { slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 4.8 },
+    { slot_id: 2, material: 'PLA', colour: '#FF1493', used_grams: 1.9 },
+  ],
+  spools: [
+    {
+      spool_id: 9,
+      material: 'PETG',
+      subtype: 'Basic',
+      brand: 'Bambu Lab',
+      color_name: 'Misty Blue',
+      colour: '#688197',
+      slicer_filament: 'GFG00',
+      slicer_filament_name: 'Bambu PETG Basic',
+      remaining_g: 1000,
+      nozzle_temp_min: 230,
+      nozzle_temp_max: 260,
+      temperature_from: 'tray',
+      storage_location: null,
+      loaded: {
+        printer_id: 1,
+        printer_name: '3DP-31B-598',
+        ams_id: 0,
+        tray_id: 1,
+        global_tray_id: 1,
+        extruder: 0,
+        inlet: 'B',
+        is_ams_ht: false,
+        is_external: false,
+      },
+      nozzle_presets: { '0.2': 'GFSG00_24', '0.4': 'GFSG00_23', '0.6': 'GFSG00_25' },
+    },
+    {
+      spool_id: 21,
+      material: 'PLA',
+      subtype: 'Silk',
+      brand: 'Bambu Lab',
+      color_name: 'Blue',
+      colour: '#0047BB',
+      slicer_filament: 'GFA05',
+      slicer_filament_name: 'Bambu PLA Silk @BBL H2C 0.4 nozzle',
+      remaining_g: 812,
+      nozzle_temp_min: 190,
+      nozzle_temp_max: 230,
+      temperature_from: 'tray',
+      storage_location: null,
+      loaded: {
+        printer_id: 1,
+        printer_name: '3DP-31B-598',
+        ams_id: 1,
+        tray_id: 0,
+        global_tray_id: 4,
+        extruder: 0,
+        inlet: 'B',
+        is_ams_ht: false,
+        is_external: false,
+      },
+      nozzle_presets: { '0.2': 'GFSA05_21', '0.4': 'GFSA05_22' },
+    },
+    {
+      // The AMS-HT: one spool, no slot number to name, and on the other inlet.
+      spool_id: 22,
+      material: 'PLA',
+      subtype: 'Basic',
+      brand: 'Bambu Lab',
+      color_name: 'Hot Pink',
+      colour: '#F5547C',
+      slicer_filament: 'GFA00',
+      slicer_filament_name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle',
+      remaining_g: 640,
+      nozzle_temp_min: 190,
+      nozzle_temp_max: 230,
+      temperature_from: 'tray',
+      storage_location: null,
+      loaded: {
+        printer_id: 1,
+        printer_name: '3DP-31B-598',
+        ams_id: 128,
+        tray_id: 0,
+        global_tray_id: 128,
+        extruder: 1,
+        inlet: 'A',
+        is_ams_ht: true,
+        is_external: false,
+      },
+      nozzle_presets: { '0.2': 'GFSA00_21', '0.4': 'GFSA00_20' },
+    },
+    {
+      // Loaded, but in the other printer — a legitimate choice that means fetching it.
+      spool_id: 30,
+      material: 'PLA',
+      subtype: 'Basic',
+      brand: 'Inland',
+      color_name: 'White',
+      colour: '#E3E5E5',
+      slicer_filament: 'GFL99',
+      slicer_filament_name: 'Inland PLA @BBL H2C',
+      remaining_g: 877.5,
+      nozzle_temp_min: 190,
+      nozzle_temp_max: 230,
+      temperature_from: 'tray',
+      storage_location: null,
+      loaded: {
+        printer_id: 2,
+        printer_name: '3DP-77A-114',
+        ams_id: 0,
+        tray_id: 0,
+        global_tray_id: 0,
+        extruder: 0,
+        inlet: 'A',
+        is_ams_ht: false,
+        is_external: false,
+      },
+      nozzle_presets: { '0.4': 'GFL99_20' },
+    },
+    {
+      spool_id: 24,
+      material: 'PETG',
+      subtype: 'Magic',
+      brand: 'Cookiecad',
+      color_name: 'Witchcraft',
+      colour: '#7389BC',
+      slicer_filament: '2',
+      slicer_filament_name: 'Cookiecad PETG Magic Dark Magic (3DFP 7JdoWkaDB) @H2C',
+      remaining_g: 823,
+      nozzle_temp_min: null,
+      nozzle_temp_max: null,
+      temperature_from: 'unknown',
+      storage_location: 'Shelf B',
+      loaded: null,
+      nozzle_presets: { '0.4': '2' },
+    },
+    {
+      spool_id: 27,
+      material: 'PLA',
+      subtype: 'Basic',
+      brand: 'Elegoo',
+      color_name: 'Deep Pink',
+      colour: '#FF1493',
+      slicer_filament: null,
+      slicer_filament_name: null,
+      // Untagged: Bambuddy reports `remain: -1` for it, which is unknown, not empty.
+      remaining_g: null,
+      nozzle_temp_min: null,
+      nozzle_temp_max: null,
+      temperature_from: 'unknown',
+      storage_location: 'Shelf B',
+      loaded: null,
+      nozzle_presets: {},
+    },
+    {
+      // Nearly spent: 2 g against slot 1's 4.8 g, so "enough for this print" hides it.
+      spool_id: 26,
+      material: 'PLA',
+      subtype: 'Silk',
+      brand: 'Bambu Lab',
+      color_name: 'Blue',
+      colour: '#0047BB',
+      slicer_filament: 'GFA05',
+      slicer_filament_name: 'Bambu PLA Silk @BBL H2C 0.4 nozzle',
+      remaining_g: 2,
+      nozzle_temp_min: 190,
+      nozzle_temp_max: 230,
+      temperature_from: 'spool',
+      storage_location: 'Shelf A',
+      loaded: null,
+      nozzle_presets: { '0.4': 'GFSA05_22' },
+    },
+  ],
+  suggested: [
+    { slot_id: 1, spool_id: 21 },
+    { slot_id: 2, spool_id: 27 },
+  ],
+  warnings: [
+    {
+      kind: 'not-loaded',
+      slot_id: 2,
+      message:
+        'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
+    },
+    {
+      kind: 'unknown-temperature',
+      slot_id: null,
+      message:
+        'Bambuddy has no nozzle temperature for Elegoo PLA Basic Deep Pink, so ScadBuddy cannot check it against the others on this plate.',
+    },
+  ],
+}
