@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from tests.api.conftest import PNG_BYTES
 
@@ -398,3 +399,54 @@ def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient)
 def test_a_body_with_no_content_type_at_all_is_refused(client: TestClient) -> None:
     response = client.post("/api/v1/models", content=b"cube(1);")
     assert response.status_code == 415
+
+
+def test_the_schema_of_a_forced_save_answers_a_problem_not_a_crash(client: TestClient) -> None:
+    """`force` is the first way unparseable source can reach the catalogue, and the UI
+    goes straight to the customizer after one."""
+    forced = client.post(
+        "/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n", "force": True}
+    )
+    assert forced.status_code == 201
+
+    response = client.get("/api/v1/models/broken/schema")
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert "schema" in body["detail"]
+    assert body["log_tail"] == ["ERROR: Parser error: syntax error"]
+
+
+def test_a_refusal_says_when_it_was_a_timeout(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`timed_out` has to survive the save path, or the editor blames the syntax."""
+
+    async def timing_out(*args: object, **kwargs: object) -> ProcessOutput:
+        raise RenderTimeoutError("openscad timed out after 120s", ["Compiling design..."])
+
+    monkeypatch.setattr("scadbuddy.library.scad.run_openscad", timing_out)
+
+    response = client.put(f"/api/v1/models/{model}/source", json={"source": "cube(1);\n"})
+    assert response.status_code == 422
+    body = response.json()
+    assert body["timed_out"] is True
+    assert "timed out" in body["detail"]
+
+
+def test_replacing_the_source_swaps_the_file_rather_than_truncating_it(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A render may have the old file open; the replacement must not be seen half-written."""
+    source_path = paths.model_source(model)
+    before = source_path.stat().st_ino
+
+    replacement = "width = 7;\n"
+    assert (
+        client.put(f"/api/v1/models/{model}/source", json={"source": replacement}).status_code
+        == 200
+    )
+
+    assert source_path.read_text(encoding="utf-8") == replacement
+    assert source_path.stat().st_ino != before
+    assert sorted(p.name for p in paths.model_dir(model).iterdir()) == ["model.json", "model.scad"]

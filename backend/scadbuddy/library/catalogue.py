@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -119,6 +121,26 @@ class Catalogue:
         if readme is not None:
             self.readme_path(slug).write_text(readme, encoding="utf-8")
         return self.record(slug)
+
+    def replace_source(self, slug: str, source: str) -> None:
+        """Swap `model.scad` for new contents without ever leaving it half-written.
+
+        A render for this slug may be queued or running, and OpenSCAD opens the file by
+        path; `write_text` truncates first, so a reader landing in that window sees a
+        torn file and fails for a reason that has nothing to do with its own source.
+        `os.replace` is atomic, and a temp file in the same directory keeps it on one
+        filesystem so it stays that way.
+        """
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+        handle, staged = tempfile.mkstemp(dir=directory, prefix=".model-", suffix=".scad")
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as writer:
+                writer.write(source)
+            os.replace(staged, self.paths.model_source(slug))
+        except BaseException:
+            Path(staged).unlink(missing_ok=True)
+            raise
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
         self._require(slug)

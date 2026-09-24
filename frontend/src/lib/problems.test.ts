@@ -47,6 +47,11 @@ describe('refusedCheck', () => {
     expect(check?.log_tail).toEqual(refusal.log_tail)
   })
 
+  it('carries the timeout flag the server sent', () => {
+    expect(refusedCheck(refusal)?.timed_out).toBe(false)
+    expect(refusedCheck({ ...refusal, timed_out: true })?.timed_out).toBe(true)
+  })
+
   it('is undefined when the problem carries no diagnostics', () => {
     expect(refusedCheck({ title: 'Conflict', status: 409 })).toBeUndefined()
   })

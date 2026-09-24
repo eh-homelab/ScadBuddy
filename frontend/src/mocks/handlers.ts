@@ -202,7 +202,9 @@ export const handlers = [
         has_readme: false,
       }
       state.models = [pasted, ...state.models]
-      state.schemas[pastedSlug] = fixtures.keychainSchema
+      // A forced save stores source OpenSCAD cannot parse, so no schema is derived —
+      // the customizer then opens onto the 422 the real backend answers.
+      if (check.ok) state.schemas[pastedSlug] = fixtures.keychainSchema
       state.sources[pastedSlug] = body.source
       await delay(120)
       return HttpResponse.json(pasted, { status: 201 })
@@ -260,6 +262,7 @@ export const handlers = [
     const check = checkOf(body.source)
     if (!check.ok && !body.force) return refusal(check)
     state.sources[slug] = body.source
+    if (!check.ok) delete state.schemas[slug]
     const updated = { ...model, updated_at: new Date().toISOString() }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     await delay(120)
@@ -277,8 +280,16 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug/schema`, ({ params }) => {
-    const schema = state.schemas[String(params['slug'])]
-    return schema ? HttpResponse.json(schema) : problem(404, 'Model not found')
+    const slug = String(params['slug'])
+    const schema = state.schemas[slug]
+    if (schema) return HttpResponse.json(schema)
+    return state.models.some((model) => model.slug === slug)
+      ? problem(
+          422,
+          'Unprocessable Content',
+          "OpenSCAD could not build a customizer schema from this model's source",
+        )
+      : problem(404, 'Model not found')
   }),
 
   http.post(`${base}/models/:slug/render`, async ({ params, request }) => {

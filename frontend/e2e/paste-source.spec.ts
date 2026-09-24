@@ -56,6 +56,10 @@ test.describe('pasted source', () => {
 
     await page.getByRole('button', { name: 'Save anyway' }).click()
     await expect(page).toHaveURL(/\/m\/half-cube$/)
+    // Forced source has no derivable schema, so the customizer says so rather than
+    // erroring out — the save was allowed, not pretended to have worked.
+    // Not `getByRole('alert')`: Monaco leaves its own live regions in the document.
+    await expect(page.getByText(/could not build a customizer schema/)).toBeVisible()
 
     // The editor model is disposed with the page, so a new paste starts blank rather
     // than resurrecting the last one from the reused `models/new` URI.

@@ -28,9 +28,10 @@ from scadbuddy.library.scad import (
     check_source,
     decode_source,
     inspect_source,
+    parse_diagnostics,
 )
 from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_filename, slugify
-from scadbuddy.render.runner import cached_schema
+from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
 logger = logging.getLogger(__name__)
@@ -130,6 +131,9 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
         str(error),
         log_tail=error.log_tail,
         diagnostics=[d.model_dump() for d in check.diagnostics] if check else [],
+        # Round-tripped so a refusal reads the same as the live check did: a timeout
+        # says the source may be slow, not that its syntax is wrong.
+        timed_out=check.timed_out if check else False,
     )
 
 
@@ -404,7 +408,7 @@ async def put_source(
         # checked — and has its schema derived — against the files it will really see.
         context=paths.model_dir(slug),
     )
-    paths.model_source(slug).write_text(body.source, encoding="utf-8")
+    catalogue.replace_source(slug, body.source)
     if checked is not None and checked.schema is not None:
         store_cached_schema(paths.model_meta(slug), checked.schema)
     else:
@@ -425,6 +429,16 @@ async def get_schema(
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
+        ) from None
+    except OpenSCADError as error:
+        # Reachable since `force`: a saved-anyway model has source OpenSCAD cannot get
+        # through, and the customizer opens straight onto this route. It is the model's
+        # problem, not the server's, so it reads like every other rejection here.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "OpenSCAD could not build a customizer schema from this model's source",
+            log_tail=error.log_tail,
+            diagnostics=[d.model_dump() for d in parse_diagnostics(error.log_tail)],
         ) from None
 
 

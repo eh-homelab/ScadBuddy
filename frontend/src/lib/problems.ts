@@ -93,7 +93,7 @@ export function refusedCheck(problem: Problem): SourceCheck | undefined {
   return {
     ok: false,
     checked: true,
-    timed_out: false,
+    timed_out: problem.timed_out === true,
     diagnostics,
     log_tail: Array.isArray(log) ? log.map(String) : [],
   }

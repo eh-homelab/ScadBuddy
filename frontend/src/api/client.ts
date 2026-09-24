@@ -37,7 +37,9 @@ export class ApiError extends Error {
   readonly problem: Problem
 
   constructor(problem: Problem) {
-    super(problem.title)
+    // The detail is the sentence written for a person ("OpenSCAD could not build a
+    // customizer schema from this model's source"); the title is the status name.
+    super(problem.detail ?? problem.title)
     this.name = 'ApiError'
     this.status = problem.status
     this.detail = problem.detail ?? problem.title

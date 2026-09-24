@@ -149,4 +149,30 @@ describe('NewModelPage', () => {
     expect(await screen.findByText(/check timed out/)).toBeInTheDocument()
     expect(screen.queryByText('OpenSCAD could not parse this.')).not.toBeInTheDocument()
   })
+
+  it('shows a save refused on a timeout as a timeout', async () => {
+    server.use(
+      http.post('/api/v1/models', () =>
+        HttpResponse.json(
+          {
+            title: 'Unprocessable Content',
+            status: 422,
+            detail: 'the parse check timed out',
+            timed_out: true,
+            diagnostics: [{ severity: 'error', message: 'the check timed out after 120s' }],
+            log_tail: [],
+          },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+
+    const { user } = renderNew()
+    await user.type(screen.getByLabelText('Name'), 'Slow Model')
+    await paste(user, keychainSource)
+    await screen.findByText(/^Parses cleanly/)
+
+    await user.click(screen.getByRole('button', { name: 'Save and customize' }))
+    expect(await screen.findByText(/check timed out/)).toBeInTheDocument()
+  })
 })
