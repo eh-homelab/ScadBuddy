@@ -360,3 +360,26 @@ def test_each_entry_keeps_the_compression_the_writer_chose(written: Path) -> Non
     with zipfile.ZipFile(written) as archive:
         after = {info.filename: info.compress_type for info in archive.infolist()}
     assert after == before
+
+
+def test_per_object_metadata_is_not_collateral(written: Path) -> None:
+    """The stamp owns three keys on the ROOT model. 3MF allows <metadata> inside an
+    <object> too, and a Designer there belongs to whoever put it there."""
+    with zipfile.ZipFile(written) as archive:
+        entries = [
+            (i.filename, i.compress_type, archive.read(i.filename)) for i in archive.infolist()
+        ]
+    inside = b'   <metadata name="Designer">someone else</metadata>\n'
+    with zipfile.ZipFile(written, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, compression, payload in entries:
+            if name == ROOT_MODEL:
+                payload = payload.replace(b"   <components>", inside + b"   <components>")
+            info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+            info.compress_type = compression
+            archive.writestr(info, payload)
+
+    stamp(written, PROVENANCE)
+
+    with zipfile.ZipFile(written) as archive:
+        xml = archive.read(ROOT_MODEL).decode("utf-8")
+    assert "someone else" in xml

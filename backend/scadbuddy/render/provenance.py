@@ -107,7 +107,12 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
         # the slash here and leave XML nothing can parse. Nothing re-reads the file
         # on the write path, so refuse loudly rather than ship a broken 3MF.
         raise ValueError("the 3MF root model is self-closing; nothing to stamp onto")
-    rest = _OWNED.sub("", xml[tag.end() :])
+    # Only the model's own metadata is ours to remove. 3MF allows <metadata> inside an
+    # <object> as well, and everything from <resources> on belongs to whoever put it
+    # there — an unscoped substitution would quietly take a per-object Designer with it.
+    rest = xml[tag.end() :]
+    head, marker, tail = rest.partition("<resources")
+    rest = _OWNED.sub("", head) + marker + tail
     if f"xmlns:{NS_PREFIX}=" not in opening:
         opening = f'{opening[:-1]} xmlns:{NS_PREFIX}="{SCADBUDDY_NS}">'
     entries = [f' <metadata name="Designer">{DESIGNER}</metadata>']

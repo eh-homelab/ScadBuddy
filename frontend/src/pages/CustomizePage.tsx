@@ -53,6 +53,11 @@ export function CustomizePage() {
   // spreading another model's values onto this schema is a silent wrong answer.
   const foreign = resolved && resolved.slug !== slug ? resolved : undefined
   const reopened = foreign ? undefined : resolved
+  // Every hook below runs before the redirects further down, so a page this one is
+  // only passing through must not seed any values: with none there is nothing to
+  // debounce, and no render — an OpenSCAD process and a concurrency slot — is started
+  // for a model the reader is not going to see.
+  const leaving = foreign !== undefined || Boolean(reopenId && reopenState.error)
 
   // useAsync reports loading whether or not it has anything to fetch, so reading it
   // directly would hold the values back for a render even when the target is already
@@ -63,12 +68,12 @@ export function CustomizePage() {
     // Null until there is something to show: the schema has to be here, and a deep
     // link's values have to have arrived, before the defaults are the right answer.
     () =>
-      schema && !resolving
+      schema && !resolving && !leaving
         ? reopened
           ? { ...defaultValues(schema), ...reopened.params }
           : defaultValues(schema)
         : null,
-    [schema, reopened, resolving],
+    [schema, reopened, resolving, leaving],
   )
   // A different model, or a different output, discards edits made against the old one.
   if (edits.of !== seed) setEdits({ of: seed, values: null })

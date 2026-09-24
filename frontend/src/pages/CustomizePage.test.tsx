@@ -1,11 +1,12 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { printOptions, settings as settingsFixture } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
+import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
@@ -497,6 +498,41 @@ describe('CustomizePage', () => {
       { route: `/m/name-keychain?from=${id}` },
     )
     expect(await screen.findByTestId('gone')).toBeInTheDocument()
+  })
+
+  it('renders nothing for a page it is only passing through', async () => {
+    // The hooks run before the redirects below them, so without a guard the wrong
+    // model gets a real OpenSCAD job — one render-concurrency slot for nothing.
+    const id = 'c'.repeat(32)
+    const rendered: string[] = []
+    server.use(
+      // Slower than the debounce on purpose: that is the window in which the page
+      // holds a slug it is about to leave, and the only one where this can go wrong.
+      http.get('/api/v1/outputs/:outputId/edit', async () => {
+        await delay(RENDER_DEBOUNCE_MS * 2)
+        return HttpResponse.json({
+          output_id: id,
+          slug: 'name-keychain',
+          name: 'Nova',
+          params: { name: 'Nova' },
+          model_version: null,
+          source: 'record',
+        })
+      }),
+      http.post('/api/v1/models/:slug/render', ({ params }) => {
+        rendered.push(String(params.slug))
+        return HttpResponse.json({ job_id: `job-${String(params.slug)}` }, { status: 202 })
+      }),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+      </Routes>,
+      { route: `/m/some-other-model?from=${id}` },
+    )
+    await new Promise((resolve) => setTimeout(resolve, RENDER_DEBOUNCE_MS * 4))
+    // The model the link actually belongs to may render; the one in the URL may not.
+    expect(rendered).not.toContain('some-other-model')
   })
 
   it('counts changes against the model defaults', async () => {
