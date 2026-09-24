@@ -114,6 +114,11 @@ jobs:
           set -euo pipefail
           if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
             version="${BASH_REMATCH[1]}"
+          elif [[ "$REF" == refs/tags/* ]]; then
+            # The trigger is `v*`, which also admits `v1.2.3-rc1` or `v2`.
+            # Those are not releases deploy-release.yml would accept, and
+            # labelling them `sha-<short>` would hide the mismatch — refuse.
+            echo "::error::tag '${REF#refs/tags/}' is not vX.Y.Z; only strict semver tags are built"; exit 1
           else
             version="sha-${SHA:0:7}"
           fi

@@ -68,7 +68,9 @@ jobs:
           ref="ghcr.io/eh-homelab/scadbuddy:${version}"
           # Parsed from the human output: buildx ignores --format for some
           # image shapes and prints the default block instead.
-          digest=$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')
+          # `|| true`: under `set -e` a failing pipeline in a plain assignment
+          # aborts the step before the error line below can say what happened.
+          digest=$(docker buildx imagetools inspect "$ref" 2>&1 | awk '/^Digest:/ {print $2; exit}' || true)
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $ref (got '$digest')"; exit 1; }
           echo "$ref -> $digest"
           echo "version=$version" >> "$GITHUB_OUTPUT"
@@ -89,13 +91,14 @@ jobs:
   # Success is reported by clusters' scadbuddy-verify-deploy.yml once the pod
   # serves the revision; this job covers the ways a main deploy can end
   # without a merge on its way — the `pin` job was overtaken in the deploy
-  # queue and cancelled before it ran, it failed before opening a PR, or it
-  # opened the PR but could not arm auto-merge — so none is silent. Posts a
-  # commit comment on the build's commit, the same place verification reports.
+  # queue and cancelled before it ran, it failed before opening a PR, it
+  # opened the PR but could not arm auto-merge, or clusters already pinned
+  # this exact image so there was nothing to open — so none is silent. Posts
+  # a commit comment on the build's commit, the same place verification reports.
   report:
     name: Report a deploy that opened no PR
     needs: [resolve, deploy]
-    if: ${{ always() && needs.resolve.result != 'skipped' && needs.deploy.result != 'success' }}
+    if: ${{ always() && needs.resolve.result != 'skipped' && (needs.deploy.result != 'success' || needs.deploy.outputs.unchanged == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     # A commit comment needs contents: write. The App token below carries it
@@ -125,10 +128,14 @@ jobs:
           DEPLOY_RESULT: ${{ needs.deploy.result }}
           PR_URL: ${{ needs.deploy.outputs.pr_url }}
           ARMED: ${{ needs.deploy.outputs.armed }}
+          UNCHANGED: ${{ needs.deploy.outputs.unchanged }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
           case "$RESOLVE_RESULT:$DEPLOY_RESULT" in
+            success:success)
+              # Only reachable via the job `if` when nothing changed.
+              line="ℹ️ Nothing to deploy: clusters already pins this exact image ([deploy run](${RUN_URL}))." ;;
             success:cancelled)
               line="⚠️ Not deployed: a newer deploy request overtook this build before its clusters PR was opened. A later main build supersedes it; re-run the [deploy run](${RUN_URL}) to deploy this commit anyway." ;;
             success:*)
@@ -146,5 +153,6 @@ jobs:
           gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/comments" -f body="$line" > /dev/null \
             || echo "::warning::could not comment on ${REVISION:0:7}"
           # The workflow is red for anything but a cancellation — overtaken
-          # in the queue, or cancelled by hand — which is not a failure.
-          [ "$DEPLOY_RESULT" = "cancelled" ] || [ "$RESOLVE_RESULT" = "cancelled" ]
+          # in the queue, or cancelled by hand — or an unchanged pin, neither
+          # of which is a failure.
+          [ "$DEPLOY_RESULT" = "cancelled" ] || [ "$RESOLVE_RESULT" = "cancelled" ] || [ "$UNCHANGED" = "true" ]
