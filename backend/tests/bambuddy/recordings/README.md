@@ -35,6 +35,12 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
 | `slicer-pipelines-configured.json` | `GET /api/v1/slicer-pipelines/`, now that one exists |
 | `pipeline-runs.json` | `GET /api/v1/slicer-pipelines/1/runs` |
 
+Added for #88 on 2026-09-24 (a `GET`):
+
+| File | Source |
+|---|---|
+| `slicer-pipeline.json` | `GET /api/v1/slicer-pipelines/1` |
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
@@ -70,6 +76,24 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
   `/printers`.
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
+
+- **`POST /slicer-pipelines/{id}/run` cannot carry print options, and no amount of
+  patching afterwards fixes that.** `PipelineRunCreateRequest` has exactly four fields
+  (`source_library_file_id`, `source_archive_id`, `copies`, `force`). The route answers
+  **202** and hands the work to a background task which, once slicing finishes, creates
+  each copy's queue entry as a bare
+  `PrintQueueItem(printer_id, target_model, library_file_id, status)` — Bambuddy's own
+  model defaults, with nothing plumbed through from the request. `jobs[].queue_entry_id`
+  is therefore still null when the 202 returns, so there is not even an id to
+  `PATCH /api/v1/queue/{item_id}` (which in any case omits `quantity`, `insert_at_top`
+  and `project_id`, all three of which `PrintQueueItemCreate` accepts). Read off
+  `/app/backend/app/api/routes/pipeline_runs.py` in the running 1.2.5.5 pod on
+  2026-09-24, not inferred from the spec. This is why a send carrying print options
+  slices and queues itself from the pipeline's own presets instead of running it.
+- **`GET /slicer-pipelines/{id}` returns the same shape as a row of the list route**,
+  so one model covers both — including `target_kind`, `target_printer_id` and
+  `target_model_class`, which is what lets a slice-and-queue send aim at whatever the
+  pipeline aims at.
 
 ## What could not be recorded
 

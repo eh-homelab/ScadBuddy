@@ -458,6 +458,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/print-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Remembered print options */
+        get: operations["get_print_options_api_v1_settings_print_options_get"];
+        /**
+         * Remember print options for one scope
+         * @description Only the named scope changes; the other two are left exactly as they were.
+         */
+        put: operations["put_print_options_api_v1_settings_print_options_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/register-sidebar": {
         parameters: {
             query?: never;
@@ -1256,6 +1277,103 @@ export interface components {
             source: "orca_cloud" | "cloud" | "local" | "standard";
         };
         /**
+         * PrintOptions
+         * @description A sparse overlay on ``PrintQueueItemCreate``'s option fields.
+         *
+         *     ``extra="forbid"`` on purpose: a misspelled option must 422 rather than be
+         *     remembered under a name nothing will ever read.
+         */
+        PrintOptions: {
+            /** Auto Off After */
+            auto_off_after?: boolean | null;
+            /** Bed Levelling */
+            bed_levelling?: ("off" | "on" | "auto") | null;
+            /** Flow Cali */
+            flow_cali?: ("off" | "on" | "auto") | null;
+            /** Insert At Top */
+            insert_at_top?: boolean | null;
+            /** Layer Inspect */
+            layer_inspect?: boolean | null;
+            /** Manual Start */
+            manual_start?: boolean | null;
+            /** Nozzle Offset Cali */
+            nozzle_offset_cali?: ("off" | "on" | "auto") | null;
+            /** Preheat Chamber Target Override */
+            preheat_chamber_target_override?: number | null;
+            /** Preheat Override */
+            preheat_override?: ("inherit" | "on" | "off") | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Quantity */
+            quantity?: number | null;
+            /** Timelapse */
+            timelapse?: boolean | null;
+            /** Use Ams */
+            use_ams?: boolean | null;
+            /** Vibration Cali */
+            vibration_cali?: boolean | null;
+        };
+        /**
+         * PrintOptionsState
+         * @description The view plus the printer the per-printer scope keys on.
+         *
+         *     Only the GET carries it, and only the GET may touch Bambuddy: with a slicer pipeline
+         *     configured the target printer lives on the pipeline, so reading it costs one
+         *     ``GET /slicer-pipelines/{id}``. The PUT deliberately does not resolve it — remembering
+         *     an option must not need a reachable Bambuddy — and an override saved against the wrong
+         *     id would silently never apply, which is why this is served rather than guessed.
+         */
+        PrintOptionsState: {
+            defaults: components["schemas"]["PrintOptions"];
+            global_options: components["schemas"]["PrintOptions"];
+            /** Models */
+            models?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printers */
+            printers?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+        };
+        /**
+         * PrintOptionsUpdate
+         * @description Replaces one scope's overrides wholesale.
+         *
+         *     An all-unset ``options`` clears the scope rather than storing an empty object.
+         */
+        PrintOptionsUpdate: {
+            /** Key */
+            key?: string | null;
+            options: components["schemas"]["PrintOptions"];
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "global" | "printer" | "model";
+        };
+        /**
+         * PrintOptionsView
+         * @description The remembered print options, plus what Bambuddy would do without them.
+         *
+         *     ``defaults`` is Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults and is the
+         *     baseline the UI marks a value as non-default against. It is served rather than
+         *     duplicated in the frontend so there is one copy of it in the codebase.
+         */
+        PrintOptionsView: {
+            defaults: components["schemas"]["PrintOptions"];
+            global_options: components["schemas"]["PrintOptions"];
+            /** Models */
+            models?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+            /** Printers */
+            printers?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+        };
+        /**
          * PrintRunRequest
          * @description ``pipeline_id`` omitted means "whatever this model defaults to".
          *
@@ -1325,17 +1443,15 @@ export interface components {
         };
         /** SendRequest */
         SendRequest: {
-            /**
-             * Copies
-             * @default 1
-             */
-            copies: number;
+            /** Copies */
+            copies?: number | null;
             /**
              * Mode
              * @default library
              * @enum {string}
              */
             mode: "library" | "queue";
+            options?: components["schemas"]["PrintOptions"];
         };
         /** SendResult */
         SendResult: {
@@ -1350,6 +1466,7 @@ export interface components {
              * @enum {string}
              */
             mode: "library" | "queue";
+            options?: components["schemas"]["PrintOptions"];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
             /** Queue Item Id */
@@ -2369,6 +2486,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SettingsView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_print_options_api_v1_settings_print_options_get: {
+        parameters: {
+            query?: {
+                /** @description The model about to be printed, whose own pipeline may differ */
+                slug?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintOptionsState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_print_options_api_v1_settings_print_options_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintOptionsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintOptionsView"];
                 };
             };
             /** @description Validation Error */

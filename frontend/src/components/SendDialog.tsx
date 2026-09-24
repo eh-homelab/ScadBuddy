@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Output, SendMode, SendResult } from '../api/types'
+import type { Output, PrintOptions, SendMode, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { eligibilityIssues } from '../lib/problems'
+import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -30,6 +31,8 @@ interface Props {
 export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [mode, setMode] = useState<SendMode>('queue')
   const [copies, setCopies] = useState(1)
+  // #88 — per-send overrides. Remembered ones live on the server and are merged there.
+  const [options, setOptions] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [issues, setIssues] = useState<string[]>([])
@@ -49,7 +52,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
     setError(null)
     setIssues([])
     try {
-      const sent = await api.sendOutput(output.id, { mode, copies })
+      const sent = await api.sendOutput(output.id, { mode, copies, options })
       setResult(sent)
       onSent(sent)
     } catch (cause) {
@@ -159,6 +162,14 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
               <span className="text-[12px] text-faint">Only used when queueing a print.</span>
             )}
           </div>
+
+          {mode === 'queue' && output && (
+            <PrintOptionsDisclosure
+              slug={output.slug}
+              value={options}
+              onChange={setOptions}
+            />
+          )}
 
           {error && (
             <div role="alert" className="mt-3 text-[13px] text-warn">
