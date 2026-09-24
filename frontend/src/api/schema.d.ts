@@ -370,17 +370,14 @@ export interface paths {
          * Spools that can print this output, and what the plate needs
          * @description Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
          *
-         *     One route rather than six calls from the browser, because the join is the part with
-         *     the traps in it: an AMS id is the printer's numbering and not a list index, the flat
-         *     tray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,
-         *     ``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle
-         *     temperature window is on the AMS tray rather than on the spool row.
+         *     One route rather than three calls from the browser, because the join is the part
+         *     with the traps in it: ``/inventory/assignments`` covers every printer while
+         *     ``inventory-remain`` covers one, ``remain: -1`` means unknown and so does
+         *     ``used_grams: 0``.
          *
          *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
          *     this printer": without one the spools are still listed, with their last known
-         *     assignment, but nothing that depends on live AMS state is reported. ``pipeline_id``
-         *     is read only for its process preset's *name*, which is the one place a nozzle
-         *     diameter is written down.
+         *     assignment, but the reconciled remaining weights are not.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -811,30 +808,17 @@ export interface components {
          * FilamentOptions
          * @description Everything the filament step of the dialog needs, in one answer.
          *
-         *     One route rather than six, because the join — inventory against assignments against
-         *     the live AMS against the per-slot remaining weights — is the part that is easy to
-         *     get wrong, and doing it in the browser would mean shipping every spool's history to
-         *     do it.
+         *     One route rather than three, because the join — inventory against assignments
+         *     against the per-slot remaining weights — is the part that is easy to get wrong, and
+         *     doing it in the browser would mean shipping every spool's history to do it.
          */
         FilamentOptions: {
-            /** Ams Switch Inlet */
-            ams_switch_inlet?: {
-                [key: string]: string;
-            };
             /** Library File Id */
             library_file_id: number;
-            /** Nozzle Diameters */
-            nozzle_diameters?: string[];
-            /** Nozzle Rack */
-            nozzle_rack?: components["schemas"]["NozzleRackSlot"][];
             /** Printer Id */
             printer_id?: number | null;
-            /** Printer Model */
-            printer_model?: string | null;
             /** Printer Name */
             printer_name?: string | null;
-            /** Process Nozzle Diameter */
-            process_nozzle_diameter?: string | null;
             /** Slots */
             slots?: components["schemas"]["SlotNeed"][];
             /** Spools */
@@ -871,7 +855,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "temperature" | "not-loaded" | "low-filament" | "nozzle-mismatch" | "unreachable" | "no-choice" | "unknown-temperature";
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset";
             /** Message */
             message: string;
             /** Slot Id */
@@ -1022,26 +1006,12 @@ export interface components {
         /**
          * LoadedAt
          * @description Where a spool physically is, when Bambuddy says it is loaded somewhere.
+         *
+         *     Purely a label. It is not an address: nothing here turns it into a tray number.
          */
         LoadedAt: {
             /** Ams Id */
             ams_id: number;
-            /** Extruder */
-            extruder?: number | null;
-            /** Global Tray Id */
-            global_tray_id: number;
-            /** Inlet */
-            inlet?: string | null;
-            /**
-             * Is Ams Ht
-             * @default false
-             */
-            is_ams_ht: boolean;
-            /**
-             * Is External
-             * @default false
-             */
-            is_external: boolean;
             /** Printer Id */
             printer_id: number;
             /** Printer Name */
@@ -1082,41 +1052,6 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
-        };
-        /**
-         * NozzleRackSlot
-         * @description A slot of an H2-series nozzle rack — what ``nozzle_rack_choice`` picks from.
-         */
-        NozzleRackSlot: {
-            /**
-             * Filament Color
-             * @default
-             */
-            filament_color: string;
-            /**
-             * Filament Type
-             * @default
-             */
-            filament_type: string;
-            /**
-             * Id
-             * @default 0
-             */
-            id: number;
-            /**
-             * Nozzle Diameter
-             * @default
-             */
-            nozzle_diameter: string;
-            /**
-             * Nozzle Type
-             * @default
-             */
-            nozzle_type: string;
-            /** Stat */
-            stat?: number | null;
-            /** Wear */
-            wear?: number | null;
         };
         /** Option */
         Option: {
@@ -1778,9 +1713,7 @@ export interface components {
         };
         /**
          * SlotNeed
-         * @description One filament slot of the plate, as Bambuddy reads the 3MF.
-         *
-         *     ``slot_id`` is **1-based**: ``ams_mapping`` is indexed by ``slot_id - 1``.
+         * @description One filament slot of the plate, as Bambuddy reads the 3MF. ``slot_id`` is 1-based.
          */
         SlotNeed: {
             /** Colour */
@@ -1794,7 +1727,7 @@ export interface components {
         };
         /**
          * SpoolOption
-         * @description One row of the picker: a spool, plus where it is and what it can print.
+         * @description One row of the picker: a spool, and where it is.
          */
         SpoolOption: {
             /** Brand */
@@ -1806,14 +1739,6 @@ export interface components {
             loaded?: components["schemas"]["LoadedAt"] | null;
             /** Material */
             material: string;
-            /** Nozzle Presets */
-            nozzle_presets?: {
-                [key: string]: string;
-            };
-            /** Nozzle Temp Max */
-            nozzle_temp_max?: number | null;
-            /** Nozzle Temp Min */
-            nozzle_temp_min?: number | null;
             /** Remaining G */
             remaining_g?: number | null;
             /** Slicer Filament */
@@ -1826,12 +1751,6 @@ export interface components {
             storage_location?: string | null;
             /** Subtype */
             subtype?: string | null;
-            /**
-             * Temperature From
-             * @default unknown
-             * @enum {string}
-             */
-            temperature_from: "tray" | "spool" | "unknown";
         };
         /** ValidationError */
         ValidationError: {
@@ -2640,7 +2559,6 @@ export interface operations {
         parameters: {
             query?: {
                 printer_id?: number | null;
-                pipeline_id?: number | null;
                 plate_id?: number;
             };
             header?: never;

@@ -1,12 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import type { FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
 import {
   NO_FILTERS,
+  checkPlan,
   facets,
   filterSpools,
   loadedLabel,
   slotNeed,
-  sortWarnings,
   spoolLabel,
   warningsFor,
 } from './filaments'
@@ -22,12 +22,8 @@ function spool(rest: Partial<SpoolOption> = {}): SpoolOption {
     slicer_filament: 'GFA00',
     slicer_filament_name: 'Bambu PLA Basic @BBL H2C 0.4 nozzle',
     remaining_g: 800,
-    nozzle_temp_min: 190,
-    nozzle_temp_max: 230,
-    temperature_from: 'tray',
     storage_location: null,
     loaded: null,
-    nozzle_presets: {},
     ...rest,
   }
 }
@@ -75,18 +71,6 @@ describe('loadedLabel', () => {
     expect(loadedLabel(spool({ loaded: loaded({ ams_id: 0, tray_id: 1 }) }), 1)).toBe(
       'AMS 0 · slot 2',
     )
-  })
-
-  it('names the AMS-HT and the external spool instead of a slot', () => {
-    // The AMS-HT is ams_id 128 and holds one spool, so there is no slot to name.
-    expect(loadedLabel(spool({ loaded: loaded({ ams_id: 128, is_ams_ht: true }) }), 1)).toBe(
-      'AMS-HT',
-    )
-    expect(loadedLabel(spool({ loaded: loaded({ is_external: true }) }), 1)).toBe('External spool')
-  })
-
-  it('names the inlet the filament switcher has this AMS on', () => {
-    expect(loadedLabel(spool({ loaded: loaded({ inlet: 'B' }) }), 1)).toBe('AMS 0 · slot 2 · inlet B')
   })
 
   it('names the other printer when the spool is not in the one being printed on', () => {
@@ -207,27 +191,71 @@ describe('facets', () => {
   })
 })
 
-describe('warningsFor and sortWarnings', () => {
+describe('warningsFor', () => {
   const warnings: FilamentWarning[] = [
-    { kind: 'temperature', slot_id: null, message: 'plate' },
     { kind: 'not-loaded', slot_id: 2, message: 'slot two' },
     { kind: 'low-filament', slot_id: 1, message: 'slot one' },
   ]
 
-  it('picks out one slot’s warnings and not the plate-wide ones', () => {
+  it('picks out one slot’s warnings', () => {
     expect(warningsFor(warnings, 1).map((w) => w.message)).toEqual(['slot one'])
     expect(warningsFor(warnings, 3)).toEqual([])
   })
+})
 
-  it('puts the plate-wide warnings last, keeping the server order within each band', () => {
-    // `slot_id: null` is the temperature rule, which is about the plate as a whole; read
-    // in place it would look like a remark on whichever slot preceded it.
-    expect(sortWarnings(warnings).map((w) => w.message)).toEqual(['slot two', 'slot one', 'plate'])
+describe('checkPlan', () => {
+  /**
+   * The picker recomputes these because the server's own answer describes ITS opening
+   * selection, and stops being true the moment a slot is changed — which is the whole
+   * point of the picker.
+   */
+  function options(rest: Partial<FilamentOptions> = {}): FilamentOptions {
+    return {
+      library_file_id: 1,
+      printer_id: 1,
+      printer_name: 'Printer A',
+      slots: [{ slot_id: 1, material: 'PLA', colour: '#0047BB', used_grams: 100 }],
+      spools: [
+        spool({ spool_id: 1, remaining_g: 800, loaded: loaded({}) }),
+        spool({ spool_id: 2, remaining_g: 20, loaded: null, storage_location: 'Shelf A' }),
+        spool({ spool_id: 3, remaining_g: 800, loaded: loaded({ printer_id: 2, printer_name: 'Printer B' }) }),
+      ],
+      suggested: [{ slot_id: 1, spool_id: 1 }],
+      warnings: [],
+      ...rest,
+    }
+  }
+
+  it('says nothing about a loaded spool with enough left', () => {
+    expect(checkPlan(options(), [{ slot_id: 1, spool_id: 1 }], 1)).toEqual([])
   })
 
-  it('does not mutate what it was given', () => {
-    const original = [...warnings]
-    sortWarnings(warnings)
-    expect(warnings).toEqual(original)
+  it('tracks the slot the user actually chose, not the server’s suggestion', () => {
+    const found = checkPlan(options(), [{ slot_id: 1, spool_id: 2 }], 1)
+    expect(found.map((w) => w.kind).sort()).toEqual(['low-filament', 'not-loaded'])
+    expect(found.find((w) => w.kind === 'not-loaded')?.message).toContain('Shelf A')
+  })
+
+  it('names the other printer rather than calling the spool unloaded', () => {
+    const found = checkPlan(options(), [{ slot_id: 1, spool_id: 3 }], 1)
+    expect(found).toHaveLength(1)
+    expect(found[0]?.message).toContain('Printer B')
+  })
+
+  it('multiplies the grams by the copies', () => {
+    const plan = [{ slot_id: 1, spool_id: 1 }]
+    expect(checkPlan(options(), plan, 1)).toEqual([])
+    expect(checkPlan(options(), plan, 20).map((w) => w.kind)).toEqual(['low-filament'])
+  })
+
+  it('declines to judge when the plate has not been sliced', () => {
+    // `used_grams: 0` is what an unsliced plate answers for every slot: unknown, never
+    // "needs nothing".
+    const unsliced = options({ slots: [{ slot_id: 1, used_grams: 0 }] })
+    expect(checkPlan(unsliced, [{ slot_id: 1, spool_id: 1 }], 1000)).toEqual([])
+  })
+
+  it('says so when a slot has nothing chosen', () => {
+    expect(checkPlan(options(), [], 1).map((w) => w.kind)).toEqual(['no-choice'])
   })
 })

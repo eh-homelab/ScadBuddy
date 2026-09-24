@@ -60,7 +60,6 @@ from scadbuddy.bambuddy.models import (
     SliceRequest,
     Spool,
     SpoolAssignment,
-    SpoolFilamentPreset,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -279,17 +278,6 @@ class BambuddyClient:
             params={"printer_id": printer_id} if printer_id is not None else None,
         )
         return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
-
-    async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
-        """The slicer filament presets this spool maps to, per model and nozzle."""
-        what = f"list the filament presets of spool {spool_id}"
-        response = await self._send(
-            "GET",
-            f"/inventory/spools/{spool_id}/filament-presets",
-            scope=Scope.READ_STATUS,
-            what=what,
-        )
-        return [SpoolFilamentPreset.model_validate(row) for row in self._rows(response, what=what)]
 
     async def inventory_remain(self, printer_id: int) -> InventoryRemain:
         """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""

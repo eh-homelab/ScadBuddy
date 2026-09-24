@@ -475,7 +475,6 @@ async def filament_options_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
-    pipeline_id: int | None = None,
     plate_id: int = 1,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
@@ -484,27 +483,13 @@ async def filament_options_for_output(
     check does: the plate's slots are read out of a *library file*, so there is no
     answer before one exists. An output is immutable, so this uploads once.
 
-    The pipeline is read only to name its process preset, which is where the nozzle
-    diameter is written; without one the nozzle rules stay quiet rather than comparing
-    against a default nobody chose.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
-    process_preset_name: str | None = None
-    resolved = pipeline_id or settings.pipeline_for(meta.slug)
-    if resolved is not None:
-        pipeline = next(
-            (row for row in await client.pipelines() if row.id == resolved),
-            None,
-        )
-        if pipeline is not None:
-            names = (await _catalogue(client)).names()
-            process_preset_name = _names(names, pipeline.process_preset)
     return await gather_options(
         client,
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_id=plate_id,
-        process_preset_name=process_preset_name,
         fallback_colours=list(meta.colors),
     )
 
@@ -568,7 +553,6 @@ async def run_for_output(
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_id=request.plate_id,
-        process_preset_name=_names((await _catalogue(client)).names(), pipeline.process_preset),
         fallback_colours=list(meta.colors),
     )
     warnings = check(options, request.filament_plan, copies=request.copies)

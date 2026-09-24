@@ -542,32 +542,11 @@
         "type": "object"
       },
       "FilamentOptions": {
-        "description": "Everything the filament step of the dialog needs, in one answer.\n\nOne route rather than six, because the join \u2014 inventory against assignments against\nthe live AMS against the per-slot remaining weights \u2014 is the part that is easy to\nget wrong, and doing it in the browser would mean shipping every spool's history to\ndo it.",
+        "description": "Everything the filament step of the dialog needs, in one answer.\n\nOne route rather than three, because the join \u2014 inventory against assignments\nagainst the per-slot remaining weights \u2014 is the part that is easy to get wrong, and\ndoing it in the browser would mean shipping every spool's history to do it.",
         "properties": {
-          "ams_switch_inlet": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Ams Switch Inlet",
-            "type": "object"
-          },
           "library_file_id": {
             "title": "Library File Id",
             "type": "integer"
-          },
-          "nozzle_diameters": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Nozzle Diameters",
-            "type": "array"
-          },
-          "nozzle_rack": {
-            "items": {
-              "$ref": "#/components/schemas/NozzleRackSlot"
-            },
-            "title": "Nozzle Rack",
-            "type": "array"
           },
           "printer_id": {
             "anyOf": [
@@ -580,17 +559,6 @@
             ],
             "title": "Printer Id"
           },
-          "printer_model": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Printer Model"
-          },
           "printer_name": {
             "anyOf": [
               {
@@ -601,17 +569,6 @@
               }
             ],
             "title": "Printer Name"
-          },
-          "process_nozzle_diameter": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Process Nozzle Diameter"
           },
           "slots": {
             "items": {
@@ -672,13 +629,10 @@
         "properties": {
           "kind": {
             "enum": [
-              "temperature",
               "not-loaded",
               "low-filament",
-              "nozzle-mismatch",
-              "unreachable",
               "no-choice",
-              "unknown-temperature"
+              "no-preset"
             ],
             "title": "Kind",
             "type": "string"
@@ -1124,47 +1078,11 @@
         "type": "object"
       },
       "LoadedAt": {
-        "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.",
+        "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.\n\nPurely a label. It is not an address: nothing here turns it into a tray number.",
         "properties": {
           "ams_id": {
             "title": "Ams Id",
             "type": "integer"
-          },
-          "extruder": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Extruder"
-          },
-          "global_tray_id": {
-            "title": "Global Tray Id",
-            "type": "integer"
-          },
-          "inlet": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Inlet"
-          },
-          "is_ams_ht": {
-            "default": false,
-            "title": "Is Ams Ht",
-            "type": "boolean"
-          },
-          "is_external": {
-            "default": false,
-            "title": "Is External",
-            "type": "boolean"
           },
           "printer_id": {
             "title": "Printer Id",
@@ -1189,8 +1107,7 @@
         "required": [
           "printer_id",
           "ams_id",
-          "tray_id",
-          "global_tray_id"
+          "tray_id"
         ],
         "title": "LoadedAt",
         "type": "object"
@@ -1292,60 +1209,6 @@
           "updated_at"
         ],
         "title": "ModelRecord",
-        "type": "object"
-      },
-      "NozzleRackSlot": {
-        "description": "A slot of an H2-series nozzle rack \u2014 what ``nozzle_rack_choice`` picks from.",
-        "properties": {
-          "filament_color": {
-            "default": "",
-            "title": "Filament Color",
-            "type": "string"
-          },
-          "filament_type": {
-            "default": "",
-            "title": "Filament Type",
-            "type": "string"
-          },
-          "id": {
-            "default": 0,
-            "title": "Id",
-            "type": "integer"
-          },
-          "nozzle_diameter": {
-            "default": "",
-            "title": "Nozzle Diameter",
-            "type": "string"
-          },
-          "nozzle_type": {
-            "default": "",
-            "title": "Nozzle Type",
-            "type": "string"
-          },
-          "stat": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Stat"
-          },
-          "wear": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Wear"
-          }
-        },
-        "title": "NozzleRackSlot",
         "type": "object"
       },
       "Option": {
@@ -3356,7 +3219,7 @@
         "type": "object"
       },
       "SlotNeed": {
-        "description": "One filament slot of the plate, as Bambuddy reads the 3MF.\n\n``slot_id`` is **1-based**: ``ams_mapping`` is indexed by ``slot_id - 1``.",
+        "description": "One filament slot of the plate, as Bambuddy reads the 3MF. ``slot_id`` is 1-based.",
         "properties": {
           "colour": {
             "anyOf": [
@@ -3403,7 +3266,7 @@
         "type": "object"
       },
       "SpoolOption": {
-        "description": "One row of the picker: a spool, plus where it is and what it can print.",
+        "description": "One row of the picker: a spool, and where it is.",
         "properties": {
           "brand": {
             "anyOf": [
@@ -3451,35 +3314,6 @@
           "material": {
             "title": "Material",
             "type": "string"
-          },
-          "nozzle_presets": {
-            "additionalProperties": {
-              "type": "string"
-            },
-            "title": "Nozzle Presets",
-            "type": "object"
-          },
-          "nozzle_temp_max": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Nozzle Temp Max"
-          },
-          "nozzle_temp_min": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Nozzle Temp Min"
           },
           "remaining_g": {
             "anyOf": [
@@ -3539,16 +3373,6 @@
               }
             ],
             "title": "Subtype"
-          },
-          "temperature_from": {
-            "default": "unknown",
-            "enum": [
-              "tray",
-              "spool",
-              "unknown"
-            ],
-            "title": "Temperature From",
-            "type": "string"
           }
         },
         "required": [
@@ -4704,7 +4528,7 @@
     },
     "/api/v1/print/outputs/{output_id}/filaments": {
       "get": {
-        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than six calls from the browser, because the join is the part with\nthe traps in it: an AMS id is the printer's numbering and not a list index, the flat\ntray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,\n``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle\ntemperature window is on the AMS tray rather than on the spool row.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but nothing that depends on live AMS state is reported. ``pipeline_id``\nis read only for its process preset's *name*, which is the one place a nozzle\ndiameter is written down.",
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not.",
         "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
         "parameters": [
           {
@@ -4731,22 +4555,6 @@
                 }
               ],
               "title": "Printer Id"
-            }
-          },
-          {
-            "in": "query",
-            "name": "pipeline_id",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "integer"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Pipeline Id"
             }
           },
           {
