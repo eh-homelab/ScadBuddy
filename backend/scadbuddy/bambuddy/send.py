@@ -168,9 +168,10 @@ async def upload_output(
 
     The order matters: the plate fit is decided *before* anything is deleted, so a
     model that cannot be laid out refuses with the previous send still intact rather
-    than taking the old file with it. Once the delete is committed the recorded id is
-    cleared in the same breath, so a failure between delete and upload cannot leave
-    ``library_file_id`` pointing at a file that is gone.
+    than taking the old file with it. The recorded id is cleared only once the delete
+    has actually come back — committed or 404 — so a failure between delete and upload
+    cannot leave ``library_file_id`` pointing at a file that is gone, and a delete that
+    *fails* leaves the id in place to be retried rather than orphaning the file.
     """
     plate = plate if plate is not None else await target_plate(client, settings, meta.slug)
     payload = _laid_out_for(_read_3mf(store, meta), plate)
@@ -178,16 +179,20 @@ async def upload_output(
 
     if meta.library_file_id is not None:
         library_file_id = meta.library_file_id
-        meta = store.forget_library_file(meta.id)
         try:
             await client.delete_library_file(library_file_id)
         except ApiError as error:
             if error.status != status.HTTP_404_NOT_FOUND:
+                # The file is still there and still ours. Leaving the recorded id
+                # alone is what lets the next send delete it; clearing it first
+                # would strand the file in Bambuddy with nothing pointing at it,
+                # and every retry would add another copy.
                 raise
             logger.info(
                 "the previously sent library file was already gone",
                 extra={"library_file_id": library_file_id},
             )
+        meta = store.forget_library_file(meta.id)
 
     uploaded = await client.upload_library_file(
         filename, payload, folder_id=settings.library_folder_id

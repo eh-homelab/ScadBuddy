@@ -158,6 +158,38 @@ class TestPlacement:
         with pytest.raises(PlateFitError, match="prime tower"):
             place_on_plate(_bounds(295.0, 315.0), plate_for("H2C"))
 
+    def test_a_large_single_colour_object_moves_clear_of_the_filament_cutter(self) -> None:
+        # The X1/P1 cutter corner was screened against the tower and never against
+        # the object, so a big single-colour model sat across it silently.
+        plate = plate_for("X1C")
+        assert plate.exclusions, "the X1C profile should carry the cutter cutout"
+        placement = place_on_plate(_bounds(230.0, 210.0), plate, tower=False)
+        rect = (
+            placement.offset[0],
+            placement.offset[1],
+            placement.offset[0] + 230.0,
+            placement.offset[1] + 210.0,
+        )
+        for cut in plate.exclusions:
+            clear = (
+                rect[0] >= cut.max_x
+                or rect[2] <= cut.min_x
+                or rect[1] >= cut.max_y
+                or rect[3] <= cut.min_y
+            )
+            assert clear, f"object {rect} sits in the cutout {cut}"
+        assert rect[0] >= plate.usable.min_x and rect[2] <= plate.usable.max_x
+
+    def test_an_object_that_cannot_clear_the_cutter_is_refused(self) -> None:
+        with pytest.raises(PlateFitError, match="filament cutter"):
+            place_on_plate(_bounds(250.0, 250.0), plate_for("X1C"), tower=False)
+
+    def test_a_small_object_is_left_centred(self) -> None:
+        # The nudge must not perturb anything that already clears the cutout.
+        plate = plate_for("X1C")
+        placement = place_on_plate(_bounds(180.0, 180.0), plate, tower=False)
+        assert (placement.offset[0] + 90.0, placement.offset[1] + 90.0) == plate.usable.centre
+
     def test_a_single_colour_object_needs_no_tower(self) -> None:
         placement = place_on_plate(_bounds(295.0, 315.0), plate_for("H2C"), tower=False)
         assert placement.tower is None

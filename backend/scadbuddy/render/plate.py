@@ -175,6 +175,45 @@ def plate_for(model: str | None) -> PlateGeometry:
     return _BY_ALIAS.get(key, DEFAULT_PLATE)
 
 
+def _clear_of_exclusions(
+    centre: tuple[float, float], width: float, depth: float, plate: PlateGeometry
+) -> tuple[float, float] | None:
+    """``centre`` moved just far enough that the object misses every cutout.
+
+    The cutouts are the X1/P1 filament-cutter corner. They were screened against
+    the *tower* from the start and never against the object itself, so a large
+    single-colour model on an X1 sat across the cutter with nothing complaining —
+    the same silently-unprintable outcome this module exists to prevent, one bed
+    over. A cutout is always a bed corner, so clearing it means pushing away from
+    that corner along whichever axis costs less; ``None`` means the object cannot
+    clear it and still fit.
+    """
+    area = plate.usable
+    for _ in range(len(plate.exclusions) + 1):
+        rect = Rect(
+            centre[0] - width / 2,
+            centre[1] - depth / 2,
+            centre[0] + width / 2,
+            centre[1] + depth / 2,
+        )
+        hit = next((cut for cut in plate.exclusions if rect.overlaps(cut)), None)
+        if hit is None:
+            return centre
+        # Push out of the cutout the cheap way, and only away from the bed edge
+        # it hugs: a cutout touching min_x can only be escaped towards max_x.
+        dx = (hit.max_x - rect.min_x) if hit.min_x <= area.min_x else -(rect.max_x - hit.min_x)
+        dy = (hit.max_y - rect.min_y) if hit.min_y <= area.min_y else -(rect.max_y - hit.min_y)
+        centre = (centre[0] + dx, centre[1]) if abs(dx) <= abs(dy) else (centre[0], centre[1] + dy)
+        if (
+            centre[0] - width / 2 < area.min_x
+            or centre[0] + width / 2 > area.max_x
+            or centre[1] - depth / 2 < area.min_y
+            or centre[1] + depth / 2 > area.max_y
+        ):
+            return None
+    return None
+
+
 def _tower_sides(area: Rect, tower: float) -> list[tuple[str, Rect, Rect]]:
     """``(name, strip, remainder)`` for each edge the tower could sit against."""
     band = tower + TOWER_CLEARANCE
@@ -297,7 +336,15 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
         )
 
     if not tower:
-        return Placement(offset=_offset(area.centre), tower=None)
+        centre = _clear_of_exclusions(area.centre, width, depth, plate)
+        if centre is None:
+            raise PlateFitError(
+                f"the model is {width:.1f} x {depth:.1f} mm, which cannot avoid the "
+                f"area {plate.model or 'the default plate'} cannot print in "
+                f"(the filament cutter) and still fit its "
+                f"{area.width:.0f} x {area.depth:.0f} mm bed"
+            )
+        return Placement(offset=_offset(centre), tower=None)
 
     reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
     inset = Rect(
@@ -309,19 +356,24 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
 
     # First choice: the object stays centred and the tower takes whichever edge
     # it fits against. Only if none does is the object moved.
-    centred = _rect_at(area.centre)
-    for side, strip, _remainder in _tower_sides(inset, reserved):
-        corner = _tower_corner(side, strip, centred, plate, reserved)
-        if corner is not None:
-            return Placement(offset=_offset(area.centre), tower=corner)
+    object_centre = _clear_of_exclusions(area.centre, width, depth, plate)
+    if object_centre is not None:
+        centred = _rect_at(object_centre)
+        for side, strip, _remainder in _tower_sides(inset, reserved):
+            corner = _tower_corner(side, strip, centred, plate, reserved)
+            if corner is not None:
+                return Placement(offset=_offset(object_centre), tower=corner)
 
     for side, strip, remainder in _tower_sides(inset, reserved):
         if width > remainder.width or depth > remainder.depth:
             continue
-        moved = _rect_at(remainder.centre)
+        moved_centre = _clear_of_exclusions(remainder.centre, width, depth, plate)
+        if moved_centre is None:
+            continue
+        moved = _rect_at(moved_centre)
         corner = _tower_corner(side, strip, moved, plate, reserved)
         if corner is not None:
-            return Placement(offset=_offset(remainder.centre), tower=corner)
+            return Placement(offset=_offset(moved_centre), tower=corner)
 
     reach = f"reachable by all {plate.extruders} extruders" if plate.extruders > 1 else "printable"
     raise PlateFitError(

@@ -555,3 +555,32 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
     assert response.status_code == 409
     assert not delete.called, "the old file was removed before the refusal"
     assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+
+
+@respx.mock
+def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, model: str) -> None:
+    """A delete that is not a 404 leaves the previous send intact and retryable.
+
+    Clearing the id first would strand the file in Bambuddy with nothing pointing
+    at it, and every retry would upload another copy — the duplication this delete
+    exists to prevent.
+    """
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    assert (
+        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
+            "library_file_id"
+        ]
+        == 41
+    )
+
+    respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.status_code >= 500
+    assert upload.call_count == 1, "a second copy was uploaded despite the failed delete"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
