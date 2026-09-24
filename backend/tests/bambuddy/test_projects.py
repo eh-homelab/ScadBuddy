@@ -54,6 +54,29 @@ async def test_each_project_is_listed_with_the_folder_that_belongs_to_it(
 
 
 @respx.mock
+async def test_a_project_folder_nested_under_another_is_still_found(
+    bambuddy: BambuddyClient,
+) -> None:
+    """``/library/folders`` answers with a **tree**: a sub-folder arrives inside its
+    parent's ``children``, not alongside it. A scan of the top level alone would report
+    a nested project folder as missing and then create a second one beside it."""
+    nested = recording("library-folders-nested.json")
+    # Move the project link onto a folder that only exists as a child.
+    supplies = next(row for row in nested if row["children"])
+    supplies["children"][0]["project_id"] = 1
+    supplies["children"][0]["project_name"] = "Reagan Keychain"
+    for row in nested:
+        if row.get("project_id") == 1:
+            row["project_id"] = None
+
+    projects_route()
+    respx.get(f"{API}/library/folders").mock(return_value=httpx.Response(200, json=nested))
+
+    choices = await describe_projects(bambuddy)
+    assert choices.projects[0].folder_id == supplies["children"][0]["id"]
+
+
+@respx.mock
 async def test_creating_a_project_also_creates_its_folder(bambuddy: BambuddyClient) -> None:
     """A folder carries ``project_id``; without one Bambuddy's project page has no files
     to show, which is the whole point of the pairing."""

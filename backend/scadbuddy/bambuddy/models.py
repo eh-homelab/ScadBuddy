@@ -198,6 +198,14 @@ class AvailableFilament(BambuddyModel):
 
 
 class Folder(BambuddyModel):
+    """A row of ``GET /api/v1/library/folders``.
+
+    **The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their
+    parent's ``children`` rather than returning them alongside it, so a folder linked to
+    a project is invisible to a scan of the top level if it happens to live under
+    another folder. :func:`walk` is what flattens it.
+    """
+
     id: int
     name: str
     parent_id: int | None = None
@@ -206,6 +214,14 @@ class Folder(BambuddyModel):
     project_name: str | None = None
     archive_id: int | None = None
     is_external: bool = False
+    children: list[Folder] = Field(default_factory=list)
+
+    def walk(self) -> list[Folder]:
+        """This folder and every folder beneath it, depth first."""
+        found = [self]
+        for child in self.children:
+            found.extend(child.walk())
+        return found
 
 
 class FolderCreate(BambuddyModel):

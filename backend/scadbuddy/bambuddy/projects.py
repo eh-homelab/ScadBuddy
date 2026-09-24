@@ -103,7 +103,10 @@ async def describe_projects(
     per row, and the flat list already carries the link.
     """
     projects = await client.projects()
-    folders = await client.folders()
+    # Flattened, because `/library/folders` answers with a *tree*: a sub-folder arrives
+    # inside its parent's `children`, so a project folder nested under another one is
+    # invisible to a scan of the top level.
+    folders = [row for top in await client.folders() for row in top.walk()]
     by_project: dict[int, Folder] = {}
     for folder in folders:
         if folder.project_id is not None:
