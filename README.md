@@ -46,8 +46,9 @@ Both call `deploy.reusable.yml`, which:
    annotations (`version`, `revision`, `source`) in the manifest;
 3. opens **one** PR, `deploy(scadbuddy): <version>`, on the fixed branch
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
-   closes an older open one and replaces the branch; the two paths share a
-   concurrency group so they queue rather than race.
+   closes an older open one and replaces the branch; this one job carries a
+   concurrency group shared by both paths, so only the branch/PR handling
+   serialises — a release's image wait never holds up a main deploy.
 
 The clusters ruleset (`CI Summary` + `claude-review`) gates the merge; the
 merge is the deploy. ArgoCD then syncs the `scadbuddy` Application, and
@@ -82,7 +83,9 @@ deploy PR link into the release notes. There is no human step after
 ### Reading a deploy
 
 - **Which build is live:** `curl https://scadbuddy.internal.nullreference.io/healthz`
-  reports `revision` (commit) and `version` (image tag).
+  reports `revision` (commit) and `version` — the same label the manifest
+  pins (`X.Y.Z` for a release, `sha-<short>` for a main build), so the two
+  should match the Deployment's annotations exactly.
 - **What is pinned:** the annotations on the Deployment in
   `applications/scadbuddy/scadbuddy.yaml`.
 - **No ✅ within ~20 min of a merge/publish:** look at the clusters deploy PR

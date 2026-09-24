@@ -74,6 +74,14 @@ jobs:
     name: Pin ${{ inputs.version }} in clusters
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The one place the two callers can race: this job closes the previous
+    # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
+    # Job-level, so only these few seconds serialise — deploy-release's image
+    # wait and deploy-main's digest lookup run concurrently. Never cancel: a
+    # run cut off between the push and `gh pr merge --auto` leaves an orphan.
+    concurrency:
+      group: scadbuddy-deploy
+      cancel-in-progress: false
     outputs:
       pr_url: ${{ steps.pr.outputs.pr_url }}
       pr_number: ${{ steps.pr.outputs.pr_number }}

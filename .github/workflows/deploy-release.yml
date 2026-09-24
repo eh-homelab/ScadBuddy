@@ -11,15 +11,14 @@ name: Deploy release
 # notes under "## Deployment".
 #
 # Independent of deploy-main.yml: disabling continuous deploy from main does
-# not affect releases, and vice versa. Pre-releases are not deployed.
+# not affect releases, and vice versa. Pre-releases are not deployed. The
+# only shared state is the clusters deploy branch, and the `pin` job in
+# deploy.reusable.yml serialises that — not a workflow-level group here, which
+# would hold a main deploy behind the image wait below.
 
 on:
   release:
     types: [published]
-
-concurrency:
-  group: scadbuddy-deploy
-  cancel-in-progress: false
 
 permissions:
   contents: read

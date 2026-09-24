@@ -48,7 +48,7 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       tags: ${{ steps.meta.outputs.tags }}
-      version: ${{ steps.meta.outputs.version }}
+      version: ${{ steps.label.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -89,6 +89,26 @@ jobs:
             org.opencontainers.image.description=Self-hosted OpenSCAD customizer for Bambuddy
             org.opencontainers.image.licenses=MIT
 
+      # The label the deploy pipeline pins, and what /healthz reports as
+      # `version`: `X.Y.Z` for a `vX.Y.Z` tag, `sha-<short>` for anything
+      # else. Not metadata-action's `version` output — that is the PRIMARY
+      # tag, which on the default branch is the constant `main`, so every
+      # continuous deploy would stamp the same value while clusters pinned
+      # `sha-<short>`, and the two could never be compared.
+      - name: Pick the deploy label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -102,12 +122,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          # Stamped into the image and reported by /healthz. `version` is the
-          # metadata-action's primary tag: `main` on the default branch,
-          # `X.Y.Z` on a `vX.Y.Z` tag — the same label the deploy pipeline pins.
+          # Stamped into the image and reported by /healthz: the commit, and
+          # the same label the deploy pipeline pins (see "Pick the deploy
+          # label" above).
           build-args: |
             SCADBUDDY_REVISION=${{ github.sha }}
-            SCADBUDDY_VERSION=${{ steps.meta.outputs.version }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
           # `type=gha`, viable only because this is a GitHub-hosted runner —
           # the Actions cache protocol fails outright on the eh-homelab

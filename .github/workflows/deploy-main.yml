@@ -28,13 +28,10 @@ on:
     types: [completed]
     branches: [main]
 
-# Shared with deploy-release.yml: the two paths write the same clusters branch,
-# so they queue behind each other instead of racing. Never cancel — a deploy
-# that is cut off after pushing the branch but before arming auto-merge leaves
-# an orphan PR.
-concurrency:
-  group: scadbuddy-deploy
-  cancel-in-progress: false
+# No workflow-level concurrency here on purpose: the mutual exclusion with
+# deploy-release.yml lives on the `pin` job in deploy.reusable.yml, the only
+# step that touches the shared clusters branch. A workflow-level group would
+# also queue this run behind a release's image wait (up to 45 min).
 
 permissions:
   contents: read
