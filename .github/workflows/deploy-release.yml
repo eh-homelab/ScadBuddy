@@ -155,12 +155,19 @@ jobs:
             line="🚀 Deploy PR: ${PR_URL} (auto-merge armed; verification is appended here once the pod reports this revision)."
           fi
           body=$(gh release view "$TAG" --json body --jq .body)
-          case "$body" in
-            *"## Deployment"*) body="${body}"$'\n'"- ${line}" ;;
-            *)                 body="${body}"$'\n\n'"## Deployment"$'\n'"- ${line}" ;;
-          esac
-          printf '%s\n' "$body" > notes.md
-          gh release edit "$TAG" --notes-file notes.md
+          body=${body//$'\r'/}
+          # Re-running this job (same run id, same RUN_URL) must not append
+          # the line a second time.
+          if grep -qF -- "$RUN_URL" <<<"$body"; then
+            echo "release $TAG already records this run; not repeating it"
+          else
+            case "$body" in
+              *"## Deployment"*) body="${body}"$'\n'"- ${line}" ;;
+              *)                 body="${body}"$'\n\n'"## Deployment"$'\n'"- ${line}" ;;
+            esac
+            printf '%s\n' "$body" > notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           # A failed deploy fails the workflow too; the release note is the
           # human-facing copy, this is the machine-facing one. Overtaken in

@@ -74,6 +74,13 @@ jobs:
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v6
+        env:
+          # The `sha-<short>` tag is the contract with the deploy pipeline:
+          # "Pick the deploy label" below and deploy-main.yml both take the
+          # first 7 characters of the commit. Pin the action's short length to
+          # the same 7 rather than inherit its default, and the step below
+          # asserts the two agree on every build.
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
         with:
           images: ghcr.io/eh-homelab/scadbuddy
           # `sha-<short>` is the one tag the cluster manifests should pin to —
@@ -100,6 +107,7 @@ jobs:
         env:
           REF: ${{ github.ref }}
           SHA: ${{ github.sha }}
+          TAGS: ${{ steps.meta.outputs.tags }}
         run: |
           set -euo pipefail
           if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
@@ -107,6 +115,10 @@ jobs:
           else
             version="sha-${SHA:0:7}"
           fi
+          # The label must be one of the tags about to be pushed, or the
+          # deploy pipeline would look for an image that does not exist.
+          grep -qxF "ghcr.io/eh-homelab/scadbuddy:${version}" <<<"$TAGS" \
+            || { echo "::error::deploy label '$version' is not among the tags metadata-action produced:"; echo "$TAGS"; exit 1; }
           echo "version=$version" | tee -a "$GITHUB_OUTPUT"
 
       - name: Build and push

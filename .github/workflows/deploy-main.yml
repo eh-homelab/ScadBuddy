@@ -62,6 +62,8 @@ jobs:
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
         run: |
           set -euo pipefail
+          # 7 characters, the same contract build-image.yml pins with
+          # DOCKER_METADATA_SHORT_SHA_LENGTH and asserts on every build.
           version="sha-${HEAD_SHA:0:7}"
           ref="ghcr.io/eh-homelab/scadbuddy:${version}"
           # Parsed from the human output: buildx ignores --format for some
