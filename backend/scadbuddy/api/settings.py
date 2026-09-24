@@ -111,7 +111,7 @@ async def get_targets(store: SettingsStoreDep) -> BambuddyTargets:
     summary="Add ScadBuddy to Bambuddy's sidebar",
 )
 async def post_register_sidebar(store: SettingsStoreDep) -> SidebarLink:
-    """Upsert the ``Customize`` External Link by name.
+    """Upsert the ``ScadBuddy`` External Link by name.
 
     Bambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a
     sandboxed iframe at ``/external/{id}`` — so ScadBuddy appears as a sidebar page

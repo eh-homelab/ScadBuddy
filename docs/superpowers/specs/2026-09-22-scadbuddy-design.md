@@ -387,7 +387,7 @@ Flows (all server-side, so the browser never sees the API key):
    `use_ams: true`. The AMS mapping is left to Bambuddy's dispatch; the
    response's queue item id is stored so the UI can deep-link to it.
 3. **Register in the sidebar** — a one-shot `POST /api/v1/external-links/`
-   with `{name:"Customize", url:<scadbuddy url>, icon:"shapes",
+   with `{name:"ScadBuddy", url:<scadbuddy url>, icon:"shapes",
    open_in_new_tab:false}` from the settings page ("Add to Bambuddy sidebar"),
    idempotent by name.
 

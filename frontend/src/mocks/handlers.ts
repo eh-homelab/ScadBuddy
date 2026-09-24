@@ -620,7 +620,7 @@ export const handlers = [
     if (created) state.sidebarLinkId = 3
     return HttpResponse.json({
       id: state.sidebarLinkId,
-      name: 'Customize',
+      name: 'ScadBuddy',
       url: state.settings.public_url ?? '',
       icon: 'shapes',
       open_in_new_tab: false,

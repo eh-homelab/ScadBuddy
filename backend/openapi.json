@@ -4011,7 +4011,7 @@
     },
     "/api/v1/settings/register-sidebar": {
       "post": {
-        "description": "Upsert the ``Customize`` External Link by name.\n\nBambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a\nsandboxed iframe at ``/external/{id}`` \u2014 so ScadBuddy appears as a sidebar page\nrather than a tab.",
+        "description": "Upsert the ``ScadBuddy`` External Link by name.\n\nBambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a\nsandboxed iframe at ``/external/{id}`` \u2014 so ScadBuddy appears as a sidebar page\nrather than a tab.",
         "operationId": "post_register_sidebar_api_v1_settings_register_sidebar_post",
         "responses": {
           "200": {
