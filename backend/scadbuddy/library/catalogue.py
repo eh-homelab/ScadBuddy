@@ -27,7 +27,7 @@ class ModelExistsError(ValueError):
 
 
 class ModelMeta(BaseModel):
-    """The editable half of ``model.json``. The renderer owns the ``schema`` key."""
+    """``model.json``: the model's metadata, and nothing derived."""
 
     name: str
     description: str = ""

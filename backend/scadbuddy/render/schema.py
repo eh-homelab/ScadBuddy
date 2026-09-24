@@ -123,20 +123,22 @@ def build_schema(param_json: dict[str, Any], source: str) -> CustomizerSchema:
     )
 
 
-def load_cached_schema(meta_path: Path, expected_sha: str) -> CustomizerSchema | None:
-    if not meta_path.is_file():
+def load_cached_schema(cache_path: Path, expected_sha: str) -> CustomizerSchema | None:
+    """Read a derived schema back, or ``None`` when it does not match the source.
+
+    ``cache_path`` is a file under ``data/cache`` (`SCHEMA_CACHE_NAME`), never the
+    model's ``model.json``: this is derived, it is written by a read, and it must
+    not land in the versioned models repository.
+    """
+    if not cache_path.is_file():
         return None
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    cached = meta.get("schema")
+    cached = json.loads(cache_path.read_text(encoding="utf-8")).get("schema")
     if not isinstance(cached, dict) or cached.get("source_sha256") != expected_sha:
         return None
     return CustomizerSchema.model_validate(cached)
 
 
-def store_cached_schema(meta_path: Path, schema: CustomizerSchema) -> None:
-    meta: dict[str, Any] = {}
-    if meta_path.is_file():
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["schema"] = schema.model_dump(mode="json")
-    meta_path.parent.mkdir(parents=True, exist_ok=True)
-    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+def store_cached_schema(cache_path: Path, schema: CustomizerSchema) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    body: dict[str, Any] = {"schema": schema.model_dump(mode="json")}
+    cache_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")

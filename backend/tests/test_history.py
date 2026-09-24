@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -310,15 +311,22 @@ def test_a_record_carries_the_revision_it_is_at(catalogue: Catalogue) -> None:
     assert edited.version != record.version
 
 
-def test_writing_source_drops_the_stale_cached_schema(catalogue: Catalogue) -> None:
+def test_a_legacy_schema_key_is_retired_from_model_json(catalogue: Catalogue) -> None:
+    """Volumes written before the cache moved out of `models/` still carry one.
+
+    Planted by writing the file directly, because `write_raw_meta` is exactly
+    what drops it.
+    """
     catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
-    raw = catalogue.read_raw_meta("keychain")
-    raw["schema"] = {"title": "stale", "source_sha256": "0" * 64, "parameters": [], "groups": []}
-    catalogue.write_raw_meta("keychain", raw)
+    meta_path = catalogue.paths.model_meta("keychain")
+    legacy = json.loads(meta_path.read_text(encoding="utf-8"))
+    legacy["schema"] = {"title": "stale", "source_sha256": "0" * 64, "parameters": []}
+    meta_path.write_text(json.dumps(legacy), encoding="utf-8")
+    assert "schema" in json.loads(meta_path.read_text(encoding="utf-8"))
 
-    catalogue.write_source("keychain", "cube(20);\n")
+    catalogue.update("keychain", ModelPatch(description="nicer"))
 
-    assert "schema" not in catalogue.read_raw_meta("keychain")
+    assert "schema" not in json.loads(meta_path.read_text(encoding="utf-8"))
 
 
 def test_deleting_a_model_is_a_commit(catalogue: Catalogue) -> None:
