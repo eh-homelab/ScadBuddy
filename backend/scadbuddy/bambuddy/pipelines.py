@@ -26,7 +26,7 @@ import json
 import logging
 from dataclasses import dataclass
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.errors import not_configured
@@ -45,6 +45,7 @@ from scadbuddy.bambuddy.models import (
     TargetKind,
 )
 from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -136,10 +137,29 @@ class PipelineDefault(BaseModel):
 
 
 class PipelineReport(BaseModel):
-    """Bambuddy's report for one pipeline, passed through as it came."""
+    """Bambuddy's report for one pipeline, passed through as it came.
+
+    ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
+    judged, which is neither ready nor blocked, and the picker says so rather than
+    guessing either way. That either-or is enforced below rather than merely described,
+    because the browser branches on it: a row with neither would render as silently
+    absent, and one with both would claim two states at once.
+    """
 
     pipeline_id: int
-    report: EligibilityReport
+    report: EligibilityReport | None = None
+    error: str | None = None
+
+    @model_validator(mode="after")
+    def _either_a_report_or_a_reason(self) -> PipelineReport:
+        # ``not self.error`` rather than ``is None``: a blank reason is no reason, and it
+        # would reach the browser as a row with nothing to say either way.
+        if (self.report is None) == (not self.error):
+            raise ValueError(
+                "a pipeline report carries either a report or a non-empty error, "
+                "never both or neither"
+            )
+        return self
 
 
 class EligibilityOverview(BaseModel):
@@ -359,10 +379,15 @@ async def check_pipelines(
     answer is a 200 carrying the report, so the picker can mark a row not-ready rather
     than discover the problem on Run.
 
-    The checks run **concurrently**: the picker cannot open until the last of them
-    answers, so a sequential loop would cost the sum of every pipeline's latency rather
-    than the slowest one's. ``gather`` keeps the order of ``pipeline_ids``, and a failure
-    in any one of them is raised as it would have been in a loop.
+    The checks run **concurrently and independently**: the picker cannot open until the
+    last of them answers, so a sequential loop would cost the sum of every pipeline's
+    latency rather than the slowest one's — and one pipeline Bambuddy cannot judge must
+    not blank every row that did answer. ``gather`` keeps the order of ``pipeline_ids``;
+    ``return_exceptions`` is what keeps a single failure local to its own row.
+
+    Concurrency is deliberately unbounded. A Bambuddy holds a handful of pipelines, and
+    the client's own connection pool is the limit that matters; a semaphore here would be
+    a guess about a number nothing has yet needed.
     """
     # Eligibility is judged against one uploaded file, so it is placed for the plate
     # this model would actually print on — the same choice Run will make.
@@ -372,12 +397,23 @@ async def check_pipelines(
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
     checks = await asyncio.gather(
-        *(client.check_eligibility(pipeline_id, request) for pipeline_id in pipeline_ids)
+        *(client.check_eligibility(pipeline_id, request) for pipeline_id in pipeline_ids),
+        return_exceptions=True,
     )
-    reports = [
-        PipelineReport(pipeline_id=pipeline_id, report=report)
-        for pipeline_id, report in zip(pipeline_ids, checks, strict=True)
-    ]
+    reports: list[PipelineReport] = []
+    for pipeline_id, outcome in zip(pipeline_ids, checks, strict=True):
+        if isinstance(outcome, EligibilityReport):
+            reports.append(PipelineReport(pipeline_id=pipeline_id, report=outcome))
+            continue
+        if not isinstance(outcome, ApiError):
+            # Anything that is not the client's own mapped failure is a bug here, not a
+            # pipeline that cannot be judged, so it is not swallowed into a row.
+            raise outcome
+        logger.info(
+            "a pipeline could not be judged for eligibility",
+            extra={"pipeline_id": pipeline_id, "status": outcome.status},
+        )
+        reports.append(PipelineReport(pipeline_id=pipeline_id, error=outcome.detail))
     return EligibilityOverview(library_file_id=library_file_id, reports=reports)
 
 

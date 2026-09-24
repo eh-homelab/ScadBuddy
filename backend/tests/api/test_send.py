@@ -479,6 +479,7 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     write_bambu_3mf(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
         paths.output_dir(model, output_id) / "model.3mf",
+        thumbnails=None,
         model_name=model,
     )
     upload = upload_route()
@@ -544,6 +545,7 @@ def test_a_refused_re_send_leaves_the_previous_file_in_place(
     write_bambu_3mf(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
         paths.output_dir(model, output_id) / "model.3mf",
+        thumbnails=None,
         model_name=model,
     )
     configure(client, printer_id=2)

@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
  <Relationship Id="rel-1" Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel" Target="/3D/3dmodel.model"/>
+ <Relationship Id="rel-2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail" Target="/Metadata/plate_1.png"/>
+ <Relationship Id="rel-4" Type="http://schemas.bambulab.com/package/2021/cover-thumbnail-middle" Target="/Metadata/plate_1.png"/>
+ <Relationship Id="rel-5" Type="http://schemas.bambulab.com/package/2021/cover-thumbnail-small" Target="/Metadata/plate_1_small.png"/>
 </Relationships>

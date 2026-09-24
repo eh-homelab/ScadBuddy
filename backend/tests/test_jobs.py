@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 import pytest
 import pytest_asyncio
@@ -12,14 +14,17 @@ import trimesh
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render import jobs
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
+    THUMBNAIL_TIMEOUT_WARNING,
     UNCOLOURED_WARNING,
     Job,
     JobResult,
     JobStore,
     PartInfo,
     RenderQueue,
+    plate_thumbnails,
     solid_parts,
 )
 from scadbuddy.render.runner import OpenSCADError
@@ -187,3 +192,46 @@ async def test_uncoloured_geometry_falls_back_to_the_split_parts() -> None:
     )
     assert parts == preview
     assert warnings == [UNCOLOURED_WARNING]
+
+
+async def test_the_plate_thumbnail_is_rendered_off_the_event_loop() -> None:
+    """Seconds of numpy on the one loop that also serves every job poll and
+    `/healthz` — and §5.3's debounce submits these back to back."""
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box())]
+    ran_on: list[str] = []
+
+    def record(_: object) -> object:
+        ran_on.append(threading.current_thread().name)
+        return object()
+
+    with mock.patch.object(jobs, "render_plate_thumbnails", record):
+        await plate_thumbnails(parts, config=replace(CONFIG, render_timeout=30.0))
+
+    assert ran_on and threading.main_thread().name not in ran_on
+
+
+async def test_a_thumbnail_that_blows_its_budget_costs_the_cover_not_the_job() -> None:
+    """§6.1 promises a bounded job, and `SCADBUDDY_RENDER_TIMEOUT` used to deliver
+    that by killing an `openscad` child. The rasteriser has no child to kill, so
+    it gets the same budget — and on blowing it the 3MF is written WITHOUT cover
+    images rather than not written at all."""
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box())]
+    # `wait_for` abandons the worker thread rather than cancelling it, and the
+    # loop joins the executor on shutdown — so the test has to release it, or it
+    # pays the stall it is asserting does not reach the caller.
+    released = threading.Event()
+
+    def blocked(_: object) -> object:
+        assert released.wait(timeout=30), "the test never released the thread"
+        return object()
+
+    with mock.patch.object(jobs, "render_plate_thumbnails", blocked):
+        try:
+            rendered, warnings = await plate_thumbnails(
+                parts, config=replace(CONFIG, render_timeout=0.05)
+            )
+        finally:
+            released.set()
+
+    assert rendered is None
+    assert warnings == [THUMBNAIL_TIMEOUT_WARNING]

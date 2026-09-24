@@ -8,7 +8,11 @@
       "3D/Objects/object_1.model",
       "3D/Objects/object_2.model",
       "Metadata/model_settings.config",
-      "Metadata/project_settings.config"
+      "Metadata/project_settings.config",
+      "Metadata/plate_1.png",
+      "Metadata/plate_1_small.png",
+      "Metadata/top_1.png",
+      "Metadata/pick_1.png"
     ],
     "colors": [
       "#0047BB",

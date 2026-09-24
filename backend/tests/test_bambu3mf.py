@@ -11,13 +11,26 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.render.bambu3mf import replate_3mf, write_bambu_3mf
-from scadbuddy.render.plate import PlateFitError, plate_for
+from scadbuddy.render.bambu3mf import (
+    PLATE_PICK,
+    PLATE_THUMBNAIL,
+    PLATE_THUMBNAIL_SMALL,
+    PLATE_TOP,
+    replate_3mf,
+    write_bambu_3mf,
+)
+from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 from scadbuddy.render.split import ColourPart
-from tests.conftest import GOLDEN
+from scadbuddy.render.thumbnail import (
+    PLATE_PNG_SIZE,
+    PLATE_SMALL_PNG_SIZE,
+    render_plate_thumbnails,
+)
+from tests.conftest import GOLDEN, read_png
 
 GOLDEN_DIR = GOLDEN / "two_boxes"
-ENTRIES = [
+# The text half of the archive, compared byte for byte against the golden.
+TEXT_ENTRIES = [
     "[Content_Types].xml",
     "_rels/.rels",
     "3D/3dmodel.model",
@@ -27,6 +40,12 @@ ENTRIES = [
     "Metadata/model_settings.config",
     "Metadata/project_settings.config",
 ]
+# The cover images. Deliberately NOT golden bytes: they are a pure function of
+# the mesh, but a recorded PNG would turn every lighting or framing tweak into a
+# binary diff nobody can review. `tests/test_thumbnail.py` pins them as
+# properties instead.
+IMAGE_ENTRIES = [PLATE_THUMBNAIL, PLATE_THUMBNAIL_SMALL, PLATE_TOP, PLATE_PICK]
+ENTRIES = TEXT_ENTRIES + IMAGE_ENTRIES
 
 
 def _translate(x: float, y: float, z: float) -> np.ndarray:
@@ -47,11 +66,21 @@ def _parts() -> list[ColourPart]:
     ]
 
 
+def _write(out: Path, *, covers: bool = True, plate: PlateGeometry = DEFAULT_PLATE) -> Path:
+    parts = _parts()
+    write_bambu_3mf(
+        parts,
+        out,
+        thumbnails=render_plate_thumbnails(parts) if covers else None,
+        model_name="two_boxes",
+        plate=plate,
+    )
+    return out
+
+
 @pytest.fixture
 def written(tmp_path: Path) -> Path:
-    out = tmp_path / "model.3mf"
-    write_bambu_3mf(_parts(), out, model_name="two_boxes")
-    return out
+    return _write(tmp_path / "model.3mf")
 
 
 def test_archive_entries_are_the_bambu_layout(written: Path) -> None:
@@ -61,7 +90,7 @@ def test_archive_entries_are_the_bambu_layout(written: Path) -> None:
 
 def test_matches_the_golden_files(written: Path) -> None:
     with zipfile.ZipFile(written) as archive:
-        for entry in ENTRIES:
+        for entry in TEXT_ENTRIES:
             produced = archive.read(entry).decode("utf-8")
             golden = GOLDEN_DIR / entry
             if os.environ.get("SCADBUDDY_UPDATE_GOLDEN"):
@@ -71,8 +100,7 @@ def test_matches_the_golden_files(written: Path) -> None:
 
 
 def test_output_is_byte_for_byte_reproducible(tmp_path: Path, written: Path) -> None:
-    again = tmp_path / "again.3mf"
-    write_bambu_3mf(_parts(), again, model_name="two_boxes")
+    again = _write(tmp_path / "again.3mf")
     assert again.read_bytes() == written.read_bytes()
 
 
@@ -106,7 +134,7 @@ def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
 
 def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
     out = tmp_path / "one.3mf"
-    write_bambu_3mf(_parts()[:1], out, model_name="one_box")
+    write_bambu_3mf(_parts()[:1], out, thumbnails=None, model_name="one_box")
     with zipfile.ZipFile(out) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
     assert "wipe_tower_x" not in settings
@@ -114,7 +142,7 @@ def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
 
 def test_writing_for_a_printer_centres_on_its_reachable_area(tmp_path: Path) -> None:
     out = tmp_path / "h2c.3mf"
-    write_bambu_3mf(_parts(), out, model_name="two_boxes", plate=plate_for("H2C"))
+    write_bambu_3mf(_parts(), out, thumbnails=None, model_name="two_boxes", plate=plate_for("H2C"))
     with zipfile.ZipFile(out) as archive:
         root = ET.fromstring(archive.read("3D/3dmodel.model"))
         settings = json.loads(archive.read("Metadata/project_settings.config"))
@@ -142,8 +170,9 @@ class TestReplate:
     def test_replating_is_what_writing_for_that_plate_would_have_produced(
         self, tmp_path: Path, written: Path
     ) -> None:
-        direct = tmp_path / "direct.3mf"
-        write_bambu_3mf(_parts(), direct, model_name="two_boxes", plate=plate_for("H2C"))
+        # The same package, covers and all — replating rewrites the placement and
+        # touches nothing else, so the bytes have to match what a direct write gives.
+        direct = _write(tmp_path / "direct.3mf", plate=plate_for("H2C"))
         assert replate_3mf(written.read_bytes(), plate_for("H2C")) == direct.read_bytes()
 
     def test_replating_keeps_every_other_entry(self, written: Path) -> None:
@@ -160,6 +189,7 @@ class TestReplate:
         write_bambu_3mf(
             [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(200, 200, 4)))],
             big,
+            thumbnails=None,
             model_name="big",
         )
         with pytest.raises(PlateFitError, match="A1 mini"):
@@ -187,4 +217,120 @@ def test_trimesh_reads_the_written_file_back(written: Path) -> None:
 
 def test_empty_part_list_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one colour part"):
-        write_bambu_3mf([], tmp_path / "empty.3mf")
+        write_bambu_3mf([], tmp_path / "empty.3mf", thumbnails=None)
+
+
+def test_the_cover_images_are_where_bambuddy_looks(written: Path) -> None:
+    """`Metadata/plate_1.png` is the first entry Bambuddy's `ThreeMFParser`
+    (`services/archive.py::_extract_thumbnail`) tries on an unsliced upload, and
+    what becomes the library file's `thumbnail_path`. This is that contract."""
+    with zipfile.ZipFile(written) as archive:
+        assert PLATE_THUMBNAIL == "Metadata/plate_1.png"
+        assert read_png(archive.read(PLATE_THUMBNAIL)).shape == (
+            PLATE_PNG_SIZE,
+            PLATE_PNG_SIZE,
+            4,
+        )
+        assert read_png(archive.read(PLATE_THUMBNAIL_SMALL)).shape == (
+            PLATE_SMALL_PNG_SIZE,
+            PLATE_SMALL_PNG_SIZE,
+            4,
+        )
+
+
+def test_the_cover_image_carries_both_part_colours(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        image = read_png(archive.read(PLATE_THUMBNAIL))
+    opaque = image[..., 3] == 255
+    assert (opaque & (image[..., 0] > image[..., 2])).any()
+    assert (opaque & (image[..., 2] > image[..., 0])).any()
+
+
+def test_png_entries_declare_their_content_type(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        types = ET.fromstring(archive.read("[Content_Types].xml"))
+    defaults = {
+        default.get("Extension"): default.get("ContentType")
+        for default in types.findall("{*}Default")
+    }
+    assert defaults["png"] == "image/png"
+
+
+def test_the_package_relationships_point_at_the_covers(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        rels = ET.fromstring(archive.read("_rels/.rels"))
+        names = archive.namelist()
+    targets = {
+        relationship.get("Type"): relationship.get("Target")
+        for relationship in rels.findall("{*}Relationship")
+    }
+    assert (
+        targets["http://schemas.openxmlformats.org/package/2006/relationships/metadata/thumbnail"]
+        == f"/{PLATE_THUMBNAIL}"
+    )
+    assert (
+        targets["http://schemas.bambulab.com/package/2021/cover-thumbnail-middle"]
+        == f"/{PLATE_THUMBNAIL}"
+    )
+    assert (
+        targets["http://schemas.bambulab.com/package/2021/cover-thumbnail-small"]
+        == f"/{PLATE_THUMBNAIL_SMALL}"
+    )
+    # Every relationship target resolves to a real entry; a dangling one is how
+    # a reader ends up with no cover at all.
+    for target in targets.values():
+        assert (target or "").lstrip("/") in names
+
+
+def test_the_plate_names_its_cover_images(written: Path) -> None:
+    with zipfile.ZipFile(written) as archive:
+        plate = ET.fromstring(archive.read("Metadata/model_settings.config")).find("./plate")
+        names = archive.namelist()
+    assert plate is not None
+    metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
+    assert metadata["thumbnail_file"] == PLATE_THUMBNAIL
+    assert metadata["top_file"] == PLATE_TOP
+    assert metadata["pick_file"] == PLATE_PICK
+    for key in ("thumbnail_file", "top_file", "pick_file"):
+        assert metadata[key] in names
+
+
+def test_without_covers_nothing_is_left_pointing_at_them(tmp_path: Path) -> None:
+    """`render.jobs` writes the 3MF without cover images when the rasteriser
+    blows its budget. The package has to stay self-consistent when it does: a
+    relationship or a `thumbnail_file` naming an entry that is not in the zip is
+    exactly the silent breakage the references exist to prevent."""
+    with zipfile.ZipFile(_write(tmp_path / "bare.3mf", covers=False)) as archive:
+        names = archive.namelist()
+        types = ET.fromstring(archive.read("[Content_Types].xml"))
+        rels = ET.fromstring(archive.read("_rels/.rels"))
+        plate = ET.fromstring(archive.read("Metadata/model_settings.config")).find("./plate")
+
+    assert names == TEXT_ENTRIES
+    assert "png" not in {d.get("Extension") for d in types.findall("{*}Default")}
+    for relationship in rels.findall("{*}Relationship"):
+        assert (relationship.get("Target") or "").lstrip("/") in names
+    assert plate is not None
+    keys = {entry.get("key") for entry in plate.findall("metadata")}
+    assert keys.isdisjoint({"thumbnail_file", "top_file", "pick_file"})
+
+
+def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> None:
+    """The cover images are a nicety; the extruder assignment is the print. A
+    3MF written without covers still has to slice."""
+    with zipfile.ZipFile(_write(tmp_path / "bare.3mf", covers=False)) as archive:
+        config = ET.fromstring(archive.read("Metadata/model_settings.config"))
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    extruders = [
+        metadata.get("value")
+        for part in config.findall("./object/part")
+        for metadata in part.findall("metadata")
+        if metadata.get("key") == "extruder"
+    ]
+    assert extruders == ["1", "2"]
+    # Two colours, so the placement reserved a prime tower and recorded it (#105).
+    assert settings == {
+        "filament_colour": ["#FF6AC1", "#1F6FEB"],
+        "wipe_tower_x": ["98"],
+        "wipe_tower_y": ["5"],
+    }
