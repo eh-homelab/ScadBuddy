@@ -182,8 +182,13 @@ jobs:
           expect_one "^\s*scadbuddy\.eh-homelab\.io/version: \"${VERSION//./\\.}\"\$" "rewritten version annotation"
           expect_one "^\s*scadbuddy\.eh-homelab\.io/revision: \"${REVISION}\"\$" "rewritten revision annotation"
           expect_one "^\s*scadbuddy\.eh-homelab\.io/source: \"${SOURCE_URL//./\\.}\"\$" "rewritten source annotation"
-          grep -q '^\s*imagePullPolicy: IfNotPresent$' "$MANIFEST" \
-            || { echo "::error file=$MANIFEST::imagePullPolicy must be IfNotPresent once the image is digest-pinned"; exit 1; }
+          # Scoped to the container just pinned, not a file-wide grep: a
+          # second container with the right policy must not mask drift here.
+          policy=$(yq eval-all -N \
+            'select(.kind == "Deployment" and .metadata.name == "scadbuddy") | .spec.template.spec.containers[] | select(.name == "scadbuddy") | .imagePullPolicy // ""' \
+            "$MANIFEST")
+          [ "$policy" = "IfNotPresent" ] \
+            || { echo "::error file=$MANIFEST::the scadbuddy container's imagePullPolicy must be IfNotPresent once the image is digest-pinned (found '${policy:-<unset>}')"; exit 1; }
 
           if git diff --quiet -- "$MANIFEST"; then
             echo "clusters already pins ${IMAGE}:${VERSION}@${DIGEST}; nothing to deploy"

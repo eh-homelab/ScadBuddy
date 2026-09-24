@@ -137,12 +137,14 @@ jobs:
               else
                 line="❌ Deploy failed before a clusters PR was opened — see the [deploy run](${RUN_URL})."
               fi ;;
+            cancelled:*)
+              line="⚠️ Not deployed: the deploy run was cancelled before it resolved this build's image ([deploy run](${RUN_URL})); re-run it to deploy this commit." ;;
             *)
               line="❌ Deploy could not resolve this build's image digest — see the [deploy run](${RUN_URL})." ;;
           esac
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/comments" -f body="$line" > /dev/null \
             || echo "::warning::could not comment on ${REVISION:0:7}"
-          # The workflow is red for anything but the overtaken case, which is
-          # ordinary queue behaviour rather than a failure.
-          [ "$DEPLOY_RESULT" = "cancelled" ]
+          # The workflow is red for anything but a cancellation — overtaken
+          # in the queue, or cancelled by hand — which is not a failure.
+          [ "$DEPLOY_RESULT" = "cancelled" ] || [ "$RESOLVE_RESULT" = "cancelled" ]
