@@ -203,7 +203,8 @@ async def plate_thumbnails(
 
 async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
     scad = paths.model_source(job.slug)
-    version = source_version(paths.model_dir(job.slug))
+    # Reads every file under the model directory; off the loop, like the other two.
+    version = await asyncio.to_thread(source_version, paths.model_dir(job.slug))
     schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)

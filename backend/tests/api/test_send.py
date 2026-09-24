@@ -589,7 +589,13 @@ def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, 
 # --- #80 the Edit in ScadBuddy back-link ---------------------------------------------
 
 
-def annotate_route(file_id: int = 41) -> respx.Route:
+def annotate_route(file_id: int = 41, notes: str | None = None) -> respx.Route:
+    """The note is a read-modify-write, so both halves are mocked."""
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": file_id, "filename": "demo-elan.3mf", "notes": notes}
+        )
+    )
     return respx.put(f"{API}/library/files/{file_id}").mock(
         return_value=httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
     )
@@ -661,6 +667,7 @@ def test_a_failed_annotation_still_queues_the_print(
     output_id = make_output(client, model)
     upload_route()
     run = pipeline_run_route()
+    annotate_route()  # the read succeeds; the write is what fails
     annotate = respx.put(f"{API}/library/files/41").mock(
         return_value=httpx.Response(500, json={"detail": "boom"})
     )
@@ -780,6 +787,8 @@ def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, m
         return_value=httpx.Response(200, json=recording("queue-item.json"))
     )
     # Both library entries refuse the note; the queued print is unaffected either way.
+    annotate_route()
+    annotate_route(52)
     respx.put(f"{API}/library/files/41").mock(return_value=httpx.Response(502))
     respx.put(f"{API}/library/files/52").mock(return_value=httpx.Response(502))
 
@@ -788,3 +797,24 @@ def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, m
     assert response.status_code == 200
     assert response.json()["queue_item_id"] == 9
     assert response.json()["edit_url"] is None
+
+
+@respx.mock
+def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
+    client: TestClient, model: str
+) -> None:
+    """``notes`` is the file's only free-text field, so it is not ScadBuddy's to clear."""
+    configure(client, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route(
+        notes="PLA only — the black spool\nEdit in ScadBuddy: https://old/edit/x"
+    )
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": (
+            f"PLA only — the black spool\nEdit in ScadBuddy: https://scad.test/edit/{output_id}"
+        )
+    }

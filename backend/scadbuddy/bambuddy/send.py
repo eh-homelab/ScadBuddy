@@ -27,7 +27,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
+from scadbuddy.library.deeplink import edit_url, merge_edit_note
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
@@ -281,7 +281,10 @@ async def attach_edit_link(
     if link is None:
         return None
     try:
-        await client.annotate_library_file(library_file_id, f"{EDIT_NOTE}{link}")
+        existing = await client.library_file(library_file_id)
+        await client.annotate_library_file(
+            library_file_id, merge_edit_note(existing.notes, link)
+        )
     except ApiError:
         logger.warning(
             "could not attach the edit link to the library file",

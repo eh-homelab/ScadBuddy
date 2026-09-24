@@ -35,3 +35,17 @@ def edit_url(public_url: str | None, output_id: str) -> str | None:
     if not public_url or _UNWRITABLE.search(public_url):
         return None
     return f"{public_url.rstrip('/')}{edit_path(output_id)}"
+
+
+def merge_edit_note(notes: str | None, link: str) -> str:
+    """The file's notes with our line on the end, replacing any earlier one of ours.
+
+    ``notes`` is the one free-text field a library file has, so a person may have
+    typed into it. Writing the link straight over it would throw that away silently,
+    and re-sending the same output would otherwise stack duplicate lines.
+    """
+    kept = [line for line in (notes or "").splitlines() if not line.startswith(EDIT_NOTE)]
+    while kept and not kept[-1].strip():
+        kept.pop()
+    kept.append(f"{EDIT_NOTE}{link}")
+    return "\n".join(kept)

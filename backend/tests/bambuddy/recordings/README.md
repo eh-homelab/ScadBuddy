@@ -85,6 +85,11 @@ Added for #88 on 2026-09-24 (a `GET`):
   ([library.py#L5103-L5136](https://github.com/maziggy/bambuddy/blob/9e9c08ba2cc08bf1e746ed98bef2b46b7bedea02/backend/app/api/routes/library.py#L5103-L5136)).
   Two details from the same lines: the sentinel that *clears* `folder_id`/`project_id`
   is **`0`**, not `null`, and an empty `notes` string is stored as `NULL`.
+- **`notes` is still a whole-field write, and a person may have typed in it.** The
+  partial update above is about the *other* fields; `notes` itself is replaced by
+  whatever is sent. `GET /api/v1/library/files/{file_id}` (`openapi/routes.txt`) is
+  therefore read first and the "Edit in ScadBuddy" line merged into what is there —
+  replacing an earlier one of ours, keeping everything else.
 - **An AMS `id` is the printer's numbering, not a list index.** The recorded H2C
   reports units `[0, 1, 128, 2]` — unsorted, with the single-slot AMS-HT at `128`,
   which is also how `ams_switch_inlet` keys them (as **strings**; JSON has no integer

@@ -376,6 +376,16 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_file(self, file_id: int) -> LibraryFile:
+        """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read library file {file_id}",
+        )
+        return LibraryFile.model_validate(response.json())
+
     async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
         """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
         library file has; there is no ``url`` on one (``external_url`` lives on an
