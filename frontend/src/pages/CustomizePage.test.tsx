@@ -251,6 +251,50 @@ describe('CustomizePage', () => {
     expect(within(dialog).getByText('4')).toBeInTheDocument()
   })
 
+  it('does not carry a per-send option into the next send (#88)', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.use(
+      http.post('/api/v1/outputs/:id/send', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain.3mf',
+          queue_item_id: 7,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          options: {},
+        })
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    // First send, with an option set for this print only.
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    let dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByText('Options'))
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Power off afterwards')).toBeInTheDocument(),
+    )
+    await user.selectOptions(within(dialog).getByLabelText('Power off afterwards'), 'true')
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]?.options).toEqual({ auto_off_after: true })
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+
+    // Second send, without touching the disclosure — it is collapsed, so a leaked
+    // override would be invisible.
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    expect(bodies[1]?.options).toEqual({})
+  })
+
   it('reopens an earlier output with its parameters', async () => {
     render(`/m/name-keychain?from=${'c'.repeat(32)}`)
     await waitFor(() =>

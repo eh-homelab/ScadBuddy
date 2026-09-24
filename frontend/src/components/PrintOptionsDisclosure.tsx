@@ -251,8 +251,11 @@ export function PrintOptionsDisclosure({
  * of these fields is an `int` and a Pydantic 422 names no field. Rounding matters as much
  * as bounding: `Math.min`/`Math.max` leave `3.5` alone.
  */
-function clamp(value: number, spec: OptionSpec): number {
-  const whole = Math.round(value)
+function clamp(raw: string, spec: OptionSpec): number | null {
+  const whole = Math.round(Number(raw))
+  // A `type="number"` input reports a lone "-" as its value, and `??` does not fall
+  // through `NaN`, so an unguarded one sticks in the field and blanks the control.
+  if (!Number.isFinite(whole)) return null
   const lower = spec.min === undefined ? whole : Math.max(spec.min, whole)
   return spec.max === undefined ? lower : Math.min(spec.max, lower)
 }
@@ -336,9 +339,7 @@ function OptionControl({
         value={isSet(value) ? String(value) : UNSET}
         placeholder={isSet(fallback) ? String(fallback) : ''}
         onChange={(event) =>
-          onChange(
-            event.target.value === UNSET ? null : clamp(Number(event.target.value), spec),
-          )
+          onChange(event.target.value === UNSET ? null : clamp(event.target.value, spec))
         }
         className="sb-field sb-num w-24 text-right"
       />

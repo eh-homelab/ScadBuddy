@@ -227,6 +227,19 @@ describe('PrintOptionsDisclosure', () => {
     )
   })
 
+  it('ignores a value that is not a number rather than storing NaN', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '3' } })
+
+    // A `type="number"` input really does report a lone "-" as its value.
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '-' } })
+
+    expect(screen.getByTestId('sent')).toHaveTextContent('{}')
+    expect(within(row('Quantity')).getByText(/1 · Bambuddy's default/)).toBeInTheDocument()
+  })
+
   it('forgets a scope', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
