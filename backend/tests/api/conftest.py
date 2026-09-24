@@ -52,6 +52,11 @@ if "%%FAIL%%" in text:
     print("ERROR: Parser error: syntax error", file=sys.stderr)
     raise SystemExit(1)
 
+if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
+    # Exit 0, and an export with a parameter that has no name.
+    pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
+    raise SystemExit(0)
+
 if out is not None and out.endswith(".param"):
     pathlib.Path(out).write_text(
         json.dumps(

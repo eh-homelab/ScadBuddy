@@ -122,10 +122,17 @@ export const api = {
    * model the source belongs to, so its `include` of a sibling file resolves against
    * that model's directory instead of an empty one.
    */
-  checkSource: (source: string, slug?: string) =>
+  /**
+   * `signal` matters here: the server runs these checks under its own small
+   * concurrency budget, so a superseded keystroke's check must be abandoned on the
+   * wire rather than merely ignored on arrival — otherwise it holds a permit the
+   * check the user is waiting for needs.
+   */
+  checkSource: (source: string, slug?: string, signal?: AbortSignal) =>
     request<SourceCheck>('/models/check', {
       method: 'POST',
       body: JSON.stringify({ source, slug: slug ?? null }),
+      signal,
     }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),

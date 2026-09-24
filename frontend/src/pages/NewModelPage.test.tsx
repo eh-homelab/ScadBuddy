@@ -50,6 +50,27 @@ async function paste(user: ReturnType<typeof userEvent.setup>, text: string) {
 }
 
 describe('NewModelPage', () => {
+  it('abandons a superseded check on the wire, not just on arrival', async () => {
+    // The server checks under a small concurrency budget, so a check nobody is
+    // waiting for any more must release its permit.
+    const seen: AbortSignal[] = []
+    server.use(
+      http.post('*/api/v1/models/check', async ({ request }) => {
+        seen.push(request.signal)
+        await new Promise((resolve) => setTimeout(resolve, 10_000))
+        return HttpResponse.json({ ok: true, checked: true, diagnostics: [], parameters: 0 })
+      }),
+    )
+
+    const { user, unmount } = renderNew()
+    await paste(user, keychainSource)
+    await waitFor(() => expect(seen).toHaveLength(1), { timeout: 3_000 })
+    const inflight = seen[0]
+
+    unmount()
+    await waitFor(() => expect(inflight?.aborted).toBe(true), { timeout: 3_000 })
+  })
+
   it('will not save without a name and some source', async () => {
     const { user } = renderNew()
     const save = screen.getByRole('button', { name: 'Save and customize' })

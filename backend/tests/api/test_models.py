@@ -450,3 +450,25 @@ def test_replacing_the_source_swaps_the_file_rather_than_truncating_it(
     assert source_path.read_text(encoding="utf-8") == replacement
     assert source_path.stat().st_ino != before
     assert sorted(p.name for p in paths.model_dir(model).iterdir()) == ["model.json", "model.scad"]
+
+
+def test_the_schema_of_an_unusable_export_is_a_problem_not_a_crash(client: TestClient) -> None:
+    """The same failure `inspect_source` reports as a diagnostic must not become a 500
+    when the read path hits it — which `force` makes reachable."""
+    created = client.post(
+        "/api/v1/models", json={"name": "Odd Export", "source": "%%BADPARAM%%\n", "force": True}
+    )
+    assert created.status_code == 201
+
+    response = client.get("/api/v1/models/odd-export/schema")
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "schema" in response.json()["detail"]
+
+
+def test_an_unusable_export_is_refused_at_save_time_without_force(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", json={"name": "Odd Export", "source": "%%BADPARAM%%\n"}
+    )
+    assert response.status_code == 422
+    assert "could not be derived" in response.json()["diagnostics"][0]["message"]

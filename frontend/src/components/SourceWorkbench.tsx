@@ -60,23 +60,25 @@ export function SourceWorkbench({
       setVerdict(undefined)
       return
     }
-    let cancelled = false
+    const inflight = new AbortController()
+    const { signal } = inflight
     setChecking(true)
     api
-      .checkSource(settled, slug)
+      .checkSource(settled, slug, signal)
       .then((result) => {
-        if (!cancelled) setVerdict({ source: settled, result })
+        if (!signal.aborted) setVerdict({ source: settled, result })
       })
       .catch((cause: unknown) => {
-        if (!cancelled) {
+        // An abort is this effect's own doing, not a failed check.
+        if (!signal.aborted) {
           setError(cause instanceof ApiError ? cause.detail : 'The parse check did not run.')
         }
       })
       .finally(() => {
-        if (!cancelled) setChecking(false)
+        if (!signal.aborted) setChecking(false)
       })
     return () => {
-      cancelled = true
+      inflight.abort()
     }
   }, [settled, slug])
 

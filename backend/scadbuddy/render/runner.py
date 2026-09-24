@@ -135,13 +135,31 @@ async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any
     with tempfile.TemporaryDirectory(prefix="scadbuddy-param-") as tmp:
         target = Path(tmp) / "model.param"
         await run_openscad(["-o", str(target), scad_path.name], cwd=scad_path.parent, config=config)
-        data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
+        try:
+            data: dict[str, Any] = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as error:
+            # Exit 0 and an export nothing can read: still the model's problem, so it
+            # travels as OpenSCADError and reaches the same handlers a failed run does.
+            raise OpenSCADError(
+                f"openscad wrote no usable parameter export: {error}", []
+            ) from error
     return data
 
 
 async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
+    """Every caller of this gets a schema or an OpenSCADError, never a raw KeyError.
+
+    `build_schema` subscripts the export's dicts directly, so an entry without a `name`
+    — or an option without a `value` — raises `KeyError`/`TypeError`. Uncaught, that is
+    a 500 from a route and an unhandled-error log line for a condition a client can
+    reach on purpose (a `force`d save of source whose export is unusable).
+    """
     source = scad_path.read_text(encoding="utf-8")
-    return build_schema(await export_param_json(scad_path, config=config), source)
+    data = await export_param_json(scad_path, config=config)
+    try:
+        return build_schema(data, source)
+    except (ValueError, KeyError, TypeError) as error:
+        raise OpenSCADError(f"the customizer schema could not be derived: {error}", []) from error
 
 
 async def cached_schema(scad_path: Path, meta_path: Path, *, config: Config) -> CustomizerSchema:
