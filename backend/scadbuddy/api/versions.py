@@ -19,12 +19,12 @@ from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
-    EMPTY_TREE,
     FileChange,
     GitError,
     ModelHistory,
     Revision,
     RevisionNotFoundError,
+    RevisionRange,
 )
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
@@ -78,6 +78,14 @@ async def _require_revision_async(history: ModelHistory, commit: str) -> str:
     """:func:`_require_revision` for an ``async def`` handler: `git rev-parse` is a
     subprocess, and on the event loop it stalls every render poll with it."""
     return await asyncio.to_thread(_require_revision, history, commit)
+
+
+def _require_range(history: ModelHistory, base: str | None, head: str) -> RevisionRange:
+    """:meth:`ModelHistory.revision_range`, with an unknown endpoint as a 404."""
+    try:
+        return history.revision_range(base, head)
+    except RevisionNotFoundError as error:
+        raise ApiError(status.HTTP_404_NOT_FOUND, str(error)) from None
 
 
 def _require_revision(history: ModelHistory, commit: str) -> str:
@@ -196,20 +204,21 @@ def get_version_diff(
 ) -> VersionDiff:
     require_model(catalogue, slug)
     require_history(history)
-    head = _require_revision(history, commit)
-    resolved_base = _require_revision(history, base) if base else None
+    # Both endpoints are resolved ONCE, here: the patch, the file list and the
+    # base echoed back all want the same pair, and the UI asks for a diff on
+    # every row click, so re-deriving it per call is latency for nothing. The
+    # default base (the revision's parent, or the empty tree at the root) is
+    # named rather than left implicit, so the UI can offer "diff against this".
     try:
-        patch = history.diff(resolved_base, head, slug)
-        files = history.diff_files(resolved_base, head, slug)
-        # An explicit base is echoed back as given; the default one has to be
-        # named, so the UI can offer "diff against this" without guessing.
-        effective_base = resolved_base or history.parent(head) or EMPTY_TREE
+        revisions = _require_range(history, base, commit)
+        patch = history.diff(revisions, slug)
+        files = history.diff_files(revisions, slug)
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     return VersionDiff(
         slug=slug,
-        base=effective_base,
-        head=head,
+        base=revisions.base,
+        head=revisions.head,
         files=_relative(files, slug),
         patch=patch,
     )

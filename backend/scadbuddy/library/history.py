@@ -104,6 +104,14 @@ class FileChange:
 
 
 @dataclass(frozen=True)
+class RevisionRange:
+    """A diff's two endpoints, both resolved to full object ids."""
+
+    base: str
+    head: str
+
+
+@dataclass(frozen=True)
 class Revision:
     commit: str
     author: str
@@ -201,11 +209,6 @@ class ModelHistory:
     def _out(self, *args: str, check: bool = True) -> str:
         completed = self._run(*args, check=check)
         assert isinstance(completed.stdout, str)
-        return completed.stdout
-
-    def _raw(self, *args: str) -> bytes:
-        completed = self._run(*args, text=False)
-        assert isinstance(completed.stdout, bytes)
         return completed.stdout
 
     @contextmanager
@@ -401,34 +404,42 @@ class ModelHistory:
         return completed.stdout
 
     def parent(self, commit: str) -> str | None:
-        completed = self._run(
-            "rev-parse", "--verify", "--quiet", f"{self.resolve(commit)}^", check=False
-        )
+        return self._parent_of(self.resolve(commit))
+
+    def _parent_of(self, resolved: str) -> str | None:
+        """As :meth:`parent`, for a caller that already holds a resolved id."""
+        completed = self._run("rev-parse", "--verify", "--quiet", f"{resolved}^", check=False)
         assert isinstance(completed.stdout, str)
         return completed.stdout.strip() or None if completed.returncode == 0 else None
 
-    def diff(self, base: str | None, head: str, slug: str | None = None) -> str:
-        """A unified patch between two revisions, optionally scoped to one model.
+    def revision_range(self, base: str | None, head: str) -> RevisionRange:
+        """Resolve a diff's two endpoints, once.
 
         ``base`` of ``None`` means the revision's parent -- or the empty tree when
-        it is the root commit, which has none.
+        it is the root commit, which has none. Both endpoints come back resolved,
+        so a caller that wants the patch *and* the file list (and to name the base
+        it actually used) pays for the resolution a single time: the pair is what
+        :meth:`diff` and :meth:`diff_files` take.
         """
-        args = ["diff", "--no-color", *self._range(base, head)]
+        resolved_head = self.resolve(head)
+        resolved_base = (
+            self.resolve(base) if base else (self._parent_of(resolved_head) or EMPTY_TREE)
+        )
+        return RevisionRange(resolved_base, resolved_head)
+
+    def diff(self, revisions: RevisionRange, slug: str | None = None) -> str:
+        """A unified patch across ``revisions``, optionally scoped to one model."""
+        args = ["diff", "--no-color", revisions.base, revisions.head]
         if slug is not None:
             args += ["--", slug]
         return self._out(*args)
 
-    def diff_files(self, base: str | None, head: str, slug: str | None = None) -> list[FileChange]:
+    def diff_files(self, revisions: RevisionRange, slug: str | None = None) -> list[FileChange]:
         """The ``--name-status`` summary for the same pair :meth:`diff` patches."""
-        args = ["diff", "--name-status", "--no-renames", *self._range(base, head)]
+        args = ["diff", "--name-status", "--no-renames", revisions.base, revisions.head]
         if slug is not None:
             args += ["--", slug]
         return _parse_name_status(self._out(*args))
-
-    def _range(self, base: str | None, head: str) -> tuple[str, str]:
-        resolved_head = self.resolve(head)
-        resolved_base = self.resolve(base) if base else (self.parent(resolved_head) or EMPTY_TREE)
-        return resolved_base, resolved_head
 
     def export(self, slug: str, commit: str, dest: Path) -> None:
         """Write ``slug``'s tree at ``commit`` into ``dest`` (the slug prefix stripped).

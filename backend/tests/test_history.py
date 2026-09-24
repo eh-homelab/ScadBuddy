@@ -198,15 +198,52 @@ def test_diff_defaults_to_the_parent_and_handles_the_root_commit(
     second = history.commit("Edit keychain source", "keychain")
     assert first is not None and second is not None
 
-    patch = history.diff(None, second, "keychain")
+    patch = history.diff(history.revision_range(None, second), "keychain")
     assert "-cube(10);" in patch
     assert "+cube(20);" in patch
-    assert [change.status for change in history.diff_files(None, second, "keychain")] == ["M"]
+    assert [
+        change.status
+        for change in history.diff_files(history.revision_range(None, second), "keychain")
+    ] == ["M"]
 
     # The root commit has no parent, so it diffs against the empty tree.
-    root_patch = history.diff(None, first, "keychain")
+    root_patch = history.diff(history.revision_range(None, first), "keychain")
     assert "+cube(10);" in root_patch
-    assert [change.status for change in history.diff_files(None, first, "keychain")] == ["A"]
+    assert [
+        change.status
+        for change in history.diff_files(history.revision_range(None, first), "keychain")
+    ] == ["A"]
+
+
+def test_a_default_diff_resolves_its_endpoints_once(
+    models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The panel asks for a diff on every row click, so the cost is pinned here.
+
+    ``revision_range`` exists precisely so the patch, the file list and the base
+    echoed back to the UI share one resolution; an implementation that resolved
+    per call spawned a dozen processes to answer one request.
+    """
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    write_model(models, "keychain", "cube(20);\n")
+    second = history.commit("Edit keychain source", "keychain")
+    assert second is not None
+
+    inner = history._run
+    commands: list[str] = []
+
+    def spy(*args: str, **kwargs: object) -> object:
+        commands.append(args[0])
+        return inner(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(history, "_run", spy)
+    revisions = history.revision_range(None, second)
+    history.diff(revisions, "keychain")
+    history.diff_files(revisions, "keychain")
+
+    # One rev-parse for the head, one for its parent, then the two diffs.
+    assert commands == ["rev-parse", "rev-parse", "diff", "diff"]
 
 
 def test_diff_between_two_arbitrary_revisions(models: Path, history: ModelHistory) -> None:
@@ -218,7 +255,7 @@ def test_diff_between_two_arbitrary_revisions(models: Path, history: ModelHistor
     third = history.commit("Edit twice", "keychain")
     assert first is not None and third is not None
 
-    patch = history.diff(first, third, "keychain")
+    patch = history.diff(history.revision_range(first, third), "keychain")
     assert "-cube(10);" in patch
     assert "+cube(30);" in patch
 
