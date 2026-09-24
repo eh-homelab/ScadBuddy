@@ -6,8 +6,10 @@ import logging
 import os
 import shutil
 import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -244,13 +246,51 @@ async def resolve_source(
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
-    if not (directory / SOURCE_NAME).is_file():
+    if (directory / SOURCE_NAME).is_file():
+        # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
+        # than by export time and cannot take an old revision out from under a
+        # render that is still browsing it.
+        await asyncio.to_thread(_touch, directory)
+    else:
         await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
     )
+
+
+def _touch(directory: Path) -> None:
+    with suppress(OSError):
+        os.utime(directory)
+
+
+def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:
+    """Evict revision exports nobody has rendered from in ``ttl`` seconds.
+
+    `cache/schema/` needs none of this -- one file per slug, overwritten in
+    place -- but every distinct `{slug, commit}` anyone opens "Customize this
+    version" on writes a directory that is otherwise kept forever, on a 5 Gi
+    PVC, for a feature whose whole point is browsing arbitrary old revisions.
+    Losing one costs a `git archive`, so this mirrors the TTL sweep `jobs/`
+    already gets, on the same clock and the same two trigger points.
+    """
+    root = paths.model_revisions
+    if not root.is_dir():
+        return []
+    cutoff = (now if now is not None else time.time()) - ttl
+    removed: list[str] = []
+    for slug_dir in sorted(root.iterdir()):
+        if not slug_dir.is_dir():
+            continue
+        for export in sorted(slug_dir.iterdir()):
+            if not export.is_dir() or export.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(export, ignore_errors=True)
+            removed.append(f"{slug_dir.name}/{export.name}")
+        with suppress(OSError):
+            slug_dir.rmdir()  # only when it emptied
+    return removed
 
 
 def _export_atomically(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
@@ -356,6 +396,7 @@ class RenderQueue:
         self.paths.ensure()
         self.store.fail_unfinished()
         self.store.prune(self.config.job_ttl)
+        prune_revision_exports(self.paths, self.config.job_ttl)
         self._workers = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
@@ -412,3 +453,4 @@ class RenderQueue:
         job.finished_at = _now()
         self.store.write(job)
         self.store.prune(self.config.job_ttl)
+        prune_revision_exports(self.paths, self.config.job_ttl)

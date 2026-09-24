@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -40,14 +41,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Before the seed: an existing models directory becomes revision 1, so a
     # re-seed on an image upgrade is a commit on top of it rather than an
     # unversioned overwrite.
-    state.history.ensure_repo()
+    await asyncio.to_thread(state.history.ensure_repo)
     # Before anything shells out to openscad or fc-list: it is what points
     # fontconfig at the fonts on the data volume.
     state.fonts.prepare()
     state.openscad_version = await probe_openscad_version(state.config)
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
-        state.catalogue.seed(seed_dir)
+        await asyncio.to_thread(state.catalogue.seed, seed_dir)
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()

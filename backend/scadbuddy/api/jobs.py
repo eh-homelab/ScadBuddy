@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Request, status
@@ -82,14 +83,15 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
     )
 
 
-def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
+async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
     """Validate an explicitly requested revision. ``None`` leaves the caller to fall
     back to whatever the model is currently at."""
     if version is None:
         return None
     require_history(history)
     try:
-        return history.resolve(version)
+        # `git rev-parse` is a subprocess, and this runs from an `async def`.
+        return await asyncio.to_thread(history.resolve, version)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {version!r}") from None
 
@@ -118,7 +120,7 @@ async def render_model(
     queue: QueueDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
-    requested = _resolve_version(history, slug, body.version)
+    requested = await _resolve_version(history, slug, body.version)
     try:
         # The schema the parameters are validated against has to be the schema of
         # the revision being rendered, not the one the model is currently at.

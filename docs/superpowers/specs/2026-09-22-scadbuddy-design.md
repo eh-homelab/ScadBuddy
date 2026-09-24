@@ -210,7 +210,19 @@ on the volume sees the same thing.
   revision is exported to `cache/revisions/<slug>/<commit>/`, an ordinary model
   directory, so the schema cache and the renderer work on it unchanged and
   nothing generated lands in the repository. Commits are immutable, so a
-  populated export is never stale.
+  populated export is never *stale* — but it is still a cache, and it is swept
+  on the same TTL and the same two trigger points as `jobs/`, by **last use**
+  rather than by export time so a sweep cannot take a revision out from under
+  someone still browsing it.
+- **Every git call is blocking**, so an `async def` handler hands it to
+  `asyncio.to_thread`. FastAPI offloads plain `def` handlers on its own; an
+  `async` one runs on the loop uvicorn shares with the render workers, and a
+  commit against the PVC there stalls every render poll and `/healthz` with it.
+- **A failed commit never fails the action.** The files are written first, so a
+  `GitError` *or* an `OSError` (the lock file is ordinary filesystem I/O, and a
+  PVC can go read-only after boot) is logged and swallowed: losing the revision
+  is the smaller harm, and reporting a 500 for an edit that already landed is
+  the larger one.
 - **Not done here:** pushing the repository to a remote. The seam is
   `ModelHistory.commit`, which returns the new commit id.
 

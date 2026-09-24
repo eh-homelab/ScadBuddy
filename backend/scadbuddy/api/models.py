@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Annotated
 
@@ -124,7 +125,13 @@ async def create_model(
         tags=_parse_tags(tags) or [],
     )
     try:
-        return catalogue.create(slug, source, meta, thumbnail=thumbnail_bytes, readme=readme_text)
+        # `to_thread`, because a create is a `git add` + `git commit` against the
+        # PVC and this handler is `async def` -- FastAPI only offloads plain `def`
+        # ones. On the event loop it would stall every render poll and /healthz
+        # for the length of the commit. Same at every git-touching call below.
+        return await asyncio.to_thread(
+            catalogue.create, slug, source, meta, thumbnail=thumbnail_bytes, readme=readme_text
+        )
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
 
@@ -173,7 +180,7 @@ async def put_source(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), log_tail=error.log_tail
         ) from None
-    return catalogue.write_source(slug, body.source, message=body.message)
+    return await asyncio.to_thread(catalogue.write_source, slug, body.source, message=body.message)
 
 
 @router.get(

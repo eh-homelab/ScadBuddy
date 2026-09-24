@@ -52,6 +52,10 @@ class DataPaths:
         for the reason on :data:`SCHEMA_CACHE_NAME`."""
         return self.cache / "schema" / f"{slug}.json"
 
+    @property
+    def model_revisions(self) -> Path:
+        return self.cache / "revisions"
+
     def model_revision_dir(self, slug: str, commit: str) -> Path:
         """An old revision of a model, exported out of git.
 
@@ -60,7 +64,7 @@ class DataPaths:
         renderer work on it unchanged. Commits are immutable, so once populated an
         entry never needs invalidating.
         """
-        return self.cache / "revisions" / slug / commit
+        return self.model_revisions / slug / commit
 
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id

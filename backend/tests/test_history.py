@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from pathlib import Path
@@ -19,6 +20,7 @@ from scadbuddy.library.history import (
     subject_line,
     summarise,
 )
+from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
@@ -403,3 +405,53 @@ def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:
     assert catalogue.paths.model_source("keychain").read_text(encoding="utf-8") == "cube(10);\n"
     assert record.version is not None
     assert record.version != first
+
+
+def test_a_filesystem_failure_never_fails_the_action_itself(
+    catalogue: Catalogue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The files are written before the commit, so a lock-file `OSError` has to
+    degrade the same way a `GitError` does.
+
+    Otherwise a PVC that went read-only after boot 500s a source edit that has
+    already landed on disk, telling the client it failed when it did not.
+    """
+    catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain"))
+    assert catalogue.history is not None
+    monkeypatch.setattr(
+        catalogue.history,
+        "commit",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only file system")),
+    )
+
+    record = catalogue.write_source("keychain", "cube(20);\n")
+
+    assert catalogue.paths.model_source("keychain").read_text(encoding="utf-8") == "cube(20);\n"
+    assert record.slug == "keychain"
+
+
+def test_revision_exports_are_evicted_by_last_use(tmp_path: Path) -> None:
+    """They are a cache, and nothing else ever removes one.
+
+    `cache/schema/` is one file per slug overwritten in place, but every distinct
+    revision anyone opens "Customize this version" on writes a directory that
+    would otherwise live on the PVC forever.
+    """
+    paths = DataPaths(tmp_path / "data")
+    paths.ensure()
+    fresh = paths.model_revision_dir("keychain", "a" * 40)
+    stale = paths.model_revision_dir("keychain", "b" * 40)
+    for directory in (fresh, stale):
+        directory.mkdir(parents=True)
+        (directory / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    os.utime(stale, (0, 0))
+
+    removed = prune_revision_exports(paths, ttl=3600.0)
+
+    assert removed == [f"keychain/{'b' * 40}"]
+    assert fresh.is_dir()
+    assert not stale.exists()
+
+
+def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
+    assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
