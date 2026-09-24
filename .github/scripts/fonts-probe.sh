@@ -39,12 +39,26 @@ exec_in() {
   fi
 }
 
-# `000` is what curl's write-out prints when it never got a response at all, so
-# it covers DNS, TLS and connect failures as well as our own --max-time.
+# "Unreachable" means the dependency did not serve us, which is broader than
+# "the socket died":
+#
+#   000          curl never got a response at all — DNS, TLS, connect, or our
+#                own --max-time.
+#   401 403 429  the host is up and REFUSING us. raw.githubusercontent.com
+#                rate-limits anonymous traffic from shared CI egress with 429
+#                (403 historically), and an install would hit the same wall, so
+#                reding the acceptance test would blame this repo for someone
+#                else's quota. 408 joins them as a server-side timeout.
+#   5xx          the host is broken.
+#
+# Everything else is reachable, and 404 deliberately so: `REPO_BASE_URL` is a
+# directory path that legitimately answers 404, and proving the host serves us
+# is the whole question here — WHICH object exists is the application's problem,
+# and it reds if it gets that wrong.
 unreachable() {
   case "$1" in
     ''|*[!0-9]*) return 0 ;;
-    000) return 0 ;;
+    000|401|403|408|429) return 0 ;;
     *) [ "$1" -ge 500 ] ;;
   esac
 }

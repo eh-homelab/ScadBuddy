@@ -115,6 +115,20 @@ run "download host 5xx" "1" "where the font files are downloaded from" \
   STUB_REPO_STATUS=500
 run "download host 404 is still reachable" "" "-" \
   STUB_REPO_STATUS=404
+# A rate-limited CDN is the dependency refusing us, not this repo failing: the
+# install would hit the same wall, so reding here would blame the wrong party.
+run "download host rate-limited (429)" "1" "where the font files are downloaded from" \
+  STUB_REPO_STATUS=429
+run "download host forbidden (403)" "1" "where the font files are downloaded from" \
+  STUB_REPO_STATUS=403
+run "download host unauthorized (401)" "1" "where the font files are downloaded from" \
+  STUB_REPO_STATUS=401
+run "download host request timeout (408)" "1" "where the font files are downloaded from" \
+  STUB_REPO_STATUS=408
+run "catalogue upstream rate-limited (429)" "1" "did not answer from the container (status 429)" \
+  STUB_METADATA_STATUS=429
+run "catalogue upstream 404 is still reachable" "" "-" \
+  STUB_METADATA_STATUS=404
 
 # ── Everything that is OURS must RED, never skip ─────────────────────────────
 # The one that keeps being got wrong: the route maps a schema drift and an
