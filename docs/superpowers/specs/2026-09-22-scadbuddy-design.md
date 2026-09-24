@@ -40,8 +40,11 @@ Non-goals (v1):
 
 - Authentication. ScadBuddy is LAN-only behind the UDM firewall, like the
   `bambuddy-slicer` sidecar. Revisit if it is ever exposed.
-- Editing `.scad` source in the browser. Models are uploaded or dropped in a
-  folder; editing happens in an editor.
+- ~~Editing `.scad` source in the browser.~~ Superseded by #92: source can be
+  pasted into a CodeMirror editor to create a model and edited in place
+  afterwards, both through the same create path as an upload and both
+  parse-checked by OpenSCAD before they are stored. Multi-file pastes (a model
+  that `include`s a helper) remain out of scope — that is the libraries issue.
 - Running OpenSCAD in the browser (openscad-wasm). Server-side render is
   simpler and uses the Manifold nightly; the door stays open.
 - Sandboxing OpenSCAD beyond a timeout and resource limits. `.scad` is a
@@ -402,10 +405,12 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | upload `.scad` (+ optional thumbnail, README); slug from filename |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README), slug from filename; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models/check` | body `{source}` → parse-only OpenSCAD run: `{ok, checked, diagnostics[], log_tail}`, saves nothing |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |
-| GET | `/models/{slug}/source` | raw source (read-only) |
+| GET | `/models/{slug}/source` | raw source |
+| PUT | `/models/{slug}/source` | body `{source, force}` → replaces it and re-derives the schema |
 | POST | `/models/{slug}/render` | body `{params}` → `{job_id}` (202) |
 | GET | `/jobs/{id}` | state, progress, log tail, result URLs |
 | GET | `/jobs/{id}/preview.glb` | viewer mesh |

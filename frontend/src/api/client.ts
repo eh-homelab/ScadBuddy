@@ -9,6 +9,7 @@ import type {
   Job,
   ModelSummary,
   Output,
+  PastedSource,
   ParamValue,
   PipelineChoices,
   PipelineCreate,
@@ -25,6 +26,7 @@ import type {
   Settings,
   SettingsUpdate,
   SidebarLink,
+  SourceCheck,
 } from './types'
 
 export const API_BASE = '/api/v1'
@@ -64,6 +66,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
+/** `GET /models/{slug}/source` answers text/plain, not JSON. */
+async function requestText(path: string): Promise<string> {
+  const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
+  if (!response.ok) {
+    throw new ApiError(await readProblem(response))
+  }
+  return await response.text()
+}
+
 async function readProblem(response: Response): Promise<Problem> {
   try {
     const body = (await response.json()) as Partial<Problem>
@@ -91,6 +102,22 @@ export const api = {
     body.append('file', file)
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
+
+  /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
+  createModelFromSource: (body: PastedSource) =>
+    request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+
+  getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
+
+  replaceSource: (slug: string, source: string, force = false) =>
+    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, force }),
+    }),
+
+  /** Parse-only: runs OpenSCAD over the source and saves nothing. */
+  checkSource: (source: string) =>
+    request<SourceCheck>('/models/check', { method: 'POST', body: JSON.stringify({ source }) }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 

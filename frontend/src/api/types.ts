@@ -20,6 +20,21 @@ export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
 
 export type ModelSummary = Schemas['ModelRecord']
+export type SourceCheck = Schemas['SourceCheck']
+export type Diagnostic = Schemas['Diagnostic']
+
+/**
+ * Body for creating a model from pasted source. Hand-written because the route
+ * accepts three content types and FastAPI inlines this one's schema in the
+ * document rather than naming it under `components`.
+ */
+export interface PastedSource {
+  name: string
+  source: string
+  description?: string
+  tags?: string[]
+  force?: boolean
+}
 
 export type Job = Schemas['JobStatus']
 export type JobState = Job['status']

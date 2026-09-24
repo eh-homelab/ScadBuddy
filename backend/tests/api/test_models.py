@@ -6,6 +6,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.schema import source_sha256
 from tests.api.conftest import PNG_BYTES
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -165,3 +166,132 @@ def test_schema_is_cached_by_source_sha(client: TestClient, model: str, paths: D
 
 def test_a_model_without_a_thumbnail_answers_404(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}/thumbnail").status_code == 404
+
+
+def test_a_json_body_creates_a_model_from_pasted_source(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        json={"name": "Name Keychain", "source": SOURCE, "tags": ["pasted"]},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert (body["slug"], body["name"]) == ("name-keychain", "Name Keychain")
+    assert body["tags"] == ["pasted"]
+    assert client.get("/api/v1/models/name-keychain/source").text == SOURCE
+
+
+def test_a_plain_text_paste_takes_its_name_from_the_header(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        content=SOURCE.encode(),
+        headers={"Content-Type": "text/plain; charset=utf-8", "X-Model-Name": "Pasted Thing"},
+    )
+    assert response.status_code == 201
+    assert response.json()["slug"] == "pasted-thing"
+
+
+def test_a_plain_text_paste_without_a_name_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", content=SOURCE.encode(), headers={"Content-Type": "text/plain"}
+    )
+    assert response.status_code == 422
+    assert "X-Model-Name" in response.json()["detail"]
+
+
+def test_a_name_that_yields_no_slug_is_rejected(client: TestClient) -> None:
+    response = client.post("/api/v1/models", json={"name": "***", "source": SOURCE})
+    assert response.status_code == 422
+    assert "slug" in response.json()["detail"]
+
+
+def test_pasted_source_openscad_cannot_parse_is_rejected(client: TestClient) -> None:
+    response = client.post("/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n"})
+    assert response.status_code == 422
+    body = response.json()
+    assert body["log_tail"] == ["ERROR: Parser error: syntax error"]
+    assert body["diagnostics"] == [
+        {
+            "severity": "error",
+            "message": "Parser error: syntax error",
+            "line": None,
+            "file": None,
+        }
+    ]
+    assert client.get("/api/v1/models/broken").status_code == 404
+
+
+def test_force_saves_source_that_does_not_parse(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", json={"name": "Broken", "source": "%%FAIL%%\n", "force": True}
+    )
+    assert response.status_code == 201
+    assert client.get("/api/v1/models/broken/source").text == "%%FAIL%%\n"
+
+
+def test_pasting_over_an_existing_slug_conflicts(client: TestClient) -> None:
+    assert _upload(client).status_code == 201
+    response = client.post("/api/v1/models", json={"name": "name keychain", "source": SOURCE})
+    assert response.status_code == 409
+
+
+def test_a_multipart_post_without_a_file_is_rejected(client: TestClient) -> None:
+    response = client.post("/api/v1/models", data={"name": "No File"})
+    assert response.status_code == 422
+    assert "file part" in response.json()["detail"]
+
+
+def test_replacing_the_source_rederives_the_schema(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    before = json.loads(paths.model_meta(model).read_text())["schema"]["source_sha256"]
+
+    replacement = 'width = 42;\nlabel = "new";\ncube(width);\n'
+    response = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
+    assert response.status_code == 200
+    assert response.json()["slug"] == model
+    assert client.get(f"/api/v1/models/{model}/source").text == replacement
+
+    after = json.loads(paths.model_meta(model).read_text())["schema"]["source_sha256"]
+    assert after == source_sha256(replacement)
+    assert after != before
+
+
+def test_replacing_the_source_keeps_the_metadata(client: TestClient, model: str) -> None:
+    client.put(f"/api/v1/models/{model}/source", json={"source": "width = 1;\n"})
+    assert client.get(f"/api/v1/models/{model}").json()["name"] == "Demo"
+
+
+def test_a_replacement_that_does_not_parse_is_refused_unless_forced(
+    client: TestClient, model: str
+) -> None:
+    original = client.get(f"/api/v1/models/{model}/source").text
+    refused = client.put(f"/api/v1/models/{model}/source", json={"source": "%%FAIL%%\n"})
+    assert refused.status_code == 422
+    assert client.get(f"/api/v1/models/{model}/source").text == original
+
+    forced = client.put(
+        f"/api/v1/models/{model}/source", json={"source": "%%FAIL%%\n", "force": True}
+    )
+    assert forced.status_code == 200
+    assert client.get(f"/api/v1/models/{model}/source").text == "%%FAIL%%\n"
+
+
+def test_replacing_the_source_of_a_model_that_is_not_there(client: TestClient) -> None:
+    assert client.put("/api/v1/models/nope/source", json={"source": SOURCE}).status_code == 404
+
+
+def test_the_check_endpoint_reports_diagnostics_without_saving_anything(
+    client: TestClient,
+) -> None:
+    response = client.post("/api/v1/models/check", json={"source": "%%FAIL%%\n"})
+    assert response.status_code == 200
+    body = response.json()
+    assert (body["ok"], body["checked"]) == (False, True)
+    assert body["diagnostics"][0]["message"] == "Parser error: syntax error"
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_the_check_endpoint_passes_source_that_parses(client: TestClient) -> None:
+    body = client.post("/api/v1/models/check", json={"source": SOURCE}).json()
+    assert (body["ok"], body["checked"], body["diagnostics"]) == (True, True, [])

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
@@ -16,10 +19,17 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
 )
-from scadbuddy.library.scad import NotOpenSCADError, decode_source, verify_parses
-from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename
-from scadbuddy.render.runner import cached_schema
+from scadbuddy.library.scad import (
+    NotOpenSCADError,
+    SourceCheck,
+    check_source,
+    decode_source,
+)
+from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename, slugify
+from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["models"])
 
@@ -58,22 +68,113 @@ def list_models(catalogue: CatalogueDep) -> list[ModelRecord]:
     return catalogue.list_models()
 
 
+class PastedSource(BaseModel):
+    """A model pasted as source rather than uploaded as a file."""
+
+    name: str = Field(description="Display name; its slug is derived from it")
+    source: str = Field(description="The OpenSCAD source")
+    description: str = ""
+    tags: list[str] = Field(default_factory=list)
+    force: bool = Field(default=False, description="Save even when the parse check fails")
+
+
+class SourceReplacement(BaseModel):
+    source: str = Field(description="The replacement OpenSCAD source")
+    force: bool = Field(default=False, description="Save even when the parse check fails")
+
+
+class CheckRequest(BaseModel):
+    source: str = Field(description="The OpenSCAD source to parse-check")
+
+
+def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiError:
+    return ApiError(
+        status.HTTP_422_UNPROCESSABLE_CONTENT,
+        str(error),
+        log_tail=error.log_tail,
+        diagnostics=[d.model_dump() for d in check.diagnostics] if check else [],
+    )
+
+
+async def _guard_source(source: str, *, config: Config, force: bool) -> None:
+    """Parse-check the source, unless the caller insisted on saving it regardless."""
+    if force:
+        return
+    check = await check_source(source, config=config)
+    if not check.ok:
+        raise _rejected(
+            NotOpenSCADError("OpenSCAD could not parse the source", check.log_tail), check
+        )
+
+
 @router.post(
     "/models",
     response_model=ModelRecord,
     status_code=status.HTTP_201_CREATED,
-    summary="Upload a model",
+    summary="Add a model",
+    description=(
+        "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` "
+        "file (plus an optional thumbnail and README); `application/json` posts "
+        "`{name, source}` pasted straight in; `text/plain` posts the bare source and "
+        "takes its name from the `X-Model-Name` header. All three derive the slug, "
+        "parse-check the source and build the customizer schema identically."
+    ),
+    openapi_extra={
+        "requestBody": {
+            "content": {
+                "application/json": {"schema": PastedSource.model_json_schema()},
+                "text/plain": {"schema": {"type": "string"}},
+            }
+        }
+    },
 )
 async def create_model(
+    request: Request,
     catalogue: CatalogueDep,
     config: ConfigDep,
-    file: Annotated[UploadFile, File(description="The .scad source")],
+    file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
     thumbnail: Annotated[UploadFile | None, File(description="Optional PNG")] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
+    model_name: Annotated[
+        str | None, Header(alias="X-Model-Name", description="Name for a text/plain paste")
+    ] = None,
+    force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
 ) -> ModelRecord:
+    content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
+
+    if content_type == "application/json":
+        pasted = PastedSource.model_validate(await request.json())
+        return await _create(
+            catalogue,
+            config,
+            slug=_slug_from_name(pasted.name),
+            source=pasted.source,
+            meta=ModelMeta(
+                name=pasted.name, description=pasted.description, tags=list(pasted.tags)
+            ),
+            force=pasted.force,
+        )
+
+    if content_type.startswith("text/"):
+        if not model_name:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                "a text/plain paste needs an X-Model-Name header",
+            )
+        return await _create(
+            catalogue,
+            config,
+            slug=_slug_from_name(model_name),
+            source=decode_source(await request.body()),
+            meta=ModelMeta(name=model_name),
+            force=force,
+        )
+
+    if file is None:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the upload needs a file part")
     try:
         slug = slug_from_filename(file.filename or "")
     except InvalidSlugError:
@@ -81,16 +182,11 @@ async def create_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the upload needs a filename that yields a slug",
         ) from None
-    if catalogue.exists(slug):
-        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
 
     try:
         source = decode_source(await file.read())
-        await verify_parses(source, config=config)
     except NotOpenSCADError as error:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), log_tail=error.log_tail
-        ) from None
+        raise _rejected(error) from None
 
     thumbnail_bytes: bytes | None = None
     if thumbnail is not None:
@@ -107,15 +203,64 @@ async def create_model(
                 status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
             ) from None
 
-    meta = ModelMeta(
-        name=name or slug,
-        description=description or "",
-        tags=_parse_tags(tags) or [],
+    return await _create(
+        catalogue,
+        config,
+        slug=slug,
+        source=source,
+        meta=ModelMeta(
+            name=name or slug,
+            description=description or "",
+            tags=_parse_tags(tags) or [],
+        ),
+        force=force,
+        thumbnail=thumbnail_bytes,
+        readme=readme_text,
     )
+
+
+def _slug_from_name(name: str) -> str:
     try:
-        return catalogue.create(slug, source, meta, thumbnail=thumbnail_bytes, readme=readme_text)
+        return slugify(name)
+    except InvalidSlugError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, f"{name!r} does not yield a usable slug"
+        ) from None
+
+
+async def _create(
+    catalogue: Catalogue,
+    config: Config,
+    *,
+    slug: str,
+    source: str,
+    meta: ModelMeta,
+    force: bool,
+    thumbnail: bytes | None = None,
+    readme: str | None = None,
+) -> ModelRecord:
+    """The one path every create takes, whatever carried the source in."""
+    if catalogue.exists(slug):
+        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+    await _guard_source(source, config=config, force=force)
+    try:
+        return catalogue.create(slug, source, meta, thumbnail=thumbnail, readme=readme)
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
+
+
+@router.post(
+    "/models/check",
+    response_model=SourceCheck,
+    summary="Parse-check OpenSCAD source",
+    description=(
+        "Runs OpenSCAD's parse-only AST export over the source and returns its "
+        "diagnostics with line numbers. `checked` is false when no openscad binary is "
+        "available, in which case `ok` says nothing."
+    ),
+)
+async def check_model_source(body: CheckRequest, config: ConfigDep) -> SourceCheck:
+    return await check_source(body.source, config=config)
 
 
 @router.get("/models/{slug}", response_model=ModelRecord, summary="Model metadata")
@@ -145,6 +290,35 @@ def delete_model(slug: SlugPath, catalogue: CatalogueDep) -> Response:
 def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> FileResponse:
     require_model(catalogue, slug)
     return FileResponse(paths.model_source(slug), media_type="text/plain; charset=utf-8")
+
+
+@router.put(
+    "/models/{slug}/source",
+    response_model=ModelRecord,
+    summary="Replace the source",
+    description=(
+        "Overwrites the source in place and re-derives the customizer schema. The "
+        "schema cache is keyed by the source's SHA-256, so the replacement invalidates "
+        "it; it is rebuilt here so the next customizer open does not pay for it."
+    ),
+)
+async def put_source(
+    slug: SlugPath,
+    body: SourceReplacement,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    config: ConfigDep,
+) -> ModelRecord:
+    require_model(catalogue, slug)
+    await _guard_source(body.source, config=config, force=body.force)
+    paths.model_source(slug).write_text(body.source, encoding="utf-8")
+    try:
+        await cached_schema(paths.model_source(slug), paths.model_meta(slug), config=config)
+    except (OpenSCADError, OSError) as error:
+        # No openscad here, or a forced save of source that does not parse. The source
+        # is stored either way; GET /schema is where that surfaces.
+        logger.warning("could not re-derive the schema", extra={"slug": slug, "error": str(error)})
+    return catalogue.record(slug)
 
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")

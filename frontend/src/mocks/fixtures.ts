@@ -496,3 +496,36 @@ export const OPENSCAD_LOG_TAIL = [
   'WARNING: Object may not be a valid 2-manifold and may need repair!',
   'Execution aborted',
 ]
+
+/** What `GET /models/{slug}/source` serves, and what the editor opens prefilled. */
+export const keychainSource = `/* [Text] */
+// Name on the tag
+name = "Reagan";
+// Text size
+text_size = 14; // [6:0.5:28]
+
+/* [Plate] */
+thickness = 5.2; // [2:0.2:10]
+
+module tag() {
+  cube([text_size * len(name), text_size * 2, thickness]);
+}
+
+tag();
+`
+
+/** Source the mock refuses, so the paste flow's failure path is reachable. */
+export const BROKEN_SOURCE = `size = 10;
+cube([size, size, size)
+`
+
+/**
+ * The mock's stand-in for OpenSCAD's parser: a line that opens a bracket it never
+ * closes. Enough to drive the inline-error UI without shipping a real parser.
+ */
+export function mockParseError(source: string): { line: number } | null {
+  const index = source
+    .split('\n')
+    .findIndex((line) => line.includes('[') && !line.includes(']'))
+  return index === -1 ? null : { line: index + 1 }
+}

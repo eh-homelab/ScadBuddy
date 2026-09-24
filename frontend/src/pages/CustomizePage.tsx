@@ -89,6 +89,13 @@ export function CustomizePage() {
             </span>
           )}
         </div>
+        <div className="flex shrink-0 items-center gap-1">
+        <Link
+          to={`/m/${slug}/source`}
+          className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+        >
+          Edit source
+        </Link>
         <Link
           to={`/m/${slug}/history`}
           className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
@@ -98,6 +105,7 @@ export function CustomizePage() {
             <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
           )}
         </Link>
+        </div>
       </div>
 
       <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
