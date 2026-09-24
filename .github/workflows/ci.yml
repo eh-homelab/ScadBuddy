@@ -463,6 +463,19 @@ jobs:
       # 503 when it cannot reach it, which is what `--fail` sees) and the TTF
       # download (raw.githubusercontent.com).
       #
+      # The second probe names NO path inside google/fonts, deliberately. Which
+      # licence directory holds a family is the application's business —
+      # `googlefonts.py`'s `LICENCE_DIRECTORIES` probes `ofl`, `apache` and
+      # `ufl` in turn precisely because neither catalogue says — so hardcoding
+      # `ofl/pacifico` here would be a second, silent copy of that layout: the
+      # day upstream relicenses the family, the real install would still work
+      # while this step called the host unreachable and skipped the test. So
+      # the probe asks only whether the host ANSWERS: any HTTP status is a
+      # working path (the bare host 301s, and a 404 would prove the same
+      # thing), while `000` or a 5xx is the outage this guard exists for. If
+      # the host answers and the app still cannot find the family, the test
+      # runs and reds — which is the right way round.
+      #
       # REACHABILITY decides `offline`, and CONTENT deliberately does not. An
       # earlier version of this step folded the two together by grepping the
       # body for the family, which turned "the catalogue no longer names
@@ -490,10 +503,11 @@ jobs:
                               'http://127.0.0.1:8080/api/v1/fonts/catalogue?q=Pacifico&limit=1')"; then
             offline=1
             echo "::warning::The Google Fonts catalogue is unreachable from the container, so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
-          elif ! docker exec scadbuddy-ci curl --fail --silent --show-error --max-time 20 --head \
-                   https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/METADATA.pb >/dev/null; then
+          elif status="$(docker exec scadbuddy-ci curl --silent --show-error --max-time 20 \
+                           -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/ || true)" \
+               && { [ -z "$status" ] || [ "$status" = 000 ] || [ "$status" -ge 500 ]; }; then
             offline=1
-            echo "::warning::google/fonts on raw.githubusercontent.com is unreachable from the container, so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue answered, so this is the download host alone."
+            echo "::warning::raw.githubusercontent.com, where the font files are downloaded from, did not answer from the container (status '${status:-none}'), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue answered, so this is the download host alone."
           elif ! printf '%s' "$catalogue" | grep -q '"family":"Pacifico"'; then
             # Reachable, and the family is missing. NOT an outage, so `offline`
             # stays empty on purpose: the test runs, the row never appears, and
