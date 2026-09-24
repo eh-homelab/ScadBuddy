@@ -210,6 +210,7 @@ class TestPlacement:
             usable=Rect(0.0, 0.0, 120.0, 256.0),
             exclusions=exclusions,
             extruders=2,
+            height=250.0,
         )
 
     def test_a_tower_landing_on_a_cutout_falls_through_to_another_side(self) -> None:
