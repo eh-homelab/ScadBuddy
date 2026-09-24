@@ -113,10 +113,35 @@ def test_re_stamping_replaces_rather_than_appends(written: Path) -> None:
     assert stamped.params == {"name": "Nova"}
 
 
-def test_the_version_is_the_hash_of_the_source(tmp_path: Path) -> None:
-    source = tmp_path / "model.scad"
-    source.write_text("cube(10);\n", encoding="utf-8")
-    assert source_version(source).startswith("sha256:")
-    assert source_version(source) == source_version(source)
-    source.write_text("cube(20);\n", encoding="utf-8")
-    assert source_version(source) != PROVENANCE.version
+def test_the_version_is_a_content_hash_of_every_scad_in_the_model(tmp_path: Path) -> None:
+    model = tmp_path / "keychain"
+    (model / "parts").mkdir(parents=True)
+    (model / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+
+    one_file = source_version(model)
+    assert one_file.startswith("sha256:")
+    assert source_version(model) == one_file
+
+    (model / "model.scad").write_text("cube(20);\n", encoding="utf-8")
+    edited = source_version(model)
+    assert edited != one_file
+
+    # An included source counts, and so does where it sits.
+    (model / "parts" / "hole.scad").write_text("circle(3);\n", encoding="utf-8")
+    included = source_version(model)
+    assert included != edited
+    (model / "parts" / "hole.scad").rename(model / "hole.scad")
+    assert source_version(model) != included
+
+
+def test_the_version_ignores_what_the_renderer_writes_back(tmp_path: Path) -> None:
+    """``model.json`` caches the schema, keyed off the .scad; a model whose source
+    has not changed must not appear to be a new version because of it."""
+    model = tmp_path / "keychain"
+    model.mkdir()
+    (model / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    before = source_version(model)
+
+    (model / "model.json").write_text('{"name": "Keychain"}\n', encoding="utf-8")
+    (model / "thumbnail.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    assert source_version(model) == before

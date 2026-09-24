@@ -30,6 +30,11 @@ PROVENANCE_KEY = f"{NS_PREFIX}:provenance"
 DESIGNER = "ScadBuddy"
 ROOT_MODEL = "3D/3dmodel.model"
 
+#: What a model's version is hashed over. `model.json` is deliberately not in it:
+#: the renderer rewrites that file to cache the schema, keyed off the .scad already,
+#: so including it would move a model's version with no edit to its source.
+SOURCE_GLOB = "*.scad"
+
 _MODEL_TAG = re.compile(r"<model\b[^>]*>")
 # The keys stamp() owns. Removing them first keeps a re-stamp idempotent; nothing
 # but stamp() writes them, because ScadBuddy wrote the file it is stamping.
@@ -44,7 +49,7 @@ class Provenance(BaseModel):
 
     #: The catalogue slug — ScadBuddy has no other model id.
     model: str
-    #: ``sha256:<hex>`` of ``model.scad`` as it was when the output was rendered.
+    #: What the model was when the output was rendered; see source_version.
     version: str
     output: str
     params: dict[str, ParamValue] = Field(default_factory=dict)
@@ -52,8 +57,24 @@ class Provenance(BaseModel):
     edit_url: str | None = None
 
 
-def source_version(path: Path) -> str:
-    return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+def source_version(model_dir: Path) -> str:
+    """A content hash over a model's OpenSCAD sources, ordered by path.
+
+    Deliberately a free-form string rather than a structured field: #90 turns the
+    models directory into a git repository and puts the commit id here instead, and
+    either shape fits without migrating the records already written.
+    """
+    digest = hashlib.sha256()
+    for name, payload in sorted(
+        (path.relative_to(model_dir).as_posix(), path.read_bytes())
+        for path in model_dir.rglob(SOURCE_GLOB)
+        if path.is_file()
+    ):
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(payload)
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
 
 
 def _stamped_root_model(xml: str, provenance: Provenance) -> str:

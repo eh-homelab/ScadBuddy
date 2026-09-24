@@ -167,7 +167,7 @@ def test_every_output_records_its_model_version_and_stamps_the_3mf(
         f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Stamped"}
     ).json()
 
-    expected = source_version(paths.model_source(model))
+    expected = source_version(paths.model_dir(model))
     assert body["model_version"] == expected
 
     stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")

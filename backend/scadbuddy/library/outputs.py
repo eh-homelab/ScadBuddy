@@ -37,8 +37,9 @@ class OutputMeta(BaseModel):
 
     id: str
     slug: str
-    #: ``sha256:<hex>`` of ``model.scad`` at render time. None on records written
-    #: before provenance was stamped.
+    #: What the model was when this was rendered — today a content hash of its
+    #: sources, a git commit id once #90 lands, so the field stays a free string.
+    #: None on records written before provenance was stamped.
     model_version: str | None = None
     name: str | None = None
     job_id: str
@@ -111,7 +112,7 @@ class OutputStore:
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
-        version = source_version(self.paths.model_source(job.slug))
+        version = source_version(self.paths.model_dir(job.slug))
         stamp(
             directory / MODEL_NAME,
             Provenance(
