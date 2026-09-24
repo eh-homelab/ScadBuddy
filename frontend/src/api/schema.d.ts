@@ -234,6 +234,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/edit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Resolve an edit deep link
+         * @description Where ``/edit/{output_id}`` should land, and with which values.
+         *
+         *     The record answers first. When it is gone — the directory restored without its
+         *     sidecars, or hand-pruned — the 3MF still carries the same provenance, so the
+         *     link keeps working from the file alone.
+         */
+        get: operations["get_edit_target_api_v1_outputs__output_id__edit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs/{output_id}/model.3mf": {
         parameters: {
             query?: never;
@@ -660,6 +684,29 @@ export interface components {
             source_sha256: string;
             /** Title */
             title?: string | null;
+        };
+        /**
+         * EditTarget
+         * @description What ``/edit/{output_id}`` needs to reopen the customizer.
+         */
+        EditTarget: {
+            /** Model Version */
+            model_version?: string | null;
+            /** Name */
+            name: string | null;
+            /** Output Id */
+            output_id: string;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            };
+            /** Slug */
+            slug: string;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "record" | "3mf";
         };
         /**
          * EligibilityCheck
@@ -1990,6 +2037,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_edit_target_api_v1_outputs__output_id__edit_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EditTarget"];
+                };
             };
             /** @description Validation Error */
             422: {
