@@ -9,7 +9,7 @@ import type { PreviewCapture } from '../components/Preview'
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
-import type { EditNavigationState } from '../lib/deeplink'
+import { editPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
@@ -93,6 +93,12 @@ export function CustomizePage() {
   }, [schema])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+
+  if (reopenId && reopenState.error) {
+    // The deep link is dead — no record and no 3MF to read it from. /edit/{id} owns
+    // that message; sending the reader there keeps one copy of it.
+    return <Navigate to={editPath(reopenId)} replace />
+  }
 
   if (foreign) {
     return (

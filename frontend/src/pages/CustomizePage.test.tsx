@@ -256,6 +256,25 @@ describe('CustomizePage', () => {
     expect(first).toEqual(['Handed over'])
   })
 
+  it('does not open a blank customizer when the link is dead', async () => {
+    // A pasted /m/{slug}?from={id} whose output and 3MF are both gone has to say so,
+    // the way /edit/{id} does, rather than quietly showing a fresh model.
+    const id = '0'.repeat(32)
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () =>
+        HttpResponse.json({ title: 'Not found', status: 404 }, { status: 404 }),
+      ),
+    )
+    renderPage(
+      <Routes>
+        <Route path="/m/:slug" element={<CustomizePage />} />
+        <Route path="/edit/:outputId" element={<div data-testid="gone" />} />
+      </Routes>,
+      { route: `/m/name-keychain?from=${id}` },
+    )
+    expect(await screen.findByTestId('gone')).toBeInTheDocument()
+  })
+
   it('counts changes against the model defaults', async () => {
     const { user } = render()
     await firstRender()
