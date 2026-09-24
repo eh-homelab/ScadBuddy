@@ -1098,7 +1098,9 @@ export interface components {
          *
          *     ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
          *     judged, which is neither ready nor blocked, and the picker says so rather than
-         *     guessing either way.
+         *     guessing either way. That either-or is enforced below rather than merely described,
+         *     because the browser branches on it: a row with neither would render as silently
+         *     absent, and one with both would claim two states at once.
          */
         PipelineReport: {
             /** Error */

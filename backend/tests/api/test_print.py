@@ -12,10 +12,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from scadbuddy.bambuddy.pipelines import BED_TYPES
+from scadbuddy.bambuddy.models import EligibilityReport
+from scadbuddy.bambuddy.pipelines import BED_TYPES, PipelineReport
 from tests.api.conftest import wait_for_job
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -469,6 +472,21 @@ def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
     # The one that failed carries why, and no report at all — neither ready nor blocked.
     assert reports[2]["report"] is None
     assert "the slicer fell over" in reports[2]["error"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="neither"),
+        pytest.param({"report": EligibilityReport(ok=True), "error": "both"}, id="both"),
+    ],
+)
+def test_a_pipeline_report_must_carry_either_a_report_or_a_reason(kwargs: Any) -> None:
+    """The browser branches on which of the two is set: a row with neither renders as
+    silently absent, and one with both claims two states at once. Enforced on the model
+    rather than left to whatever constructs it."""
+    with pytest.raises(ValidationError):
+        PipelineReport(pipeline_id=1, **kwargs)
 
 
 @respx.mock
