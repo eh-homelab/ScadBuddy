@@ -663,7 +663,7 @@ export interface components {
         };
         /**
          * EligibilityCheck
-         * @description ``pipeline_ids`` omitted means every pipeline Bambuddy has.
+         * @description ``pipeline_ids`` omitted means every pipeline Bambuddy has (freshness probe).
          */
         EligibilityCheck: {
             /** Pipeline Ids */
