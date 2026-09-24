@@ -18,17 +18,15 @@ from scadbuddy.library.fonts import (
 )
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
+    FamilyFiles,
     FontCatalogue,
+    FontFile,
     FontVariant,
     GoogleFontsError,
 )
 
 PACIFICO = CatalogueFont(
-    family="Pacifico",
-    category="handwriting",
-    variants=[FontVariant()],
-    popularity=1,
-    files={"regular": "https://fonts.gstatic.com/s/pacifico/v22/pacifico.ttf"},
+    family="Pacifico", category="handwriting", variants=[FontVariant()], popularity=1
 )
 ROBOTO = CatalogueFont(
     family="Roboto",
@@ -36,6 +34,38 @@ ROBOTO = CatalogueFont(
     variants=[FontVariant(), FontVariant(weight=700, italic=True)],
     popularity=2,
 )
+
+REPO_FILES = {
+    "Pacifico": FamilyFiles(
+        family="Pacifico",
+        directory="ofl",
+        licence="OFL",
+        files=[
+            FontFile(
+                variant=FontVariant(),
+                filename="Pacifico-Regular.ttf",
+                url="https://raw/ofl/pacifico/Pacifico-Regular.ttf",
+            )
+        ],
+    ),
+    "Roboto": FamilyFiles(
+        family="Roboto",
+        directory="apache",
+        licence="APACHE2",
+        files=[
+            FontFile(
+                variant=FontVariant(),
+                filename="Roboto-Regular.ttf",
+                url="https://raw/apache/roboto/Roboto-Regular.ttf",
+            ),
+            FontFile(
+                variant=FontVariant(weight=700, italic=True),
+                filename="Roboto-BoldItalic.ttf",
+                url="https://raw/apache/roboto/Roboto-BoldItalic.ttf",
+            ),
+        ],
+    ),
+}
 
 FONT_BYTES = b"\x00\x01\x00\x00not-really-a-ttf"
 
@@ -64,16 +94,17 @@ class FakeClient:
             source="google-fonts-metadata", fetched_at=datetime.now(UTC), fonts=self.fonts
         )
 
-    async def resolve_files(self, font: CatalogueFont) -> dict[str, str]:
-        if font.files:
-            return dict(font.files)
-        return {variant.api_key: f"https://x/{variant.api_key}.ttf" for variant in font.variants}
+    async def fetch_family_files(self, family: str) -> FamilyFiles:
+        found = REPO_FILES.get(family)
+        if found is None:
+            raise GoogleFontsError(f"{family!r} is not in the google/fonts repository")
+        return found
 
     async def fetch_file(self, url: str) -> bytes:
         self.downloads.append(url)
         return FONT_BYTES
 
-    async def fetch_licence(self, family: str) -> tuple[str, str] | None:
+    async def fetch_licence(self, files: FamilyFiles) -> tuple[str, str] | None:
         return self.licence
 
 
@@ -147,7 +178,9 @@ async def test_installing_writes_the_files_the_licence_and_a_manifest(tmp_path: 
     assert installed.licence == "OFL.txt"
 
 
-async def test_every_variant_is_downloaded_and_named_by_its_style(tmp_path: Path) -> None:
+async def test_every_face_is_downloaded_under_the_name_google_ships_it_as(
+    tmp_path: Path,
+) -> None:
     fonts = service(tmp_path)
 
     await fonts.install("Roboto")
@@ -204,7 +237,7 @@ async def test_force_reinstalls_a_family_fontconfig_already_has(
 
     await fonts.install("Pacifico", force=True)
 
-    assert client.downloads == ["https://fonts.gstatic.com/s/pacifico/v22/pacifico.ttf"]
+    assert client.downloads == ["https://raw/ofl/pacifico/Pacifico-Regular.ttf"]
 
 
 REAL_FONTCONFIG = shutil.which("fc-list") and shutil.which("fc-cache")

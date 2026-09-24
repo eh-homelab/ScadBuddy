@@ -3,22 +3,24 @@
 Two catalogue sources, picked by whether an API key is configured:
 
 * ``SCADBUDDY_GOOGLE_FONTS_API_KEY`` set — the **Developer API**
-  (``webfonts/v1/webfonts``). It is the documented, stable one, and its rows carry a
-  ``files`` map of direct ``fonts.gstatic.com`` TTF URLs, so installing a family needs
-  no second lookup.
+  (``webfonts/v1/webfonts?sort=popularity``), the documented and stable one.
 * no key — ``https://fonts.google.com/metadata/fonts``, the **public metadata** the
   fonts.google.com front end reads. No key, no quota, same families, same categories
-  and a real popularity rank. It is not a documented API and its body is prefixed
-  with the XSSI guard ``)]}'``, which has to be stripped before the JSON parses.
+  and a real popularity rank. It is not a documented API, and it may prefix its body
+  with the XSSI guard ``)]}'`` (observed both with and without), so that is stripped
+  when present.
 
 The key never leaves the server: the browser only ever talks to ``/api/v1/fonts``.
 
-The keyless path has no file URLs, so downloads go through the **CSS API** with a
-legacy ``User-Agent``. Google serves WOFF2 to anything modern and plain TrueType to
-a browser too old to know about it — and TrueType is the only one fontconfig, and so
-OpenSCAD, can use. This is the same trick google-webfonts-helper uses; it is a
-behaviour of the CSS endpoint rather than a documented contract, so
-``parse_css_faces`` raising is a normal, reported outcome rather than an assertion.
+**Downloads do not come from either.** They come from the ``google/fonts``
+repository, whose ``METADATA.pb`` names the exact TTF for every face, and that holds
+whether or not a key is set. The alternative — the CSS endpoint with an old
+``User-Agent``, the trick google-webfonts-helper uses — was measured on 2026-09-23
+and rejected on the evidence: an IE6/IE8 agent is served **EOT**, which fontconfig
+cannot read at all, and the agents that do yield ``.ttf`` are served *per-subset*
+files, so a family would install missing most of its glyphs. The repository serves
+the complete static (or variable) font, names it deterministically, and carries the
+family's licence next to it, which is the same fetch.
 """
 
 from __future__ import annotations
@@ -26,9 +28,10 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any, Literal
+from urllib.parse import quote
 
 import httpx
 from pydantic import BaseModel, Field
@@ -37,23 +40,19 @@ logger = logging.getLogger(__name__)
 
 DEVELOPER_API_URL = "https://www.googleapis.com/webfonts/v1/webfonts"
 METADATA_URL = "https://fonts.google.com/metadata/fonts"
-CSS_URL = "https://fonts.googleapis.com/css2"
-LICENCE_BASE_URL = "https://raw.githubusercontent.com/google/fonts/main"
-
-# Old enough that the CSS endpoint answers with TrueType instead of WOFF2.
-LEGACY_USER_AGENT = "Mozilla/4.0 (compatible; MSIE 6.0; Windows NT 5.1)"
+REPO_BASE_URL = "https://raw.githubusercontent.com/google/fonts/main"
+METADATA_PB = "METADATA.pb"
 XSSI_PREFIX = ")]}'"
 DEFAULT_TIMEOUT = 30.0
 
 CatalogueSource = Literal["developer-api", "google-fonts-metadata"]
 
-# Google Fonts is OFL, Apache-2.0 or UFL; the repository lays the families out under
-# one directory per licence, which is also how the licence text is found.
-LICENCE_FILES: tuple[tuple[str, str], ...] = (
-    ("ofl", "OFL.txt"),
-    ("apache", "LICENSE.txt"),
-    ("ufl", "UFL.txt"),
-)
+# Google Fonts is OFL, Apache-2.0 or UFL, and the repository lays the families out
+# under one directory per licence. Which one a family is in is not derivable from the
+# catalogue, so it is discovered by probing — and the answer also names the licence
+# file to keep beside the font.
+LICENCE_DIRECTORIES: tuple[str, ...] = ("ofl", "apache", "ufl")
+LICENCE_FILENAMES: dict[str, str] = {"OFL": "OFL.txt", "APACHE2": "LICENSE.txt", "UFL": "UFL.txt"}
 
 _WEIGHT_NAMES = {
     100: "Thin",
@@ -68,10 +67,10 @@ _WEIGHT_NAMES = {
 }
 
 _VARIANT_RE = re.compile(r"^(?P<weight>\d{3})?(?P<italic>italic|i)?$")
-_FACE_RE = re.compile(r"@font-face\s*\{(?P<body>[^}]*)\}")
-_WEIGHT_DECL_RE = re.compile(r"font-weight:\s*(\d{3})")
-_STYLE_DECL_RE = re.compile(r"font-style:\s*(normal|italic)")
-_SRC_URL_RE = re.compile(r"url\((?P<url>[^)]+)\)")
+# METADATA.pb is protobuf *text* format. The `fonts { ... }` blocks hold no nested
+# braces, so one shallow match per block is enough and no protobuf runtime is needed.
+_PB_FONTS_RE = re.compile(r"\bfonts\s*\{(?P<body>[^{}]*)\}")
+_PB_LICENSE_RE = re.compile(r'^license:\s*"([^"]*)"', re.MULTILINE)
 
 
 class GoogleFontsError(RuntimeError):
@@ -87,13 +86,6 @@ class FontVariant(BaseModel):
         """The fontconfig style name, which is what ``Family:style=…`` is written with."""
         return style_name(self.weight, self.italic)
 
-    @property
-    def api_key(self) -> str:
-        """How the Developer API keys this variant in its ``files`` map."""
-        if self.weight == 400:
-            return "italic" if self.italic else "regular"
-        return f"{self.weight}italic" if self.italic else str(self.weight)
-
 
 class CatalogueFont(BaseModel):
     family: str
@@ -101,8 +93,22 @@ class CatalogueFont(BaseModel):
     variants: list[FontVariant] = Field(default_factory=list)
     # Rank, 1 = most popular. Both sources order by it; only one states it.
     popularity: int | None = None
-    # Direct TTF URLs keyed by ``FontVariant.api_key``. Developer API only.
-    files: dict[str, str] = Field(default_factory=dict)
+
+
+class FontFile(BaseModel):
+    variant: FontVariant
+    """Google's own filename, kept verbatim: it is what the family ships as."""
+    filename: str
+    url: str
+
+
+class FamilyFiles(BaseModel):
+    """One family as the ``google/fonts`` repository holds it."""
+
+    family: str
+    directory: str
+    licence: str = ""
+    files: list[FontFile] = Field(default_factory=list)
 
 
 class FontCatalogue(BaseModel):
@@ -154,14 +160,12 @@ def parse_developer_api(payload: dict[str, Any]) -> list[CatalogueFont]:
                 variants.append(parse_variant(str(raw)))
             except ValueError:
                 logger.debug("skipping variant", extra={"family": family, "variant": raw})
-        files = {str(k): str(v) for k, v in (item.get("files") or {}).items()}
         fonts.append(
             CatalogueFont(
                 family=family,
                 category=str(item.get("category", "")),
                 variants=_sorted_variants(variants) or [FontVariant()],
                 popularity=rank,
-                files=files,
             )
         )
     return fonts
@@ -199,36 +203,54 @@ def strip_xssi(body: str) -> str:
     return text[len(XSSI_PREFIX) :].lstrip() if text.startswith(XSSI_PREFIX) else text
 
 
-def css2_family_query(family: str, variants: Sequence[FontVariant]) -> str:
-    """``Pacifico:wght@400`` / ``Roboto:ital,wght@0,400;1,700`` — axes ascending, as the
-    CSS2 endpoint requires; anything else is a 400."""
-    pairs = sorted({(1 if v.italic else 0, v.weight) for v in variants}) or [(0, 400)]
-    if any(italic for italic, _ in pairs):
-        spec = "ital,wght@" + ";".join(f"{italic},{weight}" for italic, weight in pairs)
-    else:
-        spec = "wght@" + ";".join(str(weight) for _, weight in pairs)
-    return f"{family}:{spec}"
+def parse_family_metadata(
+    text: str, *, family: str, directory: str, base_url: str = REPO_BASE_URL
+) -> FamilyFiles:
+    """A ``METADATA.pb`` into the files to download.
 
-
-def parse_css_faces(css: str) -> dict[str, str]:
-    """``@font-face`` blocks to ``{variant key: url}``, keeping only TrueType/OpenType."""
-    files: dict[str, str] = {}
-    for face in _FACE_RE.finditer(css):
-        body = face["body"]
-        weight_match = _WEIGHT_DECL_RE.search(body)
-        style_match = _STYLE_DECL_RE.search(body)
-        url_match = _SRC_URL_RE.search(body)
-        if url_match is None:
+    Variable fonts name themselves ``NotoSans[wdth,wght].ttf`` and are listed once per
+    named instance, so the same filename legitimately appears against several weights;
+    it is downloaded once and fontconfig reports every instance as a style.
+    """
+    slug = licence_slug(family)
+    licence_match = _PB_LICENSE_RE.search(text)
+    files: list[FontFile] = []
+    seen: set[str] = set()
+    for block in _PB_FONTS_RE.finditer(text):
+        body = block["body"]
+        filename = _pb_string(body, "filename")
+        if not filename or filename in seen:
             continue
-        url = url_match["url"].strip("'\" ")
-        if not url.lower().endswith((".ttf", ".otf")):
-            continue
-        variant = FontVariant(
-            weight=int(weight_match[1]) if weight_match else 400,
-            italic=bool(style_match and style_match[1] == "italic"),
+        seen.add(filename)
+        weight = _pb_number(body, "weight")
+        files.append(
+            FontFile(
+                variant=FontVariant(
+                    weight=weight if weight is not None else 400,
+                    italic=_pb_string(body, "style") == "italic",
+                ),
+                filename=filename,
+                # `,` is left alone and `[`/`]` are escaped, which is what raw
+                # .githubusercontent.com was verified to accept for a variable font.
+                url=f"{base_url}/{directory}/{slug}/{quote(filename, safe=',')}",
+            )
         )
-        files.setdefault(variant.api_key, url)
-    return files
+    return FamilyFiles(
+        family=family,
+        directory=directory,
+        licence=licence_match[1] if licence_match else "",
+        files=files,
+    )
+
+
+def _pb_string(body: str, field: str) -> str:
+    match = re.search(rf'\b{field}:\s*"([^"]*)"', body)
+    return match[1] if match else ""
+
+
+def _pb_number(body: str, field: str) -> int | None:
+    match = re.search(rf"\b{field}:\s*(\d+)", body)
+    return int(match[1]) if match else None
 
 
 def licence_slug(family: str) -> str:
@@ -270,35 +292,43 @@ class GoogleFontsClient:
             raise GoogleFontsError("the font catalogue came back empty")
         return FontCatalogue(source=self.source, fetched_at=datetime.now(UTC), fonts=fonts)
 
-    async def resolve_files(self, font: CatalogueFont) -> dict[str, str]:
-        """``{variant key: TTF url}``. Free with a key; a CSS lookup without one."""
-        if font.files:
-            return {key: url for key, url in font.files.items() if url.lower().endswith(".ttf")}
-        response = await self._get(
-            CSS_URL,
-            params={"family": css2_family_query(font.family, font.variants)},
-            headers={"User-Agent": LEGACY_USER_AGENT},
-        )
-        files = parse_css_faces(response.text)
-        if not files:
-            raise GoogleFontsError(
-                f"the CSS endpoint returned no TrueType files for {font.family!r}"
-            )
-        return files
+    async def fetch_family_files(self, family: str) -> FamilyFiles:
+        """Find the family in the ``google/fonts`` repository and list its TTFs.
+
+        Which licence directory holds it is not in either catalogue, so the three are
+        probed in turn; the one that answers also tells us the licence.
+        """
+        slug = licence_slug(family)
+        if not slug:
+            raise GoogleFontsError(f"{family!r} has no usable directory name")
+        for directory in LICENCE_DIRECTORIES:
+            try:
+                response = await self._get(f"{REPO_BASE_URL}/{directory}/{slug}/{METADATA_PB}")
+            except GoogleFontsError:
+                continue
+            files = parse_family_metadata(response.text, family=family, directory=directory)
+            if not files.files:
+                raise GoogleFontsError(f"{family!r} lists no font files")
+            return files
+        raise GoogleFontsError(f"{family!r} is not in the google/fonts repository")
 
     async def fetch_file(self, url: str) -> bytes:
         return (await self._get(url)).content
 
-    async def fetch_licence(self, family: str) -> tuple[str, str] | None:
-        """The family's licence text, or None when the repository layout does not match."""
-        slug = licence_slug(family)
-        for directory, filename in LICENCE_FILES:
+    async def fetch_licence(self, files: FamilyFiles) -> tuple[str, str] | None:
+        """The family's licence text, or None when the repository does not carry one."""
+        slug = licence_slug(files.family)
+        named = LICENCE_FILENAMES.get(files.licence)
+        candidates = (
+            [named, *LICENCE_FILENAMES.values()] if named else [*LICENCE_FILENAMES.values()]
+        )
+        for filename in dict.fromkeys(filter(None, candidates)):
             try:
-                response = await self._get(f"{LICENCE_BASE_URL}/{directory}/{slug}/{filename}")
+                response = await self._get(f"{REPO_BASE_URL}/{files.directory}/{slug}/{filename}")
             except GoogleFontsError:
                 continue
             return filename, response.text
-        logger.info("no licence file found for %s", family)
+        logger.info("no licence file found for %s", files.family)
         return None
 
 

@@ -220,21 +220,29 @@ catalogue usable without rebuilding the image.
 
 | `SCADBUDDY_GOOGLE_FONTS_API_KEY` | Source | Notes |
 |---|---|---|
-| set | Developer API, `webfonts/v1/webfonts?sort=popularity` | documented and stable; rows carry a `files` map of direct `fonts.gstatic.com` TTF URLs, so an install needs no second lookup |
-| unset (the default) | `https://fonts.google.com/metadata/fonts` | the public metadata fonts.google.com itself reads — no key, no quota, same families, categories and popularity. Undocumented, and its body is prefixed with the XSSI guard `)]}'`, which must be stripped |
+| set | Developer API, `webfonts/v1/webfonts?sort=popularity` | documented and stable |
+| unset (the default) | `https://fonts.google.com/metadata/fonts` | the public metadata fonts.google.com itself reads — no key, no quota, same families, categories and popularity. Undocumented, and it may prefix its body with the XSSI guard `)]}'` (seen both ways), which is stripped when present |
 
-**A key is optional.** Everything works without one; it only buys the documented
-endpoint and the direct file URLs.
+**A key is optional and changes nothing but the catalogue.** Everything works without
+one.
 
 Either catalogue is cached on the data volume (`fonts/.catalogue.json`, 24 h by
 default, `SCADBUDDY_FONTS_CATALOGUE_TTL`). A fetch failure falls back to a *stale*
 cache when one exists, because an old catalogue beats none.
 
-**Downloading without a key** goes through the CSS API with a legacy `User-Agent`:
-Google serves WOFF2 to anything modern and plain TrueType to a browser too old to
-know about it, and TrueType is the only format fontconfig — and so OpenSCAD — can
-use. That is a behaviour of the endpoint, not a contract, so "no TrueType came back"
-is reported as an error on the widget rather than assumed away.
+**Downloads come from neither catalogue.** They come from the `google/fonts`
+repository: `<licence-dir>/<slug>/METADATA.pb` names the exact TTF for every face,
+and the three licence directories (`ofl`, `apache`, `ufl`) are probed in turn because
+which one holds a family is not in either catalogue — the one that answers also names
+the licence to keep beside the font.
+
+The obvious alternative, the CSS endpoint with an old `User-Agent` (what
+google-webfonts-helper does), was **measured on 2026-09-23 and rejected on the
+evidence**: an IE6/IE8 agent is served **EOT**, which fontconfig cannot read at all,
+and the agents that do yield `.ttf` are served *per-subset* files, so a family would
+install missing most of its glyphs. The repository serves the complete font — for a
+variable family, one file (`NotoSans[wdth,wght].ttf`) listed against every named
+instance, downloaded once, with fontconfig reporting each instance as a style.
 
 **Layout on the data volume.**
 

@@ -7,10 +7,10 @@ catalogue row is reported as installed only when fontconfig agrees.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
-import re
 import shutil
 import subprocess
 from collections.abc import Mapping
@@ -22,11 +22,11 @@ from pydantic import BaseModel, Field, ValidationError
 from scadbuddy.core.fontconfig import env_for, fonts_dir, write_conf
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
+    FamilyFiles,
     FontCatalogue,
     GoogleFontsClient,
     GoogleFontsError,
     licence_slug,
-    parse_variant,
 )
 
 FC_LIST = "fc-list"
@@ -115,12 +115,6 @@ def list_fonts(env: Mapping[str, str] | None = None) -> list[FontFamily]:
     """Font families fontconfig can resolve, or an empty list without fontconfig."""
     output = _run_fc([FC_LIST, ":", "family", "style"], os.environ if env is None else env)
     return parse_fc_list(output) if output is not None else []
-
-
-def _font_filename(family: str, style: str, url: str) -> str:
-    suffix = ".otf" if url.lower().endswith(".otf") else ".ttf"
-    squashed = re.sub(r"\s+", "", f"{family}-{style}")
-    return f"{squashed}{suffix}"
 
 
 class FontService:
@@ -242,51 +236,47 @@ class FontService:
         )
 
     async def install(self, family: str, *, force: bool = False) -> InstalledFamily:
-        """Download every variant of ``family`` onto the data volume and refresh the cache.
+        """Download every face of ``family`` onto the data volume and refresh the cache.
 
         A family fontconfig already resolves is returned as-is and nothing is fetched,
         so picking one of the image's own faces works with no network at all.
         """
         if not force:
-            existing = self.installed_family(family)
+            existing = await asyncio.to_thread(self.installed_family, family)
             if existing is not None:
                 return existing
         catalogue = await self.catalogue()
         font = catalogue.find(family)
         if font is None:
             raise FontNotFoundError(family)
-        files = await self.client.resolve_files(font)
-        written = await self._download(font, files)
-        licence = await self._write_licence(font)
+        sources = await self.client.fetch_family_files(font.family)
+        written = await self._download(font.family, sources)
+        licence = await self._write_licence(font.family, sources)
         self._write_manifest(font, written, licence)
-        self.refresh_cache()
+        # fc-cache walks the whole font tree and is slow enough to stall the loop.
+        await asyncio.to_thread(self.refresh_cache)
         return InstalledFamily(
             family=font.family,
-            styles=self._styles_of(font),
+            styles=await asyncio.to_thread(self._styles_of, font),
             files=written,
             licence=licence,
         )
 
-    async def _download(self, font: CatalogueFont, files: Mapping[str, str]) -> list[str]:
-        directory = self.family_dir(font.family)
+    async def _download(self, family: str, sources: FamilyFiles) -> list[str]:
+        directory = self.family_dir(family)
         directory.mkdir(parents=True, exist_ok=True)
         written: list[str] = []
-        for key, url in sorted(files.items()):
-            try:
-                variant = parse_variant(key)
-            except ValueError:
-                continue
-            name = _font_filename(font.family, variant.style, url)
-            (directory / name).write_bytes(await self.client.fetch_file(url))
-            written.append(name)
+        for source in sources.files:
+            (directory / source.filename).write_bytes(await self.client.fetch_file(source.url))
+            written.append(source.filename)
         if not written:
-            raise GoogleFontsError(f"no font files were downloaded for {font.family!r}")
+            raise GoogleFontsError(f"no font files were downloaded for {family!r}")
         return written
 
-    async def _write_licence(self, font: CatalogueFont) -> str:
-        directory = self.family_dir(font.family)
+    async def _write_licence(self, family: str, sources: FamilyFiles) -> str:
+        directory = self.family_dir(family)
         try:
-            fetched = await self.client.fetch_licence(font.family)
+            fetched = await self.client.fetch_licence(sources)
         except GoogleFontsError:
             fetched = None
         if fetched is not None:
@@ -294,7 +284,7 @@ class FontService:
             (directory / filename).write_text(text, encoding="utf-8")
             return filename
         (directory / FALLBACK_LICENCE_NAME).write_text(
-            FALLBACK_LICENCE.format(family=font.family, specimen=font.family.replace(" ", "+")),
+            FALLBACK_LICENCE.format(family=family, specimen=family.replace(" ", "+")),
             encoding="utf-8",
         )
         return FALLBACK_LICENCE_NAME

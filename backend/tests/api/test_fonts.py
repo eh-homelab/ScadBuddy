@@ -11,7 +11,9 @@ from scadbuddy.api.deps import get_fonts
 from scadbuddy.library.fonts import FontFamily, FontService, list_fonts, parse_fc_list
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
+    FamilyFiles,
     FontCatalogue,
+    FontFile,
     FontVariant,
     GoogleFontsError,
 )
@@ -46,15 +48,26 @@ class FakeClient:
             fonts=list(CATALOGUE_FONTS),
         )
 
-    async def resolve_files(self, font: CatalogueFont) -> dict[str, str]:
+    async def fetch_family_files(self, family: str) -> FamilyFiles:
         if self.download_fails:
-            raise GoogleFontsError("gstatic said no")
-        return {"regular": f"https://x/{font.family}.ttf"}
+            raise GoogleFontsError("the repository said no")
+        return FamilyFiles(
+            family=family,
+            directory="ofl",
+            licence="OFL",
+            files=[
+                FontFile(
+                    variant=FontVariant(),
+                    filename=f"{family.replace(' ', '')}-Regular.ttf",
+                    url=f"https://raw/ofl/x/{family}.ttf",
+                )
+            ],
+        )
 
     async def fetch_file(self, url: str) -> bytes:
         return b"\x00\x01\x00\x00"
 
-    async def fetch_licence(self, family: str) -> tuple[str, str] | None:
+    async def fetch_licence(self, files: FamilyFiles) -> tuple[str, str] | None:
         return ("OFL.txt", "Copyright")
 
 

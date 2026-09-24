@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 from typing import Annotated
@@ -67,7 +68,8 @@ async def get_catalogue(
         # which is exactly the air-gapped case.
         raise ApiError(503, f"the Google Fonts catalogue is unavailable: {exc}") from exc
 
-    installed = fonts.installed_families()
+    # fc-list shells out; off the loop so a browse cannot stall other requests.
+    installed = await asyncio.to_thread(fonts.installed_families)
     needle = q.strip().casefold()
     wanted = category.strip().casefold()
     matched = [
