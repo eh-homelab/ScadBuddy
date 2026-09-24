@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
- <metadata name="Application">ScadBuddy</metadata>
+ <metadata name="Application">BambuStudio-02.07.00.00</metadata>
+ <metadata name="BambuStudio:3mfVersion">1</metadata>
+ <metadata name="Origin">ScadBuddy</metadata>
  <metadata name="Title">two_boxes</metadata>
  <resources>
   <object id="3" name="two_boxes" type="model" p:UUID="8eacace0-e3a3-5f22-83ec-4e6039bd45a6">
