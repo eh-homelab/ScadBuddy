@@ -586,12 +586,16 @@ async def run_for_output(
             "filaments cannot be sliced with it"
         )
     printer_id, _ = target_of(pipeline, request.printer_id)
+    # Read once and used twice. The catalogue is ~4000 presets across four tiers on the
+    # live instance, which is why `preset_options` filters it server-side in the first
+    # place; asking for it a second time in the same request is the same cost again.
+    catalogue = await _catalogue(client)
     options = await gather_options(
         client,
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_id=request.plate_id,
-        process_preset_name=_names((await _catalogue(client)).names(), pipeline.process_preset),
+        process_preset_name=_names(catalogue.names(), pipeline.process_preset),
         fallback_colours=list(meta.colors),
     )
     warnings = check(options, request.filament_plan, copies=request.copies)
@@ -599,7 +603,7 @@ async def run_for_output(
         options,
         request.filament_plan,
         pipeline_presets=list(pipeline.filament_presets),
-        resolve=filament_preset_index(await _catalogue(client)),
+        resolve=filament_preset_index(catalogue),
     )
     outcome = await slice_and_queue(
         client,
