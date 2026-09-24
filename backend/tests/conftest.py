@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -25,6 +26,14 @@ def load_fixture_source(stem: str) -> str:
 
 def openscad_binary() -> str | None:
     return shutil.which(load_config().openscad)
+
+
+def installed_font_families() -> str:
+    """`fc-list` output, lowercased. Empty when fontconfig is absent — which reads as
+    "the family is missing", the safe answer: a missing face is substituted silently."""
+    if shutil.which("fc-list") is None:
+        return ""
+    return subprocess.run(["fc-list"], capture_output=True, text=True, check=False).stdout.lower()
 
 
 @pytest.fixture(autouse=True)

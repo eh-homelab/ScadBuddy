@@ -51,3 +51,48 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('render-log')).toContainText('Compilation failed')
   })
 })
+
+test.describe('font picker', () => {
+  test.skip(
+    !!process.env.E2E_BASE_URL,
+    'msw-backed; the real stack is covered by real-backend.spec.ts',
+  )
+
+  test('searches Google Fonts, previews the name and puts the pick on the parameter', async ({
+    page,
+  }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Browse' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Choose a font' })
+
+    // The preview defaults to the text the model will actually set.
+    await expect(dialog.getByRole('textbox', { name: 'Sample text' })).toHaveValue('Reagan')
+
+    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Pacifico')
+    const row = dialog.getByRole('button', { name: /Pacifico/ })
+    await expect(row).toBeVisible()
+    await expect(row.locator('span').first()).toHaveCSS('font-family', /Pacifico/)
+
+    await row.click()
+
+    await expect(dialog).toBeHidden()
+    await expect(page.getByRole('combobox', { name: 'Typeface' })).toHaveValue(
+      'Pacifico:style=Regular',
+    )
+  })
+
+  test('says so when a font cannot be downloaded', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    await page.getByRole('button', { name: 'Browse' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Choose a font' })
+    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Playfair')
+    await dialog.getByRole('button', { name: /Playfair Display/ }).click()
+
+    await expect(dialog.getByRole('alert')).toContainText('could not be downloaded')
+    await expect(dialog).toBeVisible()
+  })
+})

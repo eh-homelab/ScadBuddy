@@ -1,0 +1,108 @@
+{
+  "exact": {
+    "archive_entries": [
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "3D/3dmodel.model",
+      "3D/_rels/3dmodel.model.rels",
+      "3D/Objects/object_1.model",
+      "3D/Objects/object_2.model",
+      "Metadata/model_settings.config",
+      "Metadata/project_settings.config"
+    ],
+    "colors": [
+      "#0047BB",
+      "#FF1493"
+    ],
+    "params": {
+      "name": "Reagan"
+    },
+    "parts": [
+      {
+        "bodies": 1,
+        "colour": "#0047BB",
+        "euler_number": 0,
+        "extruder": 1,
+        "geometry": "name-keychain_1",
+        "mesh_watertight": true,
+        "name": "Color 1",
+        "watertight": true
+      },
+      {
+        "bodies": 1,
+        "colour": "#FF1493",
+        "euler_number": -14,
+        "extruder": 2,
+        "geometry": "name-keychain_2",
+        "mesh_watertight": true,
+        "name": "Color 2",
+        "watertight": true
+      }
+    ],
+    "preview": [
+      {
+        "base_color_rgba": [
+          0,
+          71,
+          187,
+          255
+        ],
+        "name": "Color 1",
+        "watertight": false
+      },
+      {
+        "base_color_rgba": [
+          255,
+          20,
+          147,
+          255
+        ],
+        "name": "Color 2",
+        "watertight": false
+      }
+    ],
+    "slug": "name-keychain",
+    "warnings": []
+  },
+  "lengths_mm": {
+    "bbox.max.x": 86.3158,
+    "bbox.max.y": 17.3885,
+    "bbox.max.z": 6.8,
+    "bbox.min.x": -9.26,
+    "bbox.min.y": -17.3873,
+    "bbox.min.z": 0.0,
+    "bbox.size.x": 95.5758,
+    "bbox.size.y": 34.7758,
+    "bbox.size.z": 6.8,
+    "part1.max.x": 86.3158,
+    "part1.max.y": 17.3885,
+    "part1.max.z": 4.0,
+    "part1.min.x": -9.26,
+    "part1.min.y": -17.3873,
+    "part1.min.z": 0.0,
+    "part2.max.x": 82.8158,
+    "part2.max.y": 13.8885,
+    "part2.max.z": 6.8,
+    "part2.min.x": 0.5008,
+    "part2.min.y": -13.8876,
+    "part2.min.z": 4.0,
+    "preview.Color 1.max.x": 86.3158,
+    "preview.Color 1.max.y": 4.0,
+    "preview.Color 1.max.z": 17.3873,
+    "preview.Color 1.min.x": -9.26,
+    "preview.Color 1.min.y": 0.0,
+    "preview.Color 1.min.z": -17.3885,
+    "preview.Color 2.max.x": 82.8158,
+    "preview.Color 2.max.y": 6.8,
+    "preview.Color 2.max.z": 13.8876,
+    "preview.Color 2.min.x": 0.5008,
+    "preview.Color 2.min.y": 4.0,
+    "preview.Color 2.min.z": -13.8885
+  },
+  "magnitudes": {
+    "part1.area_mm2": 5005.616,
+    "part1.volume_mm3": 7902.984,
+    "part2.area_mm2": 2960.267,
+    "part2.volume_mm3": 2256.621
+  }
+}

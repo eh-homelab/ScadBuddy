@@ -12,6 +12,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.fonts import FontService
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import SLUG_PATTERN
@@ -32,6 +33,7 @@ class AppState:
     catalogue: Catalogue
     outputs: OutputStore
     settings_store: SettingsStore
+    fonts: FontService
     queue: RenderQueue
     openscad_version: str | None = field(default=None)
 
@@ -46,6 +48,11 @@ def build_state(settings: Settings) -> AppState:
         catalogue=Catalogue(paths),
         outputs=OutputStore(paths),
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
+        fonts=FontService(
+            paths.root,
+            api_key=config.google_fonts_api_key,
+            catalogue_ttl=config.fonts_catalogue_ttl,
+        ),
         queue=RenderQueue(config, paths),
     )
 
@@ -99,6 +106,10 @@ def get_settings_store(state: StateDep) -> SettingsStore:
     return state.settings_store
 
 
+def get_fonts(state: StateDep) -> FontService:
+    return state.fonts
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
@@ -108,6 +119,7 @@ PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
+FontsDep = Annotated[FontService, Depends(get_fonts)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 
 SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]

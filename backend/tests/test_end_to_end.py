@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,17 +10,11 @@ import trimesh
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.jobs import Job, JobResult, RenderQueue
-from tests.conftest import FIXTURES
+from tests.conftest import FIXTURES, installed_font_families
 
 SLUG = "name_keychain"
 KEYCHAIN_MODEL = Path(__file__).resolve().parents[2] / "models" / "name-keychain" / "model.scad"
 pytestmark = pytest.mark.requires_openscad
-
-
-def _installed_fonts() -> str:
-    if shutil.which("fc-list") is None:
-        return ""
-    return subprocess.run(["fc-list"], capture_output=True, text=True, check=False).stdout.lower()
 
 
 async def _render(paths: DataPaths, slug: str, params: dict[str, object]) -> tuple[Job, JobResult]:
@@ -83,7 +76,7 @@ async def test_the_model_directory_is_left_as_it_was(data: DataPaths) -> None:
 
 @pytest.mark.skipif(not KEYCHAIN_MODEL.is_file(), reason="models/name-keychain is not present")
 async def test_the_shipped_keychain_measures_as_the_spec_says(tmp_path: Path) -> None:
-    if "lobster two" not in _installed_fonts():
+    if "lobster two" not in installed_font_families():
         pytest.skip("Lobster Two is not installed; the model would silently fall back to DejaVu")
 
     paths = DataPaths(tmp_path)

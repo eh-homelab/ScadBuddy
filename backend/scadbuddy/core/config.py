@@ -10,6 +10,7 @@ DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
 DEFAULT_RENDER_CONCURRENCY = 2
 DEFAULT_JOB_TTL = 86400.0
+DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
 
 
 @dataclass(frozen=True)
@@ -19,6 +20,9 @@ class Config:
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
+    # Never sent to the browser: the catalogue is fetched server-side (issue #82).
+    google_fonts_api_key: str | None = None
+    fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -32,4 +36,8 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
         ),
         job_ttl=float(source.get("SCADBUDDY_JOB_TTL") or DEFAULT_JOB_TTL),
+        google_fonts_api_key=source.get("SCADBUDDY_GOOGLE_FONTS_API_KEY") or None,
+        fonts_catalogue_ttl=float(
+            source.get("SCADBUDDY_FONTS_CATALOGUE_TTL") or DEFAULT_FONTS_CATALOGUE_TTL
+        ),
     )

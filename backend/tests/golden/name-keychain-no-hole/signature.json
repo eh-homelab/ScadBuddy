@@ -1,0 +1,109 @@
+{
+  "exact": {
+    "archive_entries": [
+      "[Content_Types].xml",
+      "_rels/.rels",
+      "3D/3dmodel.model",
+      "3D/_rels/3dmodel.model.rels",
+      "3D/Objects/object_1.model",
+      "3D/Objects/object_2.model",
+      "Metadata/model_settings.config",
+      "Metadata/project_settings.config"
+    ],
+    "colors": [
+      "#0047BB",
+      "#FF1493"
+    ],
+    "params": {
+      "hole": false,
+      "name": "Ada"
+    },
+    "parts": [
+      {
+        "bodies": 1,
+        "colour": "#0047BB",
+        "euler_number": 2,
+        "extruder": 1,
+        "geometry": "name-keychain_1",
+        "mesh_watertight": true,
+        "name": "Color 1",
+        "watertight": true
+      },
+      {
+        "bodies": 1,
+        "colour": "#FF1493",
+        "euler_number": -4,
+        "extruder": 2,
+        "geometry": "name-keychain_2",
+        "mesh_watertight": true,
+        "name": "Color 2",
+        "watertight": true
+      }
+    ],
+    "preview": [
+      {
+        "base_color_rgba": [
+          0,
+          71,
+          187,
+          255
+        ],
+        "name": "Color 1",
+        "watertight": false
+      },
+      {
+        "base_color_rgba": [
+          255,
+          20,
+          147,
+          255
+        ],
+        "name": "Color 2",
+        "watertight": false
+      }
+    ],
+    "slug": "name-keychain",
+    "warnings": []
+  },
+  "lengths_mm": {
+    "bbox.max.x": 48.0402,
+    "bbox.max.y": 15.5002,
+    "bbox.max.z": 6.8,
+    "bbox.min.x": -4.6928,
+    "bbox.min.y": -15.498,
+    "bbox.min.z": 0.0,
+    "bbox.size.x": 52.733,
+    "bbox.size.y": 30.9982,
+    "bbox.size.z": 6.8,
+    "part1.max.x": 48.0402,
+    "part1.max.y": 15.5002,
+    "part1.max.z": 4.0,
+    "part1.min.x": -4.6928,
+    "part1.min.y": -15.498,
+    "part1.min.z": 0.0,
+    "part2.max.x": 44.542,
+    "part2.max.y": 12.001,
+    "part2.max.z": 6.8,
+    "part2.min.x": -1.1934,
+    "part2.min.y": -11.9983,
+    "part2.min.z": 4.0,
+    "preview.Color 1.max.x": 48.0402,
+    "preview.Color 1.max.y": 4.0,
+    "preview.Color 1.max.z": 15.498,
+    "preview.Color 1.min.x": -4.6928,
+    "preview.Color 1.min.y": 0.0,
+    "preview.Color 1.min.z": -15.5002,
+    "preview.Color 2.max.x": 44.542,
+    "preview.Color 2.max.y": 6.8,
+    "preview.Color 2.max.z": 11.9983,
+    "preview.Color 2.min.x": -1.1934,
+    "preview.Color 2.min.y": 4.0,
+    "preview.Color 2.min.z": -12.001
+  },
+  "magnitudes": {
+    "part1.area_mm2": 2948.729,
+    "part1.volume_mm3": 4644.441,
+    "part2.area_mm2": 1646.101,
+    "part2.volume_mm3": 1256.431
+  }
+}
