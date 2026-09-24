@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
@@ -20,6 +21,9 @@ from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.solids import render_solids
 from scadbuddy.render.split import ColourPart, split_by_material
+from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
+
+logger = logging.getLogger(__name__)
 
 JobState = Literal["pending", "running", "done", "failed"]
 
@@ -30,6 +34,7 @@ PREVIEW_NAME = "preview.glb"
 # Material 0 is OpenSCAD's "Default": geometry no color() call reached.
 UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
+THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 
 
 class PartInfo(BaseModel):
@@ -142,6 +147,52 @@ async def solid_parts(
     return parts, solids.warnings
 
 
+async def plate_thumbnails(
+    parts: Sequence[ColourPart], *, config: Config
+) -> tuple[PlateThumbnails | None, list[str]]:
+    """The 3MF's cover images, under the same wall-clock budget as a render.
+
+    Two separate reasons, and neither is the other's.
+
+    OFF THE EVENT LOOP, because rasterising four images is seconds of numpy on a
+    large mesh where writing the rest of the 3MF is milliseconds of XML. One loop
+    serves the whole process, so a synchronous call would stall every other job's
+    poll, `/healthz` and the second render worker — and §5.3's debounced preview
+    submits these back to back on a slider drag. Everything else in this pipeline
+    already yields: `render_3mf` and `render_solids` await a subprocess.
+
+    BOUNDED, because §6.1's guarantee is that a job is time-bounded, and until
+    now `SCADBUDDY_RENDER_TIMEOUT` delivered it by killing an `openscad` child.
+    This step has no child to kill, and its cost rises with face count, so a mesh
+    each OpenSCAD pass produced well inside its own budget can still rasterise
+    for far longer than the whole job is supposed to take — with
+    `render_concurrency` 2, two of those starve the queue. The budget is
+    `render_timeout` rather than a new knob: this is the same job's time.
+
+    The degradation is a 3MF with no cover images, NOT a failed job — the model
+    is what the user asked for and the cover is a nicety. `write_bambu_3mf` then
+    omits the png content type, the cover relationships and the plate's
+    `thumbnail_file`/`top_file`/`pick_file` along with the images, so the package
+    stays self-consistent rather than carrying dangling references.
+
+    `wait_for` cannot cancel the thread it abandons, so the orphan keeps its core
+    until it finishes. That is acceptable here and would not be for `openscad`:
+    this work is O(faces) plus O(covered pixels) with no loop that can fail to
+    terminate, whereas a `.scad` can legitimately spin forever.
+    """
+    try:
+        rendered = await asyncio.wait_for(
+            asyncio.to_thread(render_plate_thumbnails, parts), timeout=config.render_timeout
+        )
+    except TimeoutError:
+        logger.warning(
+            "plate thumbnail render exceeded the budget; writing the 3MF without cover images",
+            extra={"faces": sum(len(part.mesh.faces) for part in parts)},
+        )
+        return None, [THUMBNAIL_TIMEOUT_WARNING]
+    return rendered, []
+
+
 async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
     scad = paths.model_source(job.slug)
     schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
@@ -159,8 +210,13 @@ async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[Job
     parts, warnings = await solid_parts(
         scad, schema, job.params, preview_parts, work, config=config
     )
+    thumbnails, thumbnail_warnings = await plate_thumbnails(parts, config=config)
+    warnings += thumbnail_warnings
+
     model_path = work / MODEL_NAME
-    write_bambu_3mf(parts, model_path, model_name=job.slug)
+    await asyncio.to_thread(
+        write_bambu_3mf, parts, model_path, thumbnails=thumbnails, model_name=job.slug
+    )
 
     result = JobResult(
         model_3mf=str(model_path.relative_to(paths.root)),
