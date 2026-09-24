@@ -19,6 +19,7 @@ from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, JobResult, PartInfo, RenderQueue
+from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.split import ColourPart
 
@@ -135,6 +136,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     return JobResult(
         model_3mf=str((work / "model.3mf").relative_to(paths.root)),
         preview_glb=str((work / "preview.glb").relative_to(paths.root)),
+        source_version=source_version(paths.model_dir(job.slug)),
         parts=[PartInfo(name="Color 1", colour="#FF0000", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],

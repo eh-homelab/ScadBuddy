@@ -33,6 +33,7 @@ def _result() -> JobResult:
     return JobResult(
         model_3mf="jobs/x.work/model.3mf",
         preview_glb="jobs/x.work/preview.glb",
+        source_version="sha256:test",
         parts=[PartInfo(name="Color 1", colour="#FF6AC1", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
     )

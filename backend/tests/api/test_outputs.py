@@ -182,6 +182,28 @@ def test_every_output_records_its_model_version_and_stamps_the_3mf(
     )
 
 
+def test_the_version_is_the_source_the_render_saw_not_the_one_on_disk_at_save(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Generate persists an earlier render; the model may have moved on since.
+
+    The stamp has to describe the source that produced the geometry, so the hash is
+    taken when the render runs, not when the output is saved.
+    """
+    rendered = source_version(paths.model_dir(model))
+    job_id = _finished_job(client, model)
+
+    paths.model_source(model).write_text('width = 10;\nlabel = "edited";\n', encoding="utf-8")
+    assert source_version(paths.model_dir(model)) != rendered
+
+    body = client.post(f"/api/v1/models/{model}/outputs", json={"job_id": job_id}).json()
+    assert body["model_version"] == rendered
+
+    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    assert stamped is not None
+    assert stamped.version == rendered
+
+
 def test_the_stamp_leaves_out_a_link_when_no_public_url_is_set(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

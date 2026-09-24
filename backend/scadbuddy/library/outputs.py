@@ -13,7 +13,7 @@ from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, PartInfo
-from scadbuddy.render.provenance import Provenance, source_version, stamp
+from scadbuddy.render.provenance import Provenance, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 
@@ -112,7 +112,7 @@ class OutputStore:
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
-        version = source_version(self.paths.model_dir(job.slug))
+        version = job.result.source_version
         stamp(
             directory / MODEL_NAME,
             Provenance(
