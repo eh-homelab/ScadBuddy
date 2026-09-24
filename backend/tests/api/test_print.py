@@ -530,6 +530,9 @@ def test_run_without_a_pipeline_uses_the_models_default_before_the_global_one(
     client: TestClient, model: str
 ) -> None:
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 4})
@@ -548,6 +551,9 @@ def test_run_falls_back_to_the_global_pipeline_when_the_model_has_none(
     client: TestClient, model: str
 ) -> None:
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
@@ -613,6 +619,9 @@ def test_the_send_bar_still_works_and_now_honours_the_models_pipeline(
     """``POST /outputs/{id}/send`` predates this router; its global ``pipeline_id`` is
     the fallback now, not the only answer."""
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 4})

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -15,9 +16,11 @@ from scadbuddy.api.deps import get_queue
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, JobResult, PartInfo, RenderQueue
 from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.render.split import ColourPart
 
 MODEL_SLUG = "demo"
 FAIL_WIDTH = 999.0
@@ -123,7 +126,13 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
     (work / "preview.glb").write_bytes(b"glTF\x02\x00\x00\x00fake")
-    (work / "model.3mf").write_bytes(b"PK\x03\x04fake")
+    # A real archive, not a stub: the send path re-places the 3MF for the target
+    # printer's plate before uploading it, so it has to be readable (#105).
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 5)))],
+        work / "model.3mf",
+        model_name=job.slug,
+    )
     return JobResult(
         model_3mf=str((work / "model.3mf").relative_to(paths.root)),
         preview_glb=str((work / "preview.glb").relative_to(paths.root)),

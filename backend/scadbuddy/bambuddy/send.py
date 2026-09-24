@@ -14,17 +14,20 @@ from fastapi import status
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, not_configured
+from scadbuddy.bambuddy.errors import NOT_FOUND_PROBLEM, PLATE_FIT_PROBLEM, not_configured
 from scadbuddy.bambuddy.models import (
     CalibrationMode,
     ExternalLink,
     PipelineRunRequest,
+    Printer,
     QueueItemCreate,
     SliceRequest,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.render.bambu3mf import replate_3mf
+from scadbuddy.render.plate import DEFAULT_PLATE, PlateFitError, PlateGeometry, plate_for
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +86,69 @@ def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
     return path.read_bytes()
 
 
+async def target_printer_model(
+    client: BambuddyClient, settings: StoredSettings, slug: str
+) -> str | None:
+    """Which printer model this output is heading for, as Bambuddy names it.
+
+    The pipeline wins over the globally configured printer, the same precedence
+    :meth:`StoredSettings.pipeline_for` gives the print itself. A pipeline aimed
+    at a printer *class* names the model directly; one aimed at a specific
+    printer has to be resolved through the printer list. ``None`` — no pipeline,
+    no printer, or a printer Bambuddy reports without a model — is not an error;
+    it means the default plate.
+    """
+    pipeline_id = settings.pipeline_for(slug)
+    if pipeline_id is None and settings.printer_id is None:
+        # Nothing to resolve against, so do not spend two round trips finding out.
+        return None
+    printers: list[Printer] | None = None
+    if pipeline_id is not None:
+        pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
+        if pipeline is not None:
+            if pipeline.target_model_class:
+                return pipeline.target_model_class
+            if pipeline.target_printer_id is not None:
+                printers = await client.printers()
+                target = next(
+                    (row for row in printers if row.id == pipeline.target_printer_id), None
+                )
+                if target is not None and target.model:
+                    return target.model
+    if settings.printer_id is not None:
+        printers = printers if printers is not None else await client.printers()
+        target = next((row for row in printers if row.id == settings.printer_id), None)
+        if target is not None and target.model:
+            return target.model
+    return None
+
+
+async def target_plate(
+    client: BambuddyClient, settings: StoredSettings, slug: str
+) -> PlateGeometry:
+    model = await target_printer_model(client, settings, slug)
+    plate = plate_for(model)
+    if model and plate is DEFAULT_PLATE:
+        logger.info(
+            "no plate geometry for this printer model; using the default plate",
+            extra={"printer_model": model},
+        )
+    return plate
+
+
+def _laid_out_for(payload: bytes, plate: PlateGeometry) -> bytes:
+    """Re-place the 3MF for ``plate``, refusing here rather than at the slicer.
+
+    The 3MF was written at render time, when no printer was chosen, so the plate
+    it carries is the fallback. Moving it now is what puts the object — and the
+    prime tower a multi-colour print needs — where every extruder can reach them.
+    """
+    try:
+        return replate_3mf(payload, plate)
+    except PlateFitError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
+
+
 async def upload_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -107,8 +173,9 @@ async def upload_output(
             )
 
     filename = download_filename(meta)
+    payload = _laid_out_for(_read_3mf(store, meta), await target_plate(client, settings, meta.slug))
     uploaded = await client.upload_library_file(
-        filename, _read_3mf(store, meta), folder_id=settings.library_folder_id
+        filename, payload, folder_id=settings.library_folder_id
     )
     return store.record_send(meta.id, library_file_id=uploaded.id), uploaded.filename
 

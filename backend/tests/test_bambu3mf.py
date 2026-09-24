@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import json
 import os
 import zipfile
@@ -10,7 +11,8 @@ import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.bambu3mf import replate_3mf, write_bambu_3mf
+from scadbuddy.render.plate import PlateFitError, plate_for
 from scadbuddy.render.split import ColourPart
 from tests.conftest import GOLDEN
 
@@ -91,7 +93,77 @@ def test_every_part_gets_its_own_extruder(written: Path) -> None:
 def test_filament_colours_follow_part_order(written: Path) -> None:
     with zipfile.ZipFile(written) as archive:
         settings = json.loads(archive.read("Metadata/project_settings.config"))
-    assert settings == {"filament_colour": ["#FF6AC1", "#1F6FEB"]}
+    assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
+
+
+def test_project_settings_carry_the_prime_tower_corner(written: Path) -> None:
+    """Bambu Studio writes every vector option as an array of strings."""
+    with zipfile.ZipFile(written) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert settings["wipe_tower_x"] == ["98"]
+    assert settings["wipe_tower_y"] == ["5"]
+
+
+def test_a_single_colour_model_gets_no_prime_tower(tmp_path: Path) -> None:
+    out = tmp_path / "one.3mf"
+    write_bambu_3mf(_parts()[:1], out, model_name="one_box")
+    with zipfile.ZipFile(out) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    assert "wipe_tower_x" not in settings
+
+
+def test_writing_for_a_printer_centres_on_its_reachable_area(tmp_path: Path) -> None:
+    out = tmp_path / "h2c.3mf"
+    write_bambu_3mf(_parts(), out, model_name="two_boxes", plate=plate_for("H2C"))
+    with zipfile.ZipFile(out) as archive:
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    item = root.find(".//{*}item")
+    assert item is not None
+    transform = [float(v) for v in (item.get("transform") or "").split()]
+    assert transform[9:11] == [175.0, 160.0]
+    # x=15 is the PrintConfig default that extruder 2 cannot reach (#105).
+    assert float(settings["wipe_tower_x"][0]) >= 25.0
+
+
+class TestReplate:
+    def test_replating_moves_the_object_and_the_tower(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            root = ET.fromstring(archive.read("3D/3dmodel.model"))
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        item = root.find(".//{*}item")
+        assert item is not None
+        transform = [float(v) for v in (item.get("transform") or "").split()]
+        assert transform[9:11] == [175.0, 160.0]
+        assert settings["wipe_tower_x"] == ["145"]
+        assert settings["filament_colour"] == ["#FF6AC1", "#1F6FEB"]
+
+    def test_replating_is_what_writing_for_that_plate_would_have_produced(
+        self, tmp_path: Path, written: Path
+    ) -> None:
+        direct = tmp_path / "direct.3mf"
+        write_bambu_3mf(_parts(), direct, model_name="two_boxes", plate=plate_for("H2C"))
+        assert replate_3mf(written.read_bytes(), plate_for("H2C")) == direct.read_bytes()
+
+    def test_replating_keeps_every_other_entry(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            assert archive.namelist() == ENTRIES
+
+    def test_replating_is_idempotent(self, written: Path) -> None:
+        once = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        assert replate_3mf(once, plate_for("H2C")) == once
+
+    def test_a_model_too_big_for_the_printer_is_refused(self, tmp_path: Path) -> None:
+        big = tmp_path / "big.3mf"
+        write_bambu_3mf(
+            [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(200, 200, 4)))],
+            big,
+            model_name="big",
+        )
+        with pytest.raises(PlateFitError, match="A1 mini"):
+            replate_3mf(big.read_bytes(), plate_for("A1 mini"))
 
 
 def test_build_item_centres_the_assembly_on_the_plate_at_z0(written: Path) -> None:
