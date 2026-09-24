@@ -63,6 +63,22 @@ describe('EditPage', () => {
     )
   })
 
+  it('does not flash the spinner when the target was handed over', () => {
+    const id = 'c'.repeat(32)
+    const editTarget = {
+      output_id: id,
+      slug: 'name-keychain',
+      name: 'Handed over',
+      params: {},
+      model_version: null,
+      source: 'record',
+    }
+    // Synchronous on purpose: nothing has to resolve, so the first paint is the
+    // landing, not "Opening that output".
+    render(id, { editTarget })
+    expect(screen.getByTestId('landing')).toBeInTheDocument()
+  })
+
   it('says so when neither the record nor a 3MF is left', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/edit', () =>

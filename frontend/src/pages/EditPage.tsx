@@ -20,7 +20,11 @@ export function EditPage() {
     async () => (preloaded ? null : await api.getEditTarget(outputId)),
     [outputId, preloaded !== null],
   )
-  const target = { ...fetched, data: preloaded ?? fetched.data }
+  // useAsync starts loading whether or not it has anything to fetch, so a handed-over
+  // target would still flash the spinner for a tick before the redirect.
+  const target = preloaded
+    ? { loading: false, error: undefined, data: preloaded }
+    : { loading: fetched.loading, error: fetched.error, data: fetched.data }
 
   if (target.loading) {
     return (
