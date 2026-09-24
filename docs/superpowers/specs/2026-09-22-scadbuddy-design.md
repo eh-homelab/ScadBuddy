@@ -160,10 +160,11 @@ Data on the PVC (`SCADBUDDY_DATA_DIR`, default `/data`):
 ```
 models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
-models/<slug>/model.json          name, description, tags, thumbnail, params schema cache
+models/<slug>/model.json          name, description, tags, thumbnail (NOT the schema)
 models/<slug>/thumbnail.png
 outputs/<slug>/<output-id>/       params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
+cache/schema/<slug>.json          the DERIVED customizer schema, keyed by source hash
 cache/revisions/<slug>/<commit>/  an old model revision exported out of git, derived
 ```
 
@@ -189,9 +190,19 @@ on the volume sees the same thing.
   because a PVC's ownership need not match the runtime uid.
 - **Writes are serialised** by a thread lock plus an `flock`, so nothing can
   interleave an `add`/`commit` pair.
-- **Generated files are gitignored.** `render_solids` drops its wrapper next to
-  the model source (it has to, for `include <>` to resolve); the prefix is the
-  named `WRAPPER_PREFIX` constant and `ensure_repo` writes it into `.gitignore`.
+- **Generated files never enter the tree.** `render_solids` drops its wrapper
+  next to the model source (it has to, for `include <>` to resolve); the prefix
+  is the named `WRAPPER_PREFIX` constant and `ensure_repo` writes it into
+  `.gitignore`. The derived customizer schema used to live in `model.json` and
+  now lives under `cache/`: it is written lazily, by a *read*, outside any
+  commit, so in the tree it would leave the repository permanently dirty and
+  fold a cache blob into the next unrelated metadata commit.
+- **A commit message is flattened to one printable line** (`subject_line`).
+  `PUT /models/{slug}/source` takes a caller-supplied `message`, and the log
+  parser splits records on ASCII RS/US — bytes nothing can put in a hash, an
+  author or a date, but which a *subject* would carry straight through,
+  desyncing every later record boundary and silently dropping the malformed
+  chunks.
 - **Outputs stamp `model_version`**: the model's own last commit, not the
   repository HEAD — a commit against another model leaves this one where it was,
   and the id has to name an entry in *this* model's history.

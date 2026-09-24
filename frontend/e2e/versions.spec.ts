@@ -1,8 +1,10 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('model versions', () => {
-  // msw-backed, like the other UI specs: the real repository is covered by the
-  // backend's own tests, which run a real git in a tmp dir.
+  // msw-backed. The real repository is covered twice over: the backend's own
+  // tests drive a real git in a tmp dir, and real-backend.spec.ts's
+  // "versions a model, renders an old revision and restores it" drives the real
+  // stack -- which is the only place `git` being present in the IMAGE is proved.
   test.skip(
     !!process.env.E2E_BASE_URL,
     'msw-backed; the real stack is covered by real-backend.spec.ts',

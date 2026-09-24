@@ -5,9 +5,9 @@ from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, ConfigDep, HistoryDep, PathsDep, SlugPath
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
@@ -17,8 +17,10 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
 )
+from scadbuddy.library.history import MAX_SUBJECT
 from scadbuddy.library.scad import NotOpenSCADError, decode_source, verify_parses
 from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 
@@ -32,6 +34,14 @@ def require_model(catalogue: Catalogue, slug: str) -> ModelRecord:
         return catalogue.record(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+def require_model_exists(catalogue: Catalogue, slug: str) -> None:
+    """Existence without building a record -- which costs a `git log` for the
+    model's revision. The render path runs on every debounced keystroke and only
+    needs the 404."""
+    if not catalogue.exists(slug):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
 def _parse_tags(raw: str | None) -> list[str] | None:
@@ -140,8 +150,9 @@ def delete_model(slug: SlugPath, catalogue: CatalogueDep) -> Response:
 class SourceUpdate(BaseModel):
     source: str
     # What the revision is called in the history. The paste/edit path (#92) passes
-    # its own; anything else gets the default.
-    message: str | None = None
+    # its own; anything else gets the default. Flattened to one printable line
+    # before it reaches git -- see `history.subject_line`.
+    message: str | None = Field(default=None, max_length=MAX_SUBJECT)
 
 
 @router.put(
@@ -178,11 +189,16 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")
 async def get_schema(
-    slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep, config: ConfigDep
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
+    config: ConfigDep,
 ) -> CustomizerSchema:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
+    source = await resolve_source(slug, None, paths=paths, history=history)
     try:
-        return await cached_schema(paths.model_source(slug), paths.model_meta(slug), config=config)
+        return await cached_schema(source.scad, source.schema_cache, config=config)
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"

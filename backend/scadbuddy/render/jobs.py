@@ -8,7 +8,7 @@ import shutil
 import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -16,7 +16,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import META_NAME, SOURCE_NAME, DataPaths
+from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
@@ -203,30 +203,54 @@ async def plate_thumbnails(
     return rendered, []
 
 
-async def revision_dir(
+@dataclass(frozen=True)
+class ModelSource:
+    """What a render or a schema read works from: a `.scad`, where its derived
+    schema is cached, and which revision the two belong to."""
+
+    scad: Path
+    schema_cache: Path
+    version: str | None
+
+
+async def resolve_source(
     slug: str,
-    version: str | None,
+    requested: str | None,
     *,
     paths: DataPaths,
     history: ModelHistory | None,
-) -> Path:
-    """The model directory a render reads: the live one, or an export of an older
-    revision.
+) -> ModelSource:
+    """Resolve a model to the source a render reads: the live one, or an export of
+    an older revision.
 
-    The export is an ordinary model directory under ``data/cache``, so the schema
-    cache and the renderer -- including the wrapper `render_solids` drops next to
-    the source -- work on it unchanged, and nothing generated lands in the
-    repository. Commits are immutable, so a populated export is never stale.
+    `last_commit` is read ONCE here, and the resolved revision comes back on the
+    result so a caller does not have to ask again to stamp `model_version`.
+
+    The export is an ordinary model directory under ``data/cache``, so the
+    renderer -- including the wrapper `render_solids` drops next to the source --
+    works on it unchanged, and nothing generated lands in the repository. Commits
+    are immutable, so a populated export is never stale.
     """
-    live = paths.model_dir(slug)
-    if version is None or history is None or not history.available:
-        return live
-    if await asyncio.to_thread(history.last_commit, slug) == version:
-        return live
-    directory = paths.model_revision_dir(slug, version)
+    current = (
+        await asyncio.to_thread(history.last_commit, slug)
+        if history is not None and history.available
+        else None
+    )
+    if requested is None or requested == current:
+        return ModelSource(
+            scad=paths.model_source(slug),
+            schema_cache=paths.model_schema_cache(slug),
+            version=current,
+        )
+    assert history is not None  # a requested revision implies a repository
+    directory = paths.model_revision_dir(slug, requested)
     if not (directory / SOURCE_NAME).is_file():
-        await asyncio.to_thread(_export_atomically, history, slug, version, directory)
-    return directory
+        await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
+    return ModelSource(
+        scad=directory / SOURCE_NAME,
+        schema_cache=directory / SCHEMA_CACHE_NAME,
+        version=requested,
+    )
 
 
 def _export_atomically(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
@@ -258,9 +282,12 @@ async def render_job(
     paths: DataPaths,
     history: ModelHistory | None = None,
 ) -> tuple[JobResult, list[str]]:
-    directory = await revision_dir(job.slug, job.model_version, paths=paths, history=history)
-    scad = directory / SOURCE_NAME
-    schema = await cached_schema(scad, directory / META_NAME, config=config)
+    # Resolved again rather than carried on the job: the model can be edited
+    # between submit and render, and a stored "this one is live" flag would then
+    # render newer source while claiming the older revision.
+    source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+    scad = source.scad
+    schema = await cached_schema(scad, source.schema_cache, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
 

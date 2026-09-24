@@ -237,6 +237,44 @@ def test_source_that_does_not_parse_is_rejected_and_records_nothing(
     assert client.get(f"/api/v1/models/{SLUG}/source").text == FIRST
 
 
+def test_rendering_does_not_dirty_the_repository(client: TestClient) -> None:
+    """A render derives the schema, and that write must not land in `models/`.
+
+    It happens outside any commit, so if it did the repository would sit
+    permanently dirty and the next metadata commit would carry a cache blob.
+    """
+    upload(client)
+    job = client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}}).json()
+    assert wait_for_job(client, job["job_id"])["status"] == "done"
+
+    before = versions(client)
+    assert client.patch(f"/api/v1/models/{SLUG}", json={"description": "nicer"}).status_code == 200
+
+    added = versions(client)[0]
+    assert added["message"] == f"Update {SLUG} metadata"
+    assert [change["path"] for change in added["files"]] == ["model.json"]
+    assert len(added["files"]) == 1
+    assert len(versions(client)) == len(before) + 1
+
+
+def test_a_message_with_control_bytes_still_lists(client: TestClient) -> None:
+    upload(client)
+
+    assert put_source(client, SECOND, "one\x1etwo\x1fthree").status_code == 200
+
+    listed = versions(client)
+    assert [entry["message"] for entry in listed] == ["one two three", f"Add {SLUG}"]
+
+
+def test_an_over_long_message_is_rejected(client: TestClient) -> None:
+    upload(client)
+
+    response = put_source(client, SECOND, "x" * 5000)
+
+    assert response.status_code == 422
+    assert [entry["message"] for entry in versions(client)] == [f"Add {SLUG}"]
+
+
 def test_versions_of_a_missing_model_are_a_404(client: TestClient) -> None:
     assert client.get("/api/v1/models/nope/versions").status_code == 404
 

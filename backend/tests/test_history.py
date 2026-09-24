@@ -12,8 +12,10 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import (
     GITIGNORE_NAME,
+    MAX_SUBJECT,
     ModelHistory,
     RevisionNotFoundError,
+    subject_line,
     summarise,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -242,6 +244,33 @@ def test_the_repository_reads_the_same_from_a_plain_git(
         check=True,
     )
     assert log.stdout.strip() == "Initial revision\tScadBuddy"
+
+
+def test_a_control_byte_in_a_message_cannot_desync_the_log(
+    models: Path, history: ModelHistory
+) -> None:
+    """`_parse_log` splits on ASCII RS/US, and the subject is caller-supplied.
+
+    One of either byte in a message would move every later record boundary and
+    silently drop the malformed chunks, so a corrupted history would read as a
+    shorter one with no error anywhere.
+    """
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    write_model(models, "keychain", "cube(20);\n")
+
+    history.commit("bad\x1emessage\x1fhere\nand a second line", "keychain")
+
+    revisions = history.log("keychain")
+    assert len(revisions) == 2
+    assert revisions[0].message == "bad message here and a second line"
+
+
+def test_a_message_is_flattened_to_one_bounded_line() -> None:
+    assert subject_line("  keep   it  tidy \n") == "keep it tidy"
+    assert subject_line("\x00\x1f") == "(no message)"
+    assert subject_line("") == "(no message)"
+    assert len(subject_line("x" * (MAX_SUBJECT * 2))) == MAX_SUBJECT
 
 
 def test_summarise_reads_as_a_sentence() -> None:

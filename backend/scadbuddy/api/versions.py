@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, CommitPath, ConfigDep, HistoryDep, PathsDep, SlugPath
 from scadbuddy.api.models import require_model
-from scadbuddy.core.paths import META_NAME, SOURCE_NAME
+from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
@@ -25,7 +25,7 @@ from scadbuddy.library.history import (
     Revision,
     RevisionNotFoundError,
 )
-from scadbuddy.render.jobs import revision_dir
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 
@@ -164,11 +164,11 @@ async def get_version_schema(
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
-        directory = await revision_dir(slug, resolved, paths=paths, history=history)
+        source = await resolve_source(slug, resolved, paths=paths, history=history)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     try:
-        return await cached_schema(directory / SOURCE_NAME, directory / META_NAME, config=config)
+        return await cached_schema(source.scad, source.schema_cache, config=config)
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"

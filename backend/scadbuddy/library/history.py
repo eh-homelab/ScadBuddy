@@ -53,6 +53,9 @@ GIT = "git"
 LOCK_NAME = ".scadbuddy-git.lock"
 GITIGNORE_NAME = ".gitignore"
 DEFAULT_LOG_LIMIT = 50
+# git itself imposes no subject limit; this one keeps a listed revision readable
+# and bounds what a caller can write into the history.
+MAX_SUBJECT = 200
 
 AUTHOR_NAME = "ScadBuddy"
 AUTHOR_EMAIL = "scadbuddy@localhost"
@@ -142,8 +145,7 @@ class ModelHistory:
         """A git binary exists and ``root`` is a repository."""
         return shutil.which(self.git) is not None and (self.root / ".git").is_dir()
 
-    def _env(self, author: str | None = None) -> dict[str, str]:
-        name = author or AUTHOR_NAME
+    def _env(self) -> dict[str, str]:
         return {
             # Inherited, not pinned: `available` resolves the binary with
             # `shutil.which` against this PATH, so a pinned one would make the
@@ -153,7 +155,7 @@ class ModelHistory:
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_AUTHOR_NAME": name,
+            "GIT_AUTHOR_NAME": AUTHOR_NAME,
             "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
             "GIT_COMMITTER_NAME": AUTHOR_NAME,
             "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
@@ -165,7 +167,6 @@ class ModelHistory:
     def _run(
         self,
         *args: str,
-        author: str | None = None,
         check: bool = True,
         text: bool = True,
     ) -> subprocess.CompletedProcess[str] | subprocess.CompletedProcess[bytes]:
@@ -185,7 +186,7 @@ class ModelHistory:
             completed = subprocess.run(
                 command,
                 cwd=self.root,
-                env=self._env(author),
+                env=self._env(),
                 capture_output=True,
                 text=text,
                 check=False,
@@ -249,23 +250,23 @@ class ModelHistory:
 
     # ── writing ───────────────────────────────────────────────────────────────
 
-    def commit(self, message: str, *paths: str, author: str | None = None) -> str | None:
+    def commit(self, message: str, *paths: str) -> str | None:
         """Stage ``paths`` and commit them. ``None`` when nothing actually changed."""
         with self._exclusive():
-            return self._commit_locked(message, *paths, author=author)
+            return self._commit_locked(message, *paths)
 
-    def _commit_locked(self, message: str, *paths: str, author: str | None = None) -> str | None:
+    def _commit_locked(self, message: str, *paths: str) -> str | None:
         targets = list(paths) or ["."]
-        self._stage(targets, author)
+        self._stage(targets)
         # The commit carries no pathspec: exactly what was just staged is what is
         # committed, and a pathspec would fail for the same reason `add` can (see
         # `_stage`) on the one action that most needs to work -- delete.
         if not self._has_staged():
             return None
-        self._run("commit", "--no-verify", "-m", message, author=author)
+        self._run("commit", "--no-verify", "-m", subject_line(message))
         return self.head()
 
-    def _stage(self, targets: list[str], author: str | None) -> None:
+    def _stage(self, targets: list[str]) -> None:
         """``git add -A`` over the paths an action touched.
 
         A pathspec that matches neither the worktree nor the index is fatal to
@@ -273,7 +274,7 @@ class ModelHistory:
         predates the repository leaves a slug that is neither tracked nor on disk.
         Every other failure is real and propagates.
         """
-        staged = self._run("add", "-A", "--", *targets, author=author, check=False)
+        staged = self._run("add", "-A", "--", *targets, check=False)
         if staged.returncode == 0:
             return
         stderr = staged.stderr if isinstance(staged.stderr, str) else ""
@@ -287,7 +288,7 @@ class ModelHistory:
             return bool(self._out("ls-files", "--cached").strip())
         return self._run("diff", "--cached", "--quiet", check=False).returncode != 0
 
-    def restore(self, slug: str, commit: str, *, author: str | None = None) -> str:
+    def restore(self, slug: str, commit: str) -> str:
         """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
         resolved = self.resolve(commit)
         with self._exclusive():
@@ -300,7 +301,7 @@ class ModelHistory:
             for path in self._tracked(slug):
                 if path not in present:
                     (self.root / path).unlink(missing_ok=True)
-            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, author=author)
+            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug)
         if created is None:
             # Already identical: the caller still wants a revision id to point
             # at, and it is this model's own, not the repository HEAD -- which
@@ -458,6 +459,23 @@ def _parse_log(text: str) -> list[Revision]:
             )
         )
     return revisions
+
+
+def subject_line(message: str) -> str:
+    """Flatten a commit message to one printable line.
+
+    `_parse_log` splits `git log` output on ASCII RS/US, which nothing can emit
+    in a hash, an author or a date -- but `%s` is the SUBJECT, and the subject is
+    caller-supplied text (`PUT /models/{slug}/source` takes a `message`). One RS
+    or US in it would desync every later record boundary and silently drop the
+    malformed chunks, so a garbled history would read as a shorter one with no
+    error anywhere. Control bytes are dropped rather than escaped: this is a
+    one-line summary, and a commit message is not a place to smuggle bytes
+    through. A blank result would make `git commit` fail, so it falls back.
+    """
+    flattened = "".join(" " if character < " " else character for character in message)
+    collapsed = " ".join(flattened.split())
+    return collapsed[:MAX_SUBJECT] if collapsed else "(no message)"
 
 
 def summarise(slugs: Sequence[str]) -> str:

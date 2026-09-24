@@ -15,13 +15,12 @@ from scadbuddy.api.deps import (
     QueueDep,
     SlugPath,
 )
-from scadbuddy.api.models import require_model
+from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.versions import require_history
-from scadbuddy.core.paths import META_NAME, SOURCE_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import COMMIT_ID_PATTERN, RevisionNotFoundError
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, revision_dir
+from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, resolve_source
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
 from scadbuddy.render.schema import ParamValue
 
@@ -118,13 +117,15 @@ async def render_model(
     config: ConfigDep,
     queue: QueueDep,
 ) -> RenderAccepted:
-    require_model(catalogue, slug)
-    version = _resolve_version(history, slug, body.version) or catalogue.version(slug)
+    require_model_exists(catalogue, slug)
+    requested = _resolve_version(history, slug, body.version)
     try:
         # The schema the parameters are validated against has to be the schema of
         # the revision being rendered, not the one the model is currently at.
-        directory = await revision_dir(slug, version, paths=paths, history=history)
-        schema = await cached_schema(directory / SOURCE_NAME, directory / META_NAME, config=config)
+        # `resolve_source` also hands back which revision that is, so the job can
+        # be stamped without asking git a second time.
+        source = await resolve_source(slug, requested, paths=paths, history=history)
+        schema = await cached_schema(source.scad, source.schema_cache, config=config)
     except RevisionNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {body.version}"
@@ -148,7 +149,7 @@ async def render_model(
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
-    job = await queue.submit(slug, body.params, model_version=version)
+    job = await queue.submit(slug, body.params, model_version=source.version)
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 

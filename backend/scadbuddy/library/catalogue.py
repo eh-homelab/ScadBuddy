@@ -99,6 +99,10 @@ class Catalogue:
         return loaded if isinstance(loaded, dict) else {}
 
     def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
+        # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
+        # Dropping it here retires the key from volumes written before that was
+        # true, rather than leaving a cache blob in the versioned tree forever.
+        meta.pop("schema", None)
         meta_path = self.paths.model_meta(slug)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
@@ -158,21 +162,20 @@ class Catalogue:
         """Replace a model's ``.scad`` as one revision.
 
         The hook the paste/edit path (#92) calls: everything that rewrites model
-        source goes through here so it is versioned exactly once. The cached schema
-        is dropped rather than left to `cached_schema` to invalidate, so the
-        committed ``model.json`` never describes a source it does not match.
+        source goes through here so it is versioned exactly once. The derived
+        schema is dropped rather than left for `cached_schema` to notice: it is
+        keyed by the source hash, so a stale one is only ever dead weight.
         """
         self._require(slug)
         self.paths.model_source(slug).write_text(source, encoding="utf-8")
-        raw = self.read_raw_meta(slug)
-        if raw.pop("schema", None) is not None:
-            self.write_raw_meta(slug, raw)
+        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
         self._commit(message or f"Edit {slug} source", slug)
         return self.record(slug)
 
     def delete(self, slug: str) -> None:
         self._require(slug)
         shutil.rmtree(self.paths.model_dir(slug), ignore_errors=True)
+        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
         self._commit(f"Delete {slug}", slug)
         # Outputs are keyed by slug and only listable through it, so they go too.
         # They are NOT in the repository: a 3MF is a build artefact, not source.
