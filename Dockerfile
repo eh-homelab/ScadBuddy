@@ -116,7 +116,7 @@ FROM base AS app
 # swap would change render output with nothing anywhere reporting it. When this
 # fires, re-verify §3 of the design spec against the new build and bump the
 # default below in the same commit.
-ARG OPENSCAD_VERSION=2026.01.19
+ARG OPENSCAD_VERSION=2026.09.23
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

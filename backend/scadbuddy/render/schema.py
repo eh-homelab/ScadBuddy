@@ -94,7 +94,11 @@ def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, str]) -> Pa
         group=str(raw.get("group", "")),
         min=raw.get("min"),
         max=raw.get("max"),
-        step=raw.get("step"),
+        # Only a declared range carries a real step. OpenSCAD 2026.09.23 writes
+        # `step: 1` on every un-ranged number (2026.01.19 omitted it); that is
+        # the customizer's default, and passing it through would put an HTML
+        # `step=1` on a value like 1.2.
+        step=raw.get("step") if resolved == "slider" else None,
         max_length=raw.get("maxLength"),
         options=[Option(name=str(o["name"]), value=o["value"]) for o in raw.get("options", [])],
     )

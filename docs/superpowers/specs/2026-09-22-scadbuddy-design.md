@@ -53,6 +53,15 @@ Non-goals (v1):
 Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
 (OpenSCAD 2026.01.19, Debian 13 trixie, amd64/arm64, **no Python in the image**):
 
+> **Re-verified 2026-09-24 against OpenSCAD 2026.09.23** (the `:dev` tag rolled
+> and the Dockerfile's `OPENSCAD_VERSION` assertion fired). Everything below
+> still holds — `models/name-keychain/verify.sh` passes every check and the
+> `requires_openscad` tests pass — with **one change in the `.param` export**:
+> every un-ranged `number` now carries `"step": 1` (2026.01.19 omitted it),
+> including non-whole initials such as `wall = 1.2`. That is the customizer's
+> default, not a declared step, so `build_schema` keeps `step` only for
+> sliders; the three `.param` fixtures were regenerated on the new build.
+
 - `openscad -o model.param model.scad` writes the **customizer schema as JSON**:
   `{"parameters":[{name, type, initial, caption, group, min, max, step,
   maxLength, options:[{name,value}]}], "title"}`. Types seen: `string`,
