@@ -24,6 +24,7 @@ from scadbuddy.render.provenance import (
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.split import ColourPart
+from scadbuddy.render.thumbnail import render_plate_thumbnails
 
 PROVENANCE = Provenance(
     model="name-keychain",
@@ -37,12 +38,16 @@ PROVENANCE = Provenance(
 BAMBU_KEYS = {"Application", "Title"}
 
 
-@pytest.fixture
-def written(tmp_path: Path) -> Path:
+@pytest.fixture(params=[False, True], ids=["no-covers", "with-covers"])
+def written(request: pytest.FixtureRequest, tmp_path: Path) -> Path:
+    """Both shapes a real output takes: #107 puts four cover PNGs in every 3MF, and
+    the stamp has to leave them exactly as it found them."""
     out = tmp_path / "model.3mf"
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(10, 10, 4)))]
     write_bambu_3mf(
-        [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box(extents=(10, 10, 4)))],
+        parts,
         out,
+        thumbnails=render_plate_thumbnails(parts) if request.param else None,
         model_name="name-keychain",
     )
     return out

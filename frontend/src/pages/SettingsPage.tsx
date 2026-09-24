@@ -271,7 +271,7 @@ export function SettingsPage() {
 
             <p className="text-[13px] text-muted">
               Adds ScadBuddy to Bambuddy&rsquo;s sidebar as an External Link called
-              &ldquo;Customize&rdquo;, opening inside Bambuddy rather than a new tab. Running it
+              &ldquo;ScadBuddy&rdquo;, opening inside Bambuddy rather than a new tab. Running it
               again updates the existing entry.
             </p>
             <div className="flex items-center gap-2">

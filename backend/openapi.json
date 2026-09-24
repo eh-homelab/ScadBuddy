@@ -1730,19 +1730,36 @@
         "type": "object"
       },
       "PipelineReport": {
-        "description": "Bambuddy's report for one pipeline, passed through as it came.",
+        "description": "Bambuddy's report for one pipeline, passed through as it came.\n\n``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be\njudged, which is neither ready nor blocked, and the picker says so rather than\nguessing either way. That either-or is enforced below rather than merely described,\nbecause the browser branches on it: a row with neither would render as silently\nabsent, and one with both would claim two states at once.",
         "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
           "pipeline_id": {
             "title": "Pipeline Id",
             "type": "integer"
           },
           "report": {
-            "$ref": "#/components/schemas/EligibilityReport"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EligibilityReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
-          "pipeline_id",
-          "report"
+          "pipeline_id"
         ],
         "title": "PipelineReport",
         "type": "object"
@@ -2223,6 +2240,299 @@
         "title": "PresetRef",
         "type": "object"
       },
+      "PrintOptions": {
+        "additionalProperties": false,
+        "description": "A sparse overlay on ``PrintQueueItemCreate``'s option fields.\n\n``extra=\"forbid\"`` on purpose: a misspelled option must 422 rather than be\nremembered under a name nothing will ever read.",
+        "properties": {
+          "auto_off_after": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Auto Off After"
+          },
+          "bed_levelling": {
+            "anyOf": [
+              {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Levelling"
+          },
+          "flow_cali": {
+            "anyOf": [
+              {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Flow Cali"
+          },
+          "insert_at_top": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Insert At Top"
+          },
+          "layer_inspect": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Layer Inspect"
+          },
+          "manual_start": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manual Start"
+          },
+          "nozzle_offset_cali": {
+            "anyOf": [
+              {
+                "enum": [
+                  "off",
+                  "on",
+                  "auto"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Offset Cali"
+          },
+          "preheat_chamber_target_override": {
+            "anyOf": [
+              {
+                "maximum": 65.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Chamber Target Override"
+          },
+          "preheat_override": {
+            "anyOf": [
+              {
+                "enum": [
+                  "inherit",
+                  "on",
+                  "off"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Preheat Override"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "timelapse": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timelapse"
+          },
+          "use_ams": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Use Ams"
+          },
+          "vibration_cali": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Vibration Cali"
+          }
+        },
+        "title": "PrintOptions",
+        "type": "object"
+      },
+      "PrintOptionsState": {
+        "description": "The view plus the printer the per-printer scope keys on.\n\nOnly the GET carries it, and only the GET may touch Bambuddy: with a slicer pipeline\nconfigured the target printer lives on the pipeline, so reading it costs one\n``GET /slicer-pipelines/{id}``. The PUT deliberately does not resolve it \u2014 remembering\nan option must not need a reachable Bambuddy \u2014 and an override saved against the wrong\nid would silently never apply, which is why this is served rather than guessed.",
+        "properties": {
+          "defaults": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "global_options": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PrintOptions"
+            },
+            "title": "Models",
+            "type": "object"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "printers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PrintOptions"
+            },
+            "title": "Printers",
+            "type": "object"
+          }
+        },
+        "required": [
+          "defaults",
+          "global_options"
+        ],
+        "title": "PrintOptionsState",
+        "type": "object"
+      },
+      "PrintOptionsUpdate": {
+        "description": "Replaces one scope's overrides wholesale.\n\nAn all-unset ``options`` clears the scope rather than storing an empty object.",
+        "properties": {
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "options": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "scope": {
+            "enum": [
+              "global",
+              "printer",
+              "model"
+            ],
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "required": [
+          "scope",
+          "options"
+        ],
+        "title": "PrintOptionsUpdate",
+        "type": "object"
+      },
+      "PrintOptionsView": {
+        "description": "The remembered print options, plus what Bambuddy would do without them.\n\n``defaults`` is Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults and is the\nbaseline the UI marks a value as non-default against. It is served rather than\nduplicated in the frontend so there is one copy of it in the codebase.",
+        "properties": {
+          "defaults": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "global_options": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "models": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PrintOptions"
+            },
+            "title": "Models",
+            "type": "object"
+          },
+          "printers": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/PrintOptions"
+            },
+            "title": "Printers",
+            "type": "object"
+          }
+        },
+        "required": [
+          "defaults",
+          "global_options"
+        ],
+        "title": "PrintOptionsView",
+        "type": "object"
+      },
       "PrintRunRequest": {
         "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.",
         "properties": {
@@ -2373,11 +2683,17 @@
       "SendRequest": {
         "properties": {
           "copies": {
-            "default": 1,
-            "maximum": 1000.0,
-            "minimum": 1.0,
-            "title": "Copies",
-            "type": "integer"
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copies"
           },
           "mode": {
             "default": "library",
@@ -2387,6 +2703,9 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/PrintOptions"
           }
         },
         "title": "SendRequest",
@@ -2431,6 +2750,9 @@
             ],
             "title": "Mode",
             "type": "string"
+          },
+          "options": {
+            "$ref": "#/components/schemas/PrintOptions"
           },
           "pipeline_run_id": {
             "anyOf": [
@@ -4146,9 +4468,100 @@
         ]
       }
     },
+    "/api/v1/settings/print-options": {
+      "get": {
+        "operationId": "get_print_options_api_v1_settings_print_options_get",
+        "parameters": [
+          {
+            "description": "The model about to be printed, whose own pipeline may differ",
+            "in": "query",
+            "name": "slug",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The model about to be printed, whose own pipeline may differ",
+              "title": "Slug"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrintOptionsState"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remembered print options",
+        "tags": [
+          "settings"
+        ]
+      },
+      "put": {
+        "description": "Only the named scope changes; the other two are left exactly as they were.",
+        "operationId": "put_print_options_api_v1_settings_print_options_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrintOptionsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrintOptionsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remember print options for one scope",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
     "/api/v1/settings/register-sidebar": {
       "post": {
-        "description": "Upsert the ``Customize`` External Link by name.\n\nBambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a\nsandboxed iframe at ``/external/{id}`` \u2014 so ScadBuddy appears as a sidebar page\nrather than a tab.",
+        "description": "Upsert the ``ScadBuddy`` External Link by name.\n\nBambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a\nsandboxed iframe at ``/external/{id}`` \u2014 so ScadBuddy appears as a sidebar page\nrather than a tab.",
         "operationId": "post_register_sidebar_api_v1_settings_register_sidebar_post",
         "responses": {
           "200": {

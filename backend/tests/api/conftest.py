@@ -131,6 +131,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     write_bambu_3mf(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 5)))],
         work / "model.3mf",
+        thumbnails=None,
         model_name=job.slug,
     )
     return JobResult(

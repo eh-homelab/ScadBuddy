@@ -12,10 +12,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from scadbuddy.bambuddy.pipelines import BED_TYPES
+from scadbuddy.bambuddy.models import EligibilityReport
+from scadbuddy.bambuddy.pipelines import BED_TYPES, PipelineReport
 from tests.api.conftest import wait_for_job
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -433,6 +436,60 @@ def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
     assert peak == 3
     # And the order still matches the ids that were asked for.
     assert [entry["pipeline_id"] for entry in body["reports"]] == [1, 2, 3]
+
+
+@respx.mock
+def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
+    client: TestClient, model: str
+) -> None:
+    """A pipeline Bambuddy cannot judge must not blank the whole picker.
+
+    The reports are gathered concurrently, so without per-pipeline isolation the first
+    exception would be the response and the rows that *did* answer would be lost.
+    """
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report())
+    )
+    respx.post(f"{API}/slicer-pipelines/2/check-eligibility").mock(
+        return_value=httpx.Response(500, json={"detail": "the slicer fell over"})
+    )
+    respx.post(f"{API}/slicer-pipelines/3/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report(ok=False))
+    )
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/eligibility",
+        json={"pipeline_ids": [1, 2, 3]},
+    )
+
+    assert response.status_code == 200
+    reports = {entry["pipeline_id"]: entry for entry in response.json()["reports"]}
+    assert reports[1]["report"]["ok"] is True
+    assert reports[3]["report"]["ok"] is False
+    # The one that failed carries why, and no report at all — neither ready nor blocked.
+    assert reports[2]["report"] is None
+    assert "the slicer fell over" in reports[2]["error"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="neither"),
+        pytest.param({"report": EligibilityReport(ok=True), "error": "both"}, id="both"),
+        # An empty reason is no reason: the browser branches on which field is set, and a
+        # blank string reads as "no error" there, which would render the row as absent.
+        pytest.param({"error": ""}, id="blank-error"),
+    ],
+)
+def test_a_pipeline_report_must_carry_either_a_report_or_a_reason(kwargs: Any) -> None:
+    """The browser branches on which of the two is set: a row with neither renders as
+    silently absent, and one with both claims two states at once. Enforced on the model
+    rather than left to whatever constructs it."""
+    with pytest.raises(ValidationError):
+        PipelineReport(pipeline_id=1, **kwargs)
 
 
 @respx.mock

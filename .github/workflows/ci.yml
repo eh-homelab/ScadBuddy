@@ -392,9 +392,9 @@ jobs:
 
   # ── Committed generated files must match their generator ────────────────────
   #
-  # Ported from WonderForgeLabs/forge's `freshness` job. Two files in this repo
-  # are written by a tool and committed, so they can silently drift from the
-  # inputs they were generated from:
+  # Ported from WonderForgeLabs/forge's `freshness` job. Three files in this
+  # repo are written by a tool and committed, so they can silently drift from
+  # the inputs they were generated from:
   #
   #   backend/openapi.json
   #     Written by `scadbuddy.tools.export_openapi`, which builds the FastAPI
@@ -413,6 +413,19 @@ jobs:
   #     breaks `pnpm test` and the Playwright suite, both of which mock the API
   #     with msw. It is a pure copy, so regenerating it is deterministic.
   #
+  #   frontend/src/api/schema.d.ts
+  #     Written by `pnpm gen:api` (openapi-typescript) FROM
+  #     backend/openapi.json, which is why its step runs after the export
+  #     above. Every wire type in frontend/src/api/types.ts is an alias into
+  #     it, so a backend model change that does not reach it leaves the browser
+  #     typed against a contract the server no longer serves — and `tsc` cannot
+  #     tell, because the stale file is internally consistent. That is not
+  #     hypothetical: #91 widened the Bambuddy `Folder` and `Pipeline` models
+  #     and this file was not regenerated, so main carried stale client types
+  #     until the next PR that happened to run the generator, where the errors
+  #     surfaced in someone else's diff (#101, and #96/#98 found it
+  #     independently).
+  #
   # Deliberately NOT covered:
   #   models/<slug>/model.json — hand-authored catalogue metadata (name,
   #     description, tags, source). The design doc calls it a "params schema
@@ -422,9 +435,15 @@ jobs:
   #     runtime state produced by a real openscad against a real data dir, not
   #     a committed build product — regenerating it here would need the image
   #     and would still not be a function of the tree alone.
-  #   frontend/src/api/types.ts — its own header says "Hand-written against
-  #     the documented contract". There is no openapi-typescript (or any other
-  #     generator) in frontend/package.json, so nothing generates it.
+  #   frontend/src/api/types.ts — hand-maintained *aliases* into the generated
+  #     schema.d.ts above ("export type Job = Schemas['JobStatus']"), so adding
+  #     or renaming one is a human act and there is nothing to regenerate. Note
+  #     this entry USED to say "there is no openapi-typescript (or any other
+  #     generator) in frontend/package.json, so nothing generates it" — true
+  #     when the job was written, false since the generator and its `gen:api`
+  #     script were added, and that unrevised claim is a large part of why
+  #     schema.d.ts went uncovered for as long as it did. A "not covered" note
+  #     that has stopped being true is worse than no note.
   #   frontend/pnpm-lock.yaml, backend/uv.lock — owned by Dependabot and by
   #     `--frozen-lockfile` / `--frozen`, which already fail loudly on drift.
   #
@@ -550,6 +569,21 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # AFTER "Regenerate backend/openapi.json" on purpose: this reads that
+      # file, so generating first would type the client against the spec the
+      # tree already had and let a stale pair pass together.
+      #
+      # The only step gated on BOTH trees: the generator is a frontend
+      # devDependency (openapi-typescript, pinned via pnpm-lock.yaml, so its
+      # output is a pure function of the spec) and its input is the backend's
+      # exported spec. With one tree absent there is nothing to generate either
+      # FROM or WITH, and `pnpm gen:api` would fail on the missing input rather
+      # than report drift.
+      - name: Regenerate frontend/src/api/schema.d.ts
+        if: ${{ steps.detect.outputs.backend == 'true' && steps.detect.outputs.frontend == 'true' }}
+        working-directory: frontend
+        run: pnpm gen:api
+
       # `--save` is REQUIRED and is not about saving anything here: without it
       # `msw init` opens an @inquirer prompt asking whether to record the
       # worker directory, and on a runner (no TTY) that aborts with
@@ -565,17 +599,25 @@ jobs:
         id: check
         run: |
           set -uo pipefail
-          # Scoped to the two generated paths on purpose: `pnpm install` and
+          # Scoped to the three generated paths on purpose: `pnpm install` and
           # `uv run` touch other things (node_modules is ignored, but a future
           # tool need not be), and this job must never commit a file it did not
-          # deliberately regenerate.
-          if git diff --quiet -- backend/openapi.json frontend/public/mockServiceWorker.js; then
+          # deliberately regenerate. A pathspec that matches nothing — the
+          # frontend tree absent, say — is not an error to `git diff`, so the
+          # list needs no per-tree branching.
+          if git diff --quiet -- \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts; then
             echo "stale=false" | tee -a "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "stale=true" | tee -a "$GITHUB_OUTPUT"
           echo "Generated files differ from their generators:"
-          git --no-pager diff --stat -- backend/openapi.json frontend/public/mockServiceWorker.js
+          git --no-pager diff --stat -- \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts
 
       # The commit message deliberately carries NO `[skip ci]`. That tag stops
       # every workflow running on the new head; required checks are evaluated
@@ -594,7 +636,10 @@ jobs:
           # avoids GH007 (push rejected for publishing a private email).
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/openapi.json frontend/public/mockServiceWorker.js
+          git add \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts
           git commit -m "chore: regenerate committed generated files
 
           Auto-generated by the CI freshness check."
@@ -628,7 +673,7 @@ jobs:
           if [ "$PUSHED" = "true" ]; then
             echo "::error::Generated files were stale and have been auto-fixed. The new commit's CI run will verify them."
           else
-            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi' and 'cd frontend && pnpm exec msw init public --save', then commit the result."
+            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi', then 'cd frontend && pnpm gen:api && pnpm exec msw init public --save' (in that order — gen:api reads the exported spec), then commit the result."
           fi
           exit 1
 
