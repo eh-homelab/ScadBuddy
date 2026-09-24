@@ -57,8 +57,74 @@ export type PipelineReport = Schemas['PipelineReport']
 export type EligibilityReport = Schemas['EligibilityReport']
 export type EligibilityIssue = Schemas['EligibilityIssue']
 export type PerPrinterReport = Schemas['PerPrinterReport']
-export type PrintRunRequest = Schemas['PrintRunRequest']
+/**
+ * The intersection is the same stale-generator stand-in as the #79 block below: the
+ * backend takes `project_id` on a run, and the generated type has not caught up. Drop it
+ * when `schema.d.ts` is regenerated.
+ */
+export type PrintRunRequest = Schemas['PrintRunRequest'] & { project_id?: number | null }
 export type PrintRunResult = Schemas['PrintRunResult']
+
+/**
+ * #79 — projects.
+ *
+ * These are the only hand-written wire types left in this file, and they are a stand-in,
+ * not a new habit. `backend/openapi.json` carries every one of them, but
+ * `src/api/schema.d.ts` has not been regenerated on this branch — and regenerating it
+ * pulls in #87's and #89's backend commits too, which make `PrintRunResult.run` nullable
+ * and so stop `PrintPicker` type-checking. That file is being edited on two other
+ * branches, so the generator has to run once all three land. Replace each of these with a
+ * `Schemas['...']` alias in that same commit; the shapes below are exactly what
+ * `openapi-typescript` emits for them, so the swap is a no-op.
+ */
+
+/** `folder_id` is null for a project with no library folder yet — one made outside
+ * ScadBuddy usually has none, and linking it creates the folder rather than refusing. */
+export interface ProjectView {
+  archive_count: number
+  colour?: string | null
+  description?: string | null
+  folder_id?: number | null
+  folder_name?: string | null
+  id: number
+  name: string
+  queue_count: number
+  status: string
+}
+
+export interface ProjectChoices {
+  model_project_id?: number | null
+  projects?: ProjectView[]
+}
+
+/** `project_id` set links that project; otherwise `name` is required and one is created.
+ * Bambuddy's own `ProjectCreate` carries `target_count`, `due_date` and `budget` as well,
+ * and ScadBuddy sends none of them rather than inventing numbers for its project page. */
+export interface ProjectRequest {
+  colour?: string | null
+  description?: string | null
+  folder_id?: number | null
+  name?: string | null
+  project_id?: number | null
+  tags?: string | null
+  url?: string | null
+}
+
+export interface ModelProject {
+  project_id?: number | null
+  slug: string
+}
+
+export interface ProjectAttach {
+  project_id?: number | null
+  queue_item_ids?: number[]
+}
+
+export interface AttachResult {
+  archive_ids?: number[]
+  project_id: number
+  queue_item_ids?: number[]
+}
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

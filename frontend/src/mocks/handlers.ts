@@ -1,10 +1,12 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  AttachResult,
   BoundingBox,
   CatalogueFont,
   EligibilityOverview,
   FontFamily,
   Job,
+  ModelProject,
   ModelSummary,
   Output,
   ParamValue,
@@ -14,6 +16,9 @@ import type {
   PresetOptions,
   PresetRef,
   PrintRunResult,
+  ProjectChoices,
+  ProjectRequest,
+  ProjectView,
   SendResult,
   Settings,
 } from '../api/types'
@@ -35,6 +40,9 @@ const state = {
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
+  projects: [...fixtures.projectViews] as ProjectView[],
+  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  modelProjects: {} as Record<string, number>,
   fonts: [...fixtures.fonts] as FontFamily[],
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
@@ -51,6 +59,8 @@ export function resetMockState(): void {
   state.jobs.clear()
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
+  state.projects = fixtures.projectViews.map((p) => ({ ...p }))
+  state.modelProjects = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
@@ -517,6 +527,80 @@ export const handlers = [
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
+  }),
+
+  // --- #79 projects -----------------------------------------------------------------
+
+  http.get(`${base}/print/projects`, ({ request }) => {
+    const slug = new URL(request.url).searchParams.get('slug')
+    return HttpResponse.json({
+      projects: state.projects,
+      // The per-model memory is ScadBuddy's own, so it only exists once a model is named.
+      model_project_id: slug ? (state.modelProjects[slug] ?? null) : null,
+    } satisfies ProjectChoices)
+  }),
+
+  http.post(`${base}/print/projects`, async ({ request }) => {
+    const body = (await request.json()) as ProjectRequest
+    const linked =
+      body.project_id === undefined || body.project_id === null
+        ? undefined
+        : state.projects.find((project) => project.id === body.project_id)
+    if (body.project_id !== undefined && body.project_id !== null && !linked) {
+      return problem(404, 'Not Found', `no project ${body.project_id}`)
+    }
+    if (!linked && !body.name) {
+      return problem(400, 'Bad Request', 'a new project needs a name')
+    }
+    const base_ = linked ?? {
+      id: nextNumber(),
+      name: body.name ?? '',
+      description: body.description ?? null,
+      colour: body.colour ?? null,
+      status: 'active',
+      archive_count: 0,
+      queue_count: 0,
+      folder_id: null,
+      folder_name: null,
+    }
+    // Creating a project creates its library folder, and linking one that has none
+    // creates it too — a project with no folder lists no files on Bambuddy's own page.
+    const saved: ProjectView = {
+      ...base_,
+      folder_id: base_.folder_id ?? nextNumber(),
+      folder_name: base_.folder_name ?? base_.name,
+    }
+    state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
+    await delay(150)
+    return HttpResponse.json(saved)
+  }),
+
+  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as { project_id: number | null }
+    if (body.project_id === null) delete state.modelProjects[slug]
+    else state.modelProjects[slug] = body.project_id
+    return HttpResponse.json({
+      slug,
+      project_id: state.modelProjects[slug] ?? null,
+    } satisfies ModelProject)
+  }),
+
+  http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
+    const projectId = body.project_id ?? state.modelProjects[output.slug] ?? null
+    if (projectId === null) {
+      return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
+    }
+    // An archive only exists once a print has finished, so the mock reports none: the
+    // caller attaches again later rather than the run pretending it already happened.
+    return HttpResponse.json({
+      project_id: projectId,
+      queue_item_ids: body.queue_item_ids,
+      archive_ids: [],
+    } satisfies AttachResult)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),
