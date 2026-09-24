@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
+ <metadata name="Application">ScadBuddy</metadata>
+ <metadata name="Title">name-keychain</metadata>
+ <resources>
+  <object id="3" name="name-keychain" type="model" p:UUID="50784226-c0de-5d4b-b7cc-452fab7307ef">
+   <components>
+    <component p:path="/3D/Objects/object_1.model" objectid="1" p:UUID="729145e9-329c-55e0-a8e6-e7b5fc19b8dd" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+    <component p:path="/3D/Objects/object_2.model" objectid="2" p:UUID="aa6b009e-d3b1-520a-9e06-a02dfad70d19" transform="1 0 0 0 1 0 0 0 1 0 0 0"/>
+   </components>
+  </object>
+ </resources>
+ <build p:UUID="9b702456-fd36-5c7f-b7ae-508c997737ba">
+  <item objectid="3" transform="1 0 0 0 1 0 0 0 1 106.32627 127.998883 0" printable="1" p:UUID="7261f554-9a79-5d5a-8a2d-81d612219a58"/>
+ </build>
+</model>
