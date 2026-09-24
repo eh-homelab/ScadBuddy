@@ -76,6 +76,7 @@ class TestPlacement:
     def test_tower_clears_the_object_and_every_extruder_reaches_it(self) -> None:
         plate = plate_for("H2C")
         placement = place_on_plate(KEYCHAIN, plate)
+        assert placement.tower is not None
         x, y = placement.tower
         assert x >= plate.usable.min_x
         assert x + PRIME_TOWER_SIDE <= plate.usable.max_x
@@ -88,6 +89,7 @@ class TestPlacement:
         for model in ("H2C", "X1C", "A1", "H2D"):
             plate = plate_for(model)
             placement = place_on_plate(KEYCHAIN, plate)
+            assert placement.tower is not None
             cx, cy = placement.offset[0], placement.offset[1]
             object_box = (cx - 88.0, cy - 23.0, cx + 88.0, cy + 23.0)
             tower = (
@@ -107,6 +109,7 @@ class TestPlacement:
     def test_tower_avoids_the_filament_cutter_cutout(self) -> None:
         plate = plate_for("P1S")
         placement = place_on_plate(_bounds(60.0, 60.0), plate)
+        assert placement.tower is not None
         x, y = placement.tower
         cutout = plate.exclusions[0]
         assert not (x < cutout.max_x and y < cutout.max_y)
