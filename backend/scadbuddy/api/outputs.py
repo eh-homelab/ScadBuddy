@@ -124,7 +124,9 @@ def get_output(output_id: OutputIdPath, outputs: OutputsDep) -> OutputDetail:
     response_model=EditTarget,
     summary="Resolve an edit deep link",
 )
-def get_edit_target(output_id: OutputIdPath, outputs: OutputsDep) -> EditTarget:
+def get_edit_target(
+    output_id: OutputIdPath, catalogue: CatalogueDep, outputs: OutputsDep
+) -> EditTarget:
     """Where ``/edit/{output_id}`` should land, and with which values.
 
     The record answers first. When it is gone — the directory restored without its
@@ -140,6 +142,7 @@ def get_edit_target(output_id: OutputIdPath, outputs: OutputsDep) -> EditTarget:
                 status.HTTP_404_NOT_FOUND,
                 f"no output with id {output_id!r}, and no 3MF left to read it from",
             ) from None
+        require_model(catalogue, stamped.model)
         return EditTarget(
             output_id=output_id,
             slug=stamped.model,
@@ -148,6 +151,10 @@ def get_edit_target(output_id: OutputIdPath, outputs: OutputsDep) -> EditTarget:
             model_version=stamped.version,
             source="3mf",
         )
+    # Every other route through a slug asks the catalogue first. A link is allowed to
+    # outlive its output — that is the point of the 3MF fallback — but not its model:
+    # answering 200 would send the customizer somewhere it cannot load.
+    require_model(catalogue, meta.slug)
     return EditTarget(
         output_id=meta.id,
         slug=meta.slug,

@@ -313,3 +313,25 @@ def test_a_public_url_that_cannot_be_written_as_xml_yields_no_link(written: Path
     with zipfile.ZipFile(written) as archive:
         ET.fromstring(archive.read(ROOT_MODEL).decode("utf-8"))
     assert "Description" not in _metadata(written)
+
+
+def test_a_failed_rewrite_leaves_the_original_3mf_alone(
+    written: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The 3MF is the deliverable; a half-written one is worse than an unstamped one."""
+    original = written.read_bytes()
+    calls = {"n": 0}
+    real = zipfile.ZipFile.writestr
+
+    def fail_partway(self: zipfile.ZipFile, *args: object, **kwargs: object) -> None:
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise OSError("no space left on device")
+        real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(zipfile.ZipFile, "writestr", fail_partway)
+    with pytest.raises(OSError, match="no space"):
+        stamp(written, PROVENANCE)
+
+    assert written.read_bytes() == original
+    assert list(written.parent.iterdir()) == [written]

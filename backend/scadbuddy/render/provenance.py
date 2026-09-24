@@ -13,6 +13,7 @@ file exactly as before and every other part is left byte-for-byte alone.
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import zipfile
 from pathlib import Path
@@ -129,11 +130,19 @@ def stamp(path: Path, provenance: Provenance) -> None:
         )
         for name, payload in entries
     ]
-    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for name, payload in rewritten:
-            info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
-            info.compress_type = zipfile.ZIP_DEFLATED
-            archive.writestr(info, payload)
+    # Written beside the original and moved over it, never truncated in place: the 3MF
+    # is the deliverable, and a rewrite that dies halfway would otherwise leave a
+    # partial file where a whole one used to be.
+    temporary = path.with_name(path.name + ".stamping")
+    try:
+        with zipfile.ZipFile(temporary, "w", zipfile.ZIP_DEFLATED) as archive:
+            for name, payload in rewritten:
+                info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, payload)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def read(path: Path) -> Provenance | None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import zipfile
 
 from fastapi.testclient import TestClient
@@ -202,6 +203,24 @@ def test_the_version_is_the_source_the_render_saw_not_the_one_on_disk_at_save(
     stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
     assert stamped is not None
     assert stamped.version == rendered
+
+
+def test_an_edit_link_for_a_model_that_is_gone_is_a_404(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A deep link outlives its output; it must not outlive its model.
+
+    Every other route through a slug asks the catalogue first. Answering 200 here
+    would send the customizer to a model that cannot be loaded, which reads as a
+    broken page rather than as the "that output is gone" the link already has.
+    """
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    assert client.get(f"/api/v1/outputs/{created['id']}/edit").status_code == 200
+
+    shutil.rmtree(paths.model_dir(model))
+    assert client.get(f"/api/v1/outputs/{created['id']}/edit").status_code == 404
 
 
 def test_the_stamp_leaves_out_a_link_when_no_public_url_is_set(
