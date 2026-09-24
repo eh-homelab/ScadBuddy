@@ -95,6 +95,11 @@ jobs:
     if: ${{ always() && needs.resolve.result != 'skipped' && needs.deploy.result != 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    # A commit comment needs contents: write. The App token below carries it
+    # on its own; this is for the GITHUB_TOKEN fallback, which otherwise could
+    # never post and would only ever reach the `::warning::`.
+    permissions:
+      contents: write
     steps:
       # The App token rather than GITHUB_TOKEN, which the org caps for
       # comment writes; falls back to GITHUB_TOKEN if the App secrets go.

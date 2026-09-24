@@ -163,5 +163,8 @@ jobs:
           gh release edit "$TAG" --notes-file notes.md
           echo "$line" >> "$GITHUB_STEP_SUMMARY"
           # A failed deploy fails the workflow too; the release note is the
-          # human-facing copy, this is the machine-facing one.
-          [ "$RESOLVE_RESULT" = "success" ] && [ "$DEPLOY_RESULT" = "success" ]
+          # human-facing copy, this is the machine-facing one. Overtaken in
+          # the queue is ordinary behaviour, not a failure — see the `pin`
+          # job's concurrency note in deploy.reusable.yml.
+          [ "$RESOLVE_RESULT" = "success" ] || exit 1
+          case "$DEPLOY_RESULT" in success|cancelled) ;; *) exit 1 ;; esac

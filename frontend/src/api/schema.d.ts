@@ -1023,8 +1023,6 @@ export interface components {
             target_model_class?: string | null;
             /** Target Printer Id */
             target_printer_id?: number | null;
-<<<<<<< HEAD
-=======
         };
         /** PipelineChoices */
         PipelineChoices: {
@@ -1255,7 +1253,6 @@ export interface components {
             printer_preset?: components["schemas"]["PresetRef"] | null;
             /** Process */
             process?: components["schemas"]["PresetChoice"][];
->>>>>>> origin/main
         };
         /**
          * PresetRef
@@ -1271,8 +1268,6 @@ export interface components {
             source: "orca_cloud" | "cloud" | "local" | "standard";
         };
         /**
-<<<<<<< HEAD
-=======
          * PrintRunRequest
          * @description ``pipeline_id`` omitted means "whatever this model defaults to".
          *
@@ -1304,7 +1299,6 @@ export interface components {
             run: components["schemas"]["PipelineRun"];
         };
         /**
->>>>>>> origin/main
          * Printer
          * @description ``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
          *
