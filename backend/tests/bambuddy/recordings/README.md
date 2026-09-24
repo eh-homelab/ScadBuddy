@@ -49,6 +49,16 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
 - **A library file has no `url` field.** `FileUpdate` takes `filename`, `folder_id`,
   `project_id` and `notes`, and `notes` is the only free text on one — see
   "Where an Edit in ScadBuddy link can live" below.
+- **`PUT /library/files/{id}` is a partial update**, so sending `notes` alone cannot
+  clear the file's folder or project. This one could not be settled by reading — the
+  schema shows every field as `anyOf [type, null]` with no `required` list, which is
+  equally consistent with a full replace — and it could not be settled by measuring
+  either, because that would mean writing to the live instance. It was settled from
+  Bambuddy's **source**: `update_file` guards every assignment with
+  `if data.<field> is not None`, and `FileUpdate` defaults each field to `None`
+  ([library.py#L5103-L5136](https://github.com/maziggy/bambuddy/blob/9e9c08ba2cc08bf1e746ed98bef2b46b7bedea02/backend/app/api/routes/library.py#L5103-L5136)).
+  Two details from the same lines: the sentinel that *clears* `folder_id`/`project_id`
+  is **`0`**, not `null`, and an empty `notes` string is stored as `NULL`.
 - **An AMS `id` is the printer's numbering, not a list index.** The recorded H2C
   reports units `[0, 1, 128, 2]` — unsorted, with the single-slot AMS-HT at `128`,
   which is also how `ams_switch_inlet` keys them (as **strings**; JSON has no integer
