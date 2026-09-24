@@ -278,6 +278,19 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
+        """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
+        library file has; there is no ``url`` on one (``external_url`` lives on an
+        archive, which a send never produces)."""
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"annotate library file {file_id}",
+            json={"notes": notes},
+        )
+        return LibraryFile.model_validate(response.json())
+
     async def delete_library_file(self, file_id: int) -> None:
         await self._send(
             "DELETE",

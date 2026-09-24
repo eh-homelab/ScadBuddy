@@ -17,6 +17,7 @@ import type {
   SendResult,
   Settings,
 } from '../api/types'
+import { editPath } from '../lib/deeplink'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
 
@@ -344,6 +345,9 @@ export const handlers = [
       pipeline_run_id: pipelineRunId,
       queue_item_id: queueItemId,
       bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      edit_url: state.settings.public_url
+        ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
+        : null,
     }
     return HttpResponse.json(result)
   }),

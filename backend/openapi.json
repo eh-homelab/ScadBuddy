@@ -2334,6 +2334,17 @@
             ],
             "title": "Bambuddy Url"
           },
+          "edit_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Edit Url"
+          },
           "filename": {
             "title": "Filename",
             "type": "string"

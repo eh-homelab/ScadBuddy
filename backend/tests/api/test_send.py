@@ -351,3 +351,46 @@ def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
         f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": copies}
     )
     assert response.status_code == 422
+
+
+# --- #80 the Edit in ScadBuddy back-link ---------------------------------------------
+
+
+def annotate_route(file_id: int = 41) -> respx.Route:
+    return respx.put(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
+    )
+
+
+@respx.mock
+def test_the_edit_link_is_attached_to_the_uploaded_file(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, public_url="https://scad.test/")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    edit_url = f"https://scad.test/edit/{output_id}"
+    assert body["edit_url"] == edit_url
+    assert annotate.called
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: {edit_url}"
+    }
+
+
+@respx.mock
+def test_nothing_is_attached_when_no_public_url_is_configured(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    assert body["edit_url"] is None
+    assert not annotate.called

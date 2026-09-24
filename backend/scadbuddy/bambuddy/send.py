@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.models import (
     SliceRequest,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -43,6 +44,9 @@ LIBRARY_PATH = "/library"
 QUEUE_BED_LEVELLING: CalibrationMode = "off"
 QUEUE_FLOW_CALI: CalibrationMode = "off"
 
+#: Prefix for the note attached to the library file, so the link is legible as text.
+EDIT_NOTE = "Edit in ScadBuddy: "
+
 
 class SendRequest(BaseModel):
     mode: SendMode = "library"
@@ -57,6 +61,8 @@ class SendResult(BaseModel):
     queue_item_id: int | None = None
     #: Deep link into Bambuddy for what this send produced.
     bambuddy_url: str | None = None
+    #: The "Edit in ScadBuddy" link attached to the library file, when one is known.
+    edit_url: str | None = None
 
 
 class SidebarLink(BaseModel):
@@ -171,6 +177,9 @@ async def send_output(
     if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
         raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
     library_file_id = meta.library_file_id
+    link = edit_url(settings.public_url, meta.id)
+    if link is not None:
+        await client.annotate_library_file(library_file_id, f"{EDIT_NOTE}{link}")
 
     if request.mode == "library":
         return SendResult(
@@ -178,6 +187,7 @@ async def send_output(
             library_file_id=library_file_id,
             filename=filename,
             bambuddy_url=client.config.web_url(LIBRARY_PATH),
+            edit_url=link,
         )
 
     # The model's own default pipeline wins over the global one (#86); before that
@@ -195,6 +205,7 @@ async def send_output(
             filename=filename,
             pipeline_run_id=run.id,
             bambuddy_url=client.config.web_url(QUEUE_PATH),
+            edit_url=link,
         )
 
     if settings.printer_id is None:
@@ -233,6 +244,7 @@ async def send_output(
         filename=filename,
         queue_item_id=item.id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
+        edit_url=link,
     )
 
 

@@ -1343,6 +1343,8 @@ export interface components {
         SendResult: {
             /** Bambuddy Url */
             bambuddy_url?: string | null;
+            /** Edit Url */
+            edit_url?: string | null;
             /** Filename */
             filename: string;
             /** Library File Id */
