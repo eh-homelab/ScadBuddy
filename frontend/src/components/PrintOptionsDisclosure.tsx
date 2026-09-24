@@ -307,6 +307,8 @@ function OptionControl({
       <input
         id={id}
         type="number"
+        min={spec.min}
+        max={spec.max}
         value={isSet(value) ? String(value) : UNSET}
         placeholder={isSet(fallback) ? String(fallback) : ''}
         onChange={(event) => onChange(event.target.value === UNSET ? null : Number(event.target.value))}

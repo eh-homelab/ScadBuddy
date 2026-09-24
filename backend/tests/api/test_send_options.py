@@ -270,18 +270,26 @@ def test_a_printer_class_pipeline_queues_by_target_model(client: TestClient, mod
 def test_a_per_printer_override_finds_the_pipelines_target_printer(
     client: TestClient, model: str
 ) -> None:
-    """No ``printer_id`` is configured, so the scope key can only come from the pipeline."""
+    """No ``printer_id`` is configured, so the scope key can only come from the pipeline.
+
+    The remembered value is deliberately ``True`` — the opposite of Bambuddy's default —
+    because asserting the default would pass just as well if the override were dropped on
+    the floor, which is the one thing this test exists to rule out.
+    """
     configure(client, pipeline_id=4)
-    remember(client, "printer", {"timelapse": False}, key=str(PIPELINE["target_printer_id"]))
+    assert BAMBUDDY_DEFAULTS.timelapse is False
+    remember(client, "printer", {"timelapse": True}, key=str(PIPELINE["target_printer_id"]))
     output_id = make_output(client, model)
     upload_route()
-    pipeline_route()
+    read = pipeline_route()
     slice_routes()
     queue = queue_route()
 
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
 
-    assert json.loads(queue.calls.last.request.read())["timelapse"] == (BAMBUDDY_DEFAULTS.timelapse)
+    # The premise: the printer id could only have come from reading the pipeline.
+    assert read.called
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is True
 
 
 @respx.mock

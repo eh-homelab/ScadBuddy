@@ -3,6 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Output, PrintOptions, SendMode, SendResult } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { eligibilityIssues } from '../lib/problems'
+import { quantityBounds } from '../lib/printOptions'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -21,6 +22,8 @@ const MODES: { value: SendMode; label: string; detail: string }[] = [
   },
 ]
 
+const { min: QUANTITY_MIN, max: QUANTITY_MAX } = quantityBounds()
+
 interface Props {
   open: boolean
   output: Output | undefined
@@ -30,10 +33,10 @@ interface Props {
 
 export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [mode, setMode] = useState<SendMode>('queue')
-  // `null` until the box is touched, so an untouched Copies does NOT go out as an
-  // explicit `quantity: 1` and silently beat a remembered per-printer or per-model one.
-  const [copies, setCopies] = useState<number | null>(null)
   // #88 — per-send overrides. Remembered ones live on the server and are merged there.
+  // Copies is one of these rather than a control of its own: `SendRequest.copies` and
+  // `options.quantity` are the same value, and two independent controls for it left the
+  // disclosure's Quantity row showing a number that was no longer going to be sent.
   const [options, setOptions] = useState<PrintOptions>({})
   const [effective, setEffective] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
@@ -41,8 +44,10 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [issues, setIssues] = useState<string[]>([])
   const [result, setResult] = useState<SendResult | null>(null)
 
-  // What the print will actually be queued with, which is what the box should show.
-  const quantity = copies ?? effective.quantity ?? 1
+  // What the print will actually be queued with. `options.quantity` first, not just
+  // `effective`, because the disclosure reports the merge back through an effect and a
+  // controlled input cannot wait a render for the keystroke it was just given.
+  const quantity = options.quantity ?? effective.quantity ?? 1
 
   function close() {
     setError(null)
@@ -58,7 +63,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
     setError(null)
     setIssues([])
     try {
-      const sent = await api.sendOutput(output.id, { mode, copies, options })
+      const sent = await api.sendOutput(output.id, { mode, options })
       setResult(sent)
       onSent(sent)
     } catch (cause) {
@@ -159,11 +164,20 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
             <input
               id="send-copies"
               type="number"
-              min={1}
-              max={50}
+              // The same bound the Quantity row uses, because it is the same field.
+              min={QUANTITY_MIN}
+              max={QUANTITY_MAX}
               value={quantity}
               disabled={mode !== 'queue'}
-              onChange={(event) => setCopies(Math.max(1, Number(event.target.value)))}
+              onChange={(event) =>
+                setOptions((current) => ({
+                  ...current,
+                  quantity: Math.min(
+                    QUANTITY_MAX,
+                    Math.max(QUANTITY_MIN, Number(event.target.value)),
+                  ),
+                }))
+              }
               className="sb-field sb-num w-20 text-right"
             />
             {mode !== 'queue' && (

@@ -44,13 +44,19 @@ class PrintOptions(BaseModel):
     layer_inspect: bool | None = None
     timelapse: bool | None = None
     use_ams: bool | None = None
+    #: 1-1000 is **ScadBuddy's** bound, mirroring ``SendRequest.copies``, which is the
+    #: other control for this same value. Bambuddy declares ``quantity`` as a plain
+    #: integer with no bound at all.
     quantity: int | None = Field(default=None, ge=1, le=1000)
     manual_start: bool | None = None
     insert_at_top: bool | None = None
     auto_off_after: bool | None = None
     project_id: int | None = None
     preheat_override: PreheatOverride | None = None
-    #: Bambuddy bounds this one itself (0-65); mirrored so a bad value 422s here.
+    #: 0-65 is **Bambuddy's** own bound, recorded in
+    #: ``tests/bambuddy/recordings/openapi/scadbuddy-routes.json`` and asserted against
+    #: that recording by ``test_the_measured_bound_comes_from_bambuddys_own_schema``.
+    #: Mirrored so a bad value 422s here rather than at Bambuddy.
     preheat_chamber_target_override: int | None = Field(default=None, ge=0, le=65)
 
     def queue_fields(self) -> dict[str, Any]:

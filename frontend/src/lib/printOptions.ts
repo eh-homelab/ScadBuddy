@@ -18,6 +18,9 @@ export interface OptionSpec {
   label: string
   kind: OptionKind
   hint?: string
+  /** For a number control, so an out-of-range value is caught before the round trip. */
+  min?: number
+  max?: number
 }
 
 /**
@@ -33,17 +36,29 @@ export const PRINT_OPTIONS: readonly OptionSpec[] = [
   { name: 'layer_inspect', label: 'First-layer inspection', kind: 'boolean' },
   { name: 'timelapse', label: 'Timelapse', kind: 'boolean' },
   { name: 'use_ams', label: 'Use the AMS', kind: 'boolean' },
-  { name: 'quantity', label: 'Quantity', kind: 'number', hint: 'Copies above overrides it' },
+  {
+    name: 'quantity',
+    label: 'Quantity',
+    kind: 'number',
+    // The Copies box above is the same value, not a competing one.
+    hint: 'Copies above',
+    min: 1,
+    max: 1000,
+  },
   { name: 'manual_start', label: 'Wait for a manual start', kind: 'boolean' },
   { name: 'insert_at_top', label: 'Insert at the top of the queue', kind: 'boolean' },
   { name: 'auto_off_after', label: 'Power off afterwards', kind: 'boolean' },
-  { name: 'project_id', label: 'Bambuddy project', kind: 'number', hint: 'Project id' },
+  // No bound: Bambuddy declares `project_id` as a plain integer, so inventing one here
+  // would reject an id the user's own instance would accept.
+  { name: 'project_id', label: 'Bambuddy project', kind: 'number', hint: 'Project id', min: 1 },
   { name: 'preheat_override', label: 'Preheat', kind: 'preheat' },
   {
     name: 'preheat_chamber_target_override',
     label: 'Chamber preheat target',
     kind: 'number',
     hint: '0-65 °C',
+    min: 0,
+    max: 65,
   },
 ]
 
@@ -109,4 +124,10 @@ export function isNonDefault(
   const value = optionValue(effective, name)
   if (!isSet(value)) return false
   return value !== optionValue(defaults, name)
+}
+
+/** `quantity`'s declared bound, so the send bar's Copies box cannot drift from the row. */
+export function quantityBounds(): { min: number; max: number } {
+  const spec = PRINT_OPTIONS.find((option) => option.name === 'quantity')
+  return { min: spec?.min ?? 1, max: spec?.max ?? 1000 }
 }

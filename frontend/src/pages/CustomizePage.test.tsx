@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
@@ -134,8 +134,9 @@ describe('CustomizePage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
-    // `copies` stays null: untouched, so it must not overrule a remembered quantity.
-    expect(bodies[0]).toMatchObject({ mode: 'queue', copies: null, options: { timelapse: true } })
+    // No `copies` at all: the send bar's Copies box is `options.quantity` now, so there
+    // is one control and one field rather than two that can disagree.
+    expect(bodies[0]).toEqual({ mode: 'queue', options: { timelapse: true } })
   })
 
   it('does not let an untouched Copies box beat a remembered quantity (#88)', async () => {
@@ -171,7 +172,52 @@ describe('CustomizePage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toMatchObject({ mode: 'queue', copies: null })
+    // Nothing about quantity goes out, so the remembered 5 is what the server resolves.
+    expect(bodies[0]).toEqual({ mode: 'queue', options: {} })
+  })
+
+  it('keeps the Copies box and the Options row on one value (#88)', async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...printOptions, models: { 'name-keychain': { quantity: 5 } } }),
+      ),
+    )
+    const bodies: unknown[] = []
+    server.use(
+      http.post('/api/v1/outputs/:id/send', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain.3mf',
+          queue_item_id: 7,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          options: { quantity: 2 },
+        })
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await waitFor(() => expect(within(dialog).getByLabelText('Copies')).toHaveValue(5))
+    await user.click(within(dialog).getByText('Options'))
+    await waitFor(() => expect(within(dialog).getByLabelText('Quantity')).toBeInTheDocument())
+
+    // Editing Copies must not leave the disclosure's Quantity row showing the old number.
+    // `fireEvent.change`, not `type`: the box clamps to its minimum on every keystroke,
+    // so a cleared-then-typed value appends to the clamp rather than replacing it. A real
+    // select-all-and-type produces exactly this one change event.
+    fireEvent.change(within(dialog).getByLabelText('Copies'), { target: { value: '2' } })
+
+    expect(within(dialog).getByLabelText('Quantity')).toHaveValue(2)
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ mode: 'queue', options: { quantity: 2 } })
   })
 
   it('reopens an earlier output with its parameters', async () => {
