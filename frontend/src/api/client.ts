@@ -16,6 +16,7 @@ import type {
   PipelineView,
   PresetOptions,
   PresetRef,
+  PrintProgress,
   PrintRunRequest,
   PrintRunResult,
   Problem,
@@ -171,6 +172,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+
+  /**
+   * #89 — how the last print of this output is going. A `null` body is the answer for
+   * an output that has never been printed, so it is passed straight through: turning it
+   * into an error here would make "not printed yet" indistinguishable from a broken read.
+   */
+  getPrintProgress: (outputId: string) =>
+    request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

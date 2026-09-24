@@ -60,6 +60,66 @@ export type PerPrinterReport = Schemas['PerPrinterReport']
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
 
+/**
+ * #89 — run tracking.
+ *
+ * These two are the only hand-written wire types left, and they are hand-written for a
+ * mechanical reason rather than a judgement: `backend/openapi.json` carries
+ * `PrintProgress` and `CopyProgress`, but `schema.d.ts` in this tree was generated
+ * before the #89 backend landed and does not. The shapes below are transcribed from
+ * that spec — including which members `openapi-typescript` makes required, namely the
+ * ones carrying a default — so once `pnpm gen:api` has run each becomes a one-line
+ * alias like every other type here.
+ */
+
+/** Which of Bambuddy's two routes the print left by. They report progress differently. */
+export type PrintRoute = 'pipeline' | 'slice_queue'
+
+/**
+ * `unknown` is a real state, not a parse failure: Bambuddy's status vocabularies differ
+ * per object, so a value the backend has not seen renders as "still going" rather than
+ * silently as "done".
+ */
+export type PrintStage =
+  | 'pending'
+  | 'running'
+  | 'queued'
+  | 'done'
+  | 'failed'
+  | 'cancelled'
+  | 'unknown'
+
+export interface CopyProgress {
+  copy_index?: number | null
+  message?: string | null
+  printer_name?: string | null
+  queue_entry_id?: number | null
+  stage: PrintStage
+  /** Why it is not printing *yet*. Waiting is not failing — `message` is the failure. */
+  waiting_reason?: string | null
+}
+
+export interface PrintProgress {
+  bambuddy_url: string
+  copies: number
+  copies_cancelled: number
+  copies_completed: number
+  copies_detail?: CopyProgress[]
+  copies_failed: number
+  copies_in_progress: number
+  /** Bambuddy's own failure text, verbatim. */
+  error_message?: string | null
+  /** What to do about it, chosen by the backend from *where* it failed, not the wording. */
+  fix?: string | null
+  pipeline_run_id?: number | null
+  queue_item_id?: number | null
+  route: PrintRoute
+  /** The only thing that says polling can stop. Never re-derive it from `stage`. */
+  settled: boolean
+  slice_job_id?: number | null
+  stage: PrintStage
+}
+
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
 export type SendMode = SendResult['mode']
