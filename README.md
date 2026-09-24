@@ -48,7 +48,11 @@ Both call `deploy.reusable.yml`, which:
    `deploy/scadbuddy`, and arms `gh pr merge --auto --squash`. A newer deploy
    closes an older open one and replaces the branch; this one job carries a
    concurrency group shared by both paths, so only the branch/PR handling
-   serialises — a release's image wait never holds up a main deploy.
+   serialises — a release's image wait never holds up a main deploy. GitHub
+   keeps one running and one queued job per group and drops the queued one
+   when a third arrives, so the **newest** request always runs; an overtaken
+   deploy is reported (⚠️ on the commit or release) rather than lost, and
+   re-running it deploys that build anyway.
 
 The clusters ruleset (`CI Summary` + `claude-review`) gates the merge; the
 merge is the deploy. ArgoCD then syncs the `scadbuddy` Application, and

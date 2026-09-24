@@ -79,6 +79,14 @@ jobs:
     # Job-level, so only these few seconds serialise — deploy-release's image
     # wait and deploy-main's digest lookup run concurrently. Never cancel: a
     # run cut off between the push and `gh pr merge --auto` leaves an orphan.
+    #
+    # GitHub keeps ONE running and ONE pending job per group; a third request
+    # cancels the pending one (it never runs) and takes its place. So the
+    # newest request always runs, and a deploy dropped from the queue is one
+    # a newer request overtook before it started — the same outcome its own
+    # supersession logic would have produced, minus the PR. The callers
+    # report that case (`needs.deploy.result == 'cancelled'`) so it is never
+    # silent; re-running the dropped run deploys it.
     concurrency:
       group: scadbuddy-deploy
       cancel-in-progress: false

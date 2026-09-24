@@ -83,3 +83,52 @@ jobs:
       source_url: ${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.resolve.outputs.revision }}
       source_kind: main
     secrets: inherit
+
+  # Success is reported by clusters' scadbuddy-verify-deploy.yml once the pod
+  # serves the revision; this job covers the two ways a main deploy can end
+  # with no PR at all — the `pin` job was overtaken in the deploy queue and
+  # cancelled before it ran, or it failed — so neither is silent. Posts a
+  # commit comment on the build's commit, the same place verification reports.
+  report:
+    name: Report a deploy that opened no PR
+    needs: [resolve, deploy]
+    if: ${{ always() && needs.resolve.result != 'skipped' && needs.deploy.result != 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # The App token rather than GITHUB_TOKEN, which the org caps for
+      # comment writes; falls back to GITHUB_TOKEN if the App secrets go.
+      - name: Mint an App token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          owner: eh-homelab
+          repositories: ScadBuddy
+          permission-contents: write
+
+      - name: Comment on the commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$RESOLVE_RESULT:$DEPLOY_RESULT" in
+            success:cancelled)
+              line="⚠️ Not deployed: a newer deploy request overtook this build before its clusters PR was opened. A later main build supersedes it; re-run the [deploy run](${RUN_URL}) to deploy this commit anyway." ;;
+            success:*)
+              line="❌ Deploy failed before a clusters PR was opened — see the [deploy run](${RUN_URL})." ;;
+            *)
+              line="❌ Deploy could not resolve this build's image digest — see the [deploy run](${RUN_URL})." ;;
+          esac
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/comments" -f body="$line" > /dev/null \
+            || echo "::warning::could not comment on ${REVISION:0:7}"
+          # The workflow is red for anything but the overtaken case, which is
+          # ordinary queue behaviour rather than a failure.
+          [ "$DEPLOY_RESULT" = "cancelled" ]

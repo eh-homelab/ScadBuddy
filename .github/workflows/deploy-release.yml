@@ -143,6 +143,10 @@ jobs:
           set -euo pipefail
           if [ "$RESOLVE_RESULT" != "success" ]; then
             line="❌ The ${TAG} image never became available — see the [deploy run](${RUN_URL})."
+          elif [ "$DEPLOY_RESULT" = "cancelled" ]; then
+            # Overtaken in the deploy queue (see the `pin` job's concurrency
+            # note in deploy.reusable.yml); nothing was opened, nothing failed.
+            line="⚠️ Not deployed: a newer deploy request overtook this one before it started, so no clusters PR was opened. Re-run the [deploy run](${RUN_URL}) to pin this release."
           elif [ "$DEPLOY_RESULT" != "success" ]; then
             line="❌ Opening the clusters deploy PR failed — see the [deploy run](${RUN_URL})."
           elif [ "$UNCHANGED" = "true" ]; then
