@@ -322,6 +322,55 @@ describe('PrintPicker', () => {
     expect(screen.queryByTestId('force')).not.toBeInTheDocument()
   })
 
+  it('reports a failure that hit every pipeline once, not once per row', async () => {
+    // A bad API key or an unreachable Bambuddy fails every check with the same message;
+    // repeating it per row says nothing extra and buries the actual problem.
+    const detail = "Bambuddy refused the API key. The key needs the 'Manage Queue' scope"
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', () =>
+        HttpResponse.json({
+          library_file_id: 8801,
+          reports: fixtures.pipelineViews.map((pipeline) => ({
+            pipeline_id: pipeline.id,
+            report: null,
+            error: detail,
+          })),
+        }),
+      ),
+    )
+    open()
+    await screen.findByRole('radio', { name: TEXTURED })
+
+    expect(await screen.findByTestId('eligibility-unavailable')).toHaveTextContent(detail)
+    // Said once, not three times.
+    expect(screen.queryByTestId('uncheckable-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('uncheckable-2')).not.toBeInTheDocument()
+    // And nothing claims to be ready or blocked off the back of an answer nobody got.
+    expect(screen.queryByText(/^(ready|not ready)$/)).not.toBeInTheDocument()
+  })
+
+  it('still shows a blank reason as unchecked rather than as nothing at all', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', () =>
+        HttpResponse.json({
+          library_file_id: 8801,
+          // The backend rejects a blank reason, so this is the belt to that braces: the
+          // row is decided by whether a REPORT arrived, not by the error string's truth.
+          reports: [
+            { pipeline_id: 1, report: null, error: '' },
+            { pipeline_id: 2, report: fixtures.eligibilityReports[2] },
+          ],
+        }),
+      ),
+    )
+    open()
+    await screen.findByRole('radio', { name: TEXTURED })
+
+    expect(await screen.findByTestId('uncheckable-1')).toBeInTheDocument()
+    expect(row(TEXTURED)).toHaveTextContent('not checked')
+    expect(row(TEXTURED)).not.toHaveTextContent(/^ready/)
+  })
+
   it('says so when Bambuddy has no pipelines at all', async () => {
     server.use(
       http.get('/api/v1/print/models/:slug/pipelines', () =>

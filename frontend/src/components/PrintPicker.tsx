@@ -173,6 +173,17 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const printers = (choices?.printers ?? []).filter((printer) =>
     (current?.printer_ids ?? []).includes(printer.id),
   )
+  /**
+   * A failure that hit *every* pipeline — a refused API key, an unreachable Bambuddy — is
+   * one problem, not one per row. Repeating it against each pipeline would read as three
+   * pipeline-specific faults and bury the actual cause.
+   */
+  const checked = pipelines.filter((pipeline) => reports[pipeline.id] !== undefined)
+  const everyCheckFailed =
+    checked.length > 0 && checked.every((pipeline) => !reports[pipeline.id]?.report)
+  const wholeCheckError = everyCheckFailed
+    ? (reports[checked[0]?.id ?? 0]?.error ?? 'Bambuddy gave no reason')
+    : null
 
   function close() {
     setError(null)
@@ -194,13 +205,17 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
       // Printing something else once says nothing about what this model should default
       // to, so neither switching pipelines nor leaving the box alone writes anything.
       const stored = choices?.model_pipeline_id ?? null
-      if (asDefault && stored !== selected) {
-        await api.putModelPipeline(slug, selected)
-        setChoices({ ...choices, model_pipeline_id: selected })
-      } else if (!asDefault && stored === selected) {
-        await api.putModelPipeline(slug, null)
-        setChoices({ ...choices, model_pipeline_id: null })
+      const remember = async (pipelineId: number | null) => {
+        await api.putModelPipeline(slug, pipelineId)
+        // Functional, and never spread over a null: `selected` can only be non-null once
+        // `choices` has loaded, so this is unreachable today — but a spread of null would
+        // silently drop `pipelines` and `printers` and empty the list.
+        setChoices((current) =>
+          current ? { ...current, model_pipeline_id: pipelineId } : current,
+        )
       }
+      if (asDefault && stored !== selected) await remember(selected)
+      else if (!asDefault && stored === selected) await remember(null)
       const ran = await api.runPipeline(outputId, {
         pipeline_id: selected,
         copies,
@@ -348,7 +363,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                                 {rowVerdict.ok ? 'ready' : 'not ready'}
                               </span>
                             )}
-                            {own?.error && (
+                            {own && !own.report && (
                               <span className="text-[11px] text-faint">not checked</span>
                             )}
                           </span>
@@ -361,12 +376,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                               {presetSummary(pipeline)}
                             </span>
                           )}
-                          {own?.error && (
+                          {own && !own.report && !everyCheckFailed && (
                             <span
                               className="mt-1 block text-[12px] text-faint"
                               data-testid={`uncheckable-${pipeline.id}`}
                             >
-                              Bambuddy could not check this pipeline: {own.error}
+                              Bambuddy could not check this pipeline:{' '}
+                              {own.error || 'it gave no reason'}
                             </span>
                           )}
                           {rowVerdict && rowVerdict.issues.length > 0 && (
@@ -388,6 +404,16 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                 })}
               </ul>
             </fieldset>
+          )}
+
+          {wholeCheckError && (
+            <p
+              role="status"
+              className="mt-2 text-[12px] text-warn"
+              data-testid="eligibility-unavailable"
+            >
+              Bambuddy could not check any of these pipelines: {wholeCheckError}
+            </p>
           )}
 
           {checking && (

@@ -152,9 +152,12 @@ class PipelineReport(BaseModel):
 
     @model_validator(mode="after")
     def _either_a_report_or_a_reason(self) -> PipelineReport:
-        if (self.report is None) == (self.error is None):
+        # ``not self.error`` rather than ``is None``: a blank reason is no reason, and it
+        # would reach the browser as a row with nothing to say either way.
+        if (self.report is None) == (not self.error):
             raise ValueError(
-                "a pipeline report carries either a report or an error, never both or neither"
+                "a pipeline report carries either a report or a non-empty error, "
+                "never both or neither"
             )
         return self
 

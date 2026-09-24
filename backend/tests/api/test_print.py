@@ -479,6 +479,9 @@ def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
     [
         pytest.param({}, id="neither"),
         pytest.param({"report": EligibilityReport(ok=True), "error": "both"}, id="both"),
+        # An empty reason is no reason: the browser branches on which field is set, and a
+        # blank string reads as "no error" there, which would render the row as absent.
+        pytest.param({"error": ""}, id="blank-error"),
     ],
 )
 def test_a_pipeline_report_must_carry_either_a_report_or_a_reason(kwargs: Any) -> None:
