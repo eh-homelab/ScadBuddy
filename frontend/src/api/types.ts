@@ -69,6 +69,18 @@ export type FilamentPlan = Schemas['FilamentPlan']
 export type FilamentWarning = Schemas['FilamentWarning']
 export type LoadedAt = Schemas['LoadedAt']
 
+/**
+ * #89 — run tracking.
+ *
+ * `PrintRoute` and `PrintStage` are named aliases onto the generated members rather
+ * than string literals of their own: the backend's vocabulary is the contract, and a
+ * hand-kept copy would drift the moment it gains a state.
+ */
+export type PrintProgress = Schemas['PrintProgress']
+export type CopyProgress = Schemas['CopyProgress']
+export type PrintRoute = PrintProgress['route']
+export type PrintStage = PrintProgress['stage']
+
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
 export type SendMode = SendResult['mode']

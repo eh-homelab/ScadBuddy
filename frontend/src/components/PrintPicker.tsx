@@ -12,7 +12,9 @@ import type {
 } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { eligibilityIssues, verdictFor, type Verdict } from '../lib/problems'
+import { usePrintProgress } from '../lib/usePrintProgress'
 import { FilamentPicker } from './FilamentPicker'
+import { PrintProgressPanel } from './PrintProgressPanel'
 import { NewPipelineForm } from './NewPipelineForm'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -99,6 +101,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const [result, setResult] = useState<PrintRunResult | null>(null)
 
   const outputId = output?.id
+  /**
+   * #89 — follow only the print this dialog just started. Enabled on `result` rather
+   * than on `open` so opening the picker on an output someone printed last week does
+   * not start polling a run nobody is watching; the hook stops on `settled` and on the
+   * `null` an unprinted output answers with.
+   */
+  const { progress, polling } = usePrintProgress(outputId, open && result !== null)
   /**
    * Supersedes an in-flight load or check. The panel is not unmounted when it closes —
    * `ActionBar` renders it always and `Dialog` only drops its children — so a request
@@ -424,7 +433,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
               ))}
             </ul>
           )}
-          {/* Following the run to completion is #89; this reports what Bambuddy answered. */}
+          <PrintProgressPanel progress={progress} polling={polling} />
         </div>
       ) : creating ? (
         <NewPipelineForm

@@ -247,6 +247,82 @@
         "title": "ConnectionTest",
         "type": "object"
       },
+      "CopyProgress": {
+        "description": "One copy of a print: where it went and what it is doing.\n\nA pipeline run reports one of these per copy; the queue route has exactly one,\nbecause Bambuddy's queue models repeats through ``quantity`` rather than through\nseparate rows.",
+        "properties": {
+          "copy_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Index"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "queue_entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Entry Id"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "pending",
+              "running",
+              "queued",
+              "done",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiting Reason"
+          }
+        },
+        "title": "CopyProgress",
+        "type": "object"
+      },
       "CreateOutputRequest": {
         "properties": {
           "job_id": {
@@ -1392,6 +1468,21 @@
             ],
             "title": "Pipeline Run Id"
           },
+          "print_route": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pipeline",
+                  "slice_queue"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Route"
+          },
           "queue_item_id": {
             "anyOf": [
               {
@@ -1402,6 +1493,17 @@
               }
             ],
             "title": "Queue Item Id"
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
           },
           "slug": {
             "title": "Slug",
@@ -1890,9 +1992,33 @@
             ],
             "title": "Assigned Printer Name"
           },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "copy_index": {
             "title": "Copy Index",
             "type": "integer"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
           },
           "error_message": {
             "anyOf": [
@@ -1975,6 +2101,18 @@
       },
       "PipelineRun": {
         "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "copies": {
             "default": 1,
             "title": "Copies",
@@ -1999,6 +2137,18 @@
             "default": 0,
             "title": "Copies In Progress",
             "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
           },
           "eligibility_overridden": {
             "default": false,
@@ -2042,6 +2192,17 @@
             },
             "title": "Jobs",
             "type": "array"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
           },
           "pipeline_id": {
             "anyOf": [
@@ -2119,6 +2280,18 @@
               }
             ],
             "title": "Source Library File Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
           },
           "status": {
             "title": "Status",
@@ -2447,6 +2620,135 @@
           "id"
         ],
         "title": "PresetRef",
+        "type": "object"
+      },
+      "PrintProgress": {
+        "description": "What the send bar shows until every copy is queued, failed or cancelled.",
+        "properties": {
+          "bambuddy_url": {
+            "title": "Bambuddy Url",
+            "type": "string"
+          },
+          "copies": {
+            "default": 1,
+            "title": "Copies",
+            "type": "integer"
+          },
+          "copies_cancelled": {
+            "default": 0,
+            "title": "Copies Cancelled",
+            "type": "integer"
+          },
+          "copies_completed": {
+            "default": 0,
+            "title": "Copies Completed",
+            "type": "integer"
+          },
+          "copies_detail": {
+            "items": {
+              "$ref": "#/components/schemas/CopyProgress"
+            },
+            "title": "Copies Detail",
+            "type": "array"
+          },
+          "copies_failed": {
+            "default": 0,
+            "title": "Copies Failed",
+            "type": "integer"
+          },
+          "copies_in_progress": {
+            "default": 0,
+            "title": "Copies In Progress",
+            "type": "integer"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fix"
+          },
+          "pipeline_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Run Id"
+          },
+          "queue_item_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Item Id"
+          },
+          "route": {
+            "enum": [
+              "pipeline",
+              "slice_queue"
+            ],
+            "title": "Route",
+            "type": "string"
+          },
+          "settled": {
+            "default": false,
+            "title": "Settled",
+            "type": "boolean"
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "pending",
+              "running",
+              "queued",
+              "done",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route",
+          "bambuddy_url"
+        ],
+        "title": "PrintProgress",
         "type": "object"
       },
       "PrintRunRequest": {
@@ -4482,6 +4784,58 @@
           }
         },
         "summary": "Spools that can print this output, and what the plate needs",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/progress": {
+      "get": {
+        "description": "Follow whichever of Bambuddy's two routes this output last took (#89).\n\n``null`` means this output has never been printed \u2014 that is an answer, not an\nerror, and the send bar shows nothing rather than a failure.\n\nThe poll is needed rather than optional on the pipeline route: ``run`` answers 202\nand creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is\nstill null when the run response arrives. ``settled`` is what says the polling can\nstop; it is computed from the copies, because a run can report a terminal status\nwhile a copy is still being dispatched.",
+        "operationId": "get_progress_api_v1_print_outputs__output_id__progress_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PrintProgress"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Progress Api V1 Print Outputs  Output Id  Progress Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "How the last print of this output is going",
         "tags": [
           "print"
         ]

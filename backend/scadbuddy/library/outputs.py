@@ -5,6 +5,7 @@ import shutil
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -21,6 +22,9 @@ PREVIEW_NAME = "preview.glb"
 THUMBNAIL_NAME = "thumbnail.png"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
+
+#: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``.
+PrintRoute = Literal["pipeline", "slice_queue"]
 
 
 class OutputNotFoundError(KeyError):
@@ -42,6 +46,11 @@ class OutputMeta(BaseModel):
     library_file_id: int | None = None
     pipeline_run_id: int | None = None
     queue_item_id: int | None = None
+    #: Which of Bambuddy's two routes the last print took (#87). Without it an output
+    #: that has been printed both ways carries a run id *and* a queue item id, and
+    #: nothing says which one describes the print now in progress.
+    print_route: PrintRoute | None = None
+    slice_job_id: int | None = None
 
 
 class OutputStore:
@@ -114,6 +123,8 @@ class OutputStore:
         library_file_id: int | None = None,
         pipeline_run_id: int | None = None,
         queue_item_id: int | None = None,
+        print_route: PrintRoute | None = None,
+        slice_job_id: int | None = None,
     ) -> OutputMeta:
         """Persist the Bambuddy ids a send produced, leaving omitted ones alone."""
         directory = self._find_dir(output_id)
@@ -125,6 +136,8 @@ class OutputStore:
                     ("library_file_id", library_file_id),
                     ("pipeline_run_id", pipeline_run_id),
                     ("queue_item_id", queue_item_id),
+                    ("print_route", print_route),
+                    ("slice_job_id", slice_job_id),
                 )
                 if value is not None
             }

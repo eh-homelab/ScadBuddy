@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api } from '../api/client'
 import type { CustomizerSchema, Output } from '../api/types'
@@ -20,6 +20,9 @@ export function HistoryPage() {
   const navigate = useNavigate()
   const schemaState = useAsync(() => api.getSchema(slug), [slug])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #89 — an output records Bambuddy's ids, never a URL, so the base to deep-link them
+  // against comes from Settings. Until it answers, the ids still read as plain text.
+  const bambuddyUrl = useAsync(() => api.getSettings(), []).data?.bambuddy_url ?? undefined
   const [sendFor, setSendFor] = useState<Output | undefined>(undefined)
   const [deleting, setDeleting] = useState<string | null>(null)
 
@@ -80,6 +83,7 @@ export function HistoryPage() {
                 onReopen={() => void navigate(`/m/${slug}?from=${output.id}`)}
                 onSend={() => setSendFor(output)}
                 onDelete={() => void remove(output.id)}
+                bambuddyUrl={bambuddyUrl}
               />
             ))}
           </ul>
@@ -96,6 +100,34 @@ export function HistoryPage() {
   )
 }
 
+/**
+ * A recorded Bambuddy id, linked to the page it means something on (#89). Bambuddy has
+ * no page per pipeline run — its copies land in the queue — so a run links to the queue
+ * itself rather than to an invented path. `target=_blank` because ScadBuddy renders
+ * inside Bambuddy's sandboxed iframe (spec §1).
+ */
+function BambuddyId({
+  href,
+  className,
+  children,
+}: {
+  href: string | undefined
+  className: string
+  children: ReactNode
+}) {
+  if (!href) return <span className={className}>{children}</span>
+  return (
+    <a
+      className={`${className} underline decoration-dotted underline-offset-2`}
+      href={href}
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      {children}
+    </a>
+  )
+}
+
 function OutputRow({
   output,
   schema,
@@ -103,6 +135,7 @@ function OutputRow({
   onReopen,
   onSend,
   onDelete,
+  bambuddyUrl,
 }: {
   output: Output
   schema: CustomizerSchema
@@ -110,6 +143,7 @@ function OutputRow({
   onReopen: () => void
   onSend: () => void
   onDelete: () => void
+  bambuddyUrl: string | undefined
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
 
@@ -125,13 +159,22 @@ function OutputRow({
           <p className="sb-num mt-1 text-[12px] text-muted">
             {output.bbox_mm ? formatBbox(output.bbox_mm) : 'No dimensions recorded'}
             {output.queue_item_id && (
-              <span className="ml-2 text-ok">queued #{output.queue_item_id}</span>
+              <BambuddyId
+                className="ml-2 text-ok"
+                href={bambuddyUrl && `${bambuddyUrl}/queue/${output.queue_item_id}`}
+              >
+                queued #{output.queue_item_id}
+              </BambuddyId>
             )}
             {!output.queue_item_id && output.pipeline_run_id && (
-              <span className="ml-2 text-ok">pipeline run #{output.pipeline_run_id}</span>
+              <BambuddyId className="ml-2 text-ok" href={bambuddyUrl && `${bambuddyUrl}/queue`}>
+                pipeline run #{output.pipeline_run_id}
+              </BambuddyId>
             )}
             {!output.queue_item_id && !output.pipeline_run_id && output.library_file_id && (
-              <span className="ml-2 text-muted">in library #{output.library_file_id}</span>
+              <BambuddyId className="ml-2 text-muted" href={bambuddyUrl && `${bambuddyUrl}/library`}>
+                in library #{output.library_file_id}
+              </BambuddyId>
             )}
           </p>
         </div>

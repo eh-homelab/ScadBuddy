@@ -14,6 +14,7 @@ import type {
   PipelineView,
   PresetOptions,
   PresetRef,
+  PrintProgress,
   PrintRunResult,
   SendResult,
   Settings,
@@ -564,6 +565,29 @@ export const handlers = [
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
+  }),
+
+  /**
+   * #89 — following the print. Which route answers is read off what the output recorded,
+   * the way the backend does it, so an output that has never been printed answers `200
+   * null` rather than a 404: never printed is an answer, not a missing resource.
+   */
+  http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if (output.pipeline_run_id) {
+      return HttpResponse.json({
+        ...fixtures.pipelineProgress,
+        pipeline_run_id: output.pipeline_run_id,
+      } satisfies PrintProgress)
+    }
+    if (output.queue_item_id) {
+      return HttpResponse.json({
+        ...fixtures.queuedSliceProgress,
+        queue_item_id: output.queue_item_id,
+      } satisfies PrintProgress)
+    }
+    return HttpResponse.json(null)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),

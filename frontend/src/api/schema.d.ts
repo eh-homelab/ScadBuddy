@@ -391,6 +391,35 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/outputs/{output_id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How the last print of this output is going
+         * @description Follow whichever of Bambuddy's two routes this output last took (#89).
+         *
+         *     ``null`` means this output has never been printed — that is an answer, not an
+         *     error, and the send bar shows nothing rather than a failure.
+         *
+         *     The poll is needed rather than optional on the pipeline route: ``run`` answers 202
+         *     and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
+         *     still null when the run response arrives. ``settled`` is what says the polling can
+         *     stop; it is computed from the copies, because a run can report a terminal status
+         *     while a copy is still being dispatched.
+         */
+        get: operations["get_progress_api_v1_print_outputs__output_id__progress_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/outputs/{output_id}/run": {
         parameters: {
             query?: never;
@@ -671,6 +700,32 @@ export interface components {
             ok: boolean;
             /** Printers */
             printers?: components["schemas"]["Printer"][];
+        };
+        /**
+         * CopyProgress
+         * @description One copy of a print: where it went and what it is doing.
+         *
+         *     A pipeline run reports one of these per copy; the queue route has exactly one,
+         *     because Bambuddy's queue models repeats through ``quantity`` rather than through
+         *     separate rows.
+         */
+        CopyProgress: {
+            /** Copy Index */
+            copy_index?: number | null;
+            /** Message */
+            message?: string | null;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Queue Entry Id */
+            queue_entry_id?: number | null;
+            /**
+             * Stage
+             * @default unknown
+             * @enum {string}
+             */
+            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            /** Waiting Reason */
+            waiting_reason?: string | null;
         };
         /** CreateOutputRequest */
         CreateOutputRequest: {
@@ -1098,8 +1153,12 @@ export interface components {
             parts?: components["schemas"]["PartInfo"][];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
+            /** Print Route */
+            print_route?: ("pipeline" | "slice_queue") | null;
             /** Queue Item Id */
             queue_item_id?: number | null;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
             /** Slug */
             slug: string;
             /** Warnings */
@@ -1246,8 +1305,12 @@ export interface components {
             assigned_printer_id?: number | null;
             /** Assigned Printer Name */
             assigned_printer_name?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
             /** Copy Index */
             copy_index: number;
+            /** Dispatched At */
+            dispatched_at?: string | null;
             /** Error Message */
             error_message?: string | null;
             /** Id */
@@ -1278,6 +1341,8 @@ export interface components {
         };
         /** PipelineRun */
         PipelineRun: {
+            /** Completed At */
+            completed_at?: string | null;
             /**
              * Copies
              * @default 1
@@ -1303,6 +1368,8 @@ export interface components {
              * @default 0
              */
             copies_in_progress: number;
+            /** Created At */
+            created_at?: string | null;
             /**
              * Eligibility Overridden
              * @default false
@@ -1316,6 +1383,8 @@ export interface components {
             id: number;
             /** Jobs */
             jobs?: components["schemas"]["PipelineJob"][];
+            /** Parent Run Id */
+            parent_run_id?: number | null;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Pipeline Name */
@@ -1330,6 +1399,8 @@ export interface components {
             source_filename?: string | null;
             /** Source Library File Id */
             source_library_file_id?: number | null;
+            /** Started At */
+            started_at?: string | null;
             /** Status */
             status: string;
             /** Target Kind */
@@ -1429,6 +1500,67 @@ export interface components {
              * @enum {string}
              */
             source: "orca_cloud" | "cloud" | "local" | "standard";
+        };
+        /**
+         * PrintProgress
+         * @description What the send bar shows until every copy is queued, failed or cancelled.
+         */
+        PrintProgress: {
+            /** Bambuddy Url */
+            bambuddy_url: string;
+            /**
+             * Copies
+             * @default 1
+             */
+            copies: number;
+            /**
+             * Copies Cancelled
+             * @default 0
+             */
+            copies_cancelled: number;
+            /**
+             * Copies Completed
+             * @default 0
+             */
+            copies_completed: number;
+            /** Copies Detail */
+            copies_detail?: components["schemas"]["CopyProgress"][];
+            /**
+             * Copies Failed
+             * @default 0
+             */
+            copies_failed: number;
+            /**
+             * Copies In Progress
+             * @default 0
+             */
+            copies_in_progress: number;
+            /** Error Message */
+            error_message?: string | null;
+            /** Fix */
+            fix?: string | null;
+            /** Pipeline Run Id */
+            pipeline_run_id?: number | null;
+            /** Queue Item Id */
+            queue_item_id?: number | null;
+            /**
+             * Route
+             * @enum {string}
+             */
+            route: "pipeline" | "slice_queue";
+            /**
+             * Settled
+             * @default false
+             */
+            settled: boolean;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
+            /**
+             * Stage
+             * @default unknown
+             * @enum {string}
+             */
+            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
@@ -2526,6 +2658,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FilamentOptions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_progress_api_v1_print_outputs__output_id__progress_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintProgress"] | null;
                 };
             };
             /** @description Validation Error */
