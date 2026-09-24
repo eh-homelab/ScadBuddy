@@ -44,7 +44,7 @@ class AppState:
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     return AppState(
         settings=settings,
         config=config,

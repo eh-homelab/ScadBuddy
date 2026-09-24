@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import subprocess
@@ -12,8 +13,11 @@ import pytest
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import (
+    DEFAULT_TIMEOUT,
     GITIGNORE_NAME,
+    LOCK_NAME,
     MAX_SUBJECT,
+    GitTimeoutError,
     ModelHistory,
     RevisionNotFoundError,
     subject_line,
@@ -244,6 +248,39 @@ def test_a_default_diff_resolves_its_endpoints_once(
 
     # One rev-parse for the head, one for its parent, then the two diffs.
     assert commands == ["rev-parse", "rev-parse", "diff", "diff"]
+
+
+def test_a_stalled_git_call_times_out_rather_than_hanging(tmp_path: Path, models: Path) -> None:
+    """Every git call shares the executor `/healthz` runs on, so none may be unbounded."""
+    stalled = tmp_path / "slow-git"
+    stalled.write_text("#!/bin/sh\nsleep 30\n")
+    stalled.chmod(0o755)
+    history = ModelHistory(models, git=str(stalled), wrapper_prefix=WRAPPER_PREFIX, timeout=0.2)
+
+    with pytest.raises(GitTimeoutError) as caught:
+        history.log("keychain")
+    assert "timed out after 0.2s" in str(caught.value)
+
+
+def test_the_write_lock_wait_is_bounded_too(models: Path, history: ModelHistory) -> None:
+    """A wedged holder must not pin an executor slot for as long as it lasts."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    history.timeout = 0.2
+
+    # A second open file description on the same lock: flock is per-description,
+    # so this blocks the repository's own acquisition exactly as another process
+    # would, without needing one.
+    with (models / LOCK_NAME).open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        write_model(models, "keychain", "cube(20);\n")
+        with pytest.raises(GitTimeoutError):
+            history.commit("Edit keychain source", "keychain")
+        fcntl.flock(held, fcntl.LOCK_UN)
+
+    # The lock is free again, so the very same commit now lands.
+    history.timeout = DEFAULT_TIMEOUT
+    assert history.commit("Edit keychain source", "keychain") is not None
 
 
 def test_diff_between_two_arbitrary_revisions(models: Path, history: ModelHistory) -> None:

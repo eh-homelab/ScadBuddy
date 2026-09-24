@@ -41,6 +41,7 @@ import shutil
 import subprocess
 import tarfile
 import threading
+import time
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -53,6 +54,10 @@ GIT = "git"
 LOCK_NAME = ".scadbuddy-git.lock"
 GITIGNORE_NAME = ".gitignore"
 DEFAULT_LOG_LIMIT = 50
+# Generous for a local repository, small enough that a stalled PVC cannot hold an
+# executor slot for minutes. Overridable with ``SCADBUDDY_GIT_TIMEOUT``.
+DEFAULT_TIMEOUT = 30.0
+LOCK_POLL_SECONDS = 0.05
 # git itself imposes no subject limit; this one keeps a listed revision readable
 # and bounds what a caller can write into the history.
 MAX_SUBJECT = 200
@@ -89,6 +94,19 @@ class GitError(RuntimeError):
 
 class GitUnavailableError(GitError):
     """No usable git repository — either no binary, or ``init`` never succeeded."""
+
+
+class GitTimeoutError(GitError):
+    """A git call, or the wait for the write lock, outlived its deadline.
+
+    Unbounded is the dangerous default here. Every git call runs on the default
+    ``ThreadPoolExecutor`` via ``asyncio.to_thread``, which ``/healthz`` and the
+    render polls share, and this repository lives on a PVC that Velero snapshots:
+    one ``fsync`` parked behind a block-storage stall would hold an executor slot
+    for as long as the stall lasts, and enough of them make the whole app look
+    hung rather than one commit slow. A deadline turns that into an ordinary
+    :class:`GitError`, which the callers already log and degrade around.
+    """
 
 
 class RevisionNotFoundError(KeyError):
@@ -140,10 +158,18 @@ class ModelHistory:
     :func:`asyncio.to_thread` rather than this class pretending to be awaitable.
     """
 
-    def __init__(self, root: Path, *, git: str = GIT, wrapper_prefix: str = "") -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        git: str = GIT,
+        wrapper_prefix: str = "",
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
         self.root = root
         self.git = git
         self.wrapper_prefix = wrapper_prefix
+        self.timeout = timeout
         self._lock = threading.Lock()
 
     # ── plumbing ──────────────────────────────────────────────────────────────
@@ -198,7 +224,10 @@ class ModelHistory:
                 capture_output=True,
                 text=text,
                 check=False,
+                timeout=self.timeout,
             )
+        except subprocess.TimeoutExpired as error:
+            raise GitTimeoutError(f"git {args[0]} timed out after {self.timeout:g}s") from error
         except OSError as error:
             raise GitUnavailableError(f"could not run {self.git!r}: {error}") from error
         if check and completed.returncode != 0:
@@ -218,16 +247,36 @@ class ModelHistory:
         The thread lock alone would be enough for a single uvicorn worker; the
         ``flock`` is what keeps a second process (a shell on the volume, a future
         worker) from interleaving an ``add``/``commit`` pair with ours.
+
+        Both waits are bounded by :attr:`timeout`, for the reason
+        :class:`GitTimeoutError` gives: a blocking ``flock`` behind a wedged
+        holder would pin an executor slot for as long as that holder lasts.
+        ``fcntl.flock`` takes no deadline of its own, so the non-blocking form is
+        retried against one.
         """
-        with self._lock:
+        deadline = time.monotonic() + self.timeout
+        if not self._lock.acquire(timeout=self.timeout):
+            raise GitTimeoutError(f"waited {self.timeout:g}s for the in-process write lock")
+        try:
             lock_path = self.root / LOCK_NAME
             lock_path.parent.mkdir(parents=True, exist_ok=True)
             with lock_path.open("w") as handle:
-                fcntl.flock(handle, fcntl.LOCK_EX)
+                while True:
+                    try:
+                        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        break
+                    except BlockingIOError:
+                        if time.monotonic() >= deadline:
+                            raise GitTimeoutError(
+                                f"waited {self.timeout:g}s for {lock_path}"
+                            ) from None
+                        time.sleep(LOCK_POLL_SECONDS)
                 try:
                     yield
                 finally:
                     fcntl.flock(handle, fcntl.LOCK_UN)
+        finally:
+            self._lock.release()
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 

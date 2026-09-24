@@ -248,6 +248,14 @@ on the volume sees the same thing.
   `asyncio.to_thread`. FastAPI offloads plain `def` handlers on its own; an
   `async` one runs on the loop uvicorn shares with the render workers, and a
   commit against the PVC there stalls every render poll and `/healthz` with it.
+- **Every git call is also bounded** by `SCADBUDDY_GIT_TIMEOUT` (default 30 s),
+  and so is the wait for the write lock. Off the event loop is not enough on
+  its own: `asyncio.to_thread` runs on the executor `/healthz` and the render
+  polls share, and this repository lives on a PVC that Velero snapshots, so an
+  `fsync` parked behind a block-storage stall would hold a slot for as long as
+  the stall lasts. A deadline makes that an ordinary `GitError` instead, which
+  the next bullet already absorbs. `fcntl.flock` takes no deadline, so the
+  non-blocking form is retried against one.
 - **A failed commit never fails the action.** The files are written first, so a
   `GitError` *or* an `OSError` (the lock file is ordinary filesystem I/O, and a
   PVC can go read-only after boot) is logged and swallowed: losing the revision
