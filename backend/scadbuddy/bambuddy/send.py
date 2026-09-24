@@ -6,6 +6,7 @@ a FastAPI app, and so the route stays a thin adapter.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Literal
@@ -392,8 +393,11 @@ async def _queue_send(
     # Slicing leaves a second library entry, and the queue references that one — so
     # it is what a reader opens from the queue. Both are this output, so both get the
     # link; the note is best-effort either way.
-    noted = await attach_edit_link(client, library_file_id, meta, settings)
-    noted_sliced = await attach_edit_link(client, sliced, meta, settings)
+    # Two independent best-effort notes; nothing waits on the first to send the second.
+    noted, noted_sliced = await asyncio.gather(
+        attach_edit_link(client, library_file_id, meta, settings),
+        attach_edit_link(client, sliced, meta, settings),
+    )
     return SendResult(
         mode="queue",
         library_file_id=library_file_id,

@@ -3,7 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
-import { printOptions } from '../mocks/fixtures'
+import { printOptions, settings as settingsFixture } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -138,9 +138,42 @@ describe('CustomizePage', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
     await user.click(within(dialog).getByRole('button', { name: 'Send' }))
 
+    // A public URL is configured, so no link back means Bambuddy refused the note —
+    // not that the feature was never switched on.
     await waitFor(() =>
-      expect(within(dialog).getByText(/No link back to these parameters/)).toBeInTheDocument(),
+      expect(within(dialog).getByText(/would not take the link/)).toBeInTheDocument(),
     )
+  })
+
+  it('says nothing about the link when no public URL is configured', async () => {
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...settingsFixture, public_url: null }),
+      ),
+      http.post('/api/v1/outputs/:id/send', () =>
+        HttpResponse.json({
+          mode: 'library',
+          library_file_id: 41,
+          filename: 'name-keychain-reagan.3mf',
+          pipeline_run_id: null,
+          queue_item_id: null,
+          bambuddy_url: 'https://bambuddy.test/library',
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(within(dialog).getByText(/Added to the library/)).toBeInTheDocument())
+    expect(within(dialog).queryByText(/link back to these parameters/)).not.toBeInTheDocument()
   })
 
   it('sends the per-send print options the Options disclosure collected (#88)', async () => {

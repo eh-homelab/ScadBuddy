@@ -8,6 +8,7 @@ import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { useAsync } from '../lib/useAsync'
 
 const MODES: { value: SendMode; label: string; detail: string }[] = [
   {
@@ -44,6 +45,9 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   // `options.quantity` are the same value, and two independent controls for it left the
   // disclosure's Quantity row showing a number that was no longer going to be sent.
   const [options, setOptions] = useState<PrintOptions>({})
+  // Only to tell "no link was configured" apart from "Bambuddy refused the note":
+  // the send result reports an absent link the same way for both.
+  const publicUrl = useAsync(() => api.getSettings(), []).data?.public_url ?? null
   const [effective, setEffective] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -148,12 +152,17 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
             )}
           </p>
           {/* The note is best-effort, so say which way it went rather than implying
-              the link is on the file when Bambuddy refused it. */}
-          <p className="mt-1.5 text-[12px] text-muted">
-            {result.edit_url
-              ? 'Bambuddy has the link back to these parameters.'
-              : 'No link back to these parameters was attached.'}
-          </p>
+              the link is on the file when Bambuddy refused it. Silence when no public
+              URL is set: there was no link to attach, which is not a failure. */}
+          {result.edit_url ? (
+            <p className="mt-1.5 text-[12px] text-muted">
+              Bambuddy has the link back to these parameters.
+            </p>
+          ) : publicUrl ? (
+            <p className="mt-1.5 text-[12px] text-muted">
+              Bambuddy would not take the link back to these parameters.
+            </p>
+          ) : null}
         </>
       ) : (
         <>
