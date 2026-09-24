@@ -67,6 +67,35 @@ def test_widgets_covers_every_type() -> None:
     }
 
 
+def test_only_sliders_carry_a_step() -> None:
+    # OpenSCAD 2026.09.23 started writing `step: 1` on every un-ranged number
+    # (2026.01.19 omitted it). That is the customizer's default, not a fact about
+    # the parameter, and NumberWidget would turn it into an HTML `step=1` on a
+    # value like 1.2 — so it must not survive into the schema.
+    schema = _schema("widgets")
+    by_name = {p.name: p for p in schema.parameters}
+    assert by_name["wall"].type == "number"
+    assert by_name["wall"].step is None
+    assert by_name["copies"].step is None
+    assert by_name["quality"].step == 16.0
+
+
+def test_implicit_step_does_not_change_type_detection() -> None:
+    raw = {
+        "title": "t",
+        "parameters": [
+            {"name": "whole", "type": "number", "initial": 3.0, "step": 1.0, "group": "G"},
+            {"name": "frac", "type": "number", "initial": 1.2, "step": 1.0, "group": "G"},
+            {"name": "bare", "type": "number", "initial": 3.0, "group": "G"},
+        ],
+    }
+    by_name = {p.name: p for p in build_schema(raw, "").parameters}
+    assert by_name["whole"].type == "integer"
+    assert by_name["frac"].type == "number"
+    assert by_name["bare"].type == "integer"
+    assert all(p.step is None for p in by_name.values())
+
+
 def test_global_group_is_not_a_tab() -> None:
     schema = _schema("widgets")
     assert schema.groups == ["Shapes", "Appearance"]

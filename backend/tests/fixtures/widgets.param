@@ -15,6 +15,7 @@
             "group": "Shapes",
             "initial": 3.0,
             "name": "copies",
+            "step": 1.0,
             "type": "number"
         },
         {
@@ -22,6 +23,7 @@
             "group": "Shapes",
             "initial": 1.2,
             "name": "wall",
+            "step": 1.0,
             "type": "number"
         },
         {
