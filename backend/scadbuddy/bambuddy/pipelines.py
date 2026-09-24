@@ -21,6 +21,7 @@ Three things about Bambuddy's model shape this module:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass
@@ -355,19 +356,24 @@ async def check_pipelines(
     """Ask Bambuddy whether each pipeline would refuse this file, without printing.
 
     ``pipeline_ids`` omitted means every pipeline. Nothing here is a 409: an ineligible
-    answer is a 200 carrying the report, so the picker can grey a row out rather than
-    discover the problem on Run.
+    answer is a 200 carrying the report, so the picker can mark a row not-ready rather
+    than discover the problem on Run.
+
+    The checks run **concurrently**: the picker cannot open until the last of them
+    answers, so a sequential loop would cost the sum of every pipeline's latency rather
+    than the slowest one's. ``gather`` keeps the order of ``pipeline_ids``, and a failure
+    in any one of them is raised as it would have been in a loop.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
     if pipeline_ids is None:
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
+    checks = await asyncio.gather(
+        *(client.check_eligibility(pipeline_id, request) for pipeline_id in pipeline_ids)
+    )
     reports = [
-        PipelineReport(
-            pipeline_id=pipeline_id,
-            report=await client.check_eligibility(pipeline_id, request),
-        )
-        for pipeline_id in pipeline_ids
+        PipelineReport(pipeline_id=pipeline_id, report=report)
+        for pipeline_id, report in zip(pipeline_ids, checks, strict=True)
     ]
     return EligibilityOverview(library_file_id=library_file_id, reports=reports)
 

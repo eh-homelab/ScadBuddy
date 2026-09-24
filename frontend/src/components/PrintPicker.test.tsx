@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Output, PrintRunResult } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
@@ -166,6 +166,93 @@ describe('PrintPicker', () => {
     await screen.findByText(/Pipeline run/)
 
     expect(put).toHaveBeenCalled()
+  })
+
+  it('does not re-point an existing model default at whatever is selected next', async () => {
+    // The model already prints with pipeline 2; the user opens the picker to try 1 once.
+    server.use(
+      http.get('/api/v1/print/models/:slug/pipelines', () =>
+        HttpResponse.json({
+          pipelines: fixtures.pipelineViews,
+          printers: fixtures.targets.printers,
+          model_pipeline_id: 2,
+          global_pipeline_id: 1,
+          default_pipeline_id: 2,
+        }),
+      ),
+    )
+    const puts: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PUT' && request.url.includes('/print/models/')) puts.push(request.url)
+    })
+    const { user } = open()
+    await listed()
+
+    // Opened on its default, so the box reflects that this pipeline *is* the default.
+    expect(screen.getByRole('radio', { name: DRAFT })).toBeChecked()
+    expect(screen.getByLabelText(/Always use this pipeline/)).toBeChecked()
+
+    await user.click(screen.getByRole('radio', { name: TEXTURED }))
+
+    // Switching for one print must not carry the tick — and so must not silently make
+    // the newly chosen pipeline the model's default.
+    expect(screen.getByLabelText(/Always use this pipeline/)).not.toBeChecked()
+
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+
+    // Exactly one PUT, and it is the one that CLEARS the default rather than moving it.
+    expect(puts).toHaveLength(1)
+  })
+
+  it('ignores an eligibility answer that arrives after the output has changed', async () => {
+    // The panel is never unmounted (ActionBar always renders it), so a slow check for one
+    // output could otherwise overwrite a newer one's badges.
+    let call = 0
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', async () => {
+        call += 1
+        const slow = call === 1
+        if (slow) await delay(400)
+        return HttpResponse.json({
+          library_file_id: 8801,
+          reports: [
+            {
+              pipeline_id: 1,
+              report: slow
+                ? // The stale answer: pipeline 1 is NOT ready for the older output.
+                  {
+                    ok: false,
+                    target_kind: 'specific_printer',
+                    target_printer_id: 1,
+                    target_printer_name: '3DP-31B-598',
+                    target_model_class: null,
+                    issues: [{ kind: 'stale_answer', slot_index: null }],
+                    printer_reports: [],
+                  }
+                : fixtures.eligibilityReports[1],
+            },
+          ],
+        })
+      }),
+    )
+
+    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
+    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
+    const { rerender } = renderPage(
+      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await screen.findByRole('radio', { name: TEXTURED })
+    // Switch outputs while the first check is still in flight.
+    rerender(
+      <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+
+    await waitFor(() => expect(row(TEXTURED)).toHaveTextContent('ready'))
+    // Long enough for the superseded request to land if it were going to be applied.
+    await new Promise((resolve) => setTimeout(resolve, 500))
+    expect(screen.queryByText(/stale answer/)).not.toBeInTheDocument()
+    expect(row(TEXTURED)).not.toHaveTextContent('not ready')
   })
 
   it('says so when Bambuddy has no pipelines at all', async () => {

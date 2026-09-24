@@ -7,6 +7,7 @@ posting to the live instance was out of bounds.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -399,6 +400,39 @@ def test_eligibility_uploads_once_and_reports_every_pipeline_verbatim(
     # immutable, so the id it recorded still describes this 3MF.
     client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
     assert upload.call_count == 1
+
+
+@respx.mock
+def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
+    client: TestClient, model: str
+) -> None:
+    """The picker cannot open until the last check answers, so they are gathered: the cost
+    is the slowest pipeline's latency, not the sum of all of them."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    in_flight = 0
+    peak = 0
+
+    async def slow(request: httpx.Request) -> httpx.Response:
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        await asyncio.sleep(0.05)
+        in_flight -= 1
+        return httpx.Response(200, json=report())
+
+    for pipeline_id in (1, 2, 3):
+        respx.post(f"{API}/slicer-pipelines/{pipeline_id}/check-eligibility").mock(side_effect=slow)
+
+    body = client.post(
+        f"/api/v1/print/outputs/{output_id}/eligibility",
+        json={"pipeline_ids": [1, 2, 3]},
+    ).json()
+
+    assert peak == 3
+    # And the order still matches the ids that were asked for.
+    assert [entry["pipeline_id"] for entry in body["reports"]] == [1, 2, 3]
 
 
 @respx.mock

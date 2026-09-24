@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type {
   EligibilityReport,
@@ -81,45 +81,59 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const [result, setResult] = useState<PrintRunResult | null>(null)
 
   const outputId = output?.id
+  /**
+   * Supersedes an in-flight load or check. The panel is not unmounted when it closes —
+   * `ActionBar` renders it always and `Dialog` only drops its children — so a request
+   * started for one output can still resolve after the panel has been reopened for
+   * another, and would otherwise overwrite the newer answer with the older one.
+   */
+  const attempt = useRef(0)
 
-  const load = useCallback(async () => {
+  /** ``prefer`` selects a pipeline the caller has just created. */
+  const load = useCallback(async (prefer?: number) => {
+    const token = (attempt.current += 1)
     setLoading(true)
     setError(null)
     try {
       const next = await api.getModelPipelines(slug)
+      if (token !== attempt.current) return
       setChoices(next)
+      const ids = (next.pipelines ?? []).map((pipeline) => pipeline.id)
       setSelected((current) => {
-        const ids = (next.pipelines ?? []).map((pipeline) => pipeline.id)
+        if (prefer !== undefined && ids.includes(prefer)) return prefer
         if (current !== null && ids.includes(current)) return current
         if (next.default_pipeline_id && ids.includes(next.default_pipeline_id)) {
           return next.default_pipeline_id
         }
         return ids[0] ?? null
       })
-      setAsDefault(next.model_pipeline_id !== null && next.model_pipeline_id !== undefined)
     } catch (cause) {
+      if (token !== attempt.current) return
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the pipelines.')
     } finally {
-      setLoading(false)
+      if (token === attempt.current) setLoading(false)
     }
   }, [slug])
 
   const check = useCallback(async () => {
     if (!outputId) return
+    const token = attempt.current
     setChecking(true)
     try {
       // This uploads the 3MF if Bambuddy has not got it: there is no eligibility answer
       // before a library file exists.
       const overview = await api.checkEligibility(outputId)
+      if (token !== attempt.current) return
       setReports(
         Object.fromEntries(
           (overview.reports ?? []).map((entry) => [entry.pipeline_id, entry.report]),
         ),
       )
     } catch (cause) {
+      if (token !== attempt.current) return
       setError(cause instanceof ApiError ? cause.detail : 'Could not check eligibility.')
     } finally {
-      setChecking(false)
+      if (token === attempt.current) setChecking(false)
     }
   }, [outputId])
 
@@ -127,6 +141,22 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
     if (!open) return
     void load().then(() => check())
   }, [open, load, check])
+
+  // The reports describe one output's 3MF, so they do not survive a change of output.
+  useEffect(() => {
+    setReports({})
+  }, [outputId])
+
+  /**
+   * The "make this the default" tick follows the selection: it means "the pipeline in view
+   * *is* this model's default", not "this model has one". Without that, opening the picker
+   * on a model that already has a default and switching pipelines for a single print would
+   * silently re-point the default at whatever was selected last. A toggle the user makes
+   * afterwards stands, because `asDefault` is not itself a dependency here.
+   */
+  useEffect(() => {
+    setAsDefault(selected !== null && selected === (choices?.model_pipeline_id ?? null))
+  }, [selected, choices])
 
   const pipelines = choices?.pipelines ?? []
   const current = pipelines.find((pipeline) => pipeline.id === selected)
@@ -246,7 +276,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
           onCreated={(pipeline) => {
             setCreating(false)
             setSelected(pipeline.id)
-            void load().then(() => check())
+            void load(pipeline.id).then(() => check())
           }}
         />
       ) : (
