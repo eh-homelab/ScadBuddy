@@ -26,10 +26,17 @@ FAIL_WIDTH = 999.0
 # so the routes that shell out are exercised where no openscad is installed.
 FAKE_OPENSCAD = """#!/usr/bin/env python3
 import json
+import os
 import pathlib
 import sys
 
 args = sys.argv[1:]
+
+# Lets a test count how many times openscad was actually run.
+log = os.environ.get("FAKE_OPENSCAD_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(args) + "\\n")
 if "--version" in args:
     print("OpenSCAD version 2099.01.01", file=sys.stderr)  # the real one uses stderr too
     raise SystemExit(0)

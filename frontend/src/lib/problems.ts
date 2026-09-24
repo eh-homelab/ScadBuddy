@@ -97,10 +97,3 @@ export function refusedCheck(problem: Problem): SourceCheck | undefined {
     log_tail: Array.isArray(log) ? log.map(String) : [],
   }
 }
-
-/** The 1-based lines an editor should mark. */
-export function errorLines(check: SourceCheck | undefined): number[] {
-  return (check?.diagnostics ?? [])
-    .filter((diagnostic) => diagnostic.severity === 'error' && diagnostic.line != null)
-    .map((diagnostic) => diagnostic.line as number)
-}

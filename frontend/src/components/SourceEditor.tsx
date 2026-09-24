@@ -50,6 +50,16 @@ export function SourceEditor({ value, onChange, errors = [], uri, label }: Props
 
   useEffect(applyMarkers, [applyMarkers])
 
+  // `path` puts @monaco-editor/react in multi-model mode: it creates a text model per
+  // URI and leaves the lifecycle to us. Without this, every model opened in a session
+  // keeps its content, undo stack and tokenizer state alive for the life of the tab.
+  useEffect(
+    () => () => {
+      monaco.editor.getModel(monaco.Uri.parse(uri))?.dispose()
+    },
+    [uri],
+  )
+
   const dark =
     typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-color-scheme: dark)').matches

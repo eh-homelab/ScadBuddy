@@ -44,6 +44,7 @@ export function NewModelPage() {
       }
       // Fixed while the name is still being typed: the URI is the editor model's
       // identity, and rebuilding the model on every keystroke would drop undo history.
+      // The model is disposed when the page unmounts, so coming back starts blank.
       uri="file:///models/new/model.scad"
       source={source}
       onSourceChange={setSource}

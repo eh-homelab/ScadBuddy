@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { eligibilityIssues, errorLines, refusedCheck } from './problems'
+import { eligibilityIssues, refusedCheck } from './problems'
 
 const base = { title: 'Conflict', status: 409 }
 
@@ -49,10 +49,5 @@ describe('refusedCheck', () => {
 
   it('is undefined when the problem carries no diagnostics', () => {
     expect(refusedCheck({ title: 'Conflict', status: 409 })).toBeUndefined()
-  })
-
-  it('marks only the error lines', () => {
-    expect(errorLines(refusedCheck(refusal))).toEqual([3])
-    expect(errorLines(undefined)).toEqual([])
   })
 })

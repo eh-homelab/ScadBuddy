@@ -1,18 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
 import shutil
 import tempfile
+from contextlib import nullcontext
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.render.runner import OpenSCADError, run_openscad
-from scadbuddy.render.schema import build_schema
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput, run_openscad
+from scadbuddy.render.schema import CustomizerSchema, build_schema
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,18 @@ class SourceCheck(BaseModel):
         return [d for d in self.diagnostics if d.severity == "error"]
 
 
+@dataclass(frozen=True)
+class CheckedSource:
+    """What one OpenSCAD run produced: the verdict, and the schema it was built from.
+
+    The schema is carried rather than recomputed because deriving it IS the check —
+    a caller that then wants to store it must not pay for a second subprocess.
+    """
+
+    check: SourceCheck
+    schema: CustomizerSchema | None
+
+
 def decode_source(raw: bytes) -> str:
     """Reject anything that is not UTF-8 text before it reaches OpenSCAD."""
     if NUL in raw:
@@ -91,7 +106,9 @@ def parse_diagnostics(log: list[str]) -> list[Diagnostic]:
     return diagnostics
 
 
-async def check_source(source: str, *, config: Config) -> SourceCheck:
+async def inspect_source(
+    source: str, *, config: Config, limit: asyncio.Semaphore | None = None
+) -> CheckedSource:
     """Parse-check the source and derive its customizer schema, without saving anything.
 
     ``-o <file>.param`` is the customizer-parameter export: it parses the file and
@@ -102,21 +119,28 @@ async def check_source(source: str, *, config: Config) -> SourceCheck:
 
     The exit code is not on its own the signal — a failed top-level ``assert`` prints
     ``ERROR:`` and still exits 0 — so an ERROR diagnostic fails the check too.
+
+    ``limit`` caps how many of these run at once. The editor checks on every pause in
+    typing, from any number of tabs, and none of this goes through the render queue —
+    without a cap the only bound on concurrent ``openscad`` processes is how fast
+    people type.
     """
     if shutil.which(config.openscad) is None:
         logger.warning("openscad is not on PATH; the parse check cannot run")
-        return SourceCheck(ok=True, checked=False)
+        return CheckedSource(check=SourceCheck(ok=True, checked=False), schema=None)
 
     derivation: Diagnostic | None = None
-    parameters: int | None = None
+    schema: CustomizerSchema | None = None
     with tempfile.TemporaryDirectory(prefix="scadbuddy-check-") as tmp:
         scad_path = Path(tmp) / "model.scad"
         scad_path.write_text(source, encoding="utf-8")
         param_path = Path(tmp) / "model.param"
+        args = ["-o", str(param_path), scad_path.name]
         try:
-            output = await run_openscad(
-                ["-o", str(param_path), scad_path.name], cwd=scad_path.parent, config=config
-            )
+            async with limit or nullcontext():
+                output: ProcessOutput = await run_openscad(
+                    args, cwd=scad_path.parent, config=config
+                )
         except OpenSCADError as error:
             log_tail = error.log_tail
             returncode = error.returncode
@@ -132,17 +156,25 @@ async def check_source(source: str, *, config: Config) -> SourceCheck:
                     severity="error",
                     message=f"the customizer schema could not be derived: {error}",
                 )
-            else:
-                parameters = len(schema.parameters)
 
     diagnostics = parse_diagnostics(log_tail)
     if derivation is not None:
         diagnostics.append(derivation)
     ok = returncode == 0 and not any(d.severity == "error" for d in diagnostics)
-    return SourceCheck(
-        ok=ok,
-        checked=True,
-        diagnostics=diagnostics,
-        log_tail=log_tail,
-        parameters=parameters if ok else None,
+    return CheckedSource(
+        check=SourceCheck(
+            ok=ok,
+            checked=True,
+            diagnostics=diagnostics,
+            log_tail=log_tail,
+            parameters=len(schema.parameters) if ok and schema is not None else None,
+        ),
+        schema=schema if ok else None,
     )
+
+
+async def check_source(
+    source: str, *, config: Config, limit: asyncio.Semaphore | None = None
+) -> SourceCheck:
+    """The verdict alone, for callers with nothing to store."""
+    return (await inspect_source(source, config=config, limit=limit)).check

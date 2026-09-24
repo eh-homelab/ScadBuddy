@@ -56,6 +56,11 @@ test.describe('pasted source', () => {
 
     await page.getByRole('button', { name: 'Save anyway' }).click()
     await expect(page).toHaveURL(/\/m\/half-cube$/)
+
+    // The editor model is disposed with the page, so a new paste starts blank rather
+    // than resurrecting the last one from the reused `models/new` URI.
+    await page.goto('/new')
+    await expect(page.locator('.monaco-editor .view-lines')).not.toContainText('size = 10')
   })
 
   test('edits the source of an existing model', async ({ page }) => {

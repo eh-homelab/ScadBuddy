@@ -43,10 +43,17 @@
             "title": "Description"
           },
           "file": {
-            "contentMediaType": "application/octet-stream",
+            "anyOf": [
+              {
+                "contentMediaType": "application/octet-stream",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "description": "The .scad source",
-            "title": "File",
-            "type": "string"
+            "title": "File"
           },
           "name": {
             "anyOf": [
@@ -98,9 +105,6 @@
             "title": "Thumbnail"
           }
         },
-        "required": [
-          "file"
-        ],
         "title": "Body_create_model_api_v1_models_post",
         "type": "object"
       },
@@ -222,6 +226,20 @@
         "title": "CatalogueEntry",
         "type": "object"
       },
+      "CheckRequest": {
+        "properties": {
+          "source": {
+            "description": "The OpenSCAD source to parse-check",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "CheckRequest",
+        "type": "object"
+      },
       "ConnectionTest": {
         "properties": {
           "detail": {
@@ -305,6 +323,52 @@
           }
         },
         "title": "CustomizerSchema",
+        "type": "object"
+      },
+      "Diagnostic": {
+        "description": "One OpenSCAD message, with the line it points at when it names one.",
+        "properties": {
+          "file": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File"
+          },
+          "line": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "trace"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "severity",
+          "message"
+        ],
+        "title": "Diagnostic",
         "type": "object"
       },
       "EligibilityCheck": {
@@ -2637,6 +2701,71 @@
         "title": "SidebarLink",
         "type": "object"
       },
+      "SourceCheck": {
+        "properties": {
+          "checked": {
+            "description": "False when no openscad binary was available to ask",
+            "title": "Checked",
+            "type": "boolean"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "log_tail": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Log Tail",
+            "type": "array"
+          },
+          "ok": {
+            "title": "Ok",
+            "type": "boolean"
+          },
+          "parameters": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Customizer parameters derived, when the source got that far",
+            "title": "Parameters"
+          }
+        },
+        "required": [
+          "ok",
+          "checked"
+        ],
+        "title": "SourceCheck",
+        "type": "object"
+      },
+      "SourceReplacement": {
+        "properties": {
+          "force": {
+            "default": false,
+            "description": "Save even when the parse check fails",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "source": {
+            "description": "The replacement OpenSCAD source",
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "title": "SourceReplacement",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -2926,16 +3055,94 @@
         ]
       },
       "post": {
+        "description": "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail and README); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.",
         "operationId": "create_model_api_v1_models_post",
+        "parameters": [
+          {
+            "description": "Save even when the parse check fails",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Save even when the parse check fails",
+              "title": "Force",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Name for a text/plain paste",
+            "in": "header",
+            "name": "X-Model-Name",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Name for a text/plain paste",
+              "title": "X-Model-Name"
+            }
+          }
+        ],
         "requestBody": {
           "content": {
+            "application/json": {
+              "schema": {
+                "description": "A model pasted as source rather than uploaded as a file.",
+                "properties": {
+                  "description": {
+                    "default": "",
+                    "title": "Description",
+                    "type": "string"
+                  },
+                  "force": {
+                    "default": false,
+                    "description": "Save even when the parse check fails",
+                    "title": "Force",
+                    "type": "boolean"
+                  },
+                  "name": {
+                    "description": "Display name; its slug is derived from it",
+                    "title": "Name",
+                    "type": "string"
+                  },
+                  "source": {
+                    "description": "The OpenSCAD source",
+                    "title": "Source",
+                    "type": "string"
+                  },
+                  "tags": {
+                    "items": {
+                      "type": "string"
+                    },
+                    "title": "Tags",
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "name",
+                  "source"
+                ],
+                "title": "PastedSource",
+                "type": "object"
+              }
+            },
             "multipart/form-data": {
               "schema": {
                 "$ref": "#/components/schemas/Body_create_model_api_v1_models_post"
               }
+            },
+            "text/plain": {
+              "schema": {
+                "type": "string"
+              }
             }
-          },
-          "required": true
+          }
         },
         "responses": {
           "201": {
@@ -2959,7 +3166,49 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Upload a model",
+        "summary": "Add a model",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/check": {
+      "post": {
+        "description": "Runs OpenSCAD's parse-only AST export over the source and returns its diagnostics with line numbers. `checked` is false when no openscad binary is available, in which case `ok` says nothing.",
+        "operationId": "check_model_source_api_v1_models_check_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceCheck"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Parse-check OpenSCAD source",
         "tags": [
           "models"
         ]
@@ -3330,6 +3579,59 @@
           }
         },
         "summary": "Raw OpenSCAD source",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "description": "Overwrites the source in place and re-derives the customizer schema. The schema cache is keyed by the source's SHA-256, so the replacement invalidates it; it is rebuilt here so the next customizer open does not pay for it.",
+        "operationId": "put_source_api_v1_models__slug__source_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SourceReplacement"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Replace the source",
         "tags": [
           "models"
         ]

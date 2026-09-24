@@ -1,14 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.api.deps import CatalogueDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, ChecksDep, ConfigDep, PathsDep, SlugPath
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
@@ -20,14 +21,16 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.scad import (
+    CheckedSource,
     NotOpenSCADError,
     SourceCheck,
     check_source,
     decode_source,
+    inspect_source,
 )
 from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename, slugify
-from scadbuddy.render.runner import OpenSCADError, cached_schema
-from scadbuddy.render.schema import CustomizerSchema
+from scadbuddy.render.runner import cached_schema
+from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +90,25 @@ class CheckRequest(BaseModel):
     source: str = Field(description="The OpenSCAD source to parse-check")
 
 
+def _malformed_body(error: Exception) -> ApiError:
+    """What FastAPI would have produced had this body gone through a typed parameter.
+
+    The three content types share one route, so the JSON body is parsed by hand — which
+    also opts out of `RequestValidationError`, and with it the 422 problem document
+    every other body on this API answers with. This puts that back.
+    """
+    if isinstance(error, ValidationError):
+        return ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the request did not match the expected shape",
+            errors=[
+                {"loc": ["body", *(str(part) for part in detail["loc"])], "msg": detail["msg"]}
+                for detail in error.errors()
+            ],
+        )
+    return ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the request body is not valid JSON")
+
+
 def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiError:
     return ApiError(
         status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -96,15 +118,23 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
     )
 
 
-async def _guard_source(source: str, *, config: Config, force: bool) -> None:
-    """Parse-check the source, unless the caller insisted on saving it regardless."""
+async def _guard_source(
+    source: str, *, config: Config, force: bool, limit: asyncio.Semaphore
+) -> CheckedSource | None:
+    """Parse-check the source, unless the caller insisted on saving it regardless.
+
+    Returns what the check derived, so the caller can store the schema instead of
+    running OpenSCAD a second time to rebuild it.
+    """
     if force:
-        return
-    check = await check_source(source, config=config)
-    if not check.ok:
+        return None
+    checked = await inspect_source(source, config=config, limit=limit)
+    if not checked.check.ok:
         raise _rejected(
-            NotOpenSCADError("OpenSCAD could not parse the source", check.log_tail), check
+            NotOpenSCADError("OpenSCAD could not parse the source", checked.check.log_tail),
+            checked.check,
         )
+    return checked
 
 
 @router.post(
@@ -132,6 +162,7 @@ async def create_model(
     request: Request,
     catalogue: CatalogueDep,
     config: ConfigDep,
+    checks: ChecksDep,
     file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
     thumbnail: Annotated[UploadFile | None, File(description="Optional PNG")] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
@@ -146,10 +177,14 @@ async def create_model(
     content_type = request.headers.get("content-type", "").split(";")[0].strip().lower()
 
     if content_type == "application/json":
-        pasted = PastedSource.model_validate(await request.json())
+        try:
+            pasted = PastedSource.model_validate(await request.json())
+        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:
+            raise _malformed_body(error) from None
         return await _create(
             catalogue,
             config,
+            checks,
             slug=_slug_from_name(pasted.name),
             source=pasted.source,
             meta=ModelMeta(
@@ -164,11 +199,16 @@ async def create_model(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
                 "a text/plain paste needs an X-Model-Name header",
             )
+        try:
+            pasted_text = decode_source(await request.body())
+        except NotOpenSCADError as error:
+            raise _rejected(error) from None
         return await _create(
             catalogue,
             config,
+            checks,
             slug=_slug_from_name(model_name),
-            source=decode_source(await request.body()),
+            source=pasted_text,
             meta=ModelMeta(name=model_name),
             force=force,
         )
@@ -206,6 +246,7 @@ async def create_model(
     return await _create(
         catalogue,
         config,
+        checks,
         slug=slug,
         source=source,
         meta=ModelMeta(
@@ -231,6 +272,7 @@ def _slug_from_name(name: str) -> str:
 async def _create(
     catalogue: Catalogue,
     config: Config,
+    limit: asyncio.Semaphore,
     *,
     slug: str,
     source: str,
@@ -242,11 +284,16 @@ async def _create(
     """The one path every create takes, whatever carried the source in."""
     if catalogue.exists(slug):
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
-    await _guard_source(source, config=config, force=force)
+    checked = await _guard_source(source, config=config, force=force, limit=limit)
     try:
-        return catalogue.create(slug, source, meta, thumbnail=thumbnail, readme=readme)
+        record = catalogue.create(slug, source, meta, thumbnail=thumbnail, readme=readme)
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
+    if checked is not None and checked.schema is not None:
+        # The check already derived it; storing it here is what stops the first
+        # customizer open paying for the same subprocess again.
+        store_cached_schema(catalogue.paths.model_meta(slug), checked.schema)
+    return record
 
 
 @router.post(
@@ -259,8 +306,10 @@ async def _create(
         "available, in which case `ok` says nothing."
     ),
 )
-async def check_model_source(body: CheckRequest, config: ConfigDep) -> SourceCheck:
-    return await check_source(body.source, config=config)
+async def check_model_source(
+    body: CheckRequest, config: ConfigDep, checks: ChecksDep
+) -> SourceCheck:
+    return await check_source(body.source, config=config, limit=checks)
 
 
 @router.get("/models/{slug}", response_model=ModelRecord, summary="Model metadata")
@@ -308,16 +357,18 @@ async def put_source(
     catalogue: CatalogueDep,
     paths: PathsDep,
     config: ConfigDep,
+    checks: ChecksDep,
 ) -> ModelRecord:
     require_model(catalogue, slug)
-    await _guard_source(body.source, config=config, force=body.force)
+    checked = await _guard_source(body.source, config=config, force=body.force, limit=checks)
     paths.model_source(slug).write_text(body.source, encoding="utf-8")
-    try:
-        await cached_schema(paths.model_source(slug), paths.model_meta(slug), config=config)
-    except (OpenSCADError, OSError) as error:
-        # No openscad here, or a forced save of source that does not parse. The source
-        # is stored either way; GET /schema is where that surfaces.
-        logger.warning("could not re-derive the schema", extra={"slug": slug, "error": str(error)})
+    if checked is not None and checked.schema is not None:
+        store_cached_schema(paths.model_meta(slug), checked.schema)
+    else:
+        # A forced save, or no openscad at all: nothing was derived to store. The cache
+        # is keyed by the source's SHA-256, so the stale entry is already invalid, and
+        # GET /schema is where the failure surfaces.
+        logger.warning("stored source without a schema", extra={"slug": slug})
     return catalogue.record(slug)
 
 

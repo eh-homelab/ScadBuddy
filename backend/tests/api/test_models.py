@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
@@ -298,3 +300,84 @@ def test_the_check_endpoint_passes_source_that_parses(client: TestClient) -> Non
     # The check derives the schema too, so a source that parses but yields no
     # customizer panel is caught here rather than after it is saved.
     assert body["parameters"] == 2
+
+
+def test_a_plain_text_paste_that_is_not_utf8_is_rejected(client: TestClient) -> None:
+    """The multipart branch has always answered 422 here; text/plain must match it."""
+    response = client.post(
+        "/api/v1/models",
+        content=b"\xff\xfe cube(1);",
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Bad Bytes"},
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "UTF-8" in response.json()["detail"]
+
+
+def test_a_plain_text_paste_with_a_nul_byte_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        content=b"cube(1);\x00",
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Binary"},
+    )
+    assert response.status_code == 422
+    assert "binary" in response.json()["detail"]
+
+
+def test_a_body_that_is_not_json_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", content=b"{not json", headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "JSON" in response.json()["detail"]
+
+
+def test_an_empty_json_body_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", content=b"", headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 422
+
+
+def test_a_json_body_of_the_wrong_shape_is_rejected(client: TestClient) -> None:
+    response = client.post("/api/v1/models", json=["not", "an", "object"])
+    assert response.status_code == 422
+
+
+def test_a_json_body_missing_its_source_is_rejected_like_any_other_body(
+    client: TestClient,
+) -> None:
+    response = client.post("/api/v1/models", json={"name": "No Source"})
+    assert response.status_code == 422
+    body = response.json()
+    assert body["errors"][0]["loc"] == ["body", "source"]
+
+
+def test_replacing_the_source_runs_openscad_once(
+    client: TestClient, model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Deriving the schema IS the check, so a save must not pay for two subprocesses."""
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+
+    replacement = 'width = 3;\nlabel = "x";\n'
+    put = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
+    assert put.status_code == 200
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+    # And the schema the check derived was kept, so opening the customizer adds none.
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_pasted_model_opens_without_deriving_its_schema_again(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+
+    created = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
+    assert created.status_code == 201
+    assert client.get("/api/v1/models/pasted/schema").status_code == 200
+    assert len(log.read_text(encoding="utf-8").splitlines()) == 1

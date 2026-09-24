@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import asyncio
+import json
+from collections.abc import Sequence
+from pathlib import Path
+
 import pytest
 
+from scadbuddy.api.deps import build_state
 from scadbuddy.core.config import Config, load_config
+from scadbuddy.core.settings import Settings
+from scadbuddy.library import scad
 from scadbuddy.library.scad import check_source, parse_diagnostics
+from scadbuddy.render.runner import ProcessOutput
 
 BROKEN = "// a keychain\nsize = 10;\ncube([size, size, size)\n"
 FINE = '/* [Main] */\n// Width\nwidth = 10; // [1:100]\nname = "hi";\ncube([width, 10, 2]);\n'
@@ -74,3 +83,35 @@ async def test_a_failed_assertion_fails_the_check_despite_exit_zero() -> None:
 async def test_a_failed_check_reports_no_parameter_count() -> None:
     result = await check_source(BROKEN, config=load_config())
     assert result.parameters is None
+
+
+async def test_the_check_runs_no_more_openscads_at_once_than_its_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An editor checking on every keystroke pause must not outrun the render cap."""
+    live = 0
+    peak = 0
+
+    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await asyncio.sleep(0.01)
+        Path(args[1]).write_text(json.dumps({"parameters": []}), encoding="utf-8")
+        live -= 1
+        return ProcessOutput(returncode=0, log_tail=[], duration_s=0.01)
+
+    monkeypatch.setattr(scad, "run_openscad", fake_run)
+    monkeypatch.setattr("scadbuddy.library.scad.shutil.which", lambda _: "/usr/bin/openscad")
+
+    limit = asyncio.Semaphore(2)
+    config = Config(openscad="openscad")
+    await asyncio.gather(*(check_source(FINE, config=config, limit=limit) for _ in range(6)))
+
+    assert peak == 2
+
+
+def test_the_checks_cap_is_the_render_concurrency() -> None:
+    """The cap the routes hand to the check comes from the same knob renders obey."""
+    state = build_state(Settings(render_concurrency=3, frontend_dir=Path("/nonexistent")))
+    assert state.checks._value == 3
