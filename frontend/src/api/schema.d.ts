@@ -121,7 +121,7 @@ export interface paths {
         put?: never;
         /**
          * Parse-check OpenSCAD source
-         * @description Runs OpenSCAD's parse-only AST export over the source and returns its diagnostics with line numbers. `checked` is false when no openscad binary is available, in which case `ok` says nothing.
+         * @description Runs OpenSCAD's customizer-parameter export — the same one the schema is built from, so a source that passes here is one the customizer can open — and returns its diagnostics with line numbers. No geometry is rendered and nothing is saved. `checked` is false when no openscad binary is available, in which case `ok` says nothing.
          */
         post: operations["check_model_source_api_v1_models_check_post"];
         delete?: never;

@@ -381,3 +381,20 @@ def test_a_pasted_model_opens_without_deriving_its_schema_again(
     assert created.status_code == 201
     assert client.get("/api/v1/models/pasted/schema").status_code == 200
     assert len(log.read_text(encoding="utf-8").splitlines()) == 1
+
+
+def test_a_text_content_type_other_than_plain_is_not_a_paste(client: TestClient) -> None:
+    """`text/*` at large is a wider contract than the route documents."""
+    response = client.post(
+        "/api/v1/models",
+        content=b"<html>not openscad</html>",
+        headers={"Content-Type": "text/html", "X-Model-Name": "Sneaky"},
+    )
+    assert response.status_code == 415
+    assert "text/plain" in response.json()["detail"]
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_a_body_with_no_content_type_at_all_is_refused(client: TestClient) -> None:
+    response = client.post("/api/v1/models", content=b"cube(1);")
+    assert response.status_code == 415

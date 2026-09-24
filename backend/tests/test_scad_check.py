@@ -111,9 +111,10 @@ async def test_the_check_runs_no_more_openscads_at_once_than_its_cap(
     assert peak == 2
 
 
-async def test_the_checks_cap_is_the_render_concurrency() -> None:
-    """The cap the routes hand to the check comes from the same knob renders obey."""
-    state = build_state(Settings(render_concurrency=3, frontend_dir=Path("/nonexistent")))
+async def test_the_checks_cap_is_its_own_knob() -> None:
+    """Not the render one: the queue caps itself with worker tasks, so there is no
+    semaphore to share, and the pod's budget is the two added together."""
+    state = build_state(Settings(check_concurrency=3, frontend_dir=Path("/nonexistent")))
 
     for _ in range(3):
         await asyncio.wait_for(state.checks.acquire(), timeout=0.1)

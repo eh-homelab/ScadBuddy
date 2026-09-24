@@ -39,6 +39,11 @@ router = APIRouter(tags=["models"])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
+#: What the multipart branch will read a body from. `text/*` at large is NOT accepted:
+#: the route documents `text/plain`, and silently treating `text/html` as OpenSCAD
+#: source is a wider contract than anything here promises.
+FORM_CONTENT_TYPES = frozenset({"multipart/form-data", "application/x-www-form-urlencoded"})
+
 
 def require_model(catalogue: Catalogue, slug: str) -> ModelRecord:
     try:
@@ -210,7 +215,7 @@ async def create_model(
             force=pasted.force,
         )
 
-    if content_type.startswith("text/"):
+    if content_type == "text/plain":
         if not model_name:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -230,6 +235,12 @@ async def create_model(
             force=force,
         )
 
+    if content_type not in FORM_CONTENT_TYPES:
+        raise ApiError(
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            f"{content_type or 'an empty content type'} is not one this route accepts: "
+            "multipart/form-data, application/json or text/plain",
+        )
     if file is None:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the upload needs a file part")
     try:
@@ -318,9 +329,11 @@ async def _create(
     response_model=SourceCheck,
     summary="Parse-check OpenSCAD source",
     description=(
-        "Runs OpenSCAD's parse-only AST export over the source and returns its "
-        "diagnostics with line numbers. `checked` is false when no openscad binary is "
-        "available, in which case `ok` says nothing."
+        "Runs OpenSCAD's customizer-parameter export — the same one the schema is "
+        "built from, so a source that passes here is one the customizer can open — "
+        "and returns its diagnostics with line numbers. No geometry is rendered and "
+        "nothing is saved. `checked` is false when no openscad binary is available, "
+        "in which case `ok` says nothing."
     ),
 )
 async def check_model_source(

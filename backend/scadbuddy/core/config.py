@@ -9,6 +9,11 @@ DEFAULT_OPENSCAD = "openscad"
 DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
 DEFAULT_RENDER_CONCURRENCY = 2
+# The editor's parse check does not go through the render queue, so it carries its own
+# budget rather than borrowing the render one: the pod's worst case is the two added
+# together, and that is a number worth declaring rather than discovering. One is
+# plenty — a check parses and exports parameters, it renders no geometry.
+DEFAULT_CHECK_CONCURRENCY = 1
 DEFAULT_JOB_TTL = 86400.0
 DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
 
@@ -19,6 +24,7 @@ class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
     google_fonts_api_key: str | None = None
@@ -34,6 +40,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         render_timeout=float(source.get("SCADBUDDY_RENDER_TIMEOUT") or DEFAULT_RENDER_TIMEOUT),
         render_concurrency=int(
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
+        ),
+        check_concurrency=int(
+            source.get("SCADBUDDY_CHECK_CONCURRENCY") or DEFAULT_CHECK_CONCURRENCY
         ),
         job_ttl=float(source.get("SCADBUDDY_JOB_TTL") or DEFAULT_JOB_TTL),
         google_fonts_api_key=source.get("SCADBUDDY_GOOGLE_FONTS_API_KEY") or None,

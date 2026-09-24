@@ -36,7 +36,9 @@ class AppState:
     fonts: FontService
     queue: RenderQueue
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
-    #: parse check and the schema derivation behind it.
+    #: parse check and the schema derivation behind it. Its own budget, not the render
+    #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
+    #: the pod's worst case is render_concurrency + check_concurrency.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
@@ -57,7 +59,7 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         queue=RenderQueue(config, paths),
-        checks=asyncio.Semaphore(config.render_concurrency),
+        checks=asyncio.Semaphore(config.check_concurrency),
     )
 
 

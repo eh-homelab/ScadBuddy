@@ -411,7 +411,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 |---|---|---|
 | GET | `/models` | catalogue |
 | POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README), slug from filename; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
-| POST | `/models/check` | body `{source}` → parse-only OpenSCAD run: `{ok, checked, diagnostics[], log_tail}`, saves nothing |
+| POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
@@ -438,6 +438,14 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
   `nodeSelector: kubernetes.io/arch: amd64` (image is multi-arch but keep it
   next to the slicer), requests 250m/512Mi, limits 2/2Gi (Manifold is
   multi-threaded; OpenSCAD text rendering allocates freely).
+- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` + `SCADBUDDY_CHECK_CONCURRENCY`
+  concurrent `openscad` processes** (default 2 + 1), not the render figure alone. The
+  editor's parse check (#92) does not go through the render queue — the queue caps
+  itself with N worker tasks, so there is no semaphore to share — and it is reached on
+  a 700 ms debounce from every open editor tab. It therefore carries its own declared
+  budget rather than silently borrowing the render one. A check parses and exports
+  parameters without rendering geometry, so 1 is the default; raise it only alongside
+  the limits above.
 - `clusters/prod/scadbuddy/`: HTTPRoute `scadbuddy.internal.nullreference.io`
   on the internal Envoy gateway, `OnePasswordItem` for the Bambuddy API key
   (item `scadbuddy-bambuddy-api-key`), env from it.
