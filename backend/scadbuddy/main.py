@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from scadbuddy import __version__
-from scadbuddy.api import fonts, health, jobs, models, outputs, settings
+from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
@@ -26,6 +26,7 @@ def _api_router() -> APIRouter:
     router.include_router(models.router)
     router.include_router(jobs.router)
     router.include_router(outputs.router)
+    router.include_router(printing.router)
     router.include_router(settings.router)
     router.include_router(fonts.router)
     return router

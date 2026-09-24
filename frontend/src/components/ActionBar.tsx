@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, SendResult } from '../api/types'
+import type { Job, Output, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
 import { ColorStrip } from './ColorStrip'
+import { PrintPicker } from './PrintPicker'
 import { SendDialog } from './SendDialog'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
@@ -16,6 +17,8 @@ interface Props {
   capture: () => Promise<Blob | null>
   onGenerated: (output: Output) => void
   onSent: (result: SendResult) => void
+  /** #86 — a pipeline run started from the print picker. */
+  onRan: (result: PrintRunResult) => void
 }
 
 export function ActionBar({
@@ -26,10 +29,12 @@ export function ActionBar({
   capture,
   onGenerated,
   onSent,
+  onRan,
 }: Props) {
   const [generating, setGenerating] = useState(false)
   const [downloading, setDownloading] = useState(false)
   const [sendOpen, setSendOpen] = useState(false)
+  const [printOpen, setPrintOpen] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   const ready = job?.status === 'done' && !rendering
@@ -114,6 +119,9 @@ export function ActionBar({
           <Button onClick={() => setSendOpen(true)} disabled={!output}>
             Send to Bambuddy
           </Button>
+          <Button onClick={() => setPrintOpen(true)} disabled={!output} data-testid="print">
+            Print
+          </Button>
         </div>
       </footer>
 
@@ -122,6 +130,14 @@ export function ActionBar({
         output={output}
         onClose={() => setSendOpen(false)}
         onSent={onSent}
+      />
+
+      <PrintPicker
+        open={printOpen}
+        slug={slug}
+        output={output}
+        onClose={() => setPrintOpen(false)}
+        onRan={onRan}
       />
     </>
   )

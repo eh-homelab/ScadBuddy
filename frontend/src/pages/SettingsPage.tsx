@@ -219,8 +219,9 @@ export function SettingsPage() {
                 ))}
               </select>
               <p className="mt-1.5 text-[12px] text-muted">
-                Used by &ldquo;Slice and queue&rdquo;. Without one, ScadBuddy slices with the
-                stored presets and queues to the printer below.
+                The fallback for &ldquo;Slice and queue&rdquo; and for Print. A model given its
+                own pipeline in the print picker uses that instead. Without either, ScadBuddy
+                slices with the stored presets and queues to the printer below.
               </p>
             </div>
 

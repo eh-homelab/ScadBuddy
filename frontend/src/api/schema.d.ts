@@ -260,6 +260,152 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/models/{slug}/pipeline": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Remember this model's pipeline
+         * @description Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug.
+         */
+        put: operations["put_model_pipeline_api_v1_print_models__slug__pipeline_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/models/{slug}/pipelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Pipelines, with this model's default */
+        get: operations["get_model_pipelines_api_v1_print_models__slug__pipelines_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/outputs/{output_id}/eligibility": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Which pipelines would accept this output
+         * @description Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
+         *
+         *     Bambuddy judges a *library file*, so there is no eligibility answer before an
+         *     upload. The upload happens once per output: an output is immutable, so a recorded
+         *     ``library_file_id`` still describes this 3MF.
+         *
+         *     Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
+         *     ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
+         *     top-level ``ok`` means only that *some* printer passes.
+         */
+        post: operations["post_eligibility_api_v1_print_outputs__output_id__eligibility_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/outputs/{output_id}/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run a pipeline for this output
+         * @description ``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
+         *     ``force``.
+         *
+         *     Without ``pipeline_id`` the model's own default is used, then the global one. A
+         *     blocking eligibility issue is Bambuddy's 409, whose body this passes through as the
+         *     ``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records
+         *     ``eligibility_overridden``.
+         *
+         *     There is deliberately no printer here. ``PipelineRunRequest`` carries none, so a
+         *     class-targeted pipeline fans out by its own ``fanout_strategy`` and reports the
+         *     printer per copy in ``run.jobs[]``.
+         */
+        post: operations["post_run_api_v1_print_outputs__output_id__run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/pipelines": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Create a pipeline from presets
+         * @description ``POST /api/v1/slicer-pipelines/`` verbatim.
+         *
+         *     ``SlicerPipelineCreate`` carries no target or fanout fields, so the new pipeline
+         *     cannot be created pre-aimed at a printer — Bambuddy targets it and the response
+         *     reports what it chose. Re-targeting is a ``PUT`` ScadBuddy does not make.
+         */
+        post: operations["post_pipeline_api_v1_print_pipelines_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Presets a new pipeline can be built from
+         * @description Printer presets and bed types, plus — once a printer preset is named — the
+         *     process and filament presets compatible with it.
+         *
+         *     The filter is server-side on purpose: the live instance holds ~4000 process and
+         *     filament presets across the cloud and standard tiers, which is not a payload to
+         *     hand a browser so it can filter them itself. Nozzle diameter is not a field
+         *     anywhere; it lives in the process preset's *name* ("… H2C 0.2 nozzle"), which is
+         *     why the form picks a process preset rather than a diameter.
+         */
+        get: operations["get_presets_api_v1_print_presets_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings": {
         parameters: {
             query?: never;
@@ -462,16 +608,86 @@ export interface components {
             /** Title */
             title?: string | null;
         };
+        /**
+         * EligibilityCheck
+         * @description ``pipeline_ids`` omitted means every pipeline Bambuddy has.
+         */
+        EligibilityCheck: {
+            /** Pipeline Ids */
+            pipeline_ids?: number[] | null;
+        };
+        /**
+         * EligibilityIssue
+         * @description ``kind`` is an open enum here on purpose — Bambuddy adds kinds between
+         *     releases and an unknown one must still render, not 502 the whole report.
+         */
+        EligibilityIssue: {
+            /** Actual */
+            actual?: string | null;
+            /** Expected */
+            expected?: string | null;
+            /** Kind */
+            kind: string;
+            /** Slot Index */
+            slot_index?: number | null;
+        };
+        /** EligibilityOverview */
+        EligibilityOverview: {
+            /** Library File Id */
+            library_file_id: number;
+            /** Reports */
+            reports?: components["schemas"]["PipelineReport"][];
+        };
+        /**
+         * EligibilityReport
+         * @description Returned by ``check-eligibility`` and, on a 409, by ``run``.
+         *
+         *     Under ``target_kind="printer_class"`` ``ok`` is true when *at least one* matching
+         *     printer passes, and the per-printer detail moves to ``printer_reports`` — ``issues``
+         *     then carries only class-level problems. Reading ``ok`` as "every printer is ready"
+         *     is wrong for that target kind.
+         */
+        EligibilityReport: {
+            /** Issues */
+            issues?: components["schemas"]["EligibilityIssue"][];
+            /** Ok */
+            ok: boolean;
+            /** Printer Reports */
+            printer_reports?: components["schemas"]["PerPrinterReport"][];
+            /**
+             * Target Kind
+             * @default specific_printer
+             * @enum {string}
+             */
+            target_kind: "specific_printer" | "printer_class";
+            /** Target Model Class */
+            target_model_class?: string | null;
+            /** Target Printer Id */
+            target_printer_id?: number | null;
+            /** Target Printer Name */
+            target_printer_name?: string | null;
+        };
         /** Folder */
         Folder: {
+            /** Archive Id */
+            archive_id?: number | null;
             /** File Count */
             file_count?: number | null;
             /** Id */
             id: number;
+            /**
+             * Is External
+             * @default false
+             */
+            is_external: boolean;
             /** Name */
             name: string;
             /** Parent Id */
             parent_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Project Name */
+            project_name?: string | null;
         };
         /** FontFamily */
         FontFamily: {
@@ -651,12 +867,29 @@ export interface components {
             /** Watertight */
             watertight: boolean;
         };
+        /** PerPrinterReport */
+        PerPrinterReport: {
+            /** Issues */
+            issues?: components["schemas"]["EligibilityIssue"][];
+            /** Ok */
+            ok: boolean;
+            /** Printer Id */
+            printer_id: number;
+            /** Printer Name */
+            printer_name: string;
+        };
         /** Pipeline */
         Pipeline: {
             /** Bed Type */
             bed_type?: string | null;
             /** Description */
             description?: string | null;
+            /**
+             * Fanout Strategy
+             * @default max_parallel
+             * @enum {string}
+             */
+            fanout_strategy: "max_parallel" | "fill_one_first" | "round_robin";
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /** Id */
@@ -665,6 +898,238 @@ export interface components {
             name: string;
             printer_preset?: components["schemas"]["PresetRef"] | null;
             process_preset?: components["schemas"]["PresetRef"] | null;
+            /**
+             * Target Kind
+             * @default printer_class
+             * @enum {string}
+             */
+            target_kind: "specific_printer" | "printer_class";
+            /** Target Model Class */
+            target_model_class?: string | null;
+            /** Target Printer Id */
+            target_printer_id?: number | null;
+        };
+        /** PipelineChoices */
+        PipelineChoices: {
+            /** Default Pipeline Id */
+            default_pipeline_id?: number | null;
+            /** Global Pipeline Id */
+            global_pipeline_id?: number | null;
+            /** Model Pipeline Id */
+            model_pipeline_id?: number | null;
+            /** Pipelines */
+            pipelines?: components["schemas"]["PipelineView"][];
+            /** Printers */
+            printers?: components["schemas"]["Printer"][];
+        };
+        /**
+         * PipelineCreate
+         * @description ``POST /api/v1/slicer-pipelines/``.
+         *
+         *     ``SlicerPipelineCreate`` carries **no** target or fanout fields even though
+         *     ``SlicerPipelineResponse`` returns them — a pipeline is created against the
+         *     defaults and re-targeted with ``PUT``, which ScadBuddy does not do.
+         */
+        PipelineCreate: {
+            /** Bed Type */
+            bed_type?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Filament Presets */
+            filament_presets: components["schemas"]["PresetRef"][];
+            /** Name */
+            name: string;
+            printer_preset: components["schemas"]["PresetRef"];
+            process_preset: components["schemas"]["PresetRef"];
+        };
+        /** PipelineDefault */
+        PipelineDefault: {
+            /** Global Pipeline Id */
+            global_pipeline_id?: number | null;
+            /** Pipeline Id */
+            pipeline_id?: number | null;
+            /** Slug */
+            slug: string;
+        };
+        /**
+         * PipelineDefaultPatch
+         * @description ``null`` clears this model's default, falling back to the global one.
+         */
+        PipelineDefaultPatch: {
+            /** Pipeline Id */
+            pipeline_id?: number | null;
+        };
+        /**
+         * PipelineJob
+         * @description One copy of a run: the queue entry it became and the printer it landed on.
+         */
+        PipelineJob: {
+            /** Assigned Printer Id */
+            assigned_printer_id?: number | null;
+            /** Assigned Printer Name */
+            assigned_printer_name?: string | null;
+            /** Copy Index */
+            copy_index: number;
+            /** Error Message */
+            error_message?: string | null;
+            /** Id */
+            id: number;
+            /** Pipeline Run Id */
+            pipeline_run_id: number;
+            /** Queue Entry Id */
+            queue_entry_id?: number | null;
+            /** Status */
+            status: string;
+        };
+        /**
+         * PipelineReport
+         * @description Bambuddy's report for one pipeline, passed through as it came.
+         */
+        PipelineReport: {
+            /** Pipeline Id */
+            pipeline_id: number;
+            report: components["schemas"]["EligibilityReport"];
+        };
+        /** PipelineRun */
+        PipelineRun: {
+            /**
+             * Copies
+             * @default 1
+             */
+            copies: number;
+            /**
+             * Copies Cancelled
+             * @default 0
+             */
+            copies_cancelled: number;
+            /**
+             * Copies Completed
+             * @default 0
+             */
+            copies_completed: number;
+            /**
+             * Copies Failed
+             * @default 0
+             */
+            copies_failed: number;
+            /**
+             * Copies In Progress
+             * @default 0
+             */
+            copies_in_progress: number;
+            /**
+             * Eligibility Overridden
+             * @default false
+             */
+            eligibility_overridden: boolean;
+            /** Error Message */
+            error_message?: string | null;
+            /** Fanout Strategy */
+            fanout_strategy?: ("max_parallel" | "fill_one_first" | "round_robin") | null;
+            /** Id */
+            id: number;
+            /** Jobs */
+            jobs?: components["schemas"]["PipelineJob"][];
+            /** Pipeline Id */
+            pipeline_id?: number | null;
+            /** Pipeline Name */
+            pipeline_name?: string | null;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
+            /** Sliced Library File Id */
+            sliced_library_file_id?: number | null;
+            /** Source Archive Id */
+            source_archive_id?: number | null;
+            /** Source Filename */
+            source_filename?: string | null;
+            /** Source Library File Id */
+            source_library_file_id?: number | null;
+            /** Status */
+            status: string;
+            /** Target Kind */
+            target_kind?: ("specific_printer" | "printer_class") | null;
+            /** Target Model Class */
+            target_model_class?: string | null;
+            /** Target Printer Id */
+            target_printer_id?: number | null;
+        };
+        /**
+         * PipelineView
+         * @description A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and
+         *     the printers its target comes out as.
+         */
+        PipelineView: {
+            /** Bed Type */
+            bed_type?: string | null;
+            /** Description */
+            description?: string | null;
+            /**
+             * Fanout Strategy
+             * @enum {string}
+             */
+            fanout_strategy: "max_parallel" | "fill_one_first" | "round_robin";
+            /** Filament Preset Names */
+            filament_preset_names?: (string | null)[];
+            /** Filament Presets */
+            filament_presets?: components["schemas"]["PresetRef"][];
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /** Printer Ids */
+            printer_ids?: number[];
+            printer_preset?: components["schemas"]["PresetRef"] | null;
+            /** Printer Preset Name */
+            printer_preset_name?: string | null;
+            process_preset?: components["schemas"]["PresetRef"] | null;
+            /** Process Preset Name */
+            process_preset_name?: string | null;
+            /**
+             * Target Kind
+             * @enum {string}
+             */
+            target_kind: "specific_printer" | "printer_class";
+            /** Target Model Class */
+            target_model_class?: string | null;
+            /** Target Printer Id */
+            target_printer_id?: number | null;
+            /** Target Printer Name */
+            target_printer_name?: string | null;
+        };
+        /**
+         * PresetChoice
+         * @description One row of the "New pipeline" form's pickers.
+         *
+         *     ``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns
+         *     one, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.
+         *     An empty list means the preset declares no restriction, not that it fits nothing.
+         */
+        PresetChoice: {
+            /** Compatible Printers */
+            compatible_printers?: string[];
+            /** Filament Colour */
+            filament_colour?: string | null;
+            /** Filament Type */
+            filament_type?: string | null;
+            /** Name */
+            name: string;
+            ref: components["schemas"]["PresetRef"];
+        };
+        /**
+         * PresetOptions
+         * @description Printer presets and bed types always; process and filament only once a printer
+         *     preset is named, because unfiltered those two tiers are thousands of rows.
+         */
+        PresetOptions: {
+            /** Bed Types */
+            bed_types?: string[];
+            /** Filament */
+            filament?: components["schemas"]["PresetChoice"][];
+            /** Printer */
+            printer?: components["schemas"]["PresetChoice"][];
+            printer_preset?: components["schemas"]["PresetRef"] | null;
+            /** Process */
+            process?: components["schemas"]["PresetChoice"][];
         };
         /**
          * PresetRef
@@ -679,7 +1144,45 @@ export interface components {
              */
             source: "orca_cloud" | "cloud" | "local" | "standard";
         };
-        /** Printer */
+        /**
+         * PrintRunRequest
+         * @description ``pipeline_id`` omitted means "whatever this model defaults to".
+         *
+         *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
+         *     only offers it once the issues have been shown.
+         */
+        PrintRunRequest: {
+            /**
+             * Copies
+             * @default 1
+             */
+            copies: number;
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+            /** Pipeline Id */
+            pipeline_id?: number | null;
+        };
+        /** PrintRunResult */
+        PrintRunResult: {
+            /** Bambuddy Url */
+            bambuddy_url: string;
+            /** Library File Id */
+            library_file_id: number;
+            /** Pipeline Id */
+            pipeline_id: number;
+            run: components["schemas"]["PipelineRun"];
+        };
+        /**
+         * Printer
+         * @description ``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
+         *
+         *     ``access_code`` is deliberately absent: Bambuddy withholds it from API-keyed
+         *     callers, so a model that carried it would be null in production and populated
+         *     only when auth is disabled.
+         */
         Printer: {
             /** Id */
             id: number;
@@ -1436,6 +1939,207 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_model_pipeline_api_v1_print_models__slug__pipeline_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PipelineDefaultPatch"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineDefault"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_model_pipelines_api_v1_print_models__slug__pipelines_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineChoices"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_eligibility_api_v1_print_outputs__output_id__eligibility_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EligibilityCheck"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EligibilityOverview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_run_api_v1_print_outputs__output_id__run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintRunRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintRunResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_pipeline_api_v1_print_pipelines_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PipelineCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PipelineView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_presets_api_v1_print_presets_get: {
+        parameters: {
+            query?: {
+                printer_preset_source?: ("orca_cloud" | "cloud" | "local" | "standard") | null;
+                printer_preset_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetOptions"];
+                };
             };
             /** @description Validation Error */
             422: {

@@ -137,6 +137,7 @@ export function CustomizePage() {
               outputsState.reload()
             }}
             onSent={() => outputsState.reload()}
+            onRan={() => outputsState.reload()}
           />
         </div>
       </div>

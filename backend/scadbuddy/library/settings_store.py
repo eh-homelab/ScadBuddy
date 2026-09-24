@@ -38,6 +38,16 @@ class StoredSettings(BambuddyIds):
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
 
+    #: Model slug -> the pipeline that model prints with, which wins over
+    #: ``pipeline_id``. Deliberately not part of :class:`SettingsPatch`: a patch
+    #: replaces a whole value, while a per-model default has to be settable one model
+    #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
+    model_pipelines: dict[str, int] = Field(default_factory=dict)
+
+    def pipeline_for(self, slug: str) -> int | None:
+        """This model's own pipeline, else the global fallback (#86)."""
+        return self.model_pipelines.get(slug, self.pipeline_id)
+
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it."""
@@ -90,7 +100,23 @@ class SettingsStore:
         if changes.get("bambuddy_api_key") == "":
             changes["bambuddy_api_key"] = None
         current.update(changes)
-        settings = StoredSettings.model_validate(current)
+        return self._write(StoredSettings.model_validate(current))
+
+    def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
+        """Point one model at a pipeline, or clear it back to the global fallback.
+
+        One slug at a time rather than through :class:`SettingsPatch`, which would make
+        the browser send the whole map back and lose any entry it had not loaded.
+        """
+        settings = self.load()
+        pipelines = dict(settings.model_pipelines)
+        if pipeline_id is None:
+            pipelines.pop(slug, None)
+        else:
+            pipelines[slug] = pipeline_id
+        return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
+
+    def _write(self, settings: StoredSettings) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(settings.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
