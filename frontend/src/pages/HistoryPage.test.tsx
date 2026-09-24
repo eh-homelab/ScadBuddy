@@ -78,6 +78,20 @@ describe('HistoryPage', () => {
     expect(within(await row('Nova')).getByText('in library #8790')).toBeInTheDocument()
   })
 
+  it('deep-links each recorded id into Bambuddy', async () => {
+    render()
+    // The base comes from Settings, because an output record carries ids and no URL.
+    const queued = within(await row('Reagan')).getByRole('link', { name: 'queued #4471' })
+    expect(queued).toHaveAttribute(
+      'href',
+      'https://bambuddy.internal.nullreference.io/queue/4471',
+    )
+    expect(within(await row('Nova')).getByRole('link', { name: 'in library #8790' })).toHaveAttribute(
+      'href',
+      'https://bambuddy.internal.nullreference.io/library',
+    )
+  })
+
   it('edits an output through its deep link', async () => {
     const { user } = render()
     await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))

@@ -98,8 +98,14 @@ async def upload_output(
     store: OutputStore,
     meta: OutputMeta,
     settings: StoredSettings,
+    *,
+    folder_id: int | None = None,
 ) -> tuple[OutputMeta, str]:
     """Upload ``model.3mf``, replacing a file a previous send left behind.
+
+    ``folder_id`` overrides the folder from Settings, which is how a send to a project
+    lands in *that project's* folder (#79) — a folder carries ``project_id``, so putting
+    the file there is what makes Bambuddy's project page list it.
 
     Bambuddy keeps both copies if you simply upload again, so a re-send deletes the
     recorded id first. A delete that 404s is not fatal — someone removing the file in
@@ -118,7 +124,9 @@ async def upload_output(
 
     filename = download_filename(meta)
     uploaded = await client.upload_library_file(
-        filename, _read_3mf(store, meta), folder_id=settings.library_folder_id
+        filename,
+        _read_3mf(store, meta),
+        folder_id=folder_id if folder_id is not None else settings.library_folder_id,
     )
     return store.record_send(meta.id, library_file_id=uploaded.id), uploaded.filename
 
@@ -128,6 +136,8 @@ async def ensure_uploaded(
     store: OutputStore,
     meta: OutputMeta,
     settings: StoredSettings,
+    *,
+    folder_id: int | None = None,
 ) -> tuple[OutputMeta, int]:
     """The library file id to slice, judge or print, uploading the 3MF if there is none.
 
@@ -137,8 +147,13 @@ async def ensure_uploaded(
     file in Bambuddy, and must not re-upload on every open.
     """
     if meta.library_file_id is not None:
+        if folder_id is not None:
+            # The file was uploaded before this project was chosen, so it is sitting in
+            # whatever folder that send used. Bambuddy has a move route, and a caller
+            # that reports `folder_id` must not report one the file is not in.
+            await client.move_library_files([meta.library_file_id], folder_id)
         return meta, meta.library_file_id
-    meta, _ = await upload_output(client, store, meta, settings)
+    meta, _ = await upload_output(client, store, meta, settings, folder_id=folder_id)
     if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
         raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
     return meta, meta.library_file_id
@@ -310,7 +325,7 @@ async def _queue_send(
                 source_library_file_id=library_file_id, copies=options.quantity or 1
             ),
         )
-        store.record_send(meta.id, pipeline_run_id=run.id)
+        store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
         return SendResult(
             mode="queue",
             library_file_id=library_file_id,
@@ -368,7 +383,12 @@ async def _queue_send(
             **options.queue_fields(),
         )
     )
-    store.record_send(meta.id, queue_item_id=item.id)
+    store.record_send(
+        meta.id,
+        queue_item_id=item.id,
+        print_route="slice_queue",
+        slice_job_id=accepted.job_id,
+    )
     # Slicing leaves a second library entry, and the queue references that one — so
     # it is what a reader opens from the queue. Both are this output, so both get the
     # link; the note is best-effort either way.

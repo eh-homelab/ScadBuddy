@@ -36,8 +36,10 @@ from scadbuddy.bambuddy.models import (
     EligibilityReport,
     EligibilityRequest,
     ExternalLink,
+    FilamentRequirements,
     Folder,
     FolderCreate,
+    InventoryRemain,
     LibraryFile,
     LocalPresetCatalogue,
     Pipeline,
@@ -56,6 +58,8 @@ from scadbuddy.bambuddy.models import (
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
+    Spool,
+    SpoolAssignment,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -256,6 +260,68 @@ class BambuddyClient:
         )
         return LocalPresetCatalogue.model_validate(response.json())
 
+    # --- inventory -----------------------------------------------------------
+
+    async def spools(self, *, include_archived: bool = False) -> list[Spool]:
+        """``GET /api/v1/inventory/spools`` — every spool, loaded or on the shelf.
+
+        Archived spools are excluded by default because the picker offers what can be
+        printed with today; ``include_archived`` is Bambuddy's own query parameter.
+        """
+        what = "list the filament spools"
+        response = await self._send(
+            "GET",
+            "/inventory/spools",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"include_archived": include_archived},
+        )
+        return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_assignments(self, *, printer_id: int | None = None) -> list[SpoolAssignment]:
+        """``GET /api/v1/inventory/assignments`` — spool to printer/AMS/tray.
+
+        Unfiltered it covers every printer, which is what the picker wants: a spool
+        loaded in *another* printer is still offered, marked with where it is.
+        """
+        what = "list the spool assignments"
+        response = await self._send(
+            "GET",
+            "/inventory/assignments",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"printer_id": printer_id} if printer_id is not None else None,
+        )
+        return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def inventory_remain(self, printer_id: int) -> InventoryRemain:
+        """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/inventory-remain",
+            scope=Scope.READ_STATUS,
+            what=f"read the loaded filament of printer {printer_id}",
+        )
+        return InventoryRemain.model_validate(response.json())
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements:
+        """What each plate slot of a library file needs.
+
+        ``used_grams`` comes back ``0`` for a 3MF that carries no slice info — which is
+        every 3MF ScadBuddy uploads before it has been sliced. That is *unknown*, and
+        callers must not read it as "this print needs no filament".
+        """
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}/filament-requirements",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read the filament requirements of library file {file_id}",
+            params={"plate_id": plate_id} if plate_id is not None else None,
+        )
+        return FilamentRequirements.model_validate(response.json())
+
     # --- library -------------------------------------------------------------
 
     async def folders_by_project(self, project_id: int) -> list[Folder]:
@@ -278,6 +344,23 @@ class BambuddyClient:
             json=folder.model_dump(mode="json", exclude_none=True),
         )
         return Folder.model_validate(response.json())
+
+    async def move_library_files(self, file_ids: list[int], folder_id: int | None) -> None:
+        """``POST /api/v1/library/files/move`` — Bambuddy's own "put these in that folder".
+
+        Used when an output was uploaded before a project was chosen for it. Re-uploading
+        would make a second copy, and leaving it where it is while reporting the project's
+        folder would be a lie; Bambuddy has a route for exactly this, so it is called
+        rather than worked around. Moving a file into the folder it is already in is a
+        no-op there, so this needs no read of where the file currently lives.
+        """
+        await self._send(
+            "POST",
+            "/library/files/move",
+            scope=Scope.MANAGE_LIBRARY,
+            what="move the uploaded 3MF into the project's folder",
+            json={"file_ids": file_ids, "folder_id": folder_id},
+        )
 
     async def upload_library_file(
         self, filename: str, content: bytes, *, folder_id: int | None = None
@@ -409,6 +492,31 @@ class BambuddyClient:
         )
         return PipelineRun.model_validate(response.json())
 
+    async def pipeline_run(self, run_id: int) -> PipelineRun:
+        """``GET /api/v1/pipeline-runs/{run_id}`` — the single-run read.
+
+        Not ``/slicer-pipelines/{id}/runs``: that is a list, and following one run
+        through it would mean paging past every other run of the same pipeline. This
+        route also needs no pipeline id, which matters because an output records the
+        run it produced and not the pipeline it came from.
+        """
+        response = await self._send(
+            "GET",
+            f"/pipeline-runs/{run_id}",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"read pipeline run {run_id}",
+        )
+        return PipelineRun.model_validate(response.json())
+
+    async def queue_item(self, item_id: int) -> QueueItem:
+        response = await self._send(
+            "GET",
+            f"/queue/{item_id}",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"read queue item {item_id}",
+        )
+        return QueueItem.model_validate(response.json())
+
     async def pipeline_runs(self, pipeline_id: int, *, limit: int = 10) -> PipelineRunList:
         response = await self._send(
             "GET",
@@ -446,6 +554,17 @@ class BambuddyClient:
             params={"status": status_filter} if status_filter is not None else None,
         )
         return [Project.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def project(self, project_id: int) -> Project:
+        """``GET /api/v1/projects/{id}`` — the same model the list route returns, minus
+        the roll-up counters, which is why they default rather than being required."""
+        response = await self._send(
+            "GET",
+            f"/projects/{project_id}",
+            scope=Scope.MANAGE_PROJECTS,
+            what=f"read project {project_id}",
+        )
+        return Project.model_validate(response.json())
 
     async def create_project(self, project: ProjectCreate) -> Project:
         response = await self._send(

@@ -1,6 +1,34 @@
 {
   "components": {
     "schemas": {
+      "AttachResult": {
+        "description": "What was attached, so the UI can say so rather than claiming more than happened.",
+        "properties": {
+          "archive_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Archive Ids",
+            "type": "array"
+          },
+          "project_id": {
+            "title": "Project Id",
+            "type": "integer"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "project_id"
+        ],
+        "title": "AttachResult",
+        "type": "object"
+      },
       "BambuddyTargets": {
         "description": "Everything the settings page needs to fill its pickers.",
         "properties": {
@@ -245,6 +273,82 @@
           "detail"
         ],
         "title": "ConnectionTest",
+        "type": "object"
+      },
+      "CopyProgress": {
+        "description": "One copy of a print: where it went and what it is doing.\n\nA pipeline run reports one of these per copy; the queue route has exactly one,\nbecause Bambuddy's queue models repeats through ``quantity`` rather than through\nseparate rows.",
+        "properties": {
+          "copy_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copy Index"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "queue_entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Entry Id"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "pending",
+              "running",
+              "queued",
+              "done",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiting Reason"
+          }
+        },
+        "title": "CopyProgress",
         "type": "object"
       },
       "CreateOutputRequest": {
@@ -536,7 +640,127 @@
         "title": "EligibilityReport",
         "type": "object"
       },
+      "FilamentOptions": {
+        "description": "Everything the filament step of the dialog needs, in one answer.\n\nOne route rather than three, because the join \u2014 inventory against assignments\nagainst the per-slot remaining weights \u2014 is the part that is easy to get wrong, and\ndoing it in the browser would mean shipping every spool's history to do it.",
+        "properties": {
+          "library_file_id": {
+            "title": "Library File Id",
+            "type": "integer"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlotNeed"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "spools": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolOption"
+            },
+            "title": "Spools",
+            "type": "array"
+          },
+          "suggested": {
+            "items": {
+              "$ref": "#/components/schemas/SlotChoice"
+            },
+            "title": "Suggested",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FilamentWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "library_file_id"
+        ],
+        "title": "FilamentOptions",
+        "type": "object"
+      },
+      "FilamentPlan": {
+        "description": "What the dialog submits: one spool per slot, and how hard to insist on it.\n\n``force_colour_match`` becomes ``force_color_match`` on every override, which is\nthe flag Bambuddy's scheduler reads to require an exact type+colour match rather\nthan merely preferring one. It is off by default because it only bites on a\nmodel-targeted queue item, where insisting can leave the job unschedulable.",
+        "properties": {
+          "force_colour_match": {
+            "default": false,
+            "title": "Force Colour Match",
+            "type": "boolean"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlotChoice"
+            },
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "title": "FilamentPlan",
+        "type": "object"
+      },
+      "FilamentWarning": {
+        "description": "Advisory, never blocking. Bambuddy's own refusals are the eligibility report.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "not-loaded",
+              "low-filament",
+              "no-choice",
+              "no-preset"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ],
+        "title": "FilamentWarning",
+        "type": "object"
+      },
       "Folder": {
+        "description": "A row of ``GET /api/v1/library/folders``.\n\n**The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their\nparent's ``children`` rather than returning them alongside it, so a folder linked to\na project is invisible to a scan of the top level if it happens to live under\nanother folder. :func:`walk` is what flattens it.",
         "properties": {
           "archive_id": {
             "anyOf": [
@@ -548,6 +772,13 @@
               }
             ],
             "title": "Archive Id"
+          },
+          "children": {
+            "items": {
+              "$ref": "#/components/schemas/Folder"
+            },
+            "title": "Children",
+            "type": "array"
           },
           "file_count": {
             "anyOf": [
@@ -953,6 +1184,41 @@
         "title": "JobStatus",
         "type": "object"
       },
+      "LoadedAt": {
+        "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.\n\nPurely a label. It is not an address: nothing here turns it into a tray number.",
+        "properties": {
+          "ams_id": {
+            "title": "Ams Id",
+            "type": "integer"
+          },
+          "printer_id": {
+            "title": "Printer Id",
+            "type": "integer"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "tray_id": {
+            "title": "Tray Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "printer_id",
+          "ams_id",
+          "tray_id"
+        ],
+        "title": "LoadedAt",
+        "type": "object"
+      },
       "ModelPatch": {
         "properties": {
           "description": {
@@ -1183,6 +1449,32 @@
             ],
             "title": "Pipeline Run Id"
           },
+          "print_route": {
+            "anyOf": [
+              {
+                "enum": [
+                  "pipeline",
+                  "slice_queue"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Print Route"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
           "queue_item_id": {
             "anyOf": [
               {
@@ -1193,6 +1485,17 @@
               }
             ],
             "title": "Queue Item Id"
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
           },
           "slug": {
             "title": "Slug",
@@ -1681,9 +1984,33 @@
             ],
             "title": "Assigned Printer Name"
           },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "copy_index": {
             "title": "Copy Index",
             "type": "integer"
+          },
+          "dispatched_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Dispatched At"
           },
           "error_message": {
             "anyOf": [
@@ -1766,6 +2093,18 @@
       },
       "PipelineRun": {
         "properties": {
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Completed At"
+          },
           "copies": {
             "default": 1,
             "title": "Copies",
@@ -1790,6 +2129,18 @@
             "default": 0,
             "title": "Copies In Progress",
             "type": "integer"
+          },
+          "created_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Created At"
           },
           "eligibility_overridden": {
             "default": false,
@@ -1833,6 +2184,17 @@
             },
             "title": "Jobs",
             "type": "array"
+          },
+          "parent_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Run Id"
           },
           "pipeline_id": {
             "anyOf": [
@@ -1910,6 +2272,18 @@
               }
             ],
             "title": "Source Library File Id"
+          },
+          "started_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Started At"
           },
           "status": {
             "title": "Status",
@@ -2533,8 +2907,137 @@
         "title": "PrintOptionsView",
         "type": "object"
       },
+      "PrintProgress": {
+        "description": "What the send bar shows until every copy is queued, failed or cancelled.",
+        "properties": {
+          "bambuddy_url": {
+            "title": "Bambuddy Url",
+            "type": "string"
+          },
+          "copies": {
+            "default": 1,
+            "title": "Copies",
+            "type": "integer"
+          },
+          "copies_cancelled": {
+            "default": 0,
+            "title": "Copies Cancelled",
+            "type": "integer"
+          },
+          "copies_completed": {
+            "default": 0,
+            "title": "Copies Completed",
+            "type": "integer"
+          },
+          "copies_detail": {
+            "items": {
+              "$ref": "#/components/schemas/CopyProgress"
+            },
+            "title": "Copies Detail",
+            "type": "array"
+          },
+          "copies_failed": {
+            "default": 0,
+            "title": "Copies Failed",
+            "type": "integer"
+          },
+          "copies_in_progress": {
+            "default": 0,
+            "title": "Copies In Progress",
+            "type": "integer"
+          },
+          "error_message": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error Message"
+          },
+          "fix": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fix"
+          },
+          "pipeline_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Run Id"
+          },
+          "queue_item_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Item Id"
+          },
+          "route": {
+            "enum": [
+              "pipeline",
+              "slice_queue"
+            ],
+            "title": "Route",
+            "type": "string"
+          },
+          "settled": {
+            "default": false,
+            "title": "Settled",
+            "type": "boolean"
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
+          },
+          "stage": {
+            "default": "unknown",
+            "enum": [
+              "pending",
+              "running",
+              "queued",
+              "done",
+              "failed",
+              "cancelled",
+              "unknown"
+            ],
+            "title": "Stage",
+            "type": "string"
+          }
+        },
+        "required": [
+          "route",
+          "bambuddy_url"
+        ],
+        "title": "PrintProgress",
+        "type": "object"
+      },
       "PrintRunRequest": {
-        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.",
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\n``filament_plan`` is what makes this request choose its route rather than its\ncaller. A plan names one spool per plate slot, and those three queue-item fields\nexist on no other Bambuddy call \u2014 so a request carrying one is sliced and queued,\nand one without one runs the pipeline exactly as it did before (#87).",
         "properties": {
           "copies": {
             "default": 1,
@@ -2542,6 +3045,16 @@
             "minimum": 1.0,
             "title": "Copies",
             "type": "integer"
+          },
+          "filament_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilamentPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "force": {
             "default": false,
@@ -2558,16 +3071,56 @@
               }
             ],
             "title": "Pipeline Id"
+          },
+          "plate_id": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
           }
         },
         "title": "PrintRunRequest",
         "type": "object"
       },
       "PrintRunResult": {
+        "description": "One shape for both routes, so the caller need not know which one ran.\n\n``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is\npopulated: a pipeline run reports its copies through ``jobs[]``, while a queued item\nis a single row carrying ``quantity``. Following either to completion is #89.",
         "properties": {
           "bambuddy_url": {
             "title": "Bambuddy Url",
             "type": "string"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
           },
           "library_file_id": {
             "title": "Library File Id",
@@ -2577,14 +3130,87 @@
             "title": "Pipeline Id",
             "type": "integer"
           },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          },
+          "route": {
+            "default": "pipeline",
+            "enum": [
+              "pipeline",
+              "slice_queue"
+            ],
+            "title": "Route",
+            "type": "string"
+          },
           "run": {
-            "$ref": "#/components/schemas/PipelineRun"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PipelineRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
+          },
+          "sliced_library_file_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sliced Library File Id"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FilamentWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
           "pipeline_id",
           "library_file_id",
-          "run",
           "bambuddy_url"
         ],
         "title": "PrintRunResult",
@@ -2634,6 +3260,217 @@
           "name"
         ],
         "title": "Printer",
+        "type": "object"
+      },
+      "ProjectAttach": {
+        "description": "Which of this output's queue entries to file under the project.\n\nThe ids come from the progress read (#89): a pipeline run's\n``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the\nonly one that knows them, and only once it has polled.",
+        "properties": {
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          }
+        },
+        "title": "ProjectAttach",
+        "type": "object"
+      },
+      "ProjectChoices": {
+        "properties": {
+          "last_project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Project Id"
+          },
+          "projects": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectView"
+            },
+            "title": "Projects",
+            "type": "array"
+          }
+        },
+        "title": "ProjectChoices",
+        "type": "object"
+      },
+      "ProjectRequest": {
+        "description": "Create a project, or link an existing one.\n\n``project_id`` set means \"link that one\"; otherwise ``name`` is required and a new\nproject is created. Only the fields ScadBuddy has an opinion about are sent \u2014\n``ProjectCreate`` also carries ``target_count``, ``due_date``, ``budget`` and more,\nand inventing values for them would put numbers on Bambuddy's project page that\nnobody chose.",
+        "properties": {
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "title": "ProjectRequest",
+        "type": "object"
+      },
+      "ProjectView": {
+        "description": "A Bambuddy project and the library folder sends to it land in.\n\n``folder_id`` is ``None`` for a project that has no folder yet \u2014 an existing\nBambuddy project made outside ScadBuddy usually does not, and linking one creates\nit rather than refusing.",
+        "properties": {
+          "archive_count": {
+            "default": 0,
+            "title": "Archive Count",
+            "type": "integer"
+          },
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Id"
+          },
+          "folder_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Folder Name"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "queue_count": {
+            "default": 0,
+            "title": "Queue Count",
+            "type": "integer"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "status"
+        ],
+        "title": "ProjectView",
         "type": "object"
       },
       "RenderAccepted": {
@@ -3050,6 +3887,188 @@
           "embed_path"
         ],
         "title": "SidebarLink",
+        "type": "object"
+      },
+      "SlotChoice": {
+        "properties": {
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "spool_id": {
+            "title": "Spool Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slot_id",
+          "spool_id"
+        ],
+        "title": "SlotChoice",
+        "type": "object"
+      },
+      "SlotNeed": {
+        "description": "One filament slot of the plate, as Bambuddy reads the 3MF. ``slot_id`` is 1-based.",
+        "properties": {
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "material": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "used_grams": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Grams"
+          }
+        },
+        "required": [
+          "slot_id"
+        ],
+        "title": "SlotNeed",
+        "type": "object"
+      },
+      "SpoolOption": {
+        "description": "One row of the picker: a spool, and where it is.",
+        "properties": {
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "loaded": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LoadedAt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "material": {
+            "title": "Material",
+            "type": "string"
+          },
+          "remaining_g": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining G"
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "spool_id": {
+            "title": "Spool Id",
+            "type": "integer"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          }
+        },
+        "required": [
+          "spool_id",
+          "material"
+        ],
+        "title": "SpoolOption",
         "type": "object"
       },
       "ValidationError": {
@@ -4240,6 +5259,183 @@
         ]
       }
     },
+    "/api/v1/print/outputs/{output_id}/filaments": {
+      "get": {
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not.",
+        "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "printer_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Printer Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "plate_id",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Plate Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilamentOptions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Spools that can print this output, and what the plate needs",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/progress": {
+      "get": {
+        "description": "Follow whichever of Bambuddy's two routes this output last took (#89).\n\n``null`` means this output has never been printed \u2014 that is an answer, not an\nerror, and the send bar shows nothing rather than a failure.\n\nThe poll is needed rather than optional on the pipeline route: ``run`` answers 202\nand creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is\nstill null when the run response arrives. ``settled`` is what says the polling can\nstop; it is computed from the copies, because a run can report a terminal status\nwhile a copy is still being dispatched.",
+        "operationId": "get_progress_api_v1_print_outputs__output_id__progress_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/PrintProgress"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "title": "Response Get Progress Api V1 Print Outputs  Output Id  Progress Get"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "How the last print of this output is going",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/project": {
+      "post": {
+        "description": "``add-queue`` now, and ``add-archives`` for whatever the entries have produced.\n\nSeparate from the run because neither id exists when a print starts: a pipeline\nrun's queue entries are created by a background task, and an archive only exists\nonce a print has finished. Calling this again later is how the archives eventually\nland on the project's page, and attaching the same id twice is Bambuddy's to dedupe.",
+        "operationId": "post_attach_project_api_v1_print_outputs__output_id__project_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectAttach"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "File this output's queue entries under its project",
+        "tags": [
+          "print"
+        ]
+      }
+    },
     "/api/v1/print/outputs/{output_id}/run": {
       "post": {
         "description": "``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit\n``force``.\n\nWithout ``pipeline_id`` the model's own default is used, then the global one. A\nblocking eligibility issue is Bambuddy's 409, whose body this passes through as the\n``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records\n``eligibility_overridden``.\n\nThere is deliberately no printer here. ``PipelineRunRequest`` carries none, so a\nclass-targeted pipeline fans out by its own ``fanout_strategy`` and reports the\nprinter per copy in ``run.jobs[]``.",
@@ -4403,6 +5599,68 @@
           }
         },
         "summary": "Presets a new pipeline can be built from",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/projects": {
+      "get": {
+        "description": "Every Bambuddy project, with the library folder that belongs to it (#79).\n\nAlso the project the last send went to, so the picker opens where it was left.\nScadBuddy models no relationship between a model and a project: which prints\nbelong to a project is on the project's own page, and keeping a second answer\nhere would be a copy that goes stale.",
+        "operationId": "get_projects_api_v1_print_projects_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectChoices"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Bambuddy's projects",
+        "tags": [
+          "print"
+        ]
+      },
+      "post": {
+        "description": "``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with\n``project_id``, which is the pairing Bambuddy's own UI makes.\n\nWith ``project_id`` an existing project is linked instead of created, and its folder\nis left alone if it already has one \u2014 linking twice must not leave Bambuddy with two\nfolders of the same name.",
+        "operationId": "post_project_api_v1_print_projects_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProjectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Create or link a project",
         "tags": [
           "print"
         ]

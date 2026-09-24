@@ -1,0 +1,23 @@
+{
+  "file_id": 62,
+  "filename": "name-keychain-9edc180b00394d678e475b8ecad2976c.3mf",
+  "plate_id": null,
+  "filaments": [
+    {
+      "slot_id": 1,
+      "type": "",
+      "color": "#0047BB",
+      "used_grams": 0,
+      "used_meters": 0,
+      "used_in_plate": true
+    },
+    {
+      "slot_id": 2,
+      "type": "",
+      "color": "#FF1493",
+      "used_grams": 0,
+      "used_meters": 0,
+      "used_in_plate": true
+    }
+  ]
+}
