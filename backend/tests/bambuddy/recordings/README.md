@@ -35,6 +35,26 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
 | `slicer-pipelines-configured.json` | `GET /api/v1/slicer-pipelines/`, now that one exists |
 | `pipeline-runs.json` | `GET /api/v1/slicer-pipelines/1/runs` |
 
+Added for #87, over the ingress on 2026-09-24 (still every request a `GET`):
+
+| File | Source |
+|---|---|
+| `inventory-spools.json` | `GET /api/v1/inventory/spools` |
+| `inventory-assignments.json` | `GET /api/v1/inventory/assignments` |
+| `inventory-remain.json` | `GET /api/v1/printers/1/inventory-remain` |
+| `spool-filament-presets.json` | `GET /api/v1/inventory/spools/9/filament-presets` |
+| `filament-requirements.json` | `GET /api/v1/library/files/62/filament-requirements` |
+
+Added for #89 and #79, same day and the same way:
+
+| File | Source |
+|---|---|
+| `pipeline-run.json` | `GET /api/v1/pipeline-runs/1` — a **real** run, and a failed one |
+| `library-folders-nested.json` | `GET /api/v1/library/folders`, re-read once a folder had children |
+
+`tag_uid` and `tray_uuid` are replaced in the two inventory files: they are the RFID
+identities of physical spools and nothing in ScadBuddy reads them.
+
 Added for #88 on 2026-09-24 (a `GET`):
 
 | File | Source |
@@ -77,6 +97,55 @@ Added for #88 on 2026-09-24 (a `GET`):
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
 
+- **Bambuddy computes `ams_mapping` itself, and ScadBuddy therefore sends none.**
+  `print_scheduler.py`'s `_compute_ams_mapping_for_printer` is "called when a queue
+  item has no ams_mapping set", and it resolves the tray against the printer the job is
+  actually dispatching to — including the Filament Track Switch case, where a switcher
+  routes any AMS slot to either extruder so the per-nozzle filter must not apply (its
+  issue #2186). Recomputing the flat tray id here would be a second, worse copy.
+- **`filament_overrides` and `required_filament_types` are fields of
+  `PrintQueueItemCreate` and of nothing else.** `PipelineRunCreateRequest` carries only
+  `source_library_file_id` / `source_archive_id` / `copies` / `force`. Naming the
+  spools therefore forces the slice + `POST /queue/` route.
+- **A `filament_overrides` entry is `{slot_id, type, color, used_grams}`**, optionally
+  with `force_color_match`. That is the shape Bambuddy's own 3MF parser produces
+  (`services/filament_requirements.py`) and the one its scheduler validates.
+- **A spool row's `nozzle_temp_min` / `nozzle_temp_max` are null** on every row of this
+  instance. The real window is on the AMS tray the spool is loaded in. Nothing in
+  ScadBuddy reads either any more — whether two filaments can share a plate is
+  Bambuddy's eligibility question — but the asymmetry is worth keeping recorded.
+- **`GET /library/files/{id}/filament-requirements` works on an unsliced 3MF** and
+  answers `used_grams: 0` for every slot — *unknown*, not zero. `type` comes back `""`
+  on one too, so the material is unknown as well.
+- **`GET /inventory/spools/{id}/filament-presets` is keyed by printer model *and*
+  nozzle diameter**: one spool maps to `GFSG00_24` through a 0.2 and `GFSG00_23`
+  through a 0.4. ScadBuddy does **not** call it: choosing among them needs a nozzle
+  diameter, which lives nowhere but a process preset's *name*, and guessing one is
+  exactly the kind of decision that belongs to Bambuddy. The spool row's own
+  `slicer_filament` is used for the slice instead. The recording stays because the
+  keying is the reason the shortcut is safe to take.
+- **`/inventory/assignments` is unfiltered across every printer** while
+  `/printers/{id}/inventory-remain` covers one. Joining them on `(ams_id, tray_id)`
+  alone gives a spool in printer B's AMS 0 slot 1 printer A's remaining weight.
+- **A failed pipeline run keeps reporting `status: "in_progress"`.** `pipeline-run.json`
+  is a real run whose slice failed: `status: "in_progress"`, `copies_in_progress: 1`,
+  `copies_failed: 0` — *and* `completed_at` set, `sliced_library_file_id: null` and
+  `error_message: "Slice failed: The selected printer is not compatible with the process
+  preset in the 3mf."`. Neither the status nor the copy counters ever move, so a poll
+  built on either never terminates. **`completed_at` is the terminal signal.**
+- **`GET /api/v1/pipeline-runs/{run_id}` exists** — a single-run read that needs no
+  pipeline id, which is what makes following a recorded run id possible. The
+  `/slicer-pipelines/{id}/runs` list is not needed for it.
+- **`jobs[].queue_entry_id` is null until the background task has created the entry.**
+  The recorded run's one job is still `status: "pending"` with no printer and no queue
+  entry, minutes after the run finished — because nothing was sliced to queue.
+- **`GET /api/v1/library/folders` answers with a tree, not a flat list.** A sub-folder
+  arrives inside its parent's `children` rather than alongside it —
+  `library-folders-nested.json` has `Supplies` carrying two. The older
+  `library-folders.json` has no nested rows, which is why this went unnoticed: a scan of
+  the top level alone reports a nested folder as missing.
+- **`/api/v1/inventory/locations` is empty here**, so storage locations come back as the
+  free-text `storage_location` on the spool rather than as a location id.
 - **`POST /slicer-pipelines/{id}/run` cannot carry print options, and no amount of
   patching afterwards fixes that.** `PipelineRunCreateRequest` has exactly four fields
   (`source_library_file_id`, `source_archive_id`, `copies`, `force`). The route answers

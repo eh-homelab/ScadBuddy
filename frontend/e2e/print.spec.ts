@@ -82,4 +82,38 @@ test.describe('print picker', () => {
     await page.getByTestId('run-pipeline').click()
     await expect(dialog.getByText(/Pipeline run/)).toBeVisible()
   })
+
+  test('picks the filaments per slot and queues the print for one printer', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await page.getByTestId('generate').click()
+    await expect(page.getByText(/^Saved /)).toBeVisible()
+    await page.getByTestId('print').click()
+
+    const dialog = page.getByRole('dialog', { name: 'Print' })
+    // Both slots arrive pre-selected: the server auto-matches the plate's colours against
+    // the inventory, so the common case is a read rather than four clicks.
+    const slotOne = dialog.getByTestId('filament-slot-1')
+    const slotTwo = dialog.getByTestId('filament-slot-2')
+    await expect(slotOne.getByTestId('spool-21')).toBeChecked()
+    await expect(slotTwo.getByTestId('spool-27')).toBeChecked()
+
+    // The suggestion for slot 2 is an exact colour match that is on a shelf, so it comes
+    // with a "load this in" advisory rather than a failure.
+    await expect(dialog.getByTestId('filament-warnings-2')).toContainText('Load Elegoo')
+
+    // Swap it for the pink already in the AMS-HT.
+    await slotTwo.getByTestId('spool-22').check()
+    await expect(dialog.getByTestId('filament-warnings-2')).toBeHidden()
+
+    await dialog.getByTestId('use-exact-filaments').check()
+    await page.getByTestId('run-pipeline').click()
+
+    // Pinning the printer is what a pipeline run cannot express, so the backend slices
+    // and queues instead — and there is no pipeline run to report on that route.
+    const queued = dialog.getByTestId('queued-items')
+    await expect(queued).toContainText('Sliced and queued for 3DP-31B-598')
+    await expect(queued).toContainText('Queue #')
+    await expect(dialog.getByText(/Pipeline run/)).toBeHidden()
+  })
 })

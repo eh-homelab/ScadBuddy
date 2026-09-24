@@ -198,6 +198,14 @@ class AvailableFilament(BambuddyModel):
 
 
 class Folder(BambuddyModel):
+    """A row of ``GET /api/v1/library/folders``.
+
+    **The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their
+    parent's ``children`` rather than returning them alongside it, so a folder linked to
+    a project is invisible to a scan of the top level if it happens to live under
+    another folder. :func:`walk` is what flattens it.
+    """
+
     id: int
     name: str
     parent_id: int | None = None
@@ -206,6 +214,14 @@ class Folder(BambuddyModel):
     project_name: str | None = None
     archive_id: int | None = None
     is_external: bool = False
+    children: list[Folder] = Field(default_factory=list)
+
+    def walk(self) -> list[Folder]:
+        """This folder and every folder beneath it, depth first."""
+        found = [self]
+        for child in self.children:
+            found.extend(child.walk())
+        return found
 
 
 class FolderCreate(BambuddyModel):
@@ -328,6 +344,8 @@ class PipelineJob(BambuddyModel):
     queue_entry_id: int | None = None
     status: str
     error_message: str | None = None
+    dispatched_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class PipelineRun(BambuddyModel):
@@ -348,6 +366,15 @@ class PipelineRun(BambuddyModel):
     eligibility_overridden: bool = False
     error_message: str | None = None
     jobs: list[PipelineJob] = Field(default_factory=list)
+    #: **The only trustworthy terminal signal.** A run whose slice failed was recorded
+    #: on 2026-09-24 still reporting ``status: "in_progress"`` and
+    #: ``copies_in_progress: 1`` *with* ``completed_at`` set and an ``error_message``
+    #: explaining the failure — see ``recordings/pipeline-run.json``. Polling on
+    #: ``status`` or on the copy counters therefore never terminates.
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    parent_run_id: int | None = None
     target_kind: TargetKind | None = None
     target_printer_id: int | None = None
     target_model_class: str | None = None
@@ -415,13 +442,138 @@ class EligibilityReport(BambuddyModel):
     printer_reports: list[PerPrinterReport] = Field(default_factory=list)
 
 
+class Spool(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/spools`` — Bambuddy's own spool inventory.
+
+    Two fields read the opposite way to how they are named. ``rgba`` is ``RRGGBBAA``
+    **without** a leading ``#``, matching the AMS tray it was scanned from and not the
+    ``#RRGGBBAA`` ``available-filaments`` answers with. And ``nozzle_temp_min/max`` are
+    ``null`` on every row of the live instance — the real window comes from the AMS tray
+    for a loaded spool, or from the spool's filament preset; see ``filaments.py``.
+
+    ``weight_used`` counts the filament gone, so what is left is
+    :attr:`remaining_g` — ``label_weight`` is the *label*, not the remainder.
+    """
+
+    id: int
+    material: str
+    subtype: str | None = None
+    color_name: str | None = None
+    rgba: str | None = None
+    brand: str | None = None
+    label_weight: int = 0
+    core_weight: int = 0
+    weight_used: float = 0.0
+    slicer_filament: str | None = None
+    slicer_filament_name: str | None = None
+    nozzle_temp_min: int | None = None
+    nozzle_temp_max: int | None = None
+    category: str | None = None
+    storage_location: str | None = None
+    location_id: int | None = None
+    archived_at: datetime | None = None
+
+    @property
+    def remaining_g(self) -> float:
+        """What the label says minus what has been used, floored at zero."""
+        return max(0.0, float(self.label_weight) - self.weight_used)
+
+
+class SpoolAssignment(BambuddyModel):
+    """``GET /api/v1/inventory/assignments`` — which spool sits in which tray.
+
+    The nested ``spool`` is the whole :class:`Spool`, so listing assignments alone is
+    enough to render the loaded set; the flat inventory is still needed for the rest.
+    """
+
+    id: int
+    spool_id: int
+    printer_id: int
+    printer_name: str | None = None
+    ams_id: int
+    tray_id: int
+    spool: Spool | None = None
+
+
+class FilamentRequirement(BambuddyModel):
+    """One slot of ``GET /api/v1/library/files/{id}/filament-requirements``.
+
+    ``slot_id`` is **1-based** — Bambuddy's ``ams_mapping`` is indexed by
+    ``slot_id - 1``. ``used_grams`` is ``0`` on a 3MF that has never been sliced, which
+    means *unknown*, not *none*: ScadBuddy uploads an unsliced plate, so this is the
+    normal answer before a run, not an error.
+    """
+
+    slot_id: int
+    type: str | None = None
+    color: str | None = None
+    used_grams: float = 0.0
+    used_meters: float = 0.0
+    used_in_plate: bool = True
+
+
+class FilamentRequirements(BambuddyModel):
+    file_id: int | None = None
+    filename: str | None = None
+    plate_id: int | None = None
+    filaments: list[FilamentRequirement] = Field(default_factory=list)
+
+
+class SlotMaterial(BambuddyModel):
+    """One loaded slot of ``GET /api/v1/printers/{id}/inventory-remain``.
+
+    This is the single most useful join in the whole flow, and it is Bambuddy's own:
+    ``global_tray_id`` is the number ``ams_mapping`` carries (``ams_id * 4 + tray_id``,
+    or the AMS id itself at 128+, or 254/255 for an external spool), ``remaining_g`` is
+    Bambuddy's reconciliation of the AMS against the inventory, and ``extruder`` says
+    which extruder the slot actually feeds — so the filament-switcher question is
+    answered by reading it rather than by decoding ``ams_switch_inlet``'s A/B.
+    """
+
+    ams_id: int
+    tray_id: int
+    global_tray_id: int
+    material_key: str | None = None
+    remaining_g: float | None = None
+    extruder: int | None = None
+    spool: dict[str, Any] | None = None
+
+
+class InventoryRemain(BambuddyModel):
+    """``GET /api/v1/printers/{id}/inventory-remain``.
+
+    ``inventory_remain_g`` is keyed by **stringified** ``global_tray_id``; JSON has no
+    integer keys, the same trap ``ams_switch_inlet`` sets.
+    """
+
+    inventory_remain_g: dict[str, float] = Field(default_factory=dict)
+    slot_materials: list[SlotMaterial] = Field(default_factory=list)
+
+
 class QueueItem(BambuddyModel):
+    """``POST /api/v1/queue/`` and ``GET /api/v1/queue/{id}`` — the same schema.
+
+    ``waiting_reason`` is the field that explains a queued item that is not printing,
+    and it is Bambuddy's own sentence ("No active H2C printers in …"). It is separate
+    from ``error_message``: waiting is not failing, and conflating the two turns every
+    normal queue wait into an error on the send bar.
+    """
+
     id: int
     printer_id: int | None = None
+    printer_name: str | None = None
+    #: Filled in once the print has produced one; this is what a project's timeline and
+    #: BOM read, and it is why archives are attached after the print rather than at it.
+    archive_id: int | None = None
     library_file_id: int | None = None
+    library_file_name: str | None = None
     position: int | None = None
     status: str | None = None
     plate_id: int | None = None
+    waiting_reason: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class ExternalLink(BambuddyModel):
