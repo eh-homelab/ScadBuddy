@@ -169,11 +169,16 @@ jobs:
 
           # `|` as the sed delimiter: none of the substituted values (an image
           # ref, a tag, a SHA, a github.com URL) can contain it.
+          # The `unverifiable` line is an escape hatch for a HAND-written pin
+          # of an image that cannot report its commit; this pipeline always
+          # writes a full-SHA revision, so a leftover one would make every
+          # later verify run warn about a pin that no longer exists. Drop it.
           sed -i -E \
             -e "s|^(\s*)image: ${IMAGE//./\\.}[^[:space:]]*\$|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
             -e "s|^(\s*)scadbuddy\.eh-homelab\.io/version: .*\$|\1scadbuddy.eh-homelab.io/version: \"${VERSION}\"|" \
             -e "s|^(\s*)scadbuddy\.eh-homelab\.io/revision: .*\$|\1scadbuddy.eh-homelab.io/revision: \"${REVISION}\"|" \
             -e "s|^(\s*)scadbuddy\.eh-homelab\.io/source: .*\$|\1scadbuddy.eh-homelab.io/source: \"${SOURCE_URL}\"|" \
+            -e '/^\s*scadbuddy\.eh-homelab\.io\/unverifiable: /d' \
             "$MANIFEST"
 
           # Round-trip every rewritten line, not just the image: a sed that
@@ -182,6 +187,9 @@ jobs:
           expect_one "^\s*scadbuddy\.eh-homelab\.io/version: \"${VERSION//./\\.}\"\$" "rewritten version annotation"
           expect_one "^\s*scadbuddy\.eh-homelab\.io/revision: \"${REVISION}\"\$" "rewritten revision annotation"
           expect_one "^\s*scadbuddy\.eh-homelab\.io/source: \"${SOURCE_URL//./\\.}\"\$" "rewritten source annotation"
+          if grep -qE '^\s*scadbuddy\.eh-homelab\.io/unverifiable: ' "$MANIFEST"; then
+            echo "::error file=$MANIFEST::an unverifiable annotation survived the rewrite; a pipeline pin must not carry one"; exit 1
+          fi
           # Scoped to the container just pinned, not a file-wide grep: a
           # second container with the right policy must not mask drift here.
           policy=$(yq eval-all -N \
