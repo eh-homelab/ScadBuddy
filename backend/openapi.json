@@ -465,6 +465,171 @@
         "title": "EligibilityReport",
         "type": "object"
       },
+      "FilamentOptions": {
+        "description": "Everything the filament step of the dialog needs, in one answer.\n\nOne route rather than six, because the join \u2014 inventory against assignments against\nthe live AMS against the per-slot remaining weights \u2014 is the part that is easy to\nget wrong, and doing it in the browser would mean shipping every spool's history to\ndo it.",
+        "properties": {
+          "ams_switch_inlet": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Ams Switch Inlet",
+            "type": "object"
+          },
+          "library_file_id": {
+            "title": "Library File Id",
+            "type": "integer"
+          },
+          "nozzle_diameters": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Nozzle Diameters",
+            "type": "array"
+          },
+          "nozzle_rack": {
+            "items": {
+              "$ref": "#/components/schemas/NozzleRackSlot"
+            },
+            "title": "Nozzle Rack",
+            "type": "array"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "printer_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Model"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "process_nozzle_diameter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Process Nozzle Diameter"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlotNeed"
+            },
+            "title": "Slots",
+            "type": "array"
+          },
+          "spools": {
+            "items": {
+              "$ref": "#/components/schemas/SpoolOption"
+            },
+            "title": "Spools",
+            "type": "array"
+          },
+          "suggested": {
+            "items": {
+              "$ref": "#/components/schemas/SlotChoice"
+            },
+            "title": "Suggested",
+            "type": "array"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FilamentWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "library_file_id"
+        ],
+        "title": "FilamentOptions",
+        "type": "object"
+      },
+      "FilamentPlan": {
+        "description": "What the dialog submits: one spool per slot, and how hard to insist on it.\n\n``force_colour_match`` becomes ``force_color_match`` on every override, which is\nthe flag Bambuddy's scheduler reads to require an exact type+colour match rather\nthan merely preferring one. It is off by default because it only bites on a\nmodel-targeted queue item, where insisting can leave the job unschedulable.",
+        "properties": {
+          "force_colour_match": {
+            "default": false,
+            "title": "Force Colour Match",
+            "type": "boolean"
+          },
+          "slots": {
+            "items": {
+              "$ref": "#/components/schemas/SlotChoice"
+            },
+            "title": "Slots",
+            "type": "array"
+          }
+        },
+        "title": "FilamentPlan",
+        "type": "object"
+      },
+      "FilamentWarning": {
+        "description": "Advisory, never blocking. Bambuddy's own refusals are the eligibility report.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "temperature",
+              "not-loaded",
+              "low-filament",
+              "nozzle-mismatch",
+              "unreachable",
+              "no-choice",
+              "unknown-temperature"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          }
+        },
+        "required": [
+          "kind",
+          "message"
+        ],
+        "title": "FilamentWarning",
+        "type": "object"
+      },
       "Folder": {
         "properties": {
           "archive_id": {
@@ -882,6 +1047,78 @@
         "title": "JobStatus",
         "type": "object"
       },
+      "LoadedAt": {
+        "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.",
+        "properties": {
+          "ams_id": {
+            "title": "Ams Id",
+            "type": "integer"
+          },
+          "extruder": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Extruder"
+          },
+          "global_tray_id": {
+            "title": "Global Tray Id",
+            "type": "integer"
+          },
+          "inlet": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inlet"
+          },
+          "is_ams_ht": {
+            "default": false,
+            "title": "Is Ams Ht",
+            "type": "boolean"
+          },
+          "is_external": {
+            "default": false,
+            "title": "Is External",
+            "type": "boolean"
+          },
+          "printer_id": {
+            "title": "Printer Id",
+            "type": "integer"
+          },
+          "printer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Name"
+          },
+          "tray_id": {
+            "title": "Tray Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "printer_id",
+          "ams_id",
+          "tray_id",
+          "global_tray_id"
+        ],
+        "title": "LoadedAt",
+        "type": "object"
+      },
       "ModelPatch": {
         "properties": {
           "description": {
@@ -979,6 +1216,60 @@
           "updated_at"
         ],
         "title": "ModelRecord",
+        "type": "object"
+      },
+      "NozzleRackSlot": {
+        "description": "A slot of an H2-series nozzle rack \u2014 what ``nozzle_rack_choice`` picks from.",
+        "properties": {
+          "filament_color": {
+            "default": "",
+            "title": "Filament Color",
+            "type": "string"
+          },
+          "filament_type": {
+            "default": "",
+            "title": "Filament Type",
+            "type": "string"
+          },
+          "id": {
+            "default": 0,
+            "title": "Id",
+            "type": "integer"
+          },
+          "nozzle_diameter": {
+            "default": "",
+            "title": "Nozzle Diameter",
+            "type": "string"
+          },
+          "nozzle_type": {
+            "default": "",
+            "title": "Nozzle Type",
+            "type": "string"
+          },
+          "stat": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stat"
+          },
+          "wear": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Wear"
+          }
+        },
+        "title": "NozzleRackSlot",
         "type": "object"
       },
       "Option": {
@@ -2159,7 +2450,7 @@
         "type": "object"
       },
       "PrintRunRequest": {
-        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.",
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\n``filament_plan`` is what makes this request choose its route rather than its\ncaller. A plan names one spool per plate slot, and those three queue-item fields\nexist on no other Bambuddy call \u2014 so a request carrying one is sliced and queued,\nand one without one runs the pipeline exactly as it did before (#87).",
         "properties": {
           "copies": {
             "default": 1,
@@ -2167,6 +2458,16 @@
             "minimum": 1.0,
             "title": "Copies",
             "type": "integer"
+          },
+          "filament_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilamentPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "force": {
             "default": false,
@@ -2183,12 +2484,30 @@
               }
             ],
             "title": "Pipeline Id"
+          },
+          "plate_id": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
           }
         },
         "title": "PrintRunRequest",
         "type": "object"
       },
       "PrintRunResult": {
+        "description": "One shape for both routes, so the caller need not know which one ran.\n\n``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is\npopulated: a pipeline run reports its copies through ``jobs[]``, while a queued item\nis a single row carrying ``quantity``. Following either to completion is #89.",
         "properties": {
           "bambuddy_url": {
             "title": "Bambuddy Url",
@@ -2202,14 +2521,76 @@
             "title": "Pipeline Id",
             "type": "integer"
           },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "queue_item_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Queue Item Ids",
+            "type": "array"
+          },
+          "route": {
+            "default": "pipeline",
+            "enum": [
+              "pipeline",
+              "slice_queue"
+            ],
+            "title": "Route",
+            "type": "string"
+          },
           "run": {
-            "$ref": "#/components/schemas/PipelineRun"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PipelineRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "slice_job_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slice Job Id"
+          },
+          "sliced_library_file_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sliced Library File Id"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/FilamentWarning"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
           "pipeline_id",
           "library_file_id",
-          "run",
           "bambuddy_url"
         ],
         "title": "PrintRunResult",
@@ -2652,6 +3033,227 @@
           "embed_path"
         ],
         "title": "SidebarLink",
+        "type": "object"
+      },
+      "SlotChoice": {
+        "properties": {
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "spool_id": {
+            "title": "Spool Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "slot_id",
+          "spool_id"
+        ],
+        "title": "SlotChoice",
+        "type": "object"
+      },
+      "SlotNeed": {
+        "description": "One filament slot of the plate, as Bambuddy reads the 3MF.\n\n``slot_id`` is **1-based**: ``ams_mapping`` is indexed by ``slot_id - 1``.",
+        "properties": {
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "material": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material"
+          },
+          "slot_id": {
+            "title": "Slot Id",
+            "type": "integer"
+          },
+          "used_grams": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Used Grams"
+          }
+        },
+        "required": [
+          "slot_id"
+        ],
+        "title": "SlotNeed",
+        "type": "object"
+      },
+      "SpoolOption": {
+        "description": "One row of the picker: a spool, plus where it is and what it can print.",
+        "properties": {
+          "brand": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Brand"
+          },
+          "color_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Color Name"
+          },
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "loaded": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LoadedAt"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "material": {
+            "title": "Material",
+            "type": "string"
+          },
+          "nozzle_presets": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Nozzle Presets",
+            "type": "object"
+          },
+          "nozzle_temp_max": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Max"
+          },
+          "nozzle_temp_min": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Temp Min"
+          },
+          "remaining_g": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Remaining G"
+          },
+          "slicer_filament": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament"
+          },
+          "slicer_filament_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slicer Filament Name"
+          },
+          "spool_id": {
+            "title": "Spool Id",
+            "type": "integer"
+          },
+          "storage_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Storage Location"
+          },
+          "subtype": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subtype"
+          },
+          "temperature_from": {
+            "default": "unknown",
+            "enum": [
+              "tray",
+              "spool",
+              "unknown"
+            ],
+            "title": "Temperature From",
+            "type": "string"
+          }
+        },
+        "required": [
+          "spool_id",
+          "material"
+        ],
+        "title": "SpoolOption",
         "type": "object"
       },
       "ValidationError": {
@@ -3793,6 +4395,93 @@
           }
         },
         "summary": "Which pipelines would accept this output",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/outputs/{output_id}/filaments": {
+      "get": {
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than six calls from the browser, because the join is the part with\nthe traps in it: an AMS id is the printer's numbering and not a list index, the flat\ntray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,\n``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle\ntemperature window is on the AMS tray rather than on the spool row.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but nothing that depends on live AMS state is reported. ``pipeline_id``\nis read only for its process preset's *name*, which is the one place a nozzle\ndiameter is written down.",
+        "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "printer_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Printer Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pipeline_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Pipeline Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "plate_id",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "minimum": 1,
+              "title": "Plate Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FilamentOptions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Spools that can print this output, and what the plate needs",
         "tags": [
           "print"
         ]

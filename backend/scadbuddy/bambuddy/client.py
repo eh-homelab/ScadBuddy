@@ -36,8 +36,10 @@ from scadbuddy.bambuddy.models import (
     EligibilityReport,
     EligibilityRequest,
     ExternalLink,
+    FilamentRequirements,
     Folder,
     FolderCreate,
+    InventoryRemain,
     LibraryFile,
     LocalPresetCatalogue,
     Pipeline,
@@ -56,6 +58,9 @@ from scadbuddy.bambuddy.models import (
     SliceJob,
     SliceJobAccepted,
     SliceRequest,
+    Spool,
+    SpoolAssignment,
+    SpoolFilamentPreset,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -240,6 +245,79 @@ class BambuddyClient:
             "GET", "/local-presets/", scope=Scope.MANAGE_LIBRARY, what="list the local presets"
         )
         return LocalPresetCatalogue.model_validate(response.json())
+
+    # --- inventory -----------------------------------------------------------
+
+    async def spools(self, *, include_archived: bool = False) -> list[Spool]:
+        """``GET /api/v1/inventory/spools`` — every spool, loaded or on the shelf.
+
+        Archived spools are excluded by default because the picker offers what can be
+        printed with today; ``include_archived`` is Bambuddy's own query parameter.
+        """
+        what = "list the filament spools"
+        response = await self._send(
+            "GET",
+            "/inventory/spools",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"include_archived": include_archived},
+        )
+        return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_assignments(self, *, printer_id: int | None = None) -> list[SpoolAssignment]:
+        """``GET /api/v1/inventory/assignments`` — spool to printer/AMS/tray.
+
+        Unfiltered it covers every printer, which is what the picker wants: a spool
+        loaded in *another* printer is still offered, marked with where it is.
+        """
+        what = "list the spool assignments"
+        response = await self._send(
+            "GET",
+            "/inventory/assignments",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"printer_id": printer_id} if printer_id is not None else None,
+        )
+        return [SpoolAssignment.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
+        """The slicer filament presets this spool maps to, per model and nozzle."""
+        what = f"list the filament presets of spool {spool_id}"
+        response = await self._send(
+            "GET",
+            f"/inventory/spools/{spool_id}/filament-presets",
+            scope=Scope.READ_STATUS,
+            what=what,
+        )
+        return [SpoolFilamentPreset.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def inventory_remain(self, printer_id: int) -> InventoryRemain:
+        """Per-loaded-slot remaining grams, flat tray id and feeding extruder."""
+        response = await self._send(
+            "GET",
+            f"/printers/{printer_id}/inventory-remain",
+            scope=Scope.READ_STATUS,
+            what=f"read the loaded filament of printer {printer_id}",
+        )
+        return InventoryRemain.model_validate(response.json())
+
+    async def filament_requirements(
+        self, file_id: int, *, plate_id: int | None = None
+    ) -> FilamentRequirements:
+        """What each plate slot of a library file needs.
+
+        ``used_grams`` comes back ``0`` for a 3MF that carries no slice info — which is
+        every 3MF ScadBuddy uploads before it has been sliced. That is *unknown*, and
+        callers must not read it as "this print needs no filament".
+        """
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}/filament-requirements",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read the filament requirements of library file {file_id}",
+            params={"plate_id": plate_id} if plate_id is not None else None,
+        )
+        return FilamentRequirements.model_validate(response.json())
 
     # --- library -------------------------------------------------------------
 

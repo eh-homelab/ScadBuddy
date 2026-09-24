@@ -16,6 +16,7 @@ from pydantic import BaseModel
 from scadbuddy.api.deps import OutputIdPath, OutputsDep, SettingsStoreDep, SlugPath
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import PipelineCreate, PresetRef, PresetSource
 from scadbuddy.bambuddy.pipelines import (
     EligibilityOverview,
@@ -28,6 +29,7 @@ from scadbuddy.bambuddy.pipelines import (
     check_pipelines,
     create_pipeline,
     describe_pipelines,
+    filament_options_for_output,
     preset_options,
     run_for_output,
 )
@@ -175,3 +177,44 @@ async def post_run(
     settings = store.load()
     async with client_for(settings) as client:
         return await run_for_output(client, outputs, meta, settings, body)
+
+
+@router.get(
+    "/outputs/{output_id}/filaments",
+    response_model=FilamentOptions,
+    summary="Spools that can print this output, and what the plate needs",
+)
+async def get_filaments(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    printer_id: Annotated[int | None, Query()] = None,
+    pipeline_id: Annotated[int | None, Query()] = None,
+    plate_id: Annotated[int, Query(ge=1)] = 1,
+) -> FilamentOptions:
+    """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
+
+    One route rather than six calls from the browser, because the join is the part with
+    the traps in it: an AMS id is the printer's numbering and not a list index, the flat
+    tray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,
+    ``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle
+    temperature window is on the AMS tray rather than on the spool row.
+
+    ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
+    this printer": without one the spools are still listed, with their last known
+    assignment, but nothing that depends on live AMS state is reported. ``pipeline_id``
+    is read only for its process preset's *name*, which is the one place a nozzle
+    diameter is written down.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await filament_options_for_output(
+            client,
+            outputs,
+            meta,
+            settings,
+            printer_id=printer_id,
+            pipeline_id=pipeline_id,
+            plate_id=plate_id,
+        )

@@ -35,6 +35,19 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
 | `slicer-pipelines-configured.json` | `GET /api/v1/slicer-pipelines/`, now that one exists |
 | `pipeline-runs.json` | `GET /api/v1/slicer-pipelines/1/runs` |
 
+Added for #87, over the ingress on 2026-09-24 (still every request a `GET`):
+
+| File | Source |
+|---|---|
+| `inventory-spools.json` | `GET /api/v1/inventory/spools` |
+| `inventory-assignments.json` | `GET /api/v1/inventory/assignments` |
+| `inventory-remain.json` | `GET /api/v1/printers/1/inventory-remain` |
+| `spool-filament-presets.json` | `GET /api/v1/inventory/spools/9/filament-presets` |
+| `filament-requirements.json` | `GET /api/v1/library/files/62/filament-requirements` |
+
+`tag_uid` and `tray_uuid` are replaced in the two inventory files: they are the RFID
+identities of physical spools and nothing in ScadBuddy reads them.
+
 ## What the recordings settle
 
 - **`/api/v1/printers` 404s.** Only `/api/v1/printers/` exists. The design spec and the
@@ -70,6 +83,34 @@ Added for #85, over the ingress on 2026-09-23 (still every request a `GET`):
   `/printers`.
 - **`DELETE /api/v1/library/files/{file_id}` exists** (`openapi/routes.txt`), which is
   what makes a replace-on-re-send possible.
+
+- **`ams_mapping` is positional and its values are flat tray ids.** Index is
+  `slot_id - 1`, value is `ams_id * 4 + tray_id`, or the `ams_id` itself at 128 and
+  above, or 254/255 for an external spool — read off Bambuddy's own `_global_tray_id`
+  in `print_scheduler.py`, and `-1` is its "unresolved" sentinel. `inventory-remain`
+  reports that number per loaded slot as `global_tray_id`, so it does not have to be
+  recomputed.
+- **`ams_mapping`, `filament_overrides` and `required_filament_types` are fields of
+  `PrintQueueItemCreate` and of nothing else.** `PipelineRunCreateRequest` carries only
+  `source_library_file_id` / `source_archive_id` / `copies` / `force`. Naming the
+  spools therefore forces the slice + `POST /queue/` route.
+- **A `filament_overrides` entry is `{slot_id, type, color, used_grams}`**, optionally
+  with `force_color_match`. That is the shape Bambuddy's own 3MF parser produces
+  (`services/filament_requirements.py`) and the one its scheduler validates.
+- **A spool row's `nozzle_temp_min` / `nozzle_temp_max` are null** on every row of this
+  instance. The real window is on the AMS tray the spool is loaded in, which is why an
+  unloaded spool's temperature is genuinely unknown rather than defaulted.
+- **`GET /library/files/{id}/filament-requirements` works on an unsliced 3MF** and
+  answers `used_grams: 0` for every slot — *unknown*, not zero. `type` comes back `""`
+  on one too, so the material is unknown as well.
+- **`GET /inventory/spools/{id}/filament-presets` is keyed by printer model *and*
+  nozzle diameter**: one spool maps to `GFSG00_24` through a 0.2 and `GFSG00_23`
+  through a 0.4. It is the only machine-readable link from a spool to a slicer preset.
+- **`inventory-remain.slot_materials[].extruder` says which extruder a loaded slot
+  feeds.** It is what makes the filament-switcher question decidable without inferring
+  how `ams_switch_inlet`'s "A"/"B" map onto extruder numbers.
+- **`/api/v1/inventory/locations` is empty here**, so storage locations come back as the
+  free-text `storage_location` on the spool rather than as a location id.
 
 ## What could not be recorded
 
