@@ -6,6 +6,7 @@ import type {
   FontFamily,
   Job,
   ModelSummary,
+  ModelVersion,
   Output,
   ParamValue,
   PipelineChoices,
@@ -40,6 +41,8 @@ const state = {
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
   fonts: [...fixtures.fonts] as FontFamily[],
+  /** #90 — one git history per model, newest first. */
+  versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
   sidebarLinkId: 0,
@@ -57,6 +60,7 @@ export function resetMockState(): void {
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
+  state.versions = structuredClone(fixtures.versions)
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
   state.sidebarLinkId = 0
@@ -66,6 +70,28 @@ export function resetMockState(): void {
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/** Adds a revision to the head of a model's history and returns it. */
+function recordVersion(
+  slug: string,
+  message: string,
+  files: ModelVersion['files'],
+): ModelVersion {
+  state.seq += 1
+  const sha = state.seq.toString(16).padStart(40, 'e')
+  const entry: ModelVersion = {
+    commit: sha,
+    short: sha.slice(0, 7),
+    author: 'ScadBuddy',
+    date: new Date().toISOString(),
+    message,
+    files,
+    current: true,
+  }
+  const existing = (state.versions[slug] ?? []).map((v) => ({ ...v, current: false }))
+  state.versions[slug] = [entry, ...existing]
+  return entry
 }
 
 /** Job and output ids are 32 hex characters — the routes reject anything else. */
@@ -174,6 +200,73 @@ export const handlers = [
   http.delete(`${base}/models/:slug`, ({ params }) => {
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })
+  }),
+
+  http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Model not found')
+    const body = (await request.json()) as { source: string; message?: string | null }
+    const version = recordVersion(slug, body.message || `Edit ${slug} source`, [
+      { status: 'M', path: 'model.scad' },
+    ])
+    model.version = version.commit
+    model.updated_at = version.date
+    return HttpResponse.json(model)
+  }),
+
+  http.get(`${base}/models/:slug/versions`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    return HttpResponse.json(state.versions[slug] ?? [])
+  }),
+
+  http.get(`${base}/models/:slug/versions/:commit/diff`, ({ params, request }) => {
+    const slug = String(params['slug'])
+    const commit = String(params['commit'])
+    const entries = state.versions[slug] ?? []
+    const head = entries.find((v) => v.commit === commit)
+    if (!head) return problem(404, 'Revision not found')
+    // Entries are newest-first, so "everything between head and base" is the slice
+    // from head up to (not including) base. Concatenating their patches is close
+    // enough for a mock and keeps the text recognisable in assertions.
+    const requested = new URL(request.url).searchParams.get('base')
+    const headIndex = entries.findIndex((v) => v.commit === commit)
+    const baseIndex = requested ? entries.findIndex((v) => v.commit === requested) : headIndex + 1
+    const patch = entries
+      .slice(headIndex, baseIndex < 0 ? headIndex + 1 : baseIndex)
+      .map((v) => fixtures.versionPatches[v.commit] ?? '')
+      .join('')
+    return HttpResponse.json({
+      slug,
+      base: requested ?? (entries[headIndex + 1]?.commit ?? ''),
+      head: commit,
+      files: head.files,
+      patch,
+    })
+  }),
+
+  http.post(`${base}/models/:slug/versions/:commit/restore`, ({ params }) => {
+    const slug = String(params['slug'])
+    const commit = String(params['commit'])
+    const entries = state.versions[slug] ?? []
+    const target = entries.find((v) => v.commit === commit)
+    if (!target) return problem(404, 'Revision not found')
+    const created = recordVersion(slug, `Restore ${slug} to ${target.short}`, target.files)
+    const model = state.models.find((m) => m.slug === slug)
+    if (model) model.version = created.commit
+    return HttpResponse.json(created)
+  }),
+
+  http.get(`${base}/models/:slug/versions/:commit/schema`, ({ params }) => {
+    const schema = state.schemas[String(params['slug'])]
+    return schema ? HttpResponse.json(schema) : problem(404, 'Model not found')
+  }),
+
+  http.get(`${base}/models/:slug/versions/:commit/source`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    return HttpResponse.text(`// ${String(params['commit']).slice(0, 7)}\ncube(10);\n`)
   }),
 
   http.get(`${base}/models/:slug/schema`, ({ params }) => {

@@ -2,7 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
-import { printOptions } from '../mocks/fixtures'
+import { printOptions, versionIds } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -27,6 +27,17 @@ vi.mock('../components/Preview', () => ({
 
 function render(route = '/m/name-keychain') {
   return renderPage(<CustomizePage />, { route, path: '/m/:slug' })
+}
+
+/**
+ * Records the paths msw is asked for, so a route CHOICE can be asserted without an
+ * override handler: one that re-fetched the same URL to stay transparent is
+ * intercepted by msw again and recurses until the worker runs out of heap.
+ */
+function watchRequests(): string[] {
+  const seen: string[] = []
+  server.events.on('request:start', ({ request }) => seen.push(new URL(request.url).pathname))
+  return seen
 }
 
 async function firstRender() {
@@ -301,6 +312,29 @@ describe('CustomizePage', () => {
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
     )
     expect(screen.getByText('reopened from Nova')).toBeInTheDocument()
+  })
+
+  it('renders a pinned revision from its own schema, without restoring it', async () => {
+    const seen = watchRequests()
+    render(`/m/name-keychain?version=${versionIds.added}`)
+    await firstRender()
+
+    expect(screen.getByTestId('version-badge')).toHaveTextContent(
+      `revision ${versionIds.added.slice(0, 7)}`,
+    )
+    expect(screen.getByRole('button', { name: 'Back to current' })).toBeInTheDocument()
+    // The schema comes from the revision, never from the model's current source.
+    expect(seen).toContain(`/api/v1/models/name-keychain/versions/${versionIds.added}/schema`)
+    expect(seen).not.toContain('/api/v1/models/name-keychain/schema')
+  })
+
+  it('links to the versions panel', async () => {
+    render()
+    await firstRender()
+    expect(screen.getByRole('link', { name: 'Versions' })).toHaveAttribute(
+      'href',
+      '/m/name-keychain/versions',
+    )
   })
 
   it('counts changes against the model defaults', async () => {

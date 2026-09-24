@@ -4,6 +4,7 @@ import { CataloguePage } from './pages/CataloguePage'
 import { CustomizePage } from './pages/CustomizePage'
 import { HistoryPage } from './pages/HistoryPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { VersionsPage } from './pages/VersionsPage'
 
 export function App() {
   return (
@@ -12,6 +13,7 @@ export function App() {
         <Route index element={<CataloguePage />} />
         <Route path="m/:slug" element={<CustomizePage />} />
         <Route path="m/:slug/history" element={<HistoryPage />} />
+        <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

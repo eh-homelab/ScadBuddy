@@ -10,6 +10,7 @@ import type {
   CustomizerSchema,
   FontFamily,
   ModelSummary,
+  ModelVersion,
   Output,
   Param,
   Settings,
@@ -129,6 +130,86 @@ export const models: ModelSummary[] = [
     has_readme: false,
   },
 ]
+
+/**
+ * #90 — the git history of `name-keychain`. Commit ids are the real shape (40 hex
+ * characters) because the routes match on it and the UI abbreviates to seven.
+ */
+function commit(seed: string): string {
+  return seed.repeat(40).slice(0, 40)
+}
+
+export const versionIds = {
+  added: commit('a1b2c3d4e5f6'),
+  edited: commit('b7c8d9e0f1a2'),
+  raised: commit('c3d4e5f6a7b8'),
+}
+
+export const versions: Record<string, ModelVersion[]> = {
+  'name-keychain': [
+    {
+      commit: versionIds.raised,
+      short: versionIds.raised.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-21T18:04:00Z',
+      message: 'Edit name-keychain source',
+      files: [{ status: 'M', path: 'model.scad' }],
+      current: true,
+    },
+    {
+      commit: versionIds.edited,
+      short: versionIds.edited.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-20T11:30:00Z',
+      message: 'Update name-keychain metadata',
+      files: [{ status: 'M', path: 'model.json' }],
+      current: false,
+    },
+    {
+      commit: versionIds.added,
+      short: versionIds.added.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-19T08:00:00Z',
+      message: 'Add name-keychain',
+      files: [
+        { status: 'A', path: 'model.json' },
+        { status: 'A', path: 'model.scad' },
+      ],
+      current: false,
+    },
+  ],
+}
+
+export const versionPatches: Record<string, string> = {
+  [versionIds.raised]: `diff --git a/name-keychain/model.scad b/name-keychain/model.scad
+index 1111111..2222222 100644
+--- a/name-keychain/model.scad
++++ b/name-keychain/model.scad
+@@ -3,5 +3,5 @@
+ text_size = 14;
+-text_depth = 1.2;
++text_depth = 1.6;
+ plate_thickness = 3;
+`,
+  [versionIds.edited]: `diff --git a/name-keychain/model.json b/name-keychain/model.json
+index 3333333..4444444 100644
+--- a/name-keychain/model.json
++++ b/name-keychain/model.json
+@@ -1,3 +1,3 @@
+-  "description": "Keychain."
++  "description": "Two-colour keychain with raised text."
+`,
+  [versionIds.added]: `diff --git a/name-keychain/model.scad b/name-keychain/model.scad
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/name-keychain/model.scad
+@@ -0,0 +1,3 @@
++name = "Reagan";
++text_size = 14;
++text_depth = 1.2;
+`,
+}
 
 export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,

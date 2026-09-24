@@ -8,6 +8,7 @@ import type {
   InstalledFamily,
   Job,
   ModelSummary,
+  ModelVersion,
   Output,
   ParamValue,
   PipelineChoices,
@@ -28,6 +29,7 @@ import type {
   Settings,
   SettingsUpdate,
   SidebarLink,
+  VersionDiff,
 } from './types'
 
 export const API_BASE = '/api/v1'
@@ -99,12 +101,42 @@ export const api = {
 
   modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
 
-  getSchema: (slug: string) => request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
+  /** A `version` reads that revision's schema instead of the model's current one. */
+  getSchema: (slug: string, version?: string) =>
+    request<CustomizerSchema>(
+      version
+        ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
+        : `/models/${seg(slug)}/schema`,
+    ),
 
-  render: (slug: string, params: Record<string, ParamValue>) =>
+  /** #90 — replaces the source as one revision. The hook the paste/edit path calls. */
+  putSource: (slug: string, source: string, message?: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, message: message ?? null }),
+    }),
+
+  listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
+
+  getVersionSourceUrl: (slug: string, version: string) =>
+    `${API_BASE}/models/${seg(slug)}/versions/${seg(version)}/source`,
+
+  /** `base` omitted diffs against the revision's parent. */
+  getVersionDiff: (slug: string, version: string, base?: string) =>
+    request<VersionDiff>(
+      `/models/${seg(slug)}/versions/${seg(version)}/diff${base ? `?base=${seg(base)}` : ''}`,
+    ),
+
+  restoreVersion: (slug: string, version: string) =>
+    request<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
+      method: 'POST',
+    }),
+
+  /** `version` renders an old revision without restoring it ("Customize this version"). */
+  render: (slug: string, params: Record<string, ParamValue>, version?: string) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
-      body: JSON.stringify({ params }),
+      body: JSON.stringify({ params, version: version ?? null }),
     }),
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
