@@ -22,6 +22,8 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, Field, ValidationError
 
+from scadbuddy.core.paths import MODEL_META_NAME
+from scadbuddy.library.catalogue import README_NAME, THUMBNAIL_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.render.bambu3mf import CORE_NS, ZIP_TIMESTAMP
 from scadbuddy.render.schema import ParamValue
@@ -33,13 +35,14 @@ PROVENANCE_KEY = f"{NS_PREFIX}:provenance"
 DESIGNER = "ScadBuddy"
 ROOT_MODEL = "3D/3dmodel.model"
 
-#: What a model's version is hashed over. Two things are deliberately NOT in it, both
-#: because the renderer writes them into the model's own directory:
-#: `model.json`, which caches the schema keyed off the .scad already, and the
-#: per-colour wrapper `render_solids` drops beside the model for the length of a
-#: render — a randomly named file that would otherwise make the hash depend on
-#: whether a render of the same model happened to be in flight.
-SOURCE_GLOB = "*.scad"
+#: Everything under a model's directory is hashed except these, because a model may
+#: ``import()`` or ``include`` anything beside it: an STL swapped under an unchanged
+#: .scad renders different geometry, and a glob of ``*.scad`` would call that the
+#: same version. What is left out is what ScadBuddy itself puts there and what no
+#: render reads — `model.json`, the schema cache keyed off the .scad already, plus
+#: the catalogue's own presentation files, which would otherwise make uploading a
+#: thumbnail look like a new version of the model.
+NOT_SOURCE = frozenset({MODEL_META_NAME, THUMBNAIL_NAME, README_NAME})
 
 _MODEL_TAG = re.compile(r"<model\b[^>]*>")
 # The keys stamp() owns. Removing them first keeps a re-stamp idempotent; nothing
@@ -64,7 +67,7 @@ class Provenance(BaseModel):
 
 
 def source_version(model_dir: Path) -> str:
-    """A content hash over a model's OpenSCAD sources, ordered by path.
+    """A content hash over everything a model is made of, ordered by path.
 
     Deliberately a free-form string rather than a structured field: #90 turns the
     models directory into a git repository and puts the commit id here instead, and
@@ -73,8 +76,10 @@ def source_version(model_dir: Path) -> str:
     digest = hashlib.sha256()
     for name, payload in sorted(
         (path.relative_to(model_dir).as_posix(), path.read_bytes())
-        for path in model_dir.rglob(SOURCE_GLOB)
-        if path.is_file() and not path.name.startswith(WRAPPER_PREFIX)
+        for path in model_dir.rglob("*")
+        if path.is_file()
+        and path.name not in NOT_SOURCE
+        and not path.name.startswith(WRAPPER_PREFIX)
     ):
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")

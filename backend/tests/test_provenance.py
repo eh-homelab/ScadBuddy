@@ -169,6 +169,19 @@ def test_the_version_is_a_content_hash_of_every_scad_in_the_model(tmp_path: Path
     assert source_version(model) != included
 
 
+def test_the_version_covers_what_a_model_imports(tmp_path: Path) -> None:
+    """A model may import() or include an asset beside it (design doc §2), and an STL
+    swapped under a .scad that never changed produces different geometry."""
+    model = tmp_path / "keychain"
+    (model / "parts").mkdir(parents=True)
+    (model / "model.scad").write_text('import("parts/base.stl");\n', encoding="utf-8")
+    (model / "parts" / "base.stl").write_bytes(b"solid base\nendsolid base\n")
+    before = source_version(model)
+
+    (model / "parts" / "base.stl").write_bytes(b"solid other\nendsolid other\n")
+    assert source_version(model) != before
+
+
 def test_the_version_ignores_what_the_renderer_writes_back(tmp_path: Path) -> None:
     """``model.json`` caches the schema, keyed off the .scad; a model whose source
     has not changed must not appear to be a new version because of it."""
