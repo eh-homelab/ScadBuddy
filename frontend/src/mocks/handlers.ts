@@ -4,6 +4,7 @@ import type {
   BoundingBox,
   CatalogueFont,
   EligibilityOverview,
+  FilamentOptions,
   FontFamily,
   Job,
   ModelProject,
@@ -15,6 +16,7 @@ import type {
   PipelineView,
   PresetOptions,
   PresetRef,
+  PrintProgress,
   PrintRunResult,
   ProjectChoices,
   ProjectRequest,
@@ -457,6 +459,22 @@ export const handlers = [
     } satisfies EligibilityOverview)
   }),
 
+  /**
+   * #87 — the aggregation the picker reads. `printer_id` scopes it: the server reports
+   * `loaded` against that printer, so without one a spool in the other machine would
+   * look local. The recorded estate is in `fixtures.filamentOptions`.
+   */
+  http.get(`${base}/print/outputs/:id/filaments`, ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const printerId = new URL(request.url).searchParams.get('printer_id')
+    return HttpResponse.json({
+      ...fixtures.filamentOptions,
+      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      printer_id: printerId === null ? null : Number(printerId),
+    } satisfies FilamentOptions)
+  }),
+
   http.post(`${base}/print/outputs/:id/run`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
@@ -464,6 +482,10 @@ export const handlers = [
       pipeline_id?: number | null
       copies?: number
       force?: boolean
+      printer_id?: number | null
+      plate_id?: number
+      filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
+      project_id?: number | null
     }
     const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
     if (pipelineId === null) {
@@ -481,6 +503,13 @@ export const handlers = [
       )
     }
     const copies = body.copies ?? 1
+    // #79 — the project's own library folder replaces the one from Settings for this
+    // send, which is what puts the file on Bambuddy's project page.
+    const projectId = body.project_id ?? state.modelProjects[output.slug] ?? null
+    const folderId =
+      projectId === null
+        ? null
+        : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
     const runId = nextNumber()
     const libraryFileId = output.library_file_id ?? nextNumber()
     state.outputs = state.outputs.map((o) =>
@@ -489,7 +518,36 @@ export const handlers = [
         : o,
     )
     await delay(200)
+
+    /**
+     * #87 — the escalation. A `PipelineRunCreateRequest` carries no printer and no
+     * filament mapping, so a request that names either cannot go down the pipeline
+     * route at all: the backend slices the library file with the pipeline's own presets
+     * and posts queue entries itself. `run` is null on that route — there is no
+     * pipeline run to report — which is why the success panel has to guard it.
+     */
+    if (body.filament_plan || typeof body.printer_id === 'number') {
+      const sliceJobId = nextNumber()
+      const queueItemIds = Array.from({ length: copies }, () => nextNumber())
+      const queued: PrintRunResult = {
+        route: 'slice_queue',
+        pipeline_id: pipelineId,
+        library_file_id: libraryFileId,
+        printer_id: body.printer_id ?? null,
+        run: null,
+        slice_job_id: sliceJobId,
+        sliced_library_file_id: nextNumber(),
+        queue_item_ids: queueItemIds,
+        warnings: fixtures.filamentOptions.warnings,
+        project_id: projectId,
+        folder_id: folderId,
+        bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+      }
+      return HttpResponse.json(queued)
+    }
+
     const result: PrintRunResult = {
+      route: 'pipeline',
       pipeline_id: pipelineId,
       library_file_id: libraryFileId,
       run: {
@@ -524,6 +582,8 @@ export const handlers = [
         target_model_class: null,
         fanout_strategy: 'max_parallel',
       },
+      project_id: projectId,
+      folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
@@ -601,6 +661,29 @@ export const handlers = [
       queue_item_ids: body.queue_item_ids,
       archive_ids: [],
     } satisfies AttachResult)
+  }),
+
+  /**
+   * #89 — following the print. Which route answers is read off what the output recorded,
+   * the way the backend does it, so an output that has never been printed answers `200
+   * null` rather than a 404: never printed is an answer, not a missing resource.
+   */
+  http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if (output.pipeline_run_id) {
+      return HttpResponse.json({
+        ...fixtures.pipelineProgress,
+        pipeline_run_id: output.pipeline_run_id,
+      } satisfies PrintProgress)
+    }
+    if (output.queue_item_id) {
+      return HttpResponse.json({
+        ...fixtures.queuedSliceProgress,
+        queue_item_id: output.queue_item_id,
+      } satisfies PrintProgress)
+    }
+    return HttpResponse.json(null)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),

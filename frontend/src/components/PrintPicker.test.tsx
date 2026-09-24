@@ -448,3 +448,113 @@ describe('PrintPicker · New pipeline', () => {
     expect(screen.getByRole('button', { name: 'Create pipeline' })).toBeDisabled()
   })
 })
+
+describe('PrintPicker · Filaments', () => {
+  beforeEach(() => resetMockState())
+
+  /** Every `POST /print/outputs/{id}/run` body, in order. */
+  function watchRuns(): Record<string, unknown>[] {
+    const bodies: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.includes('/run')) {
+        bodies.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    return bodies
+  }
+
+  it('shows one slot per plate colour, pre-selected from the server’s suggestion', async () => {
+    open()
+    await listed()
+
+    const slot = await screen.findByTestId('filament-slot-1')
+    expect(within(slot).getByTestId('spool-21')).toBeChecked()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
+  })
+
+  it('keeps the #86 request shape while the plan is still the suggested one', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('filament-slot-1')
+
+    // The box is off and nothing has been moved, so this must stay a pipeline run —
+    // Bambuddy's own fan-out across the pipeline's printers is the default behaviour.
+    expect(screen.getByTestId('use-exact-filaments')).not.toBeChecked()
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).not.toHaveProperty('filament_plan')
+    expect(runs[0]).not.toHaveProperty('printer_id')
+  })
+
+  it('sends the plan and reports the queue entries once the user asks for these spools', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('filament-slot-1')
+
+    await user.click(screen.getByTestId('use-exact-filaments'))
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    // `run` is null on this route, so the success panel reports the queue entries the
+    // slice produced rather than a pipeline run that does not exist.
+    const queued = await screen.findByTestId('queued-items')
+    expect(queued).toHaveTextContent('Sliced and queued for 3DP-31B-598')
+    expect(queued).toHaveTextContent('Slice job')
+    expect(screen.queryByText(/Pipeline run/)).not.toBeInTheDocument()
+
+    expect(runs[0]).toMatchObject({
+      printer_id: 1,
+      plate_id: 1,
+      filament_plan: {
+        slots: [
+          { slot_id: 1, spool_id: 21 },
+          { slot_id: 2, spool_id: 27 },
+        ],
+        force_colour_match: false,
+      },
+    })
+  })
+
+  it('treats moving a slot as the same request, without the box', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+
+    const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('spool-22'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+
+    expect(runs[0]).toMatchObject({
+      printer_id: 1,
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 22 }]) },
+    })
+  })
+
+  it('says so rather than going quiet when the inventory cannot be read', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Bad Gateway',
+            status: 502,
+            detail: "Bambuddy refused the API key when asked for the spool inventory",
+          },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    open()
+    await listed()
+
+    expect(await screen.findByTestId('filaments-unavailable')).toHaveTextContent(
+      'refused the API key',
+    )
+    // The pipeline still runs; the picker is an addition to #86, not a gate on it.
+    expect(screen.getByTestId('run-pipeline')).toBeEnabled()
+  })
+})
