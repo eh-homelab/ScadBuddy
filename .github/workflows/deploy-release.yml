@@ -142,7 +142,9 @@ jobs:
       - name: Append a Deployment section to the release notes
         run: |
           set -euo pipefail
-          if [ "$RESOLVE_RESULT" != "success" ]; then
+          if [ "$RESOLVE_RESULT" = "cancelled" ]; then
+            line="⚠️ Not deployed: the deploy run was cancelled while waiting for the ${TAG} image ([deploy run](${RUN_URL})); re-run it to deploy this release."
+          elif [ "$RESOLVE_RESULT" != "success" ]; then
             line="❌ The ${TAG} image never became available — see the [deploy run](${RUN_URL})."
           elif [ "$DEPLOY_RESULT" = "cancelled" ]; then
             # Overtaken in the deploy queue (see the `pin` job's concurrency
@@ -176,5 +178,6 @@ jobs:
           # human-facing copy, this is the machine-facing one. Overtaken in
           # the queue is ordinary behaviour, not a failure — see the `pin`
           # job's concurrency note in deploy.reusable.yml.
-          [ "$RESOLVE_RESULT" = "success" ] || exit 1
+          # A cancellation — of the wait or of the deploy — is not a failure.
+          case "$RESOLVE_RESULT" in success) ;; cancelled) exit 0 ;; *) exit 1 ;; esac
           case "$DEPLOY_RESULT" in success|cancelled) ;; *) exit 1 ;; esac
