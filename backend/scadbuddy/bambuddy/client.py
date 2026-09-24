@@ -447,6 +447,31 @@ class BambuddyClient:
         )
         return PipelineRun.model_validate(response.json())
 
+    async def pipeline_run(self, run_id: int) -> PipelineRun:
+        """``GET /api/v1/pipeline-runs/{run_id}`` — the single-run read.
+
+        Not ``/slicer-pipelines/{id}/runs``: that is a list, and following one run
+        through it would mean paging past every other run of the same pipeline. This
+        route also needs no pipeline id, which matters because an output records the
+        run it produced and not the pipeline it came from.
+        """
+        response = await self._send(
+            "GET",
+            f"/pipeline-runs/{run_id}",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"read pipeline run {run_id}",
+        )
+        return PipelineRun.model_validate(response.json())
+
+    async def queue_item(self, item_id: int) -> QueueItem:
+        response = await self._send(
+            "GET",
+            f"/queue/{item_id}",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"read queue item {item_id}",
+        )
+        return QueueItem.model_validate(response.json())
+
     async def pipeline_runs(self, pipeline_id: int, *, limit: int = 10) -> PipelineRunList:
         response = await self._send(
             "GET",

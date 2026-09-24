@@ -188,7 +188,7 @@ async def send_output(
             pipeline_id,
             PipelineRunRequest(source_library_file_id=library_file_id, copies=request.copies),
         )
-        store.record_send(meta.id, pipeline_run_id=run.id)
+        store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
         return SendResult(
             mode="queue",
             library_file_id=library_file_id,
@@ -226,7 +226,12 @@ async def send_output(
             timelapse=True,
         )
     )
-    store.record_send(meta.id, queue_item_id=item.id)
+    store.record_send(
+        meta.id,
+        queue_item_id=item.id,
+        print_route="slice_queue",
+        slice_job_id=accepted.job_id,
+    )
     return SendResult(
         mode="queue",
         library_file_id=library_file_id,

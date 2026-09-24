@@ -328,6 +328,8 @@ class PipelineJob(BambuddyModel):
     queue_entry_id: int | None = None
     status: str
     error_message: str | None = None
+    dispatched_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class PipelineRun(BambuddyModel):
@@ -348,6 +350,15 @@ class PipelineRun(BambuddyModel):
     eligibility_overridden: bool = False
     error_message: str | None = None
     jobs: list[PipelineJob] = Field(default_factory=list)
+    #: **The only trustworthy terminal signal.** A run whose slice failed was recorded
+    #: on 2026-09-24 still reporting ``status: "in_progress"`` and
+    #: ``copies_in_progress: 1`` *with* ``completed_at`` set and an ``error_message``
+    #: explaining the failure — see ``recordings/pipeline-run.json``. Polling on
+    #: ``status`` or on the copy counters therefore never terminates.
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    parent_run_id: int | None = None
     target_kind: TargetKind | None = None
     target_printer_id: int | None = None
     target_model_class: str | None = None
@@ -543,12 +554,26 @@ class InventoryRemain(BambuddyModel):
 
 
 class QueueItem(BambuddyModel):
+    """``POST /api/v1/queue/`` and ``GET /api/v1/queue/{id}`` — the same schema.
+
+    ``waiting_reason`` is the field that explains a queued item that is not printing,
+    and it is Bambuddy's own sentence ("No active H2C printers in …"). It is separate
+    from ``error_message``: waiting is not failing, and conflating the two turns every
+    normal queue wait into an error on the send bar.
+    """
+
     id: int
     printer_id: int | None = None
+    printer_name: str | None = None
     library_file_id: int | None = None
+    library_file_name: str | None = None
     position: int | None = None
     status: str | None = None
     plate_id: int | None = None
+    waiting_reason: str | None = None
+    error_message: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
 
 
 class ExternalLink(BambuddyModel):

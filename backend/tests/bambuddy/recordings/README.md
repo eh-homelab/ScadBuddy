@@ -45,6 +45,12 @@ Added for #87, over the ingress on 2026-09-24 (still every request a `GET`):
 | `spool-filament-presets.json` | `GET /api/v1/inventory/spools/9/filament-presets` |
 | `filament-requirements.json` | `GET /api/v1/library/files/62/filament-requirements` |
 
+Added for #89, same day and the same way:
+
+| File | Source |
+|---|---|
+| `pipeline-run.json` | `GET /api/v1/pipeline-runs/1` — a **real** run, and a failed one |
+
 `tag_uid` and `tray_uuid` are replaced in the two inventory files: they are the RFID
 identities of physical spools and nothing in ScadBuddy reads them.
 
@@ -109,6 +115,18 @@ identities of physical spools and nothing in ScadBuddy reads them.
 - **`inventory-remain.slot_materials[].extruder` says which extruder a loaded slot
   feeds.** It is what makes the filament-switcher question decidable without inferring
   how `ams_switch_inlet`'s "A"/"B" map onto extruder numbers.
+- **A failed pipeline run keeps reporting `status: "in_progress"`.** `pipeline-run.json`
+  is a real run whose slice failed: `status: "in_progress"`, `copies_in_progress: 1`,
+  `copies_failed: 0` — *and* `completed_at` set, `sliced_library_file_id: null` and
+  `error_message: "Slice failed: The selected printer is not compatible with the process
+  preset in the 3mf."`. Neither the status nor the copy counters ever move, so a poll
+  built on either never terminates. **`completed_at` is the terminal signal.**
+- **`GET /api/v1/pipeline-runs/{run_id}` exists** — a single-run read that needs no
+  pipeline id, which is what makes following a recorded run id possible. The
+  `/slicer-pipelines/{id}/runs` list is not needed for it.
+- **`jobs[].queue_entry_id` is null until the background task has created the entry.**
+  The recorded run's one job is still `status: "pending"` with no printer and no queue
+  entry, minutes after the run finished — because nothing was sliced to queue.
 - **`/api/v1/inventory/locations` is empty here**, so storage locations come back as the
   free-text `storage_location` on the spool rather than as a location id.
 

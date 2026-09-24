@@ -33,6 +33,7 @@ from scadbuddy.bambuddy.pipelines import (
     preset_options,
     run_for_output,
 )
+from scadbuddy.bambuddy.progress import PrintProgress, progress_for
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -218,3 +219,29 @@ async def get_filaments(
             pipeline_id=pipeline_id,
             plate_id=plate_id,
         )
+
+
+@router.get(
+    "/outputs/{output_id}/progress",
+    response_model=PrintProgress | None,
+    summary="How the last print of this output is going",
+)
+async def get_progress(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+) -> PrintProgress | None:
+    """Follow whichever of Bambuddy's two routes this output last took (#89).
+
+    ``null`` means this output has never been printed — that is an answer, not an
+    error, and the send bar shows nothing rather than a failure.
+
+    The poll is needed rather than optional on the pipeline route: ``run`` answers 202
+    and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
+    still null when the run response arrives. ``settled`` is what says the polling can
+    stop; it is computed from the copies, because a run can report a terminal status
+    while a copy is still being dispatched.
+    """
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        return await progress_for(client, meta)
