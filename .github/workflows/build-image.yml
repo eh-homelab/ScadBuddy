@@ -79,7 +79,9 @@ jobs:
           # "Pick the deploy label" below and deploy-main.yml both take the
           # first 7 characters of the commit. Pin the action's short length to
           # the same 7 rather than inherit its default, and the step below
-          # asserts the two agree on every build.
+          # asserts the two agree on every build. The variable is documented
+          # in docker/metadata-action's README ("Environment variables":
+          # "Specifies the length of the short commit SHA … Default is 7").
           DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
         with:
           images: ghcr.io/eh-homelab/scadbuddy

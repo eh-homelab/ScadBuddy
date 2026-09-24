@@ -87,9 +87,10 @@ jobs:
     secrets: inherit
 
   # Success is reported by clusters' scadbuddy-verify-deploy.yml once the pod
-  # serves the revision; this job covers the two ways a main deploy can end
-  # with no PR at all — the `pin` job was overtaken in the deploy queue and
-  # cancelled before it ran, or it failed — so neither is silent. Posts a
+  # serves the revision; this job covers the ways a main deploy can end
+  # without a merge on its way — the `pin` job was overtaken in the deploy
+  # queue and cancelled before it ran, it failed before opening a PR, or it
+  # opened the PR but could not arm auto-merge — so none is silent. Posts a
   # commit comment on the build's commit, the same place verification reports.
   report:
     name: Report a deploy that opened no PR
@@ -122,6 +123,8 @@ jobs:
           REVISION: ${{ needs.resolve.outputs.revision }}
           RESOLVE_RESULT: ${{ needs.resolve.result }}
           DEPLOY_RESULT: ${{ needs.deploy.result }}
+          PR_URL: ${{ needs.deploy.outputs.pr_url }}
+          ARMED: ${{ needs.deploy.outputs.armed }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           set -euo pipefail
@@ -129,7 +132,11 @@ jobs:
             success:cancelled)
               line="⚠️ Not deployed: a newer deploy request overtook this build before its clusters PR was opened. A later main build supersedes it; re-run the [deploy run](${RUN_URL}) to deploy this commit anyway." ;;
             success:*)
-              line="❌ Deploy failed before a clusters PR was opened — see the [deploy run](${RUN_URL})." ;;
+              if [ -n "$PR_URL" ] && [ "$ARMED" != "true" ]; then
+                line="⚠️ Deploy PR opened but auto-merge could not be armed — **merge ${PR_URL} by hand** ([deploy run](${RUN_URL}))."
+              else
+                line="❌ Deploy failed before a clusters PR was opened — see the [deploy run](${RUN_URL})."
+              fi ;;
             *)
               line="❌ Deploy could not resolve this build's image digest — see the [deploy run](${RUN_URL})." ;;
           esac

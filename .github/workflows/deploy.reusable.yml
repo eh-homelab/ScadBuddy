@@ -59,6 +59,9 @@ on:
       unchanged:
         description: "`true` when clusters already pins this exact digest"
         value: ${{ jobs.pin.outputs.unchanged }}
+      armed:
+        description: "`true` when auto-merge was armed on the PR; `false` means the PR exists but needs a manual merge"
+        value: ${{ jobs.pin.outputs.armed }}
 
 permissions:
   contents: read
@@ -94,6 +97,7 @@ jobs:
       pr_url: ${{ steps.pr.outputs.pr_url }}
       pr_number: ${{ steps.pr.outputs.pr_number }}
       unchanged: ${{ steps.edit.outputs.unchanged }}
+      armed: ${{ steps.pr.outputs.armed }}
     steps:
       - name: Validate inputs
         env:
@@ -204,9 +208,10 @@ jobs:
 
           # One deploy branch, one open deploy PR. A newer deploy supersedes
           # the older one: close it (with a pointer) and replace the branch.
-          for old in $(gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[].number'); do
-            gh pr close "$old" --comment "Superseded by a newer ScadBuddy deploy (${VERSION}, ${RUN_URL})."
-          done
+          gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[].number' \
+            | while read -r old; do
+                gh pr close "$old" --comment "Superseded by a newer ScadBuddy deploy (${VERSION}, ${RUN_URL})."
+              done
           git push origin --delete "$DEPLOY_BRANCH" 2>/dev/null || true
 
           git checkout -B "$DEPLOY_BRANCH"
@@ -240,13 +245,27 @@ jobs:
           )")
           echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
           echo "pr_number=${pr_url##*/}" >> "$GITHUB_OUTPUT"
-          gh pr merge "$pr_url" --auto --squash
+          # The PR exists from here on, whatever happens next: record whether
+          # auto-merge armed so a caller can say "merge it by hand" rather
+          # than "no PR was opened" when this fails.
+          if gh pr merge "$pr_url" --auto --squash; then
+            armed=true
+          else
+            armed=false
+            echo "::error::opened ${pr_url} but could not arm auto-merge; it needs a manual merge"
+          fi
+          echo "armed=$armed" >> "$GITHUB_OUTPUT"
           {
             echo "### Deploy PR opened"
             echo
-            echo "- ${pr_url} — auto-merge armed"
+            if [ "$armed" = true ]; then
+              echo "- ${pr_url} — auto-merge armed"
+            else
+              echo "- ${pr_url} — **auto-merge could not be armed; merge it by hand**"
+            fi
             echo "- \`${IMAGE}:${VERSION}@${DIGEST}\`"
           } >> "$GITHUB_STEP_SUMMARY"
+          [ "$armed" = true ]
 
       - name: Note an unchanged pin
         if: steps.edit.outputs.unchanged == 'true'

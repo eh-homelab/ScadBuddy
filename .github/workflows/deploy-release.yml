@@ -133,6 +133,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       TAG: ${{ github.event.release.tag_name }}
       PR_URL: ${{ needs.deploy.outputs.pr_url }}
+      ARMED: ${{ needs.deploy.outputs.armed }}
       UNCHANGED: ${{ needs.deploy.outputs.unchanged }}
       DEPLOY_RESULT: ${{ needs.deploy.result }}
       RESOLVE_RESULT: ${{ needs.resolve.result }}
@@ -147,6 +148,8 @@ jobs:
             # Overtaken in the deploy queue (see the `pin` job's concurrency
             # note in deploy.reusable.yml); nothing was opened, nothing failed.
             line="⚠️ Not deployed: a newer deploy request overtook this one before it started, so no clusters PR was opened. Re-run the [deploy run](${RUN_URL}) to pin this release."
+          elif [ -n "$PR_URL" ] && [ "$ARMED" != "true" ]; then
+            line="⚠️ Deploy PR opened but auto-merge could not be armed — **merge ${PR_URL} by hand** ([deploy run](${RUN_URL}))."
           elif [ "$DEPLOY_RESULT" != "success" ]; then
             line="❌ Opening the clusters deploy PR failed — see the [deploy run](${RUN_URL})."
           elif [ "$UNCHANGED" = "true" ]; then
