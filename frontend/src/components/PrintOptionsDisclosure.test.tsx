@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { useState } from 'react'
@@ -192,6 +192,24 @@ describe('PrintOptionsDisclosure', () => {
     // Reading printer_id off the PUT response would have blanked both of these.
     expect(screen.getByRole('option', { name: 'This printer' })).toBeEnabled()
     expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
+  })
+
+  it('clamps a number row to its bound instead of letting the server 422 it', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+
+    // A browser only enforces min/max on form submission, and this never submits one.
+    fireEvent.change(screen.getByLabelText('Chamber preheat target'), {
+      target: { value: '90' },
+    })
+    fireEvent.change(screen.getByLabelText('Quantity'), { target: { value: '5000' } })
+
+    expect(screen.getByLabelText('Chamber preheat target')).toHaveValue(65)
+    expect(screen.getByLabelText('Quantity')).toHaveValue(1000)
+    expect(screen.getByTestId('sent')).toHaveTextContent(
+      '{"preheat_chamber_target_override":65,"quantity":1000}',
+    )
   })
 
   it('forgets a scope', async () => {

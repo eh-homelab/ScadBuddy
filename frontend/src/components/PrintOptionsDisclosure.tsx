@@ -234,6 +234,17 @@ export function PrintOptionsDisclosure({
   )
 }
 
+/**
+ * `min`/`max` on a number input are advisory: a browser enforces them on form submission,
+ * not on what the user types, and this disclosure never submits a form. Clamping here is
+ * what stops an out-of-range value reaching the server, where a Pydantic 422 arrives as
+ * "the request did not match the expected shape" and names no field.
+ */
+function clamp(value: number, spec: OptionSpec): number {
+  const lower = spec.min === undefined ? value : Math.max(spec.min, value)
+  return spec.max === undefined ? lower : Math.min(spec.max, lower)
+}
+
 function OptionRow({
   spec,
   effective,
@@ -311,7 +322,11 @@ function OptionControl({
         max={spec.max}
         value={isSet(value) ? String(value) : UNSET}
         placeholder={isSet(fallback) ? String(fallback) : ''}
-        onChange={(event) => onChange(event.target.value === UNSET ? null : Number(event.target.value))}
+        onChange={(event) =>
+          onChange(
+            event.target.value === UNSET ? null : clamp(Number(event.target.value), spec),
+          )
+        }
         className="sb-field sb-num w-24 text-right"
       />
     )

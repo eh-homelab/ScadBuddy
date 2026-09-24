@@ -374,6 +374,40 @@ def test_a_models_own_pipeline_is_the_one_read(client: TestClient, model: str) -
     assert not global_pipeline.called
 
 
+@respx.mock
+def test_a_printer_class_pipelines_fanout_survives_a_configured_printer(
+    client: TestClient, model: str
+) -> None:
+    """A configured ``printer_id`` keys the option scopes; it must not become the target.
+
+    Setting one is the only way to use the per-printer scope with a printer-class pipeline,
+    and taking it as the queue target pinned every copy to that single printer — quietly
+    ending the fan-out the pipeline exists for, and only once some unrelated option
+    happened to be remembered.
+    """
+    configure(client, pipeline_id=4, printer_id=1)
+    remember(client, "printer", {"insert_at_top": True}, key="1")
+    output_id = make_output(client, model)
+    upload_route()
+    pipeline_route(
+        body={
+            "target_kind": "printer_class",
+            "target_printer_id": None,
+            "target_model_class": "H2C",
+        }
+    )
+    slice_routes()
+    queue = queue_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert queued["target_model"] == "H2C"
+    assert "printer_id" not in queued
+    # And the scope still keyed on the configured printer, which is why it applied at all.
+    assert queued["insert_at_top"] is True
+
+
 # --- the acceptance case ------------------------------------------------------------
 
 

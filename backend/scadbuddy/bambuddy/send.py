@@ -258,10 +258,13 @@ async def _queue_send(
     if pipeline_id is not None and _needs_pipeline(settings, meta, request):
         pipeline = await client.pipeline(pipeline_id)
 
-    printer_id = settings.printer_id
-    if printer_id is None and pipeline is not None:
-        printer_id = pipeline.target_printer_id
-    options = _resolve_options(settings, meta, request, printer_id)
+    # The printer the *option scopes* key on — the printer ScadBuddy believes it prints to.
+    # Not the same thing as the queue item's target, which a pipeline owns outright; see
+    # below, where conflating the two pinned a printer-class pipeline to one printer.
+    scope_printer_id = settings.printer_id
+    if scope_printer_id is None and pipeline is not None:
+        scope_printer_id = pipeline.target_printer_id
+    options = _resolve_options(settings, meta, request, scope_printer_id)
 
     if pipeline_id is not None and not options.beyond_pipeline():
         run = await client.run_pipeline(
@@ -280,19 +283,25 @@ async def _queue_send(
             options=options,
         )
 
+    printer_id: int | None
     target_model: str | None = None
     if pipeline_id is not None:
         if pipeline is None:  # pragma: no cover - _needs_pipeline already fetched it
             pipeline = await client.pipeline(pipeline_id)
         slice_request = _pipeline_slice_request(pipeline, meta)
-        if printer_id is None:
-            target_model = pipeline.target_model_class
+        # The pipeline's own target, never ``settings.printer_id``: a ``printer_class``
+        # pipeline resolves no printer id at all, and taking the configured one there
+        # pinned every copy to that single printer and silently ended the fan-out the
+        # pipeline exists for. Bambuddy picks among the class from ``target_model``.
+        printer_id = pipeline.target_printer_id
+        target_model = pipeline.target_model_class if printer_id is None else None
         if printer_id is None and target_model is None:
             raise not_configured(
                 f"slicer pipeline {pipeline.id} targets neither a printer nor a printer "
                 "model, so there is nothing to queue the print options to"
             )
     else:
+        printer_id = settings.printer_id
         if printer_id is None:
             raise not_configured(
                 "no slicer pipeline and no printer are configured, so there is nothing to queue to"
