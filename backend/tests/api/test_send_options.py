@@ -302,6 +302,70 @@ def test_a_pipeline_with_no_presets_says_so_rather_than_dropping_the_options(
     assert not sliced.called
 
 
+@respx.mock
+def test_another_printers_override_does_not_cost_a_pipeline_read(
+    client: TestClient, model: str
+) -> None:
+    """One saved override must not make every later send pay for a GET it cannot use, nor
+    turn that GET's failure into a send failure."""
+    configure(client, pipeline_id=4, printer_id=1)
+    remember(client, "printer", {"timelapse": False}, key="7")
+    output_id = make_output(client, model)
+    upload_route()
+    read = pipeline_route()
+    run = respx.post(f"{API}/slicer-pipelines/4/run").mock(
+        return_value=httpx.Response(202, json={"id": 12, "status": "queued"})
+    )
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).json()
+
+    assert body["pipeline_run_id"] == 12
+    assert run.called
+    assert not read.called
+
+
+@respx.mock
+def test_the_targeted_printers_override_still_takes_the_queue_path(
+    client: TestClient, model: str
+) -> None:
+    configure(client, pipeline_id=4, printer_id=1)
+    remember(client, "printer", {"timelapse": False}, key="1")
+    output_id = make_output(client, model)
+    upload_route()
+    read = pipeline_route()
+    run = respx.post(f"{API}/slicer-pipelines/4/run")
+    slice_routes()
+    queue = queue_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert read.called
+    assert not run.called
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is False
+
+
+@respx.mock
+def test_a_models_own_pipeline_is_the_one_read(client: TestClient, model: str) -> None:
+    """#86 lets a model default to its own pipeline; the send must follow that one."""
+    configure(client, pipeline_id=4)
+    assert (
+        client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}).status_code
+        == 200
+    )
+    remember(client, "global", {"timelapse": False})
+    output_id = make_output(client, model)
+    upload_route()
+    global_pipeline = pipeline_route(4)
+    model_pipeline = pipeline_route(9)
+    slice_routes()
+    queue_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert model_pipeline.called
+    assert not global_pipeline.called
+
+
 # --- the acceptance case ------------------------------------------------------------
 
 

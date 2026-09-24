@@ -30,13 +30,19 @@ interface Props {
 
 export function SendDialog({ open, output, onClose, onSent }: Props) {
   const [mode, setMode] = useState<SendMode>('queue')
-  const [copies, setCopies] = useState(1)
+  // `null` until the box is touched, so an untouched Copies does NOT go out as an
+  // explicit `quantity: 1` and silently beat a remembered per-printer or per-model one.
+  const [copies, setCopies] = useState<number | null>(null)
   // #88 — per-send overrides. Remembered ones live on the server and are merged there.
   const [options, setOptions] = useState<PrintOptions>({})
+  const [effective, setEffective] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [issues, setIssues] = useState<string[]>([])
   const [result, setResult] = useState<SendResult | null>(null)
+
+  // What the print will actually be queued with, which is what the box should show.
+  const quantity = copies ?? effective.quantity ?? 1
 
   function close() {
     setError(null)
@@ -98,12 +104,14 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
           {result.queue_item_id ? (
             <>
               Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
-              <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
+              <span className="sb-num">{quantity}</span>{' '}
+              {quantity === 1 ? 'copy' : 'copies'}.
             </>
           ) : result.pipeline_run_id ? (
             <>
               Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
-              <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
+              <span className="sb-num">{quantity}</span>{' '}
+              {quantity === 1 ? 'copy' : 'copies'}.
             </>
           ) : (
             <>
@@ -153,7 +161,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
               type="number"
               min={1}
               max={50}
-              value={copies}
+              value={quantity}
               disabled={mode !== 'queue'}
               onChange={(event) => setCopies(Math.max(1, Number(event.target.value)))}
               className="sb-field sb-num w-20 text-right"
@@ -168,6 +176,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
               slug={output.slug}
               value={options}
               onChange={setOptions}
+              onEffective={setEffective}
             />
           )}
 

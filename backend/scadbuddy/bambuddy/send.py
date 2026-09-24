@@ -221,18 +221,20 @@ def _resolve_options(
 def _needs_pipeline(settings: StoredSettings, meta: OutputMeta, request: SendRequest) -> bool:
     """Whether the configured pipeline has to be read before the path can be chosen.
 
-    Reading it is what tells us the target printer the per-printer scope keys on, and
-    the presets to slice with once an option rules the run out. Neither matters when no
-    option beyond ``quantity`` is in play, and then this stays a single POST as before.
+    Reading it is what tells us the target printer the per-printer scope keys on, and the
+    presets to slice with once an option rules the run out.
+
+    With a printer configured the scope key is already known, so the resolution here is
+    the real one and the answer is exact. Only when it is *not* — a pipeline aimed at its
+    own printer, or at a printer class — can a remembered printer override still turn out
+    to be this send's, and then any entry in the map is reason enough to look. Deciding
+    that on "the map is non-empty" unconditionally would make one saved override cost
+    every later send an extra GET it does not need, and turn that GET's failure into a
+    send failure.
     """
-    if settings.printer_print_options:
+    if settings.printer_id is None and settings.printer_print_options:
         return True
-    partial = resolve(
-        settings.print_options,
-        settings.model_print_options.get(meta.slug),
-        _request_scope(request),
-    )
-    return bool(partial.beyond_pipeline())
+    return bool(_resolve_options(settings, meta, request, settings.printer_id).beyond_pipeline())
 
 
 async def _queue_send(

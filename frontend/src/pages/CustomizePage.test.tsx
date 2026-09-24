@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
+import { printOptions } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { CustomizePage } from './CustomizePage'
@@ -133,7 +134,44 @@ describe('CustomizePage', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(bodies).toHaveLength(1))
-    expect(bodies[0]).toMatchObject({ mode: 'queue', copies: 1, options: { timelapse: true } })
+    // `copies` stays null: untouched, so it must not overrule a remembered quantity.
+    expect(bodies[0]).toMatchObject({ mode: 'queue', copies: null, options: { timelapse: true } })
+  })
+
+  it('does not let an untouched Copies box beat a remembered quantity (#88)', async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...printOptions, models: { 'name-keychain': { quantity: 5 } } }),
+      ),
+    )
+    const bodies: unknown[] = []
+    server.use(
+      http.post('/api/v1/outputs/:id/send', async ({ request }) => {
+        bodies.push(await request.json())
+        return HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain.3mf',
+          queue_item_id: 7,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          options: { quantity: 5 },
+        })
+      }),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    // The box shows what will actually be printed, without claiming it as an override.
+    await waitFor(() => expect(within(dialog).getByLabelText('Copies')).toHaveValue(5))
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ mode: 'queue', copies: null })
   })
 
   it('reopens an earlier output with its parameters', async () => {

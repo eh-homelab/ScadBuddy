@@ -32,6 +32,11 @@ interface Props {
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
   value: PrintOptions
   onChange: (next: PrintOptions) => void
+  /**
+   * The merged result, for a caller that has to show one of these values outside the
+   * disclosure — the send bar's Copies box is the effective `quantity`.
+   */
+  onEffective?: (effective: PrintOptions) => void
 }
 
 const UNSET = ''
@@ -44,7 +49,13 @@ const UNSET = ''
  * been merged, and where that value came from. "Bambuddy's default" is a real choice, not
  * an absence: picking it removes the override rather than pinning the current default.
  */
-export function PrintOptionsDisclosure({ slug, printerId, value, onChange }: Props) {
+export function PrintOptionsDisclosure({
+  slug,
+  printerId,
+  value,
+  onChange,
+  onEffective,
+}: Props) {
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   const [loading, setLoading] = useState(true)
   const [scope, setScope] = useState<OptionScope>('printer')
@@ -87,6 +98,9 @@ export function PrintOptionsDisclosure({ slug, printerId, value, onChange }: Pro
     [layers],
   )
   const defaults = remembered?.defaults ?? {}
+
+  // Reported rather than recomputed by the caller, so there is one merge in the UI.
+  useEffect(() => onEffective?.(effective), [effective, onEffective])
 
   function set(name: OptionName, next: OptionValue) {
     const draft: Record<string, OptionValue> = { ...value }
