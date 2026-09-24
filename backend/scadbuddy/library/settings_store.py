@@ -45,6 +45,12 @@ class StoredSettings(BambuddyIds):
     #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
 
+    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
+    #: enough to open the picker where it was left rather than modelling which models
+    #: belong to which project — that question is Bambuddy's to answer.
+    last_project_id: int | None = None
+
     def pipeline_for(self, slug: str) -> int | None:
         """This model's own pipeline, else the global fallback (#86)."""
         return self.model_pipelines.get(slug, self.pipeline_id)
@@ -125,6 +131,10 @@ class SettingsStore:
         else:
             pipelines[slug] = pipeline_id
         return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
+
+    def remember_project(self, project_id: int | None) -> StoredSettings:
+        """Remember the project the last send went to, so the picker opens on it."""
+        return self._write(self.load().model_copy(update={"last_project_id": project_id}))
 
     def _write(self, settings: StoredSettings) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)

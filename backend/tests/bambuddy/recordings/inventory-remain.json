@@ -1,0 +1,86 @@
+{
+  "inventory_remain_g": {
+    "1": 1000.0,
+    "2": 1000.0,
+    "3": 400.0,
+    "4": 877.4886903895231,
+    "8": 980.0
+  },
+  "slot_materials": [
+    {
+      "ams_id": 0,
+      "tray_id": 1,
+      "global_tray_id": 1,
+      "material_key": "preset:GFG00|color:688197",
+      "remaining_g": 1000.0,
+      "extruder": 0,
+      "spool": {
+        "brand": "Bambu Lab",
+        "material": "PETG",
+        "subtype": "Basic",
+        "color_name": "Misty Blue",
+        "rgba": "688197FF"
+      }
+    },
+    {
+      "ams_id": 0,
+      "tray_id": 3,
+      "global_tray_id": 3,
+      "material_key": "unmatched:15",
+      "remaining_g": 400.0,
+      "extruder": 0,
+      "spool": {
+        "brand": "Insignia",
+        "material": "PETG",
+        "subtype": "Clear",
+        "color_name": "Clear",
+        "rgba": "00000000"
+      }
+    },
+    {
+      "ams_id": 0,
+      "tray_id": 2,
+      "global_tray_id": 2,
+      "material_key": "unmatched:14",
+      "remaining_g": 1000.0,
+      "extruder": 0,
+      "spool": {
+        "brand": "Insignia",
+        "material": "PETG",
+        "subtype": "Clear",
+        "color_name": "Clear",
+        "rgba": "00000000"
+      }
+    },
+    {
+      "ams_id": 1,
+      "tray_id": 0,
+      "global_tray_id": 4,
+      "material_key": "preset:GFSL99_20|color:E3E5E5",
+      "remaining_g": 877.4886903895231,
+      "extruder": 0,
+      "spool": {
+        "brand": "Inland",
+        "material": "PLA",
+        "subtype": "Basic",
+        "color_name": "White",
+        "rgba": "E3E5E5FF"
+      }
+    },
+    {
+      "ams_id": 2,
+      "tray_id": 0,
+      "global_tray_id": 8,
+      "material_key": "preset:GFG00|color:0086D6",
+      "remaining_g": 980.0,
+      "extruder": 0,
+      "spool": {
+        "brand": "Bambu Lab",
+        "material": "PETG",
+        "subtype": "Basic",
+        "color_name": "Navy Blue",
+        "rgba": "0086D6FF"
+      }
+    }
+  ]
+}

@@ -25,11 +25,22 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.dispatch import slice_and_queue, target_of
 from scadbuddy.bambuddy.errors import not_configured
+from scadbuddy.bambuddy.filaments import (
+    FilamentOptions,
+    FilamentPlan,
+    FilamentWarning,
+    check,
+    gather_options,
+    queue_filaments,
+    slice_filament_presets,
+)
 from scadbuddy.bambuddy.models import (
     EligibilityReport,
     EligibilityRequest,
@@ -44,6 +55,7 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
+from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -172,19 +184,52 @@ class PrintRunRequest(BaseModel):
 
     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
     only offers it once the issues have been shown.
+
+    ``filament_plan`` is what makes this request choose its route rather than its
+    caller. A plan names one spool per plate slot, and those three queue-item fields
+    exist on no other Bambuddy call — so a request carrying one is sliced and queued,
+    and one without one runs the pipeline exactly as it did before (#87).
     """
 
     pipeline_id: int | None = None
     copies: int = Field(default=1, ge=1, le=1000)
     force: bool = False
+    #: Only meaningful with a plan: it is the printer whose trays the mapping addresses.
+    printer_id: int | None = None
+    filament_plan: FilamentPlan | None = None
+    plate_id: int = Field(default=1, ge=1)
+    #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
+    #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
+    #: be — a print with no project is simply one nobody filed.
+    project_id: int | None = None
 
 
 class PrintRunResult(BaseModel):
+    """One shape for both routes, so the caller need not know which one ran.
+
+    ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
+    populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
+    is a single row carrying ``quantity``. Following either to completion is #89.
+    """
+
     pipeline_id: int
     library_file_id: int
+    route: Literal["pipeline", "slice_queue"] = "pipeline"
     #: Verbatim, including ``jobs[]`` — which printer each copy landed on is Bambuddy's
-    #: answer, not ScadBuddy's choice.
-    run: PipelineRun
+    #: answer, not ScadBuddy's choice. ``None`` on the slice-and-queue route.
+    run: PipelineRun | None = None
+    slice_job_id: int | None = None
+    sliced_library_file_id: int | None = None
+    queue_item_ids: list[int] = Field(default_factory=list)
+    #: The printer the copies will actually print on, where that is knowable. On a
+    #: class-targeted pipeline run it is not — Bambuddy fans out and reports per copy.
+    printer_id: int | None = None
+    #: ScadBuddy's own advisories about the chosen filaments, carried through so the
+    #: dialog can keep showing them after the click.
+    warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: The project this print was filed under, and the folder its 3MF went into (#79).
+    project_id: int | None = None
+    folder_id: int | None = None
     bambuddy_url: str
 
 
@@ -431,6 +476,49 @@ async def check_pipelines(
     return EligibilityOverview(library_file_id=library_file_id, reports=reports)
 
 
+def filament_preset_index(catalogue: _Catalogue) -> dict[str, PresetRef]:
+    """``preset id -> ref``, so a spool's ``slicer_filament`` string can be resolved.
+
+    The inventory stores the preset as a bare id ("GFG00", or a local preset's row id
+    "2") with no tier, while a :class:`PresetRef` needs both. The catalogue is the only
+    place the tier is written down, so an id it does not hold cannot be turned into a
+    ref — and is left as the pipeline's own preset rather than guessed at.
+
+    A cloud id and a local id could in principle collide; the first tier read wins and
+    the later one is ignored, which matches ``_catalogue``'s own ordering.
+    """
+    index: dict[str, PresetRef] = {}
+    for choice in catalogue.filament:
+        index.setdefault(choice.ref.id, choice.ref)
+    return index
+
+
+async def filament_options_for_output(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    settings: StoredSettings,
+    *,
+    printer_id: int | None = None,
+    plate_id: int = 1,
+) -> FilamentOptions:
+    """The filament step's whole payload for one output (#87).
+
+    Uploads the 3MF if Bambuddy has not got it, for the same reason the eligibility
+    check does: the plate's slots are read out of a *library file*, so there is no
+    answer before one exists. An output is immutable, so this uploads once.
+
+    """
+    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    return await gather_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_id=plate_id,
+        fallback_colours=list(meta.colors),
+    )
+
+
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -438,11 +526,19 @@ async def run_for_output(
     settings: StoredSettings,
     request: PrintRunRequest,
 ) -> PrintRunResult:
-    """Slice and queue ``copies`` through the chosen pipeline.
+    """Print this output, by whichever of Bambuddy's two routes the request needs.
 
-    A blocking eligibility issue is Bambuddy's 409, which the client turns into a
-    problem document carrying the report verbatim; ``force`` is what turns that into a
-    run recorded as ``eligibility_overridden``.
+    Without a filament plan this is unchanged from #86: ``POST
+    /slicer-pipelines/{id}/run`` with ``copies`` and an explicit ``force``. A blocking
+    eligibility issue is Bambuddy's 409, whose report the client passes through
+    verbatim, and ``force`` is what turns it into a run recorded as
+    ``eligibility_overridden``.
+
+    **With** a plan the run route cannot express it — ``ams_mapping`` and friends live
+    only on the queue item — so the plate is sliced from this same pipeline's presets
+    and queued against one printer. That is a real difference in behaviour, not an
+    implementation detail: a class-targeted pipeline fans out and a queue item does
+    not, which is why the dialog says so before the click.
     """
     pipeline_id = request.pipeline_id or settings.pipeline_for(meta.slug)
     if pipeline_id is None:
@@ -453,19 +549,96 @@ async def run_for_output(
     # Placed for the pipeline being run, which ``request.pipeline_id`` may have
     # overridden — not for whatever the settings would have defaulted to.
     plate = await target_plate(client, settings, meta.slug, pipeline_id=pipeline_id)
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
-    run = await client.run_pipeline(
-        pipeline_id,
-        PipelineRunRequest(
-            source_library_file_id=library_file_id,
-            copies=request.copies,
-            force=request.force,
-        ),
+    # A project's folder replaces the one from Settings for this send, which is what
+    # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
+    # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
+    # there.
+    project_id = request.project_id or settings.last_project_id
+    folder_id = await folder_for(client, project_id) if project_id is not None else None
+    meta, library_file_id = await ensure_uploaded(
+        client, store, meta, settings, plate=plate, folder_id=folder_id
     )
-    store.record_send(meta.id, pipeline_run_id=run.id)
+
+    if request.filament_plan is None:
+        run = await client.run_pipeline(
+            pipeline_id,
+            PipelineRunRequest(
+                source_library_file_id=library_file_id,
+                copies=request.copies,
+                force=request.force,
+            ),
+        )
+        store.record_send(
+            meta.id,
+            pipeline_run_id=run.id,
+            print_route="pipeline",
+            project_id=project_id,
+        )
+        return PrintRunResult(
+            pipeline_id=pipeline_id,
+            library_file_id=library_file_id,
+            route="pipeline",
+            run=run,
+            project_id=project_id,
+            folder_id=folder_id,
+            bambuddy_url=client.config.web_url(QUEUE_PATH),
+        )
+
+    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
+    if pipeline is None:
+        raise not_configured(
+            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so the chosen "
+            "filaments cannot be sliced with it"
+        )
+    printer_id, _ = target_of(pipeline, request.printer_id)
+    # Read once and used twice. The catalogue is ~4000 presets across four tiers on the
+    # live instance, which is why `preset_options` filters it server-side in the first
+    # place; asking for it a second time in the same request is the same cost again.
+    catalogue = await _catalogue(client)
+    options = await gather_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_id=request.plate_id,
+        fallback_colours=list(meta.colors),
+    )
+    warnings = check(options, request.filament_plan, copies=request.copies)
+    presets, colours, preset_warnings = slice_filament_presets(
+        options,
+        request.filament_plan,
+        pipeline_presets=list(pipeline.filament_presets),
+        resolve=filament_preset_index(catalogue),
+    )
+    outcome = await slice_and_queue(
+        client,
+        library_file_id=library_file_id,
+        pipeline=pipeline,
+        printer_id=request.printer_id,
+        filament_presets=presets,
+        filament_colours=colours,
+        filaments=queue_filaments(options, request.filament_plan),
+        plate_id=request.plate_id,
+        copies=request.copies,
+        project_id=project_id,
+    )
+    for queue_item_id in outcome.queue_item_ids:
+        store.record_send(
+            meta.id,
+            queue_item_id=queue_item_id,
+            print_route="slice_queue",
+            slice_job_id=outcome.slice_job_id,
+            project_id=project_id,
+        )
     return PrintRunResult(
         pipeline_id=pipeline_id,
         library_file_id=library_file_id,
-        run=run,
+        route="slice_queue",
+        slice_job_id=outcome.slice_job_id,
+        sliced_library_file_id=outcome.sliced_library_file_id,
+        queue_item_ids=outcome.queue_item_ids,
+        printer_id=outcome.printer_id,
+        warnings=warnings + preset_warnings,
+        project_id=project_id,
+        folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
     )
