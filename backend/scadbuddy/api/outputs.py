@@ -50,6 +50,9 @@ class CreateOutputRequest(BaseModel):
 class EditTarget(BaseModel):
     """What ``/edit/{output_id}`` needs to reopen the customizer."""
 
+    # "model_version" trips pydantic's reserved "model_" prefix; see OutputMeta.
+    model_config = ConfigDict(protected_namespaces=())
+
     output_id: str
     slug: str
     name: str | None
@@ -57,9 +60,6 @@ class EditTarget(BaseModel):
     model_version: str | None = None
     #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
     source: Literal["record", "3mf"]
-
-    # "model_version" trips pydantic's reserved "model_" prefix; see OutputMeta.
-    model_config = ConfigDict(protected_namespaces=())
 
 
 def _detail(store: OutputStore, meta: OutputMeta) -> OutputDetail:

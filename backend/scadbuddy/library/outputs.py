@@ -31,8 +31,8 @@ class OutputNotFoundError(KeyError):
 
 
 class OutputMeta(BaseModel):
-    # "model_version" is the name the provenance is asked for by; pydantic reserves
-    # the "model_" prefix for its own methods, so the guard is turned off here.
+    # #80 asks for the "model version"; pydantic reserves the "model_" prefix for
+    # its own methods, so its guard is turned off rather than the field renamed.
     model_config = ConfigDict(protected_namespaces=())
 
     id: str
