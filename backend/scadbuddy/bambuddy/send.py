@@ -30,7 +30,10 @@ logger = logging.getLogger(__name__)
 
 SendMode = Literal["library", "queue"]
 
-SIDEBAR_NAME = "Customize"
+SIDEBAR_NAME = "ScadBuddy"
+# Earlier builds registered the link as "Customize"; adopt and rename it rather than
+# leaving a second entry in Bambuddy's sidebar.
+LEGACY_SIDEBAR_NAMES = frozenset({"Customize"})
 SIDEBAR_ICON = "shapes"
 
 QUEUE_PATH = "/queue"
@@ -237,14 +240,20 @@ async def send_output(
 
 
 async def register_sidebar(client: BambuddyClient, settings: StoredSettings) -> SidebarLink:
-    """Upsert the ``Customize`` External Link, idempotent by name."""
+    """Upsert the ``ScadBuddy`` External Link, idempotent by name (legacy names adopted)."""
     if not settings.public_url:
         raise not_configured(
             "no public ScadBuddy URL is configured, so Bambuddy would have nothing to link to"
         )
     url = settings.public_url.rstrip("/")
-    existing = next(
-        (link for link in await client.external_links() if link.name == SIDEBAR_NAME), None
+    links = await client.external_links()
+    existing = next((link for link in links if link.name == SIDEBAR_NAME), None) or next(
+        (
+            link
+            for link in links
+            if link.name in LEGACY_SIDEBAR_NAMES and link.url.rstrip("/") == url
+        ),
+        None,
     )
     link: ExternalLink
     if existing is None:
