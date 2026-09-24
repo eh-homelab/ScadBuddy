@@ -13,10 +13,12 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
+from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import SLUG_PATTERN
 from scadbuddy.render.jobs import RenderQueue
+from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +32,7 @@ class AppState:
     settings: Settings
     config: Config
     paths: DataPaths
+    history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
     settings_store: SettingsStore
@@ -41,11 +44,13 @@ class AppState:
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
-        catalogue=Catalogue(paths),
+        history=history,
+        catalogue=Catalogue(paths, history),
         outputs=OutputStore(paths),
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
         fonts=FontService(
@@ -53,7 +58,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        queue=RenderQueue(config, paths),
+        queue=RenderQueue(config, paths, history=history),
     )
 
 
@@ -98,6 +103,10 @@ def get_catalogue(state: StateDep) -> Catalogue:
     return state.catalogue
 
 
+def get_history(state: StateDep) -> ModelHistory:
+    return state.history
+
+
 def get_outputs(state: StateDep) -> OutputStore:
     return state.outputs
 
@@ -117,6 +126,7 @@ def get_queue(state: StateDep) -> RenderQueue:
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
+HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
@@ -125,3 +135,6 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
+# Abbreviated ids are accepted the way git accepts them; the API always answers
+# with the full 40 characters.
+CommitPath = Annotated[str, Path(pattern=COMMIT_ID_PATTERN)]

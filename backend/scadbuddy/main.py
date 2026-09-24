@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from scadbuddy import __version__
-from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings
+from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings, versions
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
@@ -24,6 +24,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 def _api_router() -> APIRouter:
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(models.router)
+    router.include_router(versions.router)
     router.include_router(jobs.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
@@ -36,6 +37,10 @@ def _api_router() -> APIRouter:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     state.paths.ensure()
+    # Before the seed: an existing models directory becomes revision 1, so a
+    # re-seed on an image upgrade is a commit on top of it rather than an
+    # unversioned overwrite.
+    state.history.ensure_repo()
     # Before anything shells out to openscad or fc-list: it is what points
     # fontconfig at the fonts on the data volume.
     state.fonts.prepare()

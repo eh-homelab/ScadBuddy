@@ -11,10 +11,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import META_NAME, SOURCE_NAME, DataPaths
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
@@ -54,9 +55,16 @@ class JobResult(BaseModel):
 
 
 class Job(BaseModel):
+    # `model_version` is the name #90 asks for on the wire; without this pydantic
+    # warns that it collides with its own `model_` namespace.
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     slug: str
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    # The models-repository commit this render read. Carried onto the output it
+    # produces, so an output can always name the revision it came from (#80/#90).
+    model_version: str | None = None
     state: JobState = "pending"
     created_at: datetime
     started_at: datetime | None = None
@@ -193,9 +201,42 @@ async def plate_thumbnails(
     return rendered, []
 
 
-async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
-    scad = paths.model_source(job.slug)
-    schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
+async def revision_dir(
+    slug: str,
+    version: str | None,
+    *,
+    paths: DataPaths,
+    history: ModelHistory | None,
+) -> Path:
+    """The model directory a render reads: the live one, or an export of an older
+    revision.
+
+    The export is an ordinary model directory under ``data/cache``, so the schema
+    cache and the renderer -- including the wrapper `render_solids` drops next to
+    the source -- work on it unchanged, and nothing generated lands in the
+    repository. Commits are immutable, so a populated export is never stale.
+    """
+    live = paths.model_dir(slug)
+    if version is None or history is None or not history.available:
+        return live
+    if await asyncio.to_thread(history.last_commit, slug) == version:
+        return live
+    directory = paths.model_revision_dir(slug, version)
+    if not (directory / SOURCE_NAME).is_file():
+        await asyncio.to_thread(history.export, slug, version, directory)
+    return directory
+
+
+async def render_job(
+    job: Job,
+    *,
+    config: Config,
+    paths: DataPaths,
+    history: ModelHistory | None = None,
+) -> tuple[JobResult, list[str]]:
+    directory = await revision_dir(job.slug, job.model_version, paths=paths, history=history)
+    scad = directory / SOURCE_NAME
+    schema = await cached_schema(scad, directory / META_NAME, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -248,12 +289,14 @@ class RenderQueue:
         *,
         store: JobStore | None = None,
         render: RenderCallable | None = None,
+        history: ModelHistory | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
+        self.history = history
         self.store = store or JobStore(paths)
         self._render: RenderCallable = render or (
-            lambda job: render_job(job, config=config, paths=paths)
+            lambda job: render_job(job, config=config, paths=paths, history=history)
         )
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
@@ -272,8 +315,16 @@ class RenderQueue:
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
-    async def submit(self, slug: str, params: Mapping[str, ParamValue]) -> Job:
-        job = Job(id=uuid.uuid4().hex, slug=slug, params=dict(params), created_at=_now())
+    async def submit(
+        self, slug: str, params: Mapping[str, ParamValue], *, model_version: str | None = None
+    ) -> Job:
+        job = Job(
+            id=uuid.uuid4().hex,
+            slug=slug,
+            params=dict(params),
+            model_version=model_version,
+            created_at=_now(),
+        )
         self.store.write(job)
         await self._queue.put(job.id)
         return job

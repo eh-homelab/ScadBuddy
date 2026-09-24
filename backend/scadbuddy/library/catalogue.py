@@ -9,13 +9,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import SOURCE_NAME, DataPaths
+from scadbuddy.library.history import GitError, ModelHistory, summarise
 
 logger = logging.getLogger(__name__)
 
 THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
-SOURCE_NAME = "model.scad"
 
 
 class ModelNotFoundError(KeyError):
@@ -23,6 +23,10 @@ class ModelNotFoundError(KeyError):
 
 
 class ModelExistsError(ValueError):
+    pass
+
+
+class HistoryUnavailableError(RuntimeError):
     pass
 
 
@@ -46,13 +50,37 @@ class ModelRecord(ModelMeta):
     has_thumbnail: bool
     has_readme: bool
     updated_at: datetime
+    # The commit this model is currently at, or None when history is unavailable
+    # (no git binary). Outputs stamp this as their ``model_version``.
+    version: str | None = None
 
 
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
-    def __init__(self, paths: DataPaths) -> None:
+    def __init__(self, paths: DataPaths, history: ModelHistory | None = None) -> None:
         self.paths = paths
+        self.history = history
+
+    def _commit(self, message: str, *slugs: str) -> str | None:
+        """One commit per catalogue action. A failure never fails the action itself:
+        the files are already written, and losing the revision is the smaller harm."""
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.commit(message, *slugs)
+        except GitError:
+            logger.exception("could not record a revision", extra={"message": message})
+            return None
+
+    def version(self, slug: str) -> str | None:
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.last_commit(slug)
+        except GitError:
+            logger.exception("could not read the revision", extra={"slug": slug})
+            return None
 
     def exists(self, slug: str) -> bool:
         return self.paths.model_source(slug).is_file()
@@ -89,6 +117,7 @@ class Catalogue:
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(self.paths.model_source(slug).stat().st_mtime, UTC),
+            version=self.version(slug),
         )
 
     def list_models(self) -> list[ModelRecord]:
@@ -118,6 +147,7 @@ class Catalogue:
             self.thumbnail_path(slug).write_bytes(thumbnail)
         if readme is not None:
             self.readme_path(slug).write_text(readme, encoding="utf-8")
+        self._commit(f"Add {slug}", slug)
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
@@ -125,12 +155,41 @@ class Catalogue:
         raw = self.read_raw_meta(slug)
         raw.update(patch.model_dump(exclude_none=True))
         self.write_raw_meta(slug, raw)
+        self._commit(f"Update {slug} metadata", slug)
         return self.record(slug)
+
+    def write_source(self, slug: str, source: str, *, message: str | None = None) -> ModelRecord:
+        """Replace a model's ``.scad`` as one revision.
+
+        The hook the paste/edit path (#92) calls: everything that rewrites model
+        source goes through here so it is versioned exactly once. The cached schema
+        is dropped rather than left to `cached_schema` to invalidate, so the
+        committed ``model.json`` never describes a source it does not match.
+        """
+        self._require(slug)
+        self.paths.model_source(slug).write_text(source, encoding="utf-8")
+        raw = self.read_raw_meta(slug)
+        if raw.pop("schema", None) is not None:
+            self.write_raw_meta(slug, raw)
+        self._commit(message or f"Edit {slug} source", slug)
+        return self.record(slug)
+
+    def restore(self, slug: str, commit: str) -> ModelRecord:
+        """Put a model back as it was at ``commit`` — as a new commit, never a rewrite."""
+        self._require_history().restore(slug, commit)
+        return self.record(slug)
+
+    def _require_history(self) -> ModelHistory:
+        if self.history is None or not self.history.available:
+            raise HistoryUnavailableError("model history is not available")
+        return self.history
 
     def delete(self, slug: str) -> None:
         self._require(slug)
         shutil.rmtree(self.paths.model_dir(slug), ignore_errors=True)
+        self._commit(f"Delete {slug}", slug)
         # Outputs are keyed by slug and only listable through it, so they go too.
+        # They are NOT in the repository: a 3MF is a build artefact, not source.
         shutil.rmtree(self.paths.outputs / slug, ignore_errors=True)
 
     def seed(self, seed_dir: Path) -> list[str]:
@@ -150,4 +209,7 @@ class Catalogue:
             seeded.append(candidate.name)
         if seeded:
             logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})
+            # A re-seed on an image upgrade lands as a commit rather than a silent
+            # overwrite -- which is the whole point of #90's seed clause.
+            self._commit(f"Seed {summarise(seeded)} from the image", *seeded)
         return seeded

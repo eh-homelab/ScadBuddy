@@ -164,6 +164,11 @@ CSS_COLOURS: dict[str, str] = {
     "yellowgreen": "#9ACD32",
 }
 
+# The wrapper is written NEXT TO the model so `include <>` resolves without a
+# library path -- which puts a generated file inside the versioned models
+# repository, so `library/history.py` writes this prefix into its .gitignore.
+WRAPPER_PREFIX = "_scadbuddy_solid_"
+
 # A user-defined `color` module shadows the builtin, so a wrapper that keeps only the
 # children whose innermost color() matches a target renders that colour on its own --
 # as one closed solid, instead of the open shell a material split leaves behind.
@@ -214,7 +219,7 @@ async def render_solids(
     config: Config,
 ) -> SolidRender:
     result = SolidRender()
-    wrapper = scad_path.parent / f"_scadbuddy_solid_{secrets.token_hex(8)}.scad"
+    wrapper = scad_path.parent / f"{WRAPPER_PREFIX}{secrets.token_hex(8)}.scad"
     wrapper.write_text(wrapper_source(scad_path.name), encoding="utf-8")
     try:
         for index, colour in enumerate(colours, start=1):

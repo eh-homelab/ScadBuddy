@@ -6,7 +6,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.slugs import InvalidSlugError, slugify
@@ -28,10 +28,18 @@ class OutputNotFoundError(KeyError):
 
 
 class OutputMeta(BaseModel):
+    # See `render.jobs.Job`: `model_version` collides with pydantic's own
+    # `model_` namespace unless the guard is turned off.
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     slug: str
     name: str | None = None
     job_id: str
+    # The models-repository commit the render read (#90). Free-form on purpose:
+    # outputs written before the repository existed have none, and #80's
+    # provenance stamp keeps reading it as an opaque string.
+    model_version: str | None = None
     created_at: datetime
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
@@ -98,6 +106,7 @@ class OutputStore:
             slug=job.slug,
             name=name or None,
             job_id=job.id,
+            model_version=job.model_version,
             created_at=datetime.now(UTC),
             bbox_mm=job.result.bbox_mm,
             colors=list(job.result.colors),

@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, File, Form, Response, UploadFile, status
+from fastapi import APIRouter, Body, File, Form, Response, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from scadbuddy.api.deps import CatalogueDep, ConfigDep, PathsDep, SlugPath
 from scadbuddy.core.problems import ApiError
@@ -134,6 +135,34 @@ def delete_model(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     require_model(catalogue, slug)
     catalogue.delete(slug)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+class SourceUpdate(BaseModel):
+    source: str
+    # What the revision is called in the history. The paste/edit path (#92) passes
+    # its own; anything else gets the default.
+    message: str | None = None
+
+
+@router.put(
+    "/models/{slug}/source",
+    response_model=ModelRecord,
+    summary="Replace a model's source as one revision",
+)
+async def put_source(
+    slug: SlugPath,
+    body: Annotated[SourceUpdate, Body()],
+    catalogue: CatalogueDep,
+    config: ConfigDep,
+) -> ModelRecord:
+    require_model(catalogue, slug)
+    try:
+        await verify_parses(body.source, config=config)
+    except NotOpenSCADError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), log_tail=error.log_tail
+        ) from None
+    return catalogue.write_source(slug, body.source, message=body.message)
 
 
 @router.get(
