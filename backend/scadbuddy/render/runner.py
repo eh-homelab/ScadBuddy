@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.fontconfig import env_for
 from scadbuddy.render.schema import (
     CustomizerSchema,
     Parameter,
@@ -101,12 +102,15 @@ async def _drain(stream: asyncio.StreamReader, tail: deque[str]) -> None:
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
+    # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
+    # the data volume and not only the ones baked into the image (issue #82).
     process = await asyncio.create_subprocess_exec(
         config.openscad,
         *args,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=env_for(config.data_dir),
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     assert process.stdout is not None

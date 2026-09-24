@@ -2,7 +2,9 @@ import type {
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
+  FontCatalogue,
   FontFamily,
+  InstalledFamily,
   Job,
   ModelSummary,
   Output,
@@ -124,6 +126,23 @@ export const api = {
   },
 
   listFonts: () => request<FontFamily[]>('/fonts'),
+
+  /** The Google Fonts catalogue, fetched and cached server-side — no API key in the browser. */
+  listFontCatalogue: (query: { q?: string; category?: string; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    if (query.q) search.set('q', query.q)
+    if (query.category) search.set('category', query.category)
+    if (query.limit !== undefined) search.set('limit', String(query.limit))
+    const suffix = search.size > 0 ? `?${search}` : ''
+    return request<FontCatalogue>(`/fonts/catalogue${suffix}`)
+  },
+
+  /** Downloads the family onto the data volume so the renderer can resolve it. */
+  installFont: (family: string) =>
+    request<InstalledFamily>('/fonts/install', {
+      method: 'POST',
+      body: JSON.stringify({ family }),
+    }),
 
   getSettings: () => request<Settings>('/settings'),
 

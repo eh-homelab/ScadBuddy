@@ -29,6 +29,13 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
     }
   }, [schema])
 
+  // The font picker previews what will actually be printed, so it needs the model's
+  // own text: the first string parameter, which on the keychain is the name.
+  const sampleText = useMemo(() => {
+    const text = (schema.parameters ?? []).find((param) => param.type === 'string')
+    return text ? String(values[text.name] ?? text.initial ?? '') : ''
+  }, [schema, values])
+
   const changed = diffFromDefaults(schema, values).length
   const isDefault = changed === 0
 
@@ -73,6 +80,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
                     param={param}
                     value={values[param.name] ?? (param.initial as ParamValue)}
                     fonts={fonts}
+                    sampleText={sampleText}
                     extruder={extruderOf(param.name)}
                     onChange={(next) => onChange(param.name, next)}
                   />
@@ -90,6 +98,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
                   param={param}
                   value={values[param.name] ?? (param.initial as ParamValue)}
                   fonts={fonts}
+                  sampleText={sampleText}
                   extruder={extruderOf(param.name)}
                   onChange={(next) => onChange(param.name, next)}
                 />

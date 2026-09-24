@@ -7,6 +7,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
     DEFAULT_DATA_DIR,
+    DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
     DEFAULT_OPENSCAD,
     DEFAULT_RENDER_CONCURRENCY,
@@ -32,6 +33,11 @@ class Settings(BaseSettings):
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
 
+    # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
+    # from the keyless fonts.google.com metadata instead of the Developer API.
+    google_fonts_api_key: str | None = None
+    fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
+
     seed_models_dir: Path | None = None
     frontend_dir: Path | None = None
 
@@ -51,6 +57,8 @@ class Settings(BaseSettings):
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
             job_ttl=self.job_ttl,
+            google_fonts_api_key=self.google_fonts_api_key,
+            fonts_catalogue_ttl=self.fonts_catalogue_ttl,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:

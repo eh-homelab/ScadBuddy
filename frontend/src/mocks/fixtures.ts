@@ -1,6 +1,7 @@
 import type {
   BambuddyTargets,
   BoundingBox,
+  CatalogueFont,
   CustomizerSchema,
   FontFamily,
   ModelSummary,
@@ -136,6 +137,57 @@ export const fonts: FontFamily[] = [
   { family: 'DejaVu Sans Mono', styles: ['Book', 'Bold'] },
   { family: 'Noto Sans', styles: ['Regular', 'Bold'] },
 ]
+
+/**
+ * A slice of the Google Fonts catalogue. `Pacifico` is the acceptance case from issue
+ * #82: not in the image, so picking it has to install it first.
+ */
+export const fontCatalogue: CatalogueFont[] = [
+  {
+    family: 'Roboto',
+    category: 'sans-serif',
+    popularity: 1,
+    installed: false,
+    variants: [
+      { weight: 400, italic: false },
+      { weight: 700, italic: false },
+    ],
+  },
+  {
+    family: 'Noto Sans',
+    category: 'sans-serif',
+    popularity: 2,
+    installed: true,
+    variants: [{ weight: 400, italic: false }],
+  },
+  {
+    family: 'Pacifico',
+    category: 'handwriting',
+    popularity: 3,
+    installed: false,
+    variants: [{ weight: 400, italic: false }],
+  },
+  {
+    family: 'Lobster Two',
+    category: 'display',
+    popularity: 4,
+    installed: false,
+    variants: [
+      { weight: 400, italic: false },
+      { weight: 700, italic: false },
+    ],
+  },
+  {
+    family: 'Playfair Display',
+    category: 'serif',
+    popularity: 5,
+    installed: false,
+    variants: [{ weight: 400, italic: false }],
+  },
+]
+
+/** The family the install route refuses, so the widget's error path is reachable. */
+export const UNINSTALLABLE_FONT = 'Playfair Display'
 
 export const outputs: Output[] = [
   {

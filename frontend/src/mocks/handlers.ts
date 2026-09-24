@@ -1,6 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   BoundingBox,
+  CatalogueFont,
+  FontFamily,
   Job,
   ModelSummary,
   Output,
@@ -23,6 +25,9 @@ const state = {
   outputs: [...fixtures.outputs] as Output[],
   settings: { ...fixtures.settings } as Settings,
   jobs: new Map<string, MockJob>(),
+  fonts: [...fixtures.fonts] as FontFamily[],
+  fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
+  catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
 }
@@ -34,8 +39,16 @@ export function resetMockState(): void {
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.settings = { ...fixtures.settings }
   state.jobs.clear()
+  state.fonts = fixtures.fonts.map((f) => ({ ...f }))
+  state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
+  state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
+}
+
+/** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
+export function setCatalogueOffline(offline: boolean): void {
+  state.catalogueOffline = offline
 }
 
 /** Job and output ids are 32 hex characters — the routes reject anything else. */
@@ -310,7 +323,51 @@ export const handlers = [
     return HttpResponse.json(result)
   }),
 
-  http.get(`${base}/fonts`, () => HttpResponse.json(fixtures.fonts)),
+  http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),
+
+  http.get(`${base}/fonts/catalogue`, ({ request }) => {
+    if (state.catalogueOffline) {
+      return problem(503, 'Service Unavailable', 'the Google Fonts catalogue is unavailable')
+    }
+    const url = new URL(request.url)
+    const needle = (url.searchParams.get('q') ?? '').toLowerCase()
+    const category = url.searchParams.get('category') ?? ''
+    const limit = Number(url.searchParams.get('limit') ?? 60)
+    const matched = state.fontCatalogue
+      .filter((font) => font.family.toLowerCase().includes(needle))
+      .filter((font) => !category || font.category === category)
+    if (needle) {
+      matched.sort((a, b) => {
+        const rank = (family: string) => (family.toLowerCase().startsWith(needle) ? 0 : 1)
+        return rank(a.family) - rank(b.family) || (a.popularity ?? 0) - (b.popularity ?? 0)
+      })
+    }
+    return HttpResponse.json({
+      source: 'google-fonts-metadata',
+      fetched_at: '2026-09-22T12:00:00Z',
+      total: matched.length,
+      fonts: matched.slice(0, limit),
+    })
+  }),
+
+  http.post(`${base}/fonts/install`, async ({ request }) => {
+    const body = (await request.json()) as { family: string }
+    const row = state.fontCatalogue.find((font) => font.family === body.family)
+    if (!row) return problem(404, 'Not Found', `'${body.family}' is not in the Google Fonts catalogue`)
+    if (row.family === fixtures.UNINSTALLABLE_FONT) {
+      return problem(502, 'Bad Gateway', `'${row.family}' could not be downloaded: gstatic said no`)
+    }
+    await delay(100)
+    const styles = (row.variants ?? []).map((variant) =>
+      variant.weight === 700 ? 'Bold' : variant.italic ? 'Italic' : 'Regular',
+    )
+    row.installed = true
+    state.fonts = [
+      ...state.fonts.filter((font) => font.family !== row.family),
+      { family: row.family, styles },
+    ]
+    return HttpResponse.json({ family: row.family, styles, files: [], licence: 'OFL.txt' })
+  }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
 

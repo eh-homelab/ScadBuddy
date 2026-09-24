@@ -193,7 +193,7 @@ when the source changes.
 | `boolean` | toggle |
 | `select` | dropdown; option `name` is the label, `value` is passed to OpenSCAD |
 | `color` | colour picker; the value is passed as a `"#RRGGBB"` string |
-| `font` | dropdown of fonts installed in the container (`fc-list`), free-text fallback |
+| `font` | free-text field with an installed-font datalist, plus a **Browse** button opening the Google Fonts picker (§5.4) |
 
 ### 5.3 The page
 
@@ -208,6 +208,74 @@ GLB the viewer loads and the 3MF that Generate would produce. Generate merely
 persists the current job's output under `outputs/` with its parameters. For
 models the size of a keychain a Manifold render is well under a second; models
 that take longer show a progress state and the previous preview stays up.
+
+### 5.4 Fonts
+
+`text()` resolves a family through fontconfig inside the container, so a model can
+only use a face fontconfig can see. The picker makes the whole Google Fonts
+catalogue usable without rebuilding the image.
+
+**Catalogue, server-side, two sources.** The browser never talks to the Google Fonts
+*API* — only `/api/v1/fonts/*` — so no key is ever shipped to it.
+
+| `SCADBUDDY_GOOGLE_FONTS_API_KEY` | Source | Notes |
+|---|---|---|
+| set | Developer API, `webfonts/v1/webfonts?sort=popularity` | documented and stable |
+| unset (the default) | `https://fonts.google.com/metadata/fonts` | the public metadata fonts.google.com itself reads — no key, no quota, same families, categories and popularity. Undocumented, and it may prefix its body with the XSSI guard `)]}'` (seen both ways), which is stripped when present |
+
+**A key is optional and changes nothing but the catalogue.** Everything works without
+one.
+
+Either catalogue is cached on the data volume (`fonts/.catalogue.json`, 24 h by
+default, `SCADBUDDY_FONTS_CATALOGUE_TTL`). A fetch failure falls back to a *stale*
+cache when one exists, because an old catalogue beats none.
+
+**Downloads come from neither catalogue.** They come from the `google/fonts`
+repository: `<licence-dir>/<slug>/METADATA.pb` names the exact TTF for every face,
+and the three licence directories (`ofl`, `apache`, `ufl`) are probed in turn because
+which one holds a family is not in either catalogue — the one that answers also names
+the licence to keep beside the font.
+
+The obvious alternative, the CSS endpoint with an old `User-Agent` (what
+google-webfonts-helper does), was **measured on 2026-09-23 and rejected on the
+evidence**: an IE6/IE8 agent is served **EOT**, which fontconfig cannot read at all,
+and the agents that do yield `.ttf` are served *per-subset* files, so a family would
+install missing most of its glyphs. The repository serves the complete font — for a
+variable family, one file (`NotoSans[wdth,wght].ttf`) listed against every named
+instance, downloaded once, with fontconfig reporting each instance as a style.
+
+**Layout on the data volume.**
+
+```
+<SCADBUDDY_DATA_DIR>/fonts/
+  fonts.conf            generated each startup; the renderer's FONTCONFIG_FILE
+  .cache/               fontconfig's own cache, writable by uid 10001
+  .catalogue.json       the cached catalogue
+  pacifico/
+    Pacifico-Regular.ttf
+    OFL.txt             the family's own licence, kept next to it
+    family.json         family, category, files, licence, source, installed_at
+```
+
+`fonts.conf` includes `/etc/fonts/fonts.conf` and adds the fonts directory; its
+`<cachedir>` is declared **before** that include, because fontconfig writes to the
+first cache directory it can and the image's system cache is baked at build time
+and owned by root. `run_openscad` passes `FONTCONFIG_FILE` in the render's
+environment — without it the downloaded families are invisible to `text()` no matter
+where they land. The variable is left unset while no config exists: fontconfig treats
+an unreadable `FONTCONFIG_FILE` as fatal, so pointing at a missing file would break
+every render rather than merely hiding the new fonts.
+
+**Licensing.** Google Fonts are OFL 1.1, Apache 2.0 or UFL 1.0. The licence text is
+fetched from the family's directory in the `google/fonts` repository and written
+beside its files; when the layout does not match, a `LICENSE.txt` naming the three
+licences and linking the specimen page is written instead, so a family is never on
+disk without one.
+
+**Air-gapped.** `GET /fonts/catalogue` answering 503 is a supported state: the picker
+says so and falls back to the families `fc-list` reports, which is also the fast path
+for picking one of the image's own faces — an already-resolvable family is returned
+as-is and nothing is fetched.
 
 ## 6. Render pipeline
 
@@ -348,6 +416,9 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PUT | `/settings` | Bambuddy connection (key write-only) |
 | POST | `/settings/test` | verifies the key: `GET /api/v1/printers` on Bambuddy |
 | POST | `/settings/register-sidebar` | External Link upsert |
+| GET | `/fonts` | families fontconfig resolves (`fc-list`) |
+| GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
+| POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
 
 ## 9. Deployment (eh-homelab/clusters)
@@ -360,6 +431,9 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 - `clusters/prod/scadbuddy/`: HTTPRoute `scadbuddy.internal.nullreference.io`
   on the internal Envoy gateway, `OnePasswordItem` for the Bambuddy API key
   (item `scadbuddy-bambuddy-api-key`), env from it.
+- `SCADBUDDY_GOOGLE_FONTS_API_KEY` is **optional** (§5.4) — without it the catalogue
+  comes from the keyless fonts.google.com metadata. The PVC also carries the
+  downloaded fonts, which are regenerable but cheap to keep.
 - Namespace `bambuddy`, so the existing `bambuddy-twice-daily` Velero schedule
   covers the PVC by default; add a row to `BACKUP-BASELINE.md`.
 - Image `ghcr.io/eh-homelab/scadbuddy`, **package public** — nodes pull GHCR

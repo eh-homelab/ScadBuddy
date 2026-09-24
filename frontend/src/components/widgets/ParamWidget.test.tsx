@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it, vi } from 'vitest'
@@ -239,11 +239,9 @@ describe('font', () => {
     caption: 'Typeface',
   }
 
-  it('offers every installed family and style', () => {
+  it('offers every installed family and style for completion', () => {
     setup(param, 'Liberation Sans:style=Bold')
-    const options = screen
-      .getByTestId('font-options')
-      .querySelectorAll('option')
+    const options = screen.getByTestId('font-options').querySelectorAll('option')
     expect([...options].map((option) => option.getAttribute('value'))).toEqual([
       'Liberation Sans:style=Regular',
       'Liberation Sans:style=Bold',
@@ -255,5 +253,58 @@ describe('font', () => {
     const { onChange, user } = setup(param, '')
     await user.type(screen.getByRole('combobox', { name: 'Typeface' }), 'X')
     expect(onChange).toHaveBeenLastCalledWith('X')
+  })
+
+  it('draws the field in the family it names', () => {
+    setup(param, 'Liberation Sans:style=Bold')
+    expect(screen.getByRole('combobox', { name: 'Typeface' })).toHaveStyle({
+      fontFamily: '"Liberation Sans", sans-serif',
+    })
+  })
+
+  it('offers the installed styles of the current family and emits the OpenSCAD form', async () => {
+    const { onChange, user } = setup(param, 'Liberation Sans:style=Bold')
+    const styles = screen.getByRole('combobox', { name: 'Typeface style' })
+
+    await user.selectOptions(styles, 'Regular')
+
+    expect(onChange).toHaveBeenLastCalledWith('Liberation Sans:style=Regular')
+  })
+
+  it('has no style dropdown for a family with a single face', () => {
+    setup(param, 'DejaVu Sans:style=Book')
+    expect(screen.queryByRole('combobox', { name: 'Typeface style' })).not.toBeInTheDocument()
+  })
+
+  it('opens the picker on Browse and installs what is chosen', async () => {
+    const { onChange, user } = setup(param, 'Liberation Sans:style=Bold')
+
+    await user.click(screen.getByRole('button', { name: 'Browse' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Choose a font' })
+    await waitFor(() =>
+      expect(within(dialog).getByRole('button', { name: /Pacifico/ })).toBeInTheDocument(),
+    )
+
+    await user.click(within(dialog).getByRole('button', { name: /Pacifico/ }))
+
+    await waitFor(() => expect(onChange).toHaveBeenLastCalledWith('Pacifico:style=Regular'))
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('seeds the picker preview with the model\u2019s own text', async () => {
+    const user = userEvent.setup()
+    render(
+      <ParamWidget
+        param={param}
+        value="Liberation Sans:style=Bold"
+        fonts={fonts}
+        sampleText="Reagan"
+        onChange={vi.fn()}
+      />,
+    )
+
+    await user.click(screen.getByRole('button', { name: 'Browse' }))
+
+    expect(await screen.findByRole('textbox', { name: 'Sample text' })).toHaveValue('Reagan')
   })
 })
