@@ -12,6 +12,7 @@ import pytest
 import trimesh
 
 from scadbuddy.render.bambu3mf import (
+    BAMBU_APPLICATION,
     PLATE_PICK,
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
@@ -328,9 +329,92 @@ def test_the_part_and_colour_metadata_survive_without_covers(tmp_path: Path) -> 
         if metadata.get("key") == "extruder"
     ]
     assert extruders == ["1", "2"]
-    # Two colours, so the placement reserved a prime tower and recorded it (#105).
+    # Two colours, so the placement reserved a prime tower and recorded it (#105);
+    # the rest is what the BambuStudio-project claim commits the file to (#110).
     assert settings == {
         "filament_colour": ["#FF6AC1", "#1F6FEB"],
+        "printer_settings_id": "ScadBuddy",
+        "print_settings_id": "ScadBuddy",
+        "filament_settings_id": ["ScadBuddy", "ScadBuddy"],
+        "nozzle_diameter": ["0.4"],
+        "printable_height": "250",
         "wipe_tower_x": ["98"],
         "wipe_tower_y": ["5"],
     }
+
+
+class TestBambuProjectIdentity:
+    """#110 — the file has to identify as a BambuStudio project, and then satisfy
+    what that claim commits it to.
+
+    ``bbs_3mf.cpp`` reads ``Metadata/project_settings.config`` only when the root
+    model's ``Application`` starts with ``BambuStudio-``; otherwise it sets
+    ``dont_load_config`` and drops the file, so the prime-tower position we
+    compute never reaches the slicer. Making that claim is half the fix: once the
+    BBL path is taken, ``BambuStudio.cpp`` dereferences five options without a
+    null check and **segfaults** on a file that omits them — not a validation
+    error, a crash before slicing starts.
+
+    The slicer itself cannot run in CI, so these pin the file contents that the
+    measured-good archive had. The end-to-end proof is in the PR.
+    """
+
+    REQUIRED = (
+        "printer_settings_id",
+        "print_settings_id",
+        "filament_settings_id",
+        "nozzle_diameter",
+        "printable_height",
+    )
+
+    def test_the_root_model_claims_to_be_a_bambustudio_project(self, written: Path) -> None:
+        with zipfile.ZipFile(written) as archive:
+            root = archive.read("3D/3dmodel.model").decode()
+        assert f'<metadata name="Application">{BAMBU_APPLICATION}</metadata>' in root
+        assert BAMBU_APPLICATION.startswith("BambuStudio-"), "the loader matches this prefix"
+        assert '<metadata name="BambuStudio:3mfVersion">1</metadata>' in root
+        # Claiming BambuStudio for the loader's benefit must not erase who wrote it.
+        assert '<metadata name="Origin">ScadBuddy</metadata>' in root
+
+    def test_the_claimed_version_triggers_no_compatibility_path(self) -> None:
+        # BambuStudio.cpp translates old configs below 1.5.9, regenerates
+        # thumbnails below 1.5.9, keeps old params below 2.0.0, disables wrapping
+        # detection below 2.2.0 and resets skirt_per_object below 2.7.0.
+        major, minor = (int(part) for part in BAMBU_APPLICATION.split("-")[1].split(".")[:2])
+        assert (major, minor) >= (2, 7), "an older claim silently changes slicer behaviour"
+
+    @pytest.mark.parametrize("key", REQUIRED)
+    def test_every_option_the_loader_dereferences_is_present(self, written: Path, key: str) -> None:
+        with zipfile.ZipFile(written) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert key in settings, f"omitting {key} segfaults the loader, it does not warn"
+
+    def test_a_single_colour_file_carries_them_too(self, tmp_path: Path) -> None:
+        # No tower, but the identity claim is unconditional, so the keys are too.
+        out = tmp_path / "one.3mf"
+        write_bambu_3mf(_parts()[:1], out, thumbnails=None, model_name="one_box")
+        with zipfile.ZipFile(out) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert all(key in settings for key in self.REQUIRED)
+        assert "wipe_tower_x" not in settings
+
+    def test_filament_settings_id_has_one_entry_per_colour(self, written: Path) -> None:
+        with zipfile.ZipFile(written) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert len(settings["filament_settings_id"]) == len(settings["filament_colour"]) == 2
+
+    def test_printable_height_follows_the_plate(self, tmp_path: Path) -> None:
+        out = tmp_path / "h2c.3mf"
+        write_bambu_3mf(
+            _parts(), out, thumbnails=None, model_name="two_boxes", plate=plate_for("H2C")
+        )
+        with zipfile.ZipFile(out) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["printable_height"] == "325"
+
+    def test_replating_restates_the_height_for_the_new_plate(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["printable_height"] == "325"
+        assert all(key in settings for key in self.REQUIRED)

@@ -6,7 +6,13 @@ Two kinds of golden live here.
   OpenSCAD involved, compared byte for byte by `tests/test_bambu3mf.py`. Its
   `project_settings.config` carries `wipe_tower_x`/`wipe_tower_y` as well as the
   filament colours: the writer reserves a prime-tower position clear of the
-  object, because the default one is unprintable on an H2C (#105).
+  object, because the default one is unprintable on an H2C (#105). It also
+  carries `printer_settings_id`, `print_settings_id`, `filament_settings_id`,
+  `nozzle_diameter` and `printable_height`, and every `3dmodel.model` here names
+  `Application` as `BambuStudio-…` with `Origin` as ScadBuddy — that claim is
+  what makes Bambu Studio read the config at all, and those five options are
+  what stop it segfaulting once it does (#110). None of them is cosmetic: drop
+  one and the slicer crashes rather than complains.
 - `name-keychain-*/` — integration goldens for the example models in `models/`.
   Each one is a real render through the production pipeline, recorded by
   `tests/test_golden_models.py`.

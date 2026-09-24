@@ -24,6 +24,20 @@ from scadbuddy.render.plate import (
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import PlateThumbnails
 
+#: Bambu Studio reads ``Metadata/project_settings.config`` only when the root
+#: model's ``Application`` metadata starts with ``BambuStudio-``; otherwise
+#: ``_load_model_from_file`` sets ``dont_load_config`` and drops the whole file,
+#: which is why the prime-tower position we compute used to be ignored (#110).
+#:
+#: The version claimed is the *oldest* one that triggers none of the importer's
+#: compatibility paths: ``BambuStudio.cpp`` translates old configs below 1.5.9,
+#: regenerates thumbnails below 1.5.9, keeps old params below 2.0.0, disables
+#: wrapping detection below 2.2.0 and resets ``skirt_per_object`` below 2.7.0.
+#: Claiming 2.7.0 exactly clears all five, and claiming no more than that means
+#: a CLI older than the one we tested still accepts the file — the newer-file
+#: check at ``BambuStudio.cpp:1951`` only rejects files *ahead* of the reader.
+BAMBU_APPLICATION = "BambuStudio-02.07.00.00"
+
 CORE_NS = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
 PRODUCTION_NS = "http://schemas.microsoft.com/3dmanufacturing/production/2015/06"
 MODEL_RELATIONSHIP = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"
@@ -125,7 +139,9 @@ def root_model(parts: Sequence[ColourPart], model_name: str, offset: Sequence[fl
     return (
         '<?xml version="1.0" encoding="UTF-8"?>\n'
         f'<model unit="millimeter" xml:lang="en-US" xmlns="{CORE_NS}" xmlns:p="{PRODUCTION_NS}">\n'
-        f' <metadata name="Application">ScadBuddy</metadata>\n'
+        f' <metadata name="Application">{BAMBU_APPLICATION}</metadata>\n'
+        ' <metadata name="BambuStudio:3mfVersion">1</metadata>\n'
+        ' <metadata name="Origin">ScadBuddy</metadata>\n'
         f' <metadata name="Title">{escape(model_name)}</metadata>\n'
         " <resources>\n"
         f'  <object id="{assembly_id}" name={quoteattr(model_name)} type="model"'
@@ -180,7 +196,30 @@ def _cover_metadata() -> str:
     )
 
 
-def project_settings(parts: Sequence[ColourPart], placement: Placement) -> str:
+#: Options ``BambuStudio.cpp`` dereferences without a null check once a 3MF
+#: identifies as a BambuStudio project. ``printer_settings_id`` and
+#: ``print_settings_id`` are read at line 2009-2010, ``filament_settings_id``
+#: and ``nozzle_diameter`` right after, and ``printable_height`` through
+#: ``config.opt_float`` at line 2095. A missing one is not a validation error —
+#: it is a segfault before slicing starts, which is what made the naive "just
+#: set the Application tag" attempt look like a dead end (#110).
+#:
+#: The CLI reads them into ``current_*``/``old_*`` locals used for reporting and
+#: compatibility comparisons only; the settings actually sliced with come from
+#: ``--load-settings``/``--load-filaments``. Measured: placeholder ids, a
+#: deliberately wrong nozzle diameter (0.4 while slicing 0.2) and a wrong
+#: printable height all produce byte-identical results. So ScadBuddy states what
+#: it honestly knows and names itself for the rest, rather than inventing preset
+#: names that could be mistaken for real ones — it owns no slicer settings.
+PRESET_PLACEHOLDER = "ScadBuddy"
+#: Only the arity-free presence of this option matters; 1 and 3 entries were both
+#: measured to slice identically on a two-extruder H2C.
+PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
+
+
+def project_settings(
+    parts: Sequence[ColourPart], placement: Placement, plate: PlateGeometry
+) -> str:
     """``Metadata/project_settings.config``, in Bambu Studio's own JSON shape.
 
     ``ConfigBase::save_to_json`` writes every vector option as an array of
@@ -188,15 +227,21 @@ def project_settings(parts: Sequence[ColourPart], placement: Placement) -> str:
     ``coFloats`` holding the tower's front-left corner — hence ``["145"]`` rather
     than ``[145.0]``.
 
-    Note what this file is and is not worth: Bambu Studio only reads it when the
-    3MF's ``Application`` metadata names BambuStudio (``bbs_3mf.cpp`` sets
-    ``dont_load_config`` otherwise and drops the whole config), so for a file
-    ScadBuddy writes the slicer falls back to ``PrintConfig.cpp``'s defaults and
-    these keys are inert — see #105. Bambuddy itself does read the file, and the
-    position recorded here is the one the placement above reserved room for, so
-    it is written as the honest record of where the tower belongs.
+    Everything here is read only because the root model claims to be a
+    BambuStudio project (see :data:`BAMBU_APPLICATION`). Without that claim
+    ``bbs_3mf.cpp`` sets ``dont_load_config`` and drops the file wholesale, which
+    is why the tower position sat here inert until #110 — and with the claim, the
+    keys in :data:`PRESET_PLACEHOLDER`'s comment above stop being optional.
     """
-    settings: dict[str, list[str]] = {"filament_colour": [part.colour for part in parts]}
+    settings: dict[str, str | list[str]] = {
+        "filament_colour": [part.colour for part in parts],
+        # Required-or-segfault; see above.
+        "printer_settings_id": PRESET_PLACEHOLDER,
+        "print_settings_id": PRESET_PLACEHOLDER,
+        "filament_settings_id": [PRESET_PLACEHOLDER for _ in parts],
+        "nozzle_diameter": PLACEHOLDER_NOZZLE_DIAMETER,
+        "printable_height": _number(plate.height),
+    }
     if placement.tower is not None:
         settings["wipe_tower_x"] = [_number(placement.tower[0])]
         settings["wipe_tower_y"] = [_number(placement.tower[1])]
@@ -288,7 +333,7 @@ def write_bambu_3mf(
                 for index, part in enumerate(parts, start=1)
             ),
             ("Metadata/model_settings.config", model_settings(parts, model_name, covers=covers)),
-            (PROJECT_SETTINGS_NAME, project_settings(parts, placement)),
+            (PROJECT_SETTINGS_NAME, project_settings(parts, placement, plate)),
         )
     ]
     if thumbnails is not None:
@@ -373,6 +418,9 @@ def replate_3mf(payload: bytes, plate: PlateGeometry) -> bytes:
         elif name == PROJECT_SETTINGS_NAME:
             settings.pop("wipe_tower_x", None)
             settings.pop("wipe_tower_y", None)
+            # The plate changed, so restate its Z. The other keys the BBL loader
+            # needs do not vary by printer and are already in the file.
+            settings["printable_height"] = _number(plate.height)
             if placement.tower is not None:
                 settings["wipe_tower_x"] = [_number(placement.tower[0])]
                 settings["wipe_tower_y"] = [_number(placement.tower[1])]
