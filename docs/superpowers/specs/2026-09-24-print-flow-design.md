@@ -49,8 +49,8 @@ run(pipeline_id, copies, force, printer_id?, filament_plan?, options?, project_i
   │
   ├── nothing set that a run cannot express   → POST /slicer-pipelines/{id}/run
   │                                             route="pipeline"
-  └── a filament plan, a pinned printer,      → POST /library/files/{id}/slice   (the
-      queue-level options or a project           pipeline's OWN presets + bed type,
+  └── a filament plan, or queue-level         → POST /library/files/{id}/slice   (the
+      options                                    pipeline's OWN presets + bed type,
                                                  filament presets swapped per slot)
                                                 GET  /slice-jobs/{id} until finished
                                                 POST /queue/  with printer_id,
@@ -66,6 +66,14 @@ path and given a name. The pipeline is never bypassed — the slice borrows *its
 `printer_preset`, `process_preset`, `bed_type` and target, so "which pipeline" still
 means what it meant. `PrintRunResult` gains `route`, `slice_job_id` and
 `queue_item_ids` so both routes report through one shape.
+
+**What actually escalates, as shipped.** Only a **filament plan** (`run_for_output`) or
+**queue-level print options** (`_queue_send`, #88) take the second route. A `printer_id`
+on its own does not: it scopes the picker and binds the queue item *once a plan already
+forced the queue route*, and is ignored otherwise. A `project_id` on its own does not
+either — a project changes which library folder the 3MF uploads into, which needs no
+queue item. Anything else in the table above that reads like a trigger is the eventual
+three-issue design, not a path to go looking for in the code today.
 
 Escalating is visible in the dialog before the click ("Bambuddy will slice this for
 *printer*, then queue it"), because it changes which printer the copies land on: a
@@ -193,20 +201,30 @@ entry ids so History can deep-link each one.
 
 ## 7. Projects (#79)
 
-A project is Bambuddy's, not a second one here. Create → `POST /api/v1/projects/`
-then `POST /api/v1/library/folders/` with `project_id` set. Link → `GET /projects/`
-plus `GET /library/folders/by-project/{id}`. The picker's project choice replaces
-`settings.library_folder_id` for that send, so the 3MF uploads into the project's
-folder; afterwards the produced archives go to `POST /projects/{id}/add-archives` and
-the queue entries to `POST /projects/{id}/add-queue`. On the queue route `project_id`
-also rides on the queue item itself, so there is no window in which the entry exists
-unfiled.
+A project is Bambuddy's, and ScadBuddy keeps no second one. There is no ScadBuddy
+project entity, no model→project grouping and no project history view: which prints
+belong to a project is on the project's own page, and a second answer here would go
+stale. The only thing persisted is `last_project_id` — one integer, so the picker
+opens where it was left.
+
+- **Create** → `POST /api/v1/projects/` then `POST /api/v1/library/folders/` with
+  `project_id` set, which is the pairing Bambuddy's own UI makes.
+- **Link** → `GET /projects/` plus `GET /library/folders/by-project/{id}`; a project
+  that already has a folder keeps it, so linking twice does not leave two.
+- **Send** → the project's folder replaces `settings.library_folder_id` for that send,
+  which is what puts the 3MF on the project's page. An output uploaded *before* a
+  project was chosen keeps its library file — re-uploading would make a second copy —
+  so `POST /api/v1/library/files/move` puts it in the right folder instead. Reporting
+  `folder_id` without that move would report a folder the file is not in.
+- **Attach** → `POST /projects/{id}/add-queue` and `/add-archives`.
 
 Attaching is a **separate call**, not part of the run: a pipeline run's
 `jobs[].queue_entry_id` is null when the 202 returns, and an archive only exists once a
 print has finished. Attaching at run time would attach nothing on one route and half on
-the other, so `POST /print/outputs/{id}/project` is called once the ids are known and
-again when the archives appear.
+the other, so `POST /print/outputs/{id}/project` is called from the progress read (#89)
+once the ids are known, and again when the archives appear. On the queue route
+`project_id` also rides on the queue item itself, so there is no window in which the
+entry exists unfiled.
 
 Scope: the project routes map to `Manage Projects`, which the current key may not
 carry — the settings page's connection test reports the missing scope by name rather
@@ -219,5 +237,6 @@ Backend tests drive `respx` from recordings taken by `GET` only, per
 `tray_uuid` are redacted. Shapes that need a `POST` to observe (a slice job result, a
 queue-item create, a `PipelineRunResponse` with `jobs[]`) are built from Bambuddy's
 `openapi.json` inline, as the existing tests already do. The frontend gets `vitest`
-coverage of the matcher, the filters and every warning rule, and one Playwright spec
-drives the dialog end to end against `msw`.
+coverage of the opening selection, the filters and both warnings — including that they
+are recomputed for a hand-picked spool, not dropped — and one Playwright spec drives
+the dialog end to end against `msw`.

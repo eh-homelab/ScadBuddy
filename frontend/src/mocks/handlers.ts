@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  AttachResult,
   BoundingBox,
   CatalogueFont,
   EligibilityOverview,
@@ -19,6 +20,9 @@ import type {
   PrintOptions,
   PrintOptionsState,
   PrintOptionsUpdate,
+  ProjectChoices,
+  ProjectRequest,
+  ProjectView,
   SendResult,
   Settings,
 } from '../api/types'
@@ -41,6 +45,9 @@ const state = {
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
+  projects: [...fixtures.projectViews] as ProjectView[],
+  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
@@ -58,6 +65,8 @@ export function resetMockState(): void {
   state.jobs.clear()
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
+  state.projects = fixtures.projectViews.map((p) => ({ ...p }))
+  state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
@@ -480,6 +489,7 @@ export const handlers = [
       printer_id?: number | null
       plate_id?: number
       filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
+      project_id?: number | null
     }
     const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
     if (pipelineId === null) {
@@ -497,6 +507,13 @@ export const handlers = [
       )
     }
     const copies = body.copies ?? 1
+    // #79 — the project's own library folder replaces the one from Settings for this
+    // send, which is what puts the file on Bambuddy's project page.
+    const projectId = body.project_id ?? state.lastProjectId
+    const folderId =
+      projectId === null
+        ? null
+        : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
     const runId = nextNumber()
     const libraryFileId = output.library_file_id ?? nextNumber()
     state.outputs = state.outputs.map((o) =>
@@ -526,6 +543,8 @@ export const handlers = [
         sliced_library_file_id: nextNumber(),
         queue_item_ids: queueItemIds,
         warnings: fixtures.filamentOptions.warnings,
+        project_id: projectId,
+        folder_id: folderId,
         bambuddy_url: `${state.settings.bambuddy_url}/queue`,
       }
       return HttpResponse.json(queued)
@@ -567,9 +586,72 @@ export const handlers = [
         target_model_class: null,
         fanout_strategy: 'max_parallel',
       },
+      project_id: projectId,
+      folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
+  }),
+
+  // --- #79 projects -----------------------------------------------------------------
+
+  http.get(`${base}/print/projects`, () =>
+    HttpResponse.json({
+      projects: state.projects,
+      last_project_id: state.lastProjectId,
+    } satisfies ProjectChoices),
+  ),
+
+  http.post(`${base}/print/projects`, async ({ request }) => {
+    const body = (await request.json()) as ProjectRequest
+    const linked =
+      body.project_id === undefined || body.project_id === null
+        ? undefined
+        : state.projects.find((project) => project.id === body.project_id)
+    if (body.project_id !== undefined && body.project_id !== null && !linked) {
+      return problem(404, 'Not Found', `no project ${body.project_id}`)
+    }
+    if (!linked && !body.name) {
+      return problem(400, 'Bad Request', 'a new project needs a name')
+    }
+    const base_ = linked ?? {
+      id: nextNumber(),
+      name: body.name ?? '',
+      description: body.description ?? null,
+      colour: body.colour ?? null,
+      status: 'active',
+      archive_count: 0,
+      queue_count: 0,
+      folder_id: null,
+      folder_name: null,
+    }
+    // Creating a project creates its library folder, and linking one that has none
+    // creates it too — a project with no folder lists no files on Bambuddy's own page.
+    const saved: ProjectView = {
+      ...base_,
+      folder_id: base_.folder_id ?? nextNumber(),
+      folder_name: base_.folder_name ?? base_.name,
+    }
+    state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
+    await delay(150)
+    return HttpResponse.json(saved)
+  }),
+
+  http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
+    const projectId = body.project_id ?? state.lastProjectId
+    if (projectId === null) {
+      return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
+    }
+    // An archive only exists once a print has finished, so the mock reports none: the
+    // caller attaches again later rather than the run pretending it already happened.
+    return HttpResponse.json({
+      project_id: projectId,
+      queue_item_ids: body.queue_item_ids,
+      archive_ids: [],
+    } satisfies AttachResult)
   }),
 
   /**

@@ -1,0 +1,78 @@
+[
+  {
+    "id": 1,
+    "name": "MakerWorld",
+    "parent_id": null,
+    "project_id": null,
+    "archive_id": null,
+    "project_name": null,
+    "archive_name": null,
+    "is_external": false,
+    "external_path": null,
+    "external_readonly": false,
+    "file_count": 34,
+    "latest_activity_at": "2026-09-23T08:04:19.237821",
+    "children": []
+  },
+  {
+    "id": 2,
+    "name": "Raegan",
+    "parent_id": null,
+    "project_id": 1,
+    "archive_id": null,
+    "project_name": "Reagan Keychain",
+    "archive_name": null,
+    "is_external": false,
+    "external_path": null,
+    "external_readonly": false,
+    "file_count": 6,
+    "latest_activity_at": "2026-09-22T12:45:36.799885",
+    "children": []
+  },
+  {
+    "id": 3,
+    "name": "Supplies",
+    "parent_id": null,
+    "project_id": null,
+    "archive_id": null,
+    "project_name": null,
+    "archive_name": null,
+    "is_external": false,
+    "external_path": null,
+    "external_readonly": false,
+    "file_count": 0,
+    "latest_activity_at": "2026-09-24T04:43:16.487501",
+    "children": [
+      {
+        "id": 4,
+        "name": "Storage",
+        "parent_id": 3,
+        "project_id": null,
+        "archive_id": null,
+        "project_name": null,
+        "archive_name": null,
+        "is_external": false,
+        "external_path": null,
+        "external_readonly": false,
+        "file_count": 17,
+        "latest_activity_at": "2026-09-23T07:49:49.131127",
+        "children": []
+      },
+      {
+        "id": 5,
+        "name": "Storage Container Desiccant System",
+        "parent_id": 3,
+        "project_id": null,
+        "archive_id": null,
+        "project_name": null,
+        "archive_name": null,
+        "is_external": false,
+        "external_path": null,
+        "external_readonly": false,
+        "file_count": 0,
+        "latest_activity_at": "2026-09-24T04:43:16.487501",
+        "children": []
+      }
+    ]
+  }
+]

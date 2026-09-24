@@ -51,6 +51,9 @@ class OutputMeta(BaseModel):
     #: nothing says which one describes the print now in progress.
     print_route: PrintRoute | None = None
     slice_job_id: int | None = None
+    #: The Bambuddy project this output was last printed into (#79), so reopening the
+    #: history shows what each print was filed under rather than only that it happened.
+    project_id: int | None = None
 
 
 class OutputStore:
@@ -125,6 +128,7 @@ class OutputStore:
         queue_item_id: int | None = None,
         print_route: PrintRoute | None = None,
         slice_job_id: int | None = None,
+        project_id: int | None = None,
     ) -> OutputMeta:
         """Persist the Bambuddy ids a send produced, leaving omitted ones alone."""
         directory = self._find_dir(output_id)
@@ -138,6 +142,7 @@ class OutputStore:
                     ("queue_item_id", queue_item_id),
                     ("print_route", print_route),
                     ("slice_job_id", slice_job_id),
+                    ("project_id", project_id),
                 )
                 if value is not None
             }

@@ -1,4 +1,5 @@
 import type {
+  AttachResult,
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
@@ -24,6 +25,10 @@ import type {
   PrintOptionsUpdate,
   PrintOptionsView,
   Problem,
+  ProjectAttach,
+  ProjectChoices,
+  ProjectRequest,
+  ProjectView,
   RenderAccepted,
   SendRequest,
   SendResult,
@@ -199,6 +204,31 @@ export const api = {
 
   runPipeline: (outputId: string, body: PrintRunRequest) =>
     request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
+   * the one the last send went to so the picker opens where it was left. ScadBuddy
+   * models no relationship between a model and a project: which prints belong to a
+   * project is on the project's own page.
+   */
+  getProjects: () => request<ProjectChoices>('/print/projects'),
+
+  /**
+   * `project_id` links an existing project; otherwise `name` creates one. Either way the
+   * project comes back with a library folder, because it is the folder — not the project
+   * row — that makes Bambuddy's project page list the files.
+   */
+  createProject: (body: ProjectRequest) =>
+    request<ProjectView>('/print/projects', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** Filed after the run, never during it: a pipeline run's `jobs[].queue_entry_id` is
+   * null when Bambuddy answers 202, and an archive only exists once a print has finished,
+   * so the ids come from the progress read (#89). */
+  attachToProject: (outputId: string, body: ProjectAttach) =>
+    request<AttachResult>(`/print/outputs/${seg(outputId)}/project`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

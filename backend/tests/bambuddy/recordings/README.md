@@ -45,11 +45,12 @@ Added for #87, over the ingress on 2026-09-24 (still every request a `GET`):
 | `spool-filament-presets.json` | `GET /api/v1/inventory/spools/9/filament-presets` |
 | `filament-requirements.json` | `GET /api/v1/library/files/62/filament-requirements` |
 
-Added for #89, same day and the same way:
+Added for #89 and #79, same day and the same way:
 
 | File | Source |
 |---|---|
 | `pipeline-run.json` | `GET /api/v1/pipeline-runs/1` — a **real** run, and a failed one |
+| `library-folders-nested.json` | `GET /api/v1/library/folders`, re-read once a folder had children |
 
 `tag_uid` and `tray_uuid` are replaced in the two inventory files: they are the RFID
 identities of physical spools and nothing in ScadBuddy reads them.
@@ -138,6 +139,11 @@ Added for #88 on 2026-09-24 (a `GET`):
 - **`jobs[].queue_entry_id` is null until the background task has created the entry.**
   The recorded run's one job is still `status: "pending"` with no printer and no queue
   entry, minutes after the run finished — because nothing was sliced to queue.
+- **`GET /api/v1/library/folders` answers with a tree, not a flat list.** A sub-folder
+  arrives inside its parent's `children` rather than alongside it —
+  `library-folders-nested.json` has `Supplies` carrying two. The older
+  `library-folders.json` has no nested rows, which is why this went unnoticed: a scan of
+  the top level alone reports a nested folder as missing.
 - **`/api/v1/inventory/locations` is empty here**, so storage locations come back as the
   free-text `storage_location` on the spool rather than as a location id.
 - **`POST /slicer-pipelines/{id}/run` cannot carry print options, and no amount of

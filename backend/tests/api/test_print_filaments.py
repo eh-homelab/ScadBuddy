@@ -33,18 +33,12 @@ def inventory_routes(*, printer_id: int | None = 1) -> None:
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
-    respx.route(method="GET", path__regex=r"/api/v1/inventory/spools/\d+/filament-presets").mock(
-        return_value=httpx.Response(200, json=recording("spool-filament-presets.json"))
-    )
     respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
         return_value=httpx.Response(200, json=recording("filament-requirements.json"))
     )
     if printer_id is not None:
         respx.get(f"{API}/printers/{printer_id}").mock(
             return_value=httpx.Response(200, json=recording("printer.json"))
-        )
-        respx.get(f"{API}/printers/{printer_id}/status").mock(
-            return_value=httpx.Response(200, json=recording("printer-status.json"))
         )
         respx.get(f"{API}/printers/{printer_id}/inventory-remain").mock(
             return_value=httpx.Response(200, json=recording("inventory-remain.json"))

@@ -164,10 +164,16 @@ def test_a_spool_in_another_printers_tray_takes_none_of_this_printers_state() ->
     remaining weight — a different filament's.
     """
     rows = assignments()
-    # Spool 9 really is in AMS 0 tray 1, which `inventory-remain` reports as 1000 g.
-    # Move it to another printer and none of that may follow it.
+    # The recorded `inventory-remain` happens to report 1000 g for (0, 1), which is also
+    # spool 9's `label_weight - weight_used` — so asserting on the recording would pass
+    # whether or not the guard exists. The figure is made distinguishable on purpose.
+    distinct = [SlotMaterial(ams_id=0, tray_id=1, global_tray_id=1, remaining_g=42.0, extruder=0)]
+    here = options(slot_materials=distinct)
+    assert next(row for row in here.spools if row.spool_id == 9).remaining_g == 42.0
+
+    # Move spool 9 to another printer and none of that printer's state may follow it.
     moved = rows[0].model_copy(update={"printer_id": 7, "printer_name": "Other"})
-    built = options(assignments=[moved, *rows[1:]])
+    built = options(assignments=[moved, *rows[1:]], slot_materials=distinct)
     misty = next(row for row in built.spools if row.spool_id == 9)
 
     assert misty.loaded is not None
