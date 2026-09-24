@@ -18,6 +18,7 @@ from scadbuddy.render.provenance import (
     source_version,
     stamp,
 )
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.split import ColourPart
 
 PROVENANCE = Provenance(
@@ -192,3 +193,23 @@ def test_a_stamp_that_is_not_json_at_all_is_a_miss(written: Path) -> None:
             archive.writestr(name, payload)
 
     assert read(written) is None
+
+
+def test_the_version_ignores_the_renderers_transient_wrapper(tmp_path: Path) -> None:
+    """``render_solids`` writes a per-colour wrapper .scad INTO the model directory
+    and unlinks it afterwards. A render of this model running concurrently with a
+    save must not put a random filename into the hash."""
+    model = tmp_path / "keychain"
+    model.mkdir()
+    (model / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    alone = source_version(model)
+
+    (model / f"{WRAPPER_PREFIX}0123456789abcdef.scad").write_text(
+        "include <model.scad>\n", encoding="utf-8"
+    )
+    assert source_version(model) == alone
+
+    (model / f"{WRAPPER_PREFIX}fedcba9876543210.scad").write_text(
+        "include <model.scad>\n", encoding="utf-8"
+    )
+    assert source_version(model) == alone

@@ -102,6 +102,37 @@ describe('CustomizePage', () => {
     // rather than queueing the plate itself.
     await waitFor(() => expect(within(dialog).getByText(/Pipeline run/)).toBeInTheDocument())
     expect(within(dialog).getByRole('button', { name: 'Open in queue' })).toBeInTheDocument()
+    // A public URL is configured in the fixtures, so the note went on the file.
+    expect(within(dialog).getByText(/Bambuddy has the link back/)).toBeInTheDocument()
+  })
+
+  it('says when no link back to the parameters was attached', async () => {
+    server.use(
+      http.post('/api/v1/outputs/:id/send', () =>
+        HttpResponse.json({
+          mode: 'queue',
+          library_file_id: 41,
+          filename: 'name-keychain-reagan.3mf',
+          pipeline_run_id: 12,
+          queue_item_id: null,
+          bambuddy_url: 'https://bambuddy.test/queue',
+          edit_url: null,
+        }),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Send to Bambuddy' }))
+    const dialog = await screen.findByRole('dialog', { name: 'Send to Bambuddy' })
+    await user.click(within(dialog).getByRole('button', { name: 'Send' }))
+
+    await waitFor(() =>
+      expect(within(dialog).getByText(/No link back to these parameters/)).toBeInTheDocument(),
+    )
   })
 
   it('reopens an earlier output with its parameters', async () => {

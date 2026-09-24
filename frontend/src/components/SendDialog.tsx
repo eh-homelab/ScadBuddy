@@ -91,6 +91,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
       }
     >
       {result ? (
+        <>
         <p className="text-[13px] text-ink">
           {result.queue_item_id ? (
             <>
@@ -109,6 +110,14 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
             </>
           )}
         </p>
+        {/* The note is best-effort, so say which way it went rather than implying
+            the link is on the file when Bambuddy refused it. */}
+        <p className="mt-1.5 text-[12px] text-muted">
+          {result.edit_url
+            ? 'Bambuddy has the link back to these parameters.'
+            : 'No link back to these parameters was attached.'}
+        </p>
+        </>
       ) : (
         <>
           <fieldset>

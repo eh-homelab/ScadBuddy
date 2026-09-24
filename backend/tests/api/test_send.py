@@ -478,3 +478,59 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
     assert json.loads(annotate.calls.last.request.content) == {
         "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
     }
+
+
+@respx.mock
+def test_the_slice_and_queue_branch_also_annotates_last(client: TestClient, model: str) -> None:
+    """The third send path reaches attach_edit_link too, and only after enqueueing."""
+    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
+    annotate = annotate_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).json()
+
+    assert body["queue_item_id"] == 9
+    assert body["edit_url"] == f"https://scad.test/edit/{output_id}"
+    assert annotate.called
+
+    order = [(call.request.method, call.request.url.path) for call in respx.calls]
+    assert order.index(("POST", "/api/v1/queue/")) < order.index(
+        ("PUT", "/api/v1/library/files/41")
+    )
+
+
+@respx.mock
+def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
+    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
+    respx.put(f"{API}/library/files/41").mock(return_value=httpx.Response(502))
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert response.status_code == 200
+    assert response.json()["queue_item_id"] == 9
+    assert response.json()["edit_url"] is None
