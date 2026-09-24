@@ -3,7 +3,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import threading
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import replace
@@ -223,8 +225,30 @@ async def revision_dir(
         return live
     directory = paths.model_revision_dir(slug, version)
     if not (directory / SOURCE_NAME).is_file():
-        await asyncio.to_thread(history.export, slug, version, directory)
+        await asyncio.to_thread(_export_atomically, history, slug, version, directory)
     return directory
+
+
+def _export_atomically(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
+    """Export beside the destination, then move it into place.
+
+    Renders are debounced, so two of the same revision overlap routinely, and a
+    reader that finds `model.scad` present while the other writer is still
+    extracting `model.json` would render against half a revision.
+    """
+    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        history.export(slug, version, staging)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(staging, directory)
+        except OSError:
+            # Another writer got there first; its copy is just as good.
+            if not (directory / SOURCE_NAME).is_file():
+                raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
 
 
 async def render_job(

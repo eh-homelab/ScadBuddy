@@ -217,9 +217,14 @@ def test_restore_of_the_current_revision_changes_nothing(
 ) -> None:
     write_model(models, "keychain", "cube(10);\n")
     first = history.ensure_repo()
+    # A commit against a different model moves the repository HEAD away, so a
+    # no-op restore has to answer with THIS model's revision, not the HEAD.
+    write_model(models, "plate", "sphere(5);\n")
+    history.commit("Add plate", "plate")
     assert first is not None
 
     assert history.restore("keychain", first) == first
+    assert history.head() != first
 
 
 def test_the_repository_reads_the_same_from_a_plain_git(

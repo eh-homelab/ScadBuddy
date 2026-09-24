@@ -145,7 +145,11 @@ class ModelHistory:
     def _env(self, author: str | None = None) -> dict[str, str]:
         name = author or AUTHOR_NAME
         return {
-            "PATH": "/usr/local/bin:/usr/bin:/bin",
+            # Inherited, not pinned: `available` resolves the binary with
+            # `shutil.which` against this PATH, so a pinned one would make the
+            # probe pass and every call then fail. Hermeticity here is about
+            # git's CONFIG, not about where the binary lives.
+            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_SYSTEM": "/dev/null",
             "GIT_TERMINAL_PROMPT": "0",
@@ -298,8 +302,10 @@ class ModelHistory:
                     (self.root / path).unlink(missing_ok=True)
             created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, author=author)
         if created is None:
-            # Already identical — the caller still wants a revision id to point at.
-            return self.head() or resolved
+            # Already identical: the caller still wants a revision id to point
+            # at, and it is this model's own, not the repository HEAD -- which
+            # may be a commit against a different model entirely.
+            return self.last_commit(slug) or resolved
         return created
 
     # ── reading ───────────────────────────────────────────────────────────────
