@@ -151,8 +151,20 @@ async def get_print_options(
     # pipeline's target would then silently never apply.
     pipeline_id = settings.pipeline_for(slug) if slug is not None else settings.pipeline_id
     if printer_id is None and pipeline_id is not None:
-        async with client_for(settings) as client:
-            printer_id = (await client.pipeline(pipeline_id)).target_printer_id
+        try:
+            async with client_for(settings) as client:
+                printer_id = (await client.pipeline(pipeline_id)).target_printer_id
+        except ApiError as error:
+            # Everything else here is read from settings.json and needs no network, so a
+            # Bambuddy hiccup — or a pipeline deleted on its side, which ScadBuddy cannot
+            # notice, since it stores only the id — must not take the whole panel down. The
+            # fallback is the state the UI already has a shape for: no printer known, so the
+            # per-printer scope is disabled and the global and per-model rows still show.
+            logger.info(
+                "could not resolve the pipeline's target printer; the per-printer scope "
+                "will be unavailable",
+                extra={"pipeline_id": pipeline_id, "detail": error.detail},
+            )
     return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=printer_id)
 
 

@@ -187,3 +187,45 @@ def test_a_models_own_pipeline_decides_the_printer_the_scope_keys_on(
     )
 
     assert client.get(ROUTE, params={"slug": model}).json()["printer_id"] == 3
+
+
+@respx.mock
+def test_an_unreachable_bambuddy_still_serves_what_needs_no_bambuddy(
+    client: TestClient,
+) -> None:
+    """Only ``printer_id`` needs the network; losing it must not blank the whole panel.
+
+    The read side now has the property the write side was built and tested for. Without
+    it a transient outage — or a pipeline deleted on Bambuddy's side, which ScadBuddy
+    cannot notice because it stores only the id — disabled Remember and blanked the global
+    and per-model rows that were sitting in settings.json all along.
+    """
+    client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
+    )
+    client.put(ROUTE, json={"scope": "global", "options": {"timelapse": False}})
+    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
+        side_effect=httpx.ConnectError("no route to host")
+    )
+
+    response = client.get(ROUTE)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["printer_id"] is None
+    assert body["global_options"]["timelapse"] is False
+    assert body["defaults"]["bed_levelling"] == "auto"
+
+
+@respx.mock
+def test_a_pipeline_that_no_longer_exists_is_not_fatal_either(client: TestClient) -> None:
+    client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
+    )
+    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
+        return_value=httpx.Response(404, json={"detail": "Not found"})
+    )
+
+    assert client.get(ROUTE).json()["printer_id"] is None
