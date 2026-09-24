@@ -517,14 +517,25 @@ export interface components {
         };
         /** Folder */
         Folder: {
+            /** Archive Id */
+            archive_id?: number | null;
             /** File Count */
             file_count?: number | null;
             /** Id */
             id: number;
+            /**
+             * Is External
+             * @default false
+             */
+            is_external: boolean;
             /** Name */
             name: string;
             /** Parent Id */
             parent_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Project Name */
+            project_name?: string | null;
         };
         /**
          * FontCatalogueView
@@ -578,11 +589,15 @@ export interface components {
             data_dir_writable: boolean;
             /** Openscad Version */
             openscad_version: string | null;
+            /** Revision */
+            revision: string;
             /**
              * Status
              * @enum {string}
              */
             status: "ok" | "degraded";
+            /** Version */
+            version: string;
         };
         /** InstallRequest */
         InstallRequest: {
@@ -768,6 +783,12 @@ export interface components {
             bed_type?: string | null;
             /** Description */
             description?: string | null;
+            /**
+             * Fanout Strategy
+             * @default max_parallel
+             * @enum {string}
+             */
+            fanout_strategy: "max_parallel" | "fill_one_first" | "round_robin";
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /** Id */
@@ -776,6 +797,16 @@ export interface components {
             name: string;
             printer_preset?: components["schemas"]["PresetRef"] | null;
             process_preset?: components["schemas"]["PresetRef"] | null;
+            /**
+             * Target Kind
+             * @default printer_class
+             * @enum {string}
+             */
+            target_kind: "specific_printer" | "printer_class";
+            /** Target Model Class */
+            target_model_class?: string | null;
+            /** Target Printer Id */
+            target_printer_id?: number | null;
         };
         /**
          * PresetRef
@@ -790,7 +821,14 @@ export interface components {
              */
             source: "orca_cloud" | "cloud" | "local" | "standard";
         };
-        /** Printer */
+        /**
+         * Printer
+         * @description ``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
+         *
+         *     ``access_code`` is deliberately absent: Bambuddy withholds it from API-keyed
+         *     callers, so a model that carried it would be null in production and populated
+         *     only when auth is disabled.
+         */
         Printer: {
             /** Id */
             id: number;
