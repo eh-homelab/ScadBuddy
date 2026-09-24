@@ -25,31 +25,51 @@ export function CustomizePage() {
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
 
-  const [values, setValues] = useState<ParamValues>({})
+  // The values carry the revision they were derived from. `version` changes the
+  // moment the URL does, but the new schema is a fetch away and the values a
+  // debounce beyond that — so a bare `useRenderJob(slug, debounced, version)`
+  // fires at once, pairing the NEW revision id with the PREVIOUS revision's
+  // parameters. That renders the wrong thing, and 422s outright (§6.1) on a
+  // parameter the old schema had and the new one does not. Tagging the values
+  // is what lets the render wait for its own revision.
+  const [pending, setPending] = useState<{ version: string; values: ParamValues }>({
+    version: '',
+    values: {},
+  })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
 
   const schema = schemaState.data
   const reopened = reopenId ? outputsState.data?.find((o) => o.id === reopenId) : undefined
+  const values = pending.values
 
   useEffect(() => {
     if (!schema) return
-    setValues(reopened ? { ...defaultValues(schema), ...reopened.params } : defaultValues(schema))
-  }, [schema, reopened])
+    setPending({
+      version: version ?? '',
+      values: reopened ? { ...defaultValues(schema), ...reopened.params } : defaultValues(schema),
+    })
+  }, [schema, reopened, version])
 
-  const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
-  const { job, rendering, error: renderError } = useRenderJob(slug, debounced, version)
+  // One debounce over the pair, so the tag can never lag the values it labels.
+  const debounced = useDebounced(pending, RENDER_DEBOUNCE_MS)
+  const current = debounced.version === (version ?? '')
+  const {
+    job,
+    rendering,
+    error: renderError,
+  } = useRenderJob(slug, current ? debounced.values : undefined, version)
 
   // A parameter change invalidates the saved output — Generate has to run again.
-  const settled = debounced === values
+  const settled = current && debounced === pending
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const onChange = useCallback((name: string, value: ParamValue) => {
-    setValues((current) => ({ ...current, [name]: value }))
+    setPending((state) => ({ ...state, values: { ...state.values, [name]: value } }))
   }, [])
 
   const onReset = useCallback(() => {
-    if (schema) setValues(defaultValues(schema))
+    if (schema) setPending((state) => ({ ...state, values: defaultValues(schema) }))
   }, [schema])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])

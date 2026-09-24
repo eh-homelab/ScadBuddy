@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -23,7 +22,7 @@ from scadbuddy.library.history import (
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
+pytestmark = pytest.mark.requires_git
 
 
 @pytest.fixture
@@ -134,6 +133,41 @@ def test_last_commit_is_the_models_own_revision(models: Path, history: ModelHist
     # output stamps the model's own revision rather than the repository HEAD.
     assert history.head() == second
     assert history.last_commit("keychain") == first
+
+
+def test_last_commits_answers_the_whole_catalogue_in_one_walk(
+    models: Path, history: ModelHistory
+) -> None:
+    """Listing the catalogue must not fork `git log` once per model."""
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models, "plate", "sphere(5);\n")
+    history.ensure_repo()
+    write_model(models, "keychain", "cube(20);\n")
+    history.commit("Edit keychain source", "keychain")
+
+    newest = history.last_commits()
+
+    assert newest == {
+        "keychain": history.last_commit("keychain"),
+        "plate": history.last_commit("plate"),
+    }
+    assert newest["keychain"] != newest["plate"]
+
+
+def test_last_commits_ignores_files_at_the_repository_root(
+    models: Path, history: ModelHistory
+) -> None:
+    """`.gitignore` lives beside the models and is not one of them."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+
+    assert set(history.last_commits()) == {"keychain"}
+
+
+def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
+    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+
+    assert history.last_commits() == {}
 
 
 def test_show_reads_a_file_at_a_revision(models: Path, history: ModelHistory) -> None:

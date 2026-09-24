@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from typing import Any
 
 import httpx
@@ -11,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from tests.api.conftest import wait_for_job
 
-pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is not on PATH")
+pytestmark = pytest.mark.requires_git
 
 SLUG = "keychain"
 FIRST = 'width = 10;\nlabel = "hi";\n'

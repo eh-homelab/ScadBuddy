@@ -6,6 +6,7 @@ that model's directory rather than to the repository root.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from typing import Annotated
 
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, CommitPath, ConfigDep, HistoryDep, PathsDep, SlugPath
-from scadbuddy.api.models import require_model
+from scadbuddy.api.models import require_model, require_model_exists
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import (
@@ -71,6 +72,12 @@ def require_history(history: ModelHistory) -> ModelHistory:
             "model history is unavailable: no git repository under the models directory",
         )
     return history
+
+
+async def _require_revision_async(history: ModelHistory, commit: str) -> str:
+    """:func:`_require_revision` for an ``async def`` handler: `git rev-parse` is a
+    subprocess, and on the event loop it stalls every render poll with it."""
+    return await asyncio.to_thread(_require_revision, history, commit)
 
 
 def _require_revision(history: ModelHistory, commit: str) -> str:
@@ -160,9 +167,9 @@ async def get_version_schema(
     paths: PathsDep,
     config: ConfigDep,
 ) -> CustomizerSchema:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
     require_history(history)
-    resolved = _require_revision(history, commit)
+    resolved = await _require_revision_async(history, commit)
     try:
         source = await resolve_source(slug, resolved, paths=paths, history=history)
     except RevisionNotFoundError:

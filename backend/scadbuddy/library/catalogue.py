@@ -88,6 +88,16 @@ class Catalogue:
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
 
+    def versions(self) -> dict[str, str]:
+        """Every model's revision in one git call, for listing the catalogue."""
+        if self.history is None or not self.history.available:
+            return {}
+        try:
+            return self.history.last_commits()
+        except (GitError, OSError):
+            logger.exception("could not read the revisions")
+            return {}
+
     def exists(self, slug: str) -> bool:
         return self.paths.model_source(slug).is_file()
 
@@ -118,6 +128,9 @@ class Catalogue:
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     def record(self, slug: str) -> ModelRecord:
+        return self._record(slug, self.version(slug))
+
+    def _record(self, slug: str, version: str | None) -> ModelRecord:
         self._require(slug)
         raw = self.read_raw_meta(slug)
         meta = ModelMeta.model_validate({"name": slug, **raw})
@@ -127,7 +140,7 @@ class Catalogue:
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(self.paths.model_source(slug).stat().st_mtime, UTC),
-            version=self.version(slug),
+            version=version,
         )
 
     def list_models(self) -> list[ModelRecord]:
@@ -136,7 +149,9 @@ class Catalogue:
         slugs = sorted(
             path.name for path in self.paths.models.iterdir() if (path / SOURCE_NAME).is_file()
         )
-        return [self.record(slug) for slug in slugs]
+        # ONE git call for the page, not one per model: see `last_commits`.
+        versions = self.versions()
+        return [self._record(slug, versions.get(slug)) for slug in slugs]
 
     def create(
         self,

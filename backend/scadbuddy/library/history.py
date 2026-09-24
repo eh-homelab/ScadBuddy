@@ -356,6 +356,30 @@ class ModelHistory:
             return None
         return completed.stdout.strip() or None
 
+    def last_commits(self) -> dict[str, str]:
+        """Every model's current revision, from ONE walk of the history.
+
+        `last_commit` per model turns a catalogue listing into N forks, and each
+        one walks the shared history until it hits a path match -- so the cost
+        per model grows with every OTHER model's commits too. One `git log` with
+        `--name-only`, newest first, answers the whole page: the first time a
+        slug appears is by definition its newest commit.
+        """
+        completed = self._run("log", "--format=%x1e%H", "--name-only", check=False)
+        assert isinstance(completed.stdout, str)
+        if completed.returncode != 0:
+            return {}
+        newest: dict[str, str] = {}
+        for record in completed.stdout.split(_RECORD):
+            commit, _, paths = record.strip().partition("\n")
+            if not commit:
+                continue
+            for path in paths.splitlines():
+                slug = path.split("/", 1)[0]
+                if slug and "/" in path:
+                    newest.setdefault(slug, commit)
+        return newest
+
     def log(self, slug: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT) -> list[Revision]:
         args = ["log", f"--max-count={limit}", _LOG_FORMAT, "--name-status", "--no-renames"]
         if slug is not None:

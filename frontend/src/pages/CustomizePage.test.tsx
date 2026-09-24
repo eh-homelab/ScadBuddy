@@ -40,6 +40,19 @@ function watchRequests(): string[] {
   return seen
 }
 
+/** Records every render request's body, so what was ASKED of the server can be asserted. */
+function watchRenders(): Promise<{ params: Record<string, unknown>; version?: string }>[] {
+  const bodies: Promise<{ params: Record<string, unknown>; version?: string }>[] = []
+  server.events.on('request:start', ({ request }) => {
+    if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
+      bodies.push(
+        request.clone().json() as Promise<{ params: Record<string, unknown>; version?: string }>,
+      )
+    }
+  })
+  return bodies
+}
+
 async function firstRender() {
   await waitFor(() => expect(screen.getByTestId('bbox')).toBeInTheDocument(), { timeout: 4000 })
 }
@@ -327,6 +340,41 @@ describe('CustomizePage', () => {
     expect(seen).toContain(`/api/v1/models/name-keychain/versions/${versionIds.added}/schema`)
     expect(seen).not.toContain('/api/v1/models/name-keychain/schema')
   })
+
+  it('never renders a revision with the parameters of the one before it', async () => {
+    const renders = watchRenders()
+    const { user } = render(`/m/name-keychain?version=${versionIds.added}`)
+    await firstRender()
+
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Nova')
+    await waitFor(() => expect(screen.getByTestId('bbox')).toHaveTextContent('46.7'), {
+      timeout: 4000,
+    })
+
+    await user.click(screen.getByRole('button', { name: 'Back to current' }))
+    // Re-query: the form unmounts while the current schema is fetched, so the
+    // node captured above detaches and keeps its old value for ever.
+    await waitFor(
+      () => expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Reagan'),
+      { timeout: 4000 },
+    )
+    await firstRender()
+
+    // The revision's parameters must never be paired with another revision's id:
+    // `version` changes the instant the URL does, the schema and the values a
+    // fetch and a debounce later. An intermediate request holding both renders
+    // the wrong thing, and 422s outright when the two schemas differ.
+    const bodies = await Promise.all(renders)
+    expect(bodies.length).toBeGreaterThan(1)
+    // 'Nova' was only ever typed into the pinned revision, so no request may
+    // carry it once the page is back on the model's current source.
+    for (const body of bodies) {
+      if (body.params['name'] === 'Nova') expect(body.version).toBe(versionIds.added)
+    }
+    // Two debounced renders and a schema refetch do not fit the default budget.
+  }, 20000)
 
   it('links to the versions panel', async () => {
     render()

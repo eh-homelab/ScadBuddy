@@ -173,7 +173,10 @@ async def put_source(
     catalogue: CatalogueDep,
     config: ConfigDep,
 ) -> ModelRecord:
-    require_model(catalogue, slug)
+    # `require_model_exists`, not `require_model`: building a record costs a
+    # `git log` for the model's revision, and this handler is `async def`. The
+    # record `write_source` returns carries the new revision anyway.
+    require_model_exists(catalogue, slug)
     try:
         await verify_parses(body.source, config=config)
     except NotOpenSCADError as error:
