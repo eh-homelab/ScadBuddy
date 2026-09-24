@@ -14,6 +14,12 @@ name: Build Image
 # Not run on pull_request: a PR has no GHCR write token, and ci.yml already
 # builds the same Dockerfile (both targets) on every PR, so nothing about the
 # build is untested at merge time.
+#
+# This workflow only PUBLISHES. Deploying is a separate step so it can be
+# switched off without touching the build: deploy-main.yml (workflow_run on
+# this workflow) deploys every default-branch build, deploy-release.yml
+# (release: published) deploys tagged releases. Both call
+# deploy.reusable.yml, which pins the digest in eh-homelab/clusters.
 
 on:
   push:
@@ -42,6 +48,7 @@ jobs:
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       tags: ${{ steps.meta.outputs.tags }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -95,6 +102,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Stamped into the image and reported by /healthz. `version` is the
+          # metadata-action's primary tag: `main` on the default branch,
+          # `X.Y.Z` on a `vX.Y.Z` tag — the same label the deploy pipeline pins.
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.meta.outputs.version }}
           provenance: false
           # `type=gha`, viable only because this is a GitHub-hosted runner —
           # the Actions cache protocol fails outright on the eh-homelab

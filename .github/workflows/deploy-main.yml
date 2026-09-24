@@ -1,0 +1,88 @@
+---
+name: Deploy main
+
+# Continuous deploy from the default branch: every successful "Build Image"
+# run for a push to main pins that build's digest in eh-homelab/clusters (via
+# deploy.reusable.yml), labelled `sha-<short>` so the manifest says which
+# commit is live.
+#
+# THIS IS THE SWITCH. To stop merges to main from deploying, disable this one
+# workflow and nothing else:
+#
+#   gh workflow disable "Deploy main"     # and `gh workflow enable` to resume
+#
+# Builds keep publishing `:main` / `sha-*` images while it is off, and tagged
+# releases keep deploying through deploy-release.yml, which does not go
+# through here. A disabled workflow simply does not run on the trigger; nothing
+# is lost, and enabling it again deploys the NEXT main build (not the ones it
+# missed — re-run the latest "Build Image" to deploy the current head).
+#
+# workflow_run, not `push`: the digest exists only once Build Image has pushed
+# it, and Build Image is the unit that can be re-run. `branches: [main]`
+# filters on the triggering run's head branch, which for a tag push is the tag
+# name — so tag builds never come through here.
+
+on:
+  workflow_run:
+    workflows: ["Build Image"]
+    types: [completed]
+    branches: [main]
+
+# Shared with deploy-release.yml: the two paths write the same clusters branch,
+# so they queue behind each other instead of racing. Never cancel — a deploy
+# that is cut off after pushing the branch but before arming auto-merge leaves
+# an orphan PR.
+concurrency:
+  group: scadbuddy-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve the main build
+    # `head_branch == 'main'` repeats the trigger filter deliberately, and
+    # `event == 'push'` excludes a workflow_dispatch of Build Image, whose
+    # head_sha may be anything.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      version: ${{ steps.image.outputs.version }}
+      revision: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # The immutable `sha-<short>` tag is resolved rather than `:main`, which
+      # a second push could have moved by the time this runs. The short form
+      # is docker/metadata-action's default (7 chars), matching build-image.yml.
+      - name: Resolve the digest of the sha- tag
+        id: image
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          version="sha-${HEAD_SHA:0:7}"
+          ref="ghcr.io/eh-homelab/scadbuddy:${version}"
+          # Parsed from the human output: buildx ignores --format for some
+          # image shapes and prints the default block instead.
+          digest=$(docker buildx imagetools inspect "$ref" | awk '/^Digest:/ {print $2; exit}')
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $ref (got '$digest')"; exit 1; }
+          echo "$ref -> $digest"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy
+    needs: resolve
+    uses: ./.github/workflows/deploy.reusable.yml
+    with:
+      digest: ${{ needs.resolve.outputs.digest }}
+      version: ${{ needs.resolve.outputs.version }}
+      revision: ${{ needs.resolve.outputs.revision }}
+      source_url: ${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.resolve.outputs.revision }}
+      source_kind: main
+    secrets: inherit
