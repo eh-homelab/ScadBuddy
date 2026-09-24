@@ -1,6 +1,6 @@
 import { screen } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useParams, useSearchParams } from 'react-router'
+import { Route, Routes, useLocation, useParams, useSearchParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
@@ -10,7 +10,12 @@ import { EditPage } from './EditPage'
 function Landing() {
   const { slug } = useParams()
   const [search] = useSearchParams()
-  return <div data-testid="landing">{`${slug ?? ''}:${search.get('from') ?? ''}`}</div>
+  const state = useLocation().state as { editTarget?: { name?: string | null } } | null
+  return (
+    <div data-testid="landing">
+      {`${slug ?? ''}:${search.get('from') ?? ''}:${state?.editTarget?.name ?? 'no-state'}`}
+    </div>
+  )
 }
 
 function render(outputId: string) {
@@ -28,6 +33,12 @@ describe('EditPage', () => {
     const id = 'c'.repeat(32)
     render(id)
     expect(await screen.findByTestId('landing')).toHaveTextContent(`name-keychain:${id}`)
+  })
+
+  it('hands the resolved target to the customizer instead of making it refetch', async () => {
+    render('c'.repeat(32))
+    // The name proves the payload travelled, not just the id in the query string.
+    expect(await screen.findByTestId('landing')).toHaveTextContent(':Nova')
   })
 
   it('says so when neither the record nor a 3MF is left', async () => {

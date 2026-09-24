@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useParams, useSearchParams } from 'react-router'
+import { Link, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { Output, ParamValue } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
@@ -9,6 +9,7 @@ import type { PreviewCapture } from '../components/Preview'
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
+import type { EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
@@ -23,10 +24,13 @@ export function CustomizePage() {
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
-  // own provenance when the output record is gone.
+  // own provenance when the output record is gone. EditPage has usually resolved it
+  // already and passed it in state, so arriving that way costs no second request.
+  const handedOver = useLocation().state as EditNavigationState | null
+  const preloaded = handedOver?.editTarget?.output_id === reopenId ? handedOver.editTarget : null
   const reopenState = useAsync(
-    async () => (reopenId ? await api.getEditTarget(reopenId) : null),
-    [reopenId],
+    async () => (reopenId && !preloaded ? await api.getEditTarget(reopenId) : null),
+    [reopenId, preloaded !== null],
   )
 
   const [values, setValues] = useState<ParamValues>({})
@@ -34,7 +38,7 @@ export function CustomizePage() {
   const captureRef = useRef<PreviewCapture | null>(null)
 
   const schema = schemaState.data
-  const reopened = reopenState.data ?? undefined
+  const reopened = preloaded ?? reopenState.data ?? undefined
 
   useEffect(() => {
     // Wait for the reopened values rather than rendering the defaults first.

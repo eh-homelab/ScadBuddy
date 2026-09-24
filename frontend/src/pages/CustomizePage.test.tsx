@@ -24,8 +24,8 @@ vi.mock('../components/Preview', () => ({
   ),
 }))
 
-function render(route = '/m/name-keychain') {
-  return renderPage(<CustomizePage />, { route, path: '/m/:slug' })
+function render(route = '/m/name-keychain', state?: unknown) {
+  return renderPage(<CustomizePage />, { route, path: '/m/:slug', state })
 }
 
 async function firstRender() {
@@ -131,6 +131,39 @@ describe('CustomizePage', () => {
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Salvaged'),
     )
     expect(screen.getByText(`reopened from ${id.slice(0, 8)}`)).toBeInTheDocument()
+  })
+
+  it('uses the target EditPage already resolved rather than fetching it again', async () => {
+    const id = 'c'.repeat(32)
+    let calls = 0
+    server.use(
+      http.get('/api/v1/outputs/:outputId/edit', () => {
+        calls += 1
+        return HttpResponse.json({ title: 'Should not be called', status: 500 }, { status: 500 })
+      }),
+    )
+    render(`/m/name-keychain?from=${id}`, {
+      editTarget: {
+        output_id: id,
+        slug: 'name-keychain',
+        name: 'Handed over',
+        params: { name: 'Handed over' },
+        model_version: null,
+        source: 'record',
+      },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Handed over'),
+    )
+    expect(calls).toBe(0)
+  })
+
+  it('still resolves the target when opened without it — a pasted link or a reload', async () => {
+    const id = 'c'.repeat(32)
+    render(`/m/name-keychain?from=${id}`)
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
   })
 
   it('counts changes against the model defaults', async () => {

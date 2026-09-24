@@ -1,5 +1,6 @@
 import { Link, Navigate, useParams } from 'react-router'
 import { api } from '../api/client'
+import type { EditNavigationState } from '../lib/deeplink'
 import { Spinner } from '../components/ui/Spinner'
 import { useAsync } from '../lib/useAsync'
 
@@ -35,5 +36,14 @@ export function EditPage() {
     )
   }
 
-  return <Navigate to={`/m/${target.data.slug}?from=${outputId}`} replace />
+  // The resolved target rides along in router state: the customizer needs the same
+  // payload, and without this every Edit click resolves the deep link twice — which
+  // in the record-is-gone case means unzipping and re-parsing the 3MF twice.
+  return (
+    <Navigate
+      to={`/m/${target.data.slug}?from=${outputId}`}
+      state={{ editTarget: target.data } satisfies EditNavigationState}
+      replace
+    />
+  )
 }
