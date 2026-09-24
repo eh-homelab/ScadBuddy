@@ -806,3 +806,37 @@ def test_running_a_pipeline_lays_the_file_out_for_that_pipeline_not_the_default(
     client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 2})
 
     assert upload.call_count == 2, "the P1S run reused a file laid out for the H2C"
+
+
+@respx.mock
+def test_checking_several_pipelines_judges_them_all_against_one_upload(
+    client: TestClient, model: str
+) -> None:
+    """One upload, many pipelines — including pipelines aimed at different models.
+
+    Bambuddy's eligibility check reads printer availability and filament matching
+    only (its ``kind`` enum has no geometry member), so the placement the file
+    carries cannot change any of the answers. Pinning it here because the safety
+    of sharing one placement rests entirely on that, and a future geometry issue
+    in that enum would have to turn this into one upload per distinct target.
+    """
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    checks = {
+        pipeline_id: respx.post(f"{API}/slicer-pipelines/{pipeline_id}/check-eligibility").mock(
+            return_value=httpx.Response(200, json=report())
+        )
+        for pipeline_id in (1, 2)
+    }
+
+    body = client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={}).json()
+
+    assert upload.call_count == 1
+    assert sorted(entry["pipeline_id"] for entry in body["reports"]) == [1, 2]
+    # Both pipelines were judged against the same file, whatever they target.
+    for pipeline_id, route in checks.items():
+        sent = json.loads(route.calls.last.request.read())
+        assert sent["source_library_file_id"] == body["library_file_id"], pipeline_id

@@ -9,6 +9,8 @@ from scadbuddy.render.plate import (
     PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
     PlateFitError,
+    PlateGeometry,
+    Rect,
     place_on_plate,
     plate_for,
 )
@@ -147,6 +149,55 @@ class TestPlacement:
             corner[1] - (placement.offset[1] + depth),
             placement.offset[0] - (corner[0] + reserved),
             corner[0] - (placement.offset[0] + 280.0),
+        ]
+        assert max(gaps) >= TOWER_CLEARANCE, f"tower is too close to the object: {gaps}"
+
+    def test_an_object_dodges_a_cutout_and_the_tower_strip_at_once(self) -> None:
+        """The one combination no shipping profile has: a multi-extruder dead zone
+        *and* a filament-cutter cutout, with an object big enough to need moving.
+
+        Both avoidance rules are exercised separately elsewhere; this pins that
+        they compose on a plate carrying both features — the object clears the
+        cutout, stays inside the reachable area, and keeps its distance from the
+        tower. (Here the object still fits centred, so the tower takes an edge;
+        the nudge on the moved path is bounded by ``remainder`` rather than the
+        whole reachable area, which no shipping profile can reach today.)
+        """
+        plate = PlateGeometry(
+            model="Test Both",
+            size=(300.0, 300.0),
+            usable=Rect(25.0, 0.0, 300.0, 300.0),
+            exclusions=(Rect(25.0, 0.0, 60.0, 50.0),),
+            extruders=2,
+        )
+        placement = place_on_plate(_bounds(180.0, 120.0), plate)
+        assert placement.tower is not None
+        rect = (
+            placement.offset[0],
+            placement.offset[1],
+            placement.offset[0] + 180.0,
+            placement.offset[1] + 120.0,
+        )
+        for cut in plate.exclusions:
+            assert (
+                rect[0] >= cut.max_x
+                or rect[2] <= cut.min_x
+                or rect[1] >= cut.max_y
+                or rect[3] <= cut.min_y
+            ), f"object {rect} sits in the cutout {cut}"
+        assert rect[0] >= plate.usable.min_x and rect[2] <= plate.usable.max_x
+        assert rect[1] >= plate.usable.min_y and rect[3] <= plate.usable.max_y
+
+        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        corner = (
+            placement.tower[0] - PRIME_TOWER_BRIM,
+            placement.tower[1] - PRIME_TOWER_BRIM,
+        )
+        gaps = [
+            rect[1] - (corner[1] + reserved),
+            corner[1] - rect[3],
+            rect[0] - (corner[0] + reserved),
+            corner[0] - rect[2],
         ]
         assert max(gaps) >= TOWER_CLEARANCE, f"tower is too close to the object: {gaps}"
 

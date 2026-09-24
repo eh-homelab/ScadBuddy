@@ -140,11 +140,16 @@ class OutputStore:
         return updated
 
     def forget_library_file(self, output_id: str) -> OutputMeta:
-        """Drop the recorded library file id, for when the file is about to go away.
+        """Drop the recorded library file id, once the file has actually gone.
 
         ``record_send`` leaves omitted ids alone by design, so it cannot clear one.
-        Clearing it *before* the delete is what keeps a failed re-send from leaving a
-        pointer to a file that is no longer in Bambuddy.
+
+        Call this *after* the delete has come back — committed or 404 — never
+        before it. Clearing first looks safer and is not: a delete that fails for
+        any other reason (a 500, a timeout) leaves the file in Bambuddy with
+        nothing pointing at it, so the next send cannot replace it and uploads a
+        duplicate instead. ``upload_output`` is the only caller and orders it that
+        way; ``test_a_failed_delete_keeps_the_recorded_library_file_id`` pins it.
         """
         directory = self._find_dir(output_id)
         updated = self.get(output_id).model_copy(

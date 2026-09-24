@@ -389,8 +389,22 @@ async def check_pipelines(
     the client's own connection pool is the limit that matters; a semaphore here would be
     a guess about a number nothing has yet needed.
     """
-    # Eligibility is judged against one uploaded file, so it is placed for the plate
-    # this model would actually print on — the same choice Run will make.
+    # One upload is judged against every pipeline, including pipelines aimed at
+    # different printer models — so the file carries one model's placement while
+    # being checked for several. That is safe because eligibility does not look at
+    # geometry: Bambuddy's ``EligibilityIssueResponse.kind`` is a closed enum of
+    # ``printer_not_set``, ``printer_not_found``, ``printer_disabled``,
+    # ``printer_offline``, ``filament_type_mismatch``, ``filament_color_mismatch``,
+    # ``ams_slot_missing``, ``filament_unverified``, ``no_class_matches`` and
+    # ``class_not_set`` — printer availability and filament matching, nothing that
+    # reads the plate. The unprintable-area failure this module exists to prevent
+    # is a slicing-time G-code check, which eligibility never performs.
+    #
+    # So the placement here only has to be right for the pipeline that will
+    # actually run, and ``run_for_output`` re-places for whichever that turns out
+    # to be. Uploading once is the point of this endpoint — the picker opens on it.
+    # If that enum ever grows a geometry issue, this has to become one upload per
+    # distinct target instead.
     plate = await target_plate(client, settings, meta.slug)
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
     if pipeline_ids is None:

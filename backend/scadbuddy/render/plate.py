@@ -176,7 +176,11 @@ def plate_for(model: str | None) -> PlateGeometry:
 
 
 def _clear_of_exclusions(
-    centre: tuple[float, float], width: float, depth: float, plate: PlateGeometry
+    centre: tuple[float, float],
+    width: float,
+    depth: float,
+    plate: PlateGeometry,
+    region: Rect | None = None,
 ) -> tuple[float, float] | None:
     """``centre`` moved just far enough that the object misses every cutout.
 
@@ -187,8 +191,17 @@ def _clear_of_exclusions(
     over. A cutout is always a bed corner, so clearing it means pushing away from
     that corner along whichever axis costs less; ``None`` means the object cannot
     clear it and still fit.
+
+    ``region`` is where the object has to end up — the whole reachable area when
+    it keeps the centre, or the strip left over once the tower has reserved one.
+    Bounding the push by the reachable area in the latter case would let it walk
+    into the tower's strip; ``_tower_corner`` then rejects that side and the
+    search moves on, so the outcome is safe but needlessly conservative. No
+    current profile has both a multi-extruder dead zone and a cutter cutout, so
+    this is reachable only by a future one — which is exactly when a bound that
+    quietly refuses a placement that fits would be hardest to spot.
     """
-    area = plate.usable
+    area = region if region is not None else plate.usable
     for _ in range(len(plate.exclusions) + 1):
         rect = Rect(
             centre[0] - width / 2,
@@ -367,7 +380,7 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
     for side, strip, remainder in _tower_sides(inset, reserved):
         if width > remainder.width or depth > remainder.depth:
             continue
-        moved_centre = _clear_of_exclusions(remainder.centre, width, depth, plate)
+        moved_centre = _clear_of_exclusions(remainder.centre, width, depth, plate, region=remainder)
         if moved_centre is None:
             continue
         moved = _rect_at(moved_centre)
