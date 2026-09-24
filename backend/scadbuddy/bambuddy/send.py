@@ -23,7 +23,7 @@ from scadbuddy.bambuddy.models import (
     SliceRequest,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.deeplink import edit_url
+from scadbuddy.library.deeplink import EDIT_NOTE, edit_url
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 
@@ -45,7 +45,6 @@ QUEUE_BED_LEVELLING: CalibrationMode = "off"
 QUEUE_FLOW_CALI: CalibrationMode = "off"
 
 #: Prefix for the note attached to the library file, so the link is legible as text.
-EDIT_NOTE = "Edit in ScadBuddy: "
 
 
 class SendRequest(BaseModel):

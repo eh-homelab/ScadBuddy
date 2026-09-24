@@ -10,6 +10,7 @@ from xml.etree import ElementTree as ET
 import pytest
 import trimesh
 
+from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.render.bambu3mf import CORE_NS, PRODUCTION_NS, write_bambu_3mf
 from scadbuddy.render.provenance import (
     NS_PREFIX,
@@ -97,6 +98,8 @@ def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
         xml = archive.read("3D/3dmodel.model").decode("utf-8")
     assert f'xmlns:ScadBuddy="{SCADBUDDY_NS}"' in xml
     assert after["Designer"] == "ScadBuddy"
+    # The same phrase Bambuddy's note uses; one constant, or the two drift apart.
+    assert after["Description"].startswith(EDIT_NOTE)
     assert PROVENANCE.edit_url is not None
     assert PROVENANCE.edit_url in after["Description"]
 

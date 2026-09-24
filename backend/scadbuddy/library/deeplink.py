@@ -9,6 +9,9 @@ cannot infer its own external URL from a request behind a proxy.
 from __future__ import annotations
 
 EDIT_ROUTE = "/edit"
+#: How the link is introduced wherever it appears as prose — the 3MF's own
+#: Description metadata and the note on the Bambuddy library file.
+EDIT_NOTE = "Edit in ScadBuddy: "
 
 
 def edit_path(output_id: str) -> str:

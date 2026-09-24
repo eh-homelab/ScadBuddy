@@ -21,6 +21,7 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, Field, ValidationError
 
+from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.render.bambu3mf import CORE_NS, ZIP_TIMESTAMP
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -106,8 +107,7 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
     entries = [f' <metadata name="Designer">{DESIGNER}</metadata>']
     if provenance.edit_url:
         entries.append(
-            f' <metadata name="Description">Edit in ScadBuddy: '
-            f"{escape(provenance.edit_url)}</metadata>"
+            f' <metadata name="Description">{EDIT_NOTE}{escape(provenance.edit_url)}</metadata>'
         )
     entries.append(
         f' <metadata name="{PROVENANCE_KEY}">'
