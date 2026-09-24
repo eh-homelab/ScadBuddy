@@ -115,9 +115,16 @@ export const api = {
       body: JSON.stringify({ source, force }),
     }),
 
-  /** Parse-only: runs OpenSCAD over the source and saves nothing. */
-  checkSource: (source: string) =>
-    request<SourceCheck>('/models/check', { method: 'POST', body: JSON.stringify({ source }) }),
+  /**
+   * Parse-only: runs OpenSCAD over the source and saves nothing. `slug` names the
+   * model the source belongs to, so its `include` of a sibling file resolves against
+   * that model's directory instead of an empty one.
+   */
+  checkSource: (source: string, slug?: string) =>
+    request<SourceCheck>('/models/check', {
+      method: 'POST',
+      body: JSON.stringify({ source, slug: slug ?? null }),
+    }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 

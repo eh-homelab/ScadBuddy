@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -85,5 +85,23 @@ describe('EditSourcePage', () => {
     )
     renderEdit('gone')
     expect(await screen.findByRole('heading', { name: 'That source is not here' })).toBeInTheDocument()
+  })
+
+  it('checks against the model, so its sibling includes resolve', async () => {
+    const check = vi.spyOn(api, 'checkSource')
+    const { user } = renderEdit()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('include <helper.scad>\ncube(1);\n')
+
+    // The first check is for the source as it loaded; this waits for the edited one.
+    await waitFor(() => {
+      const last = check.mock.calls.at(-1)
+      expect(last?.[0]).toContain('include <helper.scad>')
+      expect(last?.[1]).toBe('name-keychain')
+    })
+    check.mockRestore()
   })
 })

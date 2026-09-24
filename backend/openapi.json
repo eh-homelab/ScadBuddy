@@ -228,6 +228,20 @@
       },
       "CheckRequest": {
         "properties": {
+          "slug": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An existing model whose directory the source is checked against, so its `include`/`use` of sibling files resolve as they will on render",
+            "title": "Slug"
+          },
           "source": {
             "description": "The OpenSCAD source to parse-check",
             "title": "Source",
@@ -2737,6 +2751,12 @@
             ],
             "description": "Customizer parameters derived, when the source got that far",
             "title": "Parameters"
+          },
+          "timed_out": {
+            "default": false,
+            "description": "True when OpenSCAD was killed on the render timeout",
+            "title": "Timed Out",
+            "type": "boolean"
           }
         },
         "required": [

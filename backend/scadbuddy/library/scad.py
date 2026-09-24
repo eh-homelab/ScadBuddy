@@ -14,12 +14,17 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.render.runner import OpenSCADError, ProcessOutput, run_openscad
+from scadbuddy.render.runner import OpenSCADError, ProcessOutput, RenderTimeoutError, run_openscad
 from scadbuddy.render.schema import CustomizerSchema, build_schema
 
 logger = logging.getLogger(__name__)
 
 NUL = b"\x00"
+
+#: ScadBuddy's own sidecars in a model directory. Everything else beside the source is
+#: something the source may `include`, `use`, `import` or `surface`, so it comes along
+#: when a candidate is checked against that directory.
+SIDECARS = frozenset({"model.scad", "model.json", "thumbnail.png", "README.md"})
 
 Severity = Literal["error", "warning", "trace"]
 
@@ -55,6 +60,9 @@ class Diagnostic(BaseModel):
 class SourceCheck(BaseModel):
     ok: bool
     checked: bool = Field(description="False when no openscad binary was available to ask")
+    timed_out: bool = Field(
+        default=False, description="True when OpenSCAD was killed on the render timeout"
+    )
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     log_tail: list[str] = Field(default_factory=list)
     parameters: int | None = Field(
@@ -106,8 +114,32 @@ def parse_diagnostics(log: list[str]) -> list[Diagnostic]:
     return diagnostics
 
 
+def _stage(source: str, directory: Path, context: Path | None) -> Path:
+    """Write the candidate source into a sandbox, beside whatever it may include.
+
+    Without the context copy, `include <helper.scad>` cannot resolve — OpenSCAD looks
+    beside the file it is given — and a missing include is only a WARNING, so the check
+    would pass and hand back a schema missing everything the helper declared.
+    """
+    if context is not None and context.is_dir():
+        for entry in context.iterdir():
+            if entry.name in SIDECARS:
+                continue
+            if entry.is_dir():
+                shutil.copytree(entry, directory / entry.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(entry, directory / entry.name)
+    scad_path = directory / "model.scad"
+    scad_path.write_text(source, encoding="utf-8")
+    return scad_path
+
+
 async def inspect_source(
-    source: str, *, config: Config, limit: asyncio.Semaphore | None = None
+    source: str,
+    *,
+    config: Config,
+    limit: asyncio.Semaphore | None = None,
+    context: Path | None = None,
 ) -> CheckedSource:
     """Parse-check the source and derive its customizer schema, without saving anything.
 
@@ -124,6 +156,10 @@ async def inspect_source(
     typing, from any number of tabs, and none of this goes through the render queue —
     without a cap the only bound on concurrent ``openscad`` processes is how fast
     people type.
+
+    ``context`` is an existing model's directory, whose sibling files are copied in
+    beside the candidate so ``include``/``use``/``surface`` resolve exactly as they
+    will on render.
     """
     if shutil.which(config.openscad) is None:
         logger.warning("openscad is not on PATH; the parse check cannot run")
@@ -131,9 +167,9 @@ async def inspect_source(
 
     derivation: Diagnostic | None = None
     schema: CustomizerSchema | None = None
+    timed_out = False
     with tempfile.TemporaryDirectory(prefix="scadbuddy-check-") as tmp:
-        scad_path = Path(tmp) / "model.scad"
-        scad_path.write_text(source, encoding="utf-8")
+        scad_path = _stage(source, Path(tmp), context)
         param_path = Path(tmp) / "model.param"
         args = ["-o", str(param_path), scad_path.name]
         try:
@@ -141,6 +177,16 @@ async def inspect_source(
                 output: ProcessOutput = await run_openscad(
                     args, cwd=scad_path.parent, config=config
                 )
+        except RenderTimeoutError as error:
+            # A timeout is not a parse failure, and saying so is the difference between
+            # "your model is broken" and "your model is slow".
+            timed_out = True
+            log_tail = error.log_tail
+            returncode = error.returncode
+            derivation = Diagnostic(
+                severity="error",
+                message=f"the check timed out after {config.render_timeout:g}s",
+            )
         except OpenSCADError as error:
             log_tail = error.log_tail
             returncode = error.returncode
@@ -168,6 +214,7 @@ async def inspect_source(
         check=SourceCheck(
             ok=ok,
             checked=True,
+            timed_out=timed_out,
             diagnostics=diagnostics,
             log_tail=log_tail,
             parameters=len(schema.parameters) if ok and schema is not None else None,
@@ -177,7 +224,11 @@ async def inspect_source(
 
 
 async def check_source(
-    source: str, *, config: Config, limit: asyncio.Semaphore | None = None
+    source: str,
+    *,
+    config: Config,
+    limit: asyncio.Semaphore | None = None,
+    context: Path | None = None,
 ) -> SourceCheck:
     """The verdict alone, for callers with nothing to store."""
-    return (await inspect_source(source, config=config, limit=limit)).check
+    return (await inspect_source(source, config=config, limit=limit, context=context)).check

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
@@ -28,7 +29,7 @@ from scadbuddy.library.scad import (
     decode_source,
     inspect_source,
 )
-from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename, slugify
+from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_filename, slugify
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -88,6 +89,15 @@ class SourceReplacement(BaseModel):
 
 class CheckRequest(BaseModel):
     source: str = Field(description="The OpenSCAD source to parse-check")
+    slug: str | None = Field(
+        default=None,
+        pattern=SLUG_PATTERN,
+        max_length=100,
+        description=(
+            "An existing model whose directory the source is checked against, so its "
+            "`include`/`use` of sibling files resolve as they will on render"
+        ),
+    )
 
 
 def _malformed_body(error: Exception) -> ApiError:
@@ -119,7 +129,12 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
 
 
 async def _guard_source(
-    source: str, *, config: Config, force: bool, limit: asyncio.Semaphore
+    source: str,
+    *,
+    config: Config,
+    force: bool,
+    limit: asyncio.Semaphore,
+    context: Path | None = None,
 ) -> CheckedSource | None:
     """Parse-check the source, unless the caller insisted on saving it regardless.
 
@@ -128,12 +143,14 @@ async def _guard_source(
     """
     if force:
         return None
-    checked = await inspect_source(source, config=config, limit=limit)
+    checked = await inspect_source(source, config=config, limit=limit, context=context)
     if not checked.check.ok:
-        raise _rejected(
-            NotOpenSCADError("OpenSCAD could not parse the source", checked.check.log_tail),
-            checked.check,
+        why = (
+            "the parse check timed out"
+            if checked.check.timed_out
+            else "OpenSCAD could not parse the source"
         )
+        raise _rejected(NotOpenSCADError(why, checked.check.log_tail), checked.check)
     return checked
 
 
@@ -307,9 +324,14 @@ async def _create(
     ),
 )
 async def check_model_source(
-    body: CheckRequest, config: ConfigDep, checks: ChecksDep
+    body: CheckRequest,
+    config: ConfigDep,
+    checks: ChecksDep,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
 ) -> SourceCheck:
-    return await check_source(body.source, config=config, limit=checks)
+    context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
+    return await check_source(body.source, config=config, limit=checks, context=context)
 
 
 @router.get("/models/{slug}", response_model=ModelRecord, summary="Model metadata")
@@ -360,7 +382,15 @@ async def put_source(
     checks: ChecksDep,
 ) -> ModelRecord:
     require_model(catalogue, slug)
-    checked = await _guard_source(body.source, config=config, force=body.force, limit=checks)
+    checked = await _guard_source(
+        body.source,
+        config=config,
+        force=body.force,
+        limit=checks,
+        # The model's own directory, so a replacement that includes a sibling file is
+        # checked — and has its schema derived — against the files it will really see.
+        context=paths.model_dir(slug),
+    )
     paths.model_source(slug).write_text(body.source, encoding="utf-8")
     if checked is not None and checked.schema is not None:
         store_cached_schema(paths.model_meta(slug), checked.schema)

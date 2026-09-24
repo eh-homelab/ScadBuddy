@@ -18,6 +18,8 @@ interface Props {
   onSourceChange: (next: string) => void
   /** The model URI the editor opens the source under. */
   uri: string
+  /** An existing model, so its sibling includes resolve while checking. */
+  slug?: string
   saveLabel: string
   canSave: boolean
   onSave: (force: boolean) => Promise<void>
@@ -41,6 +43,7 @@ export function SourceWorkbench({
   source,
   onSourceChange,
   uri,
+  slug,
   saveLabel,
   canSave,
   onSave,
@@ -60,7 +63,7 @@ export function SourceWorkbench({
     let cancelled = false
     setChecking(true)
     api
-      .checkSource(settled)
+      .checkSource(settled, slug)
       .then((result) => {
         if (!cancelled) setVerdict({ source: settled, result })
       })
@@ -75,7 +78,7 @@ export function SourceWorkbench({
     return () => {
       cancelled = true
     }
-  }, [settled])
+  }, [settled, slug])
 
   // A verdict about older text is not a verdict about this one.
   const check = verdict?.source === source ? verdict.result : undefined
@@ -161,6 +164,15 @@ function CheckReport({ check, checking }: { check: SourceCheck | undefined; chec
       <p className="text-[12px] text-faint">
         OpenSCAD parses the source as you type. Errors appear here and in the editor,
         against their line.
+      </p>
+    )
+  }
+
+  if (check.timed_out) {
+    return (
+      <p role="alert" className="text-[13px] text-warn">
+        The check timed out. The source may be valid but slow to evaluate — saving it
+        will hit the same limit.
       </p>
     )
   }

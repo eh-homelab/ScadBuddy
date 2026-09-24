@@ -53,6 +53,7 @@ export function EditSourcePage() {
         </>
       }
       uri={`file:///models/${slug}/model.scad`}
+      slug={slug}
       source={source}
       onSourceChange={setSource}
       saveLabel="Save source"

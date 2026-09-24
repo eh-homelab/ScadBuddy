@@ -143,6 +143,7 @@ function checkOf(source: string): SourceCheck {
     return {
       ok: true,
       checked: true,
+      timed_out: false,
       diagnostics: [],
       log_tail: [],
       // The real check derives the schema in the same run, so it can say how many
@@ -159,6 +160,7 @@ function checkOf(source: string): SourceCheck {
   return {
     ok: false,
     checked: true,
+    timed_out: false,
     diagnostics: [diagnostic],
     log_tail: [`ERROR: Parser error: syntax error in file model.scad, line ${failure.line}`],
   }
@@ -238,7 +240,7 @@ export const handlers = [
   }),
 
   http.post(`${base}/models/check`, async ({ request }) => {
-    const body = (await request.json()) as { source: string }
+    const body = (await request.json()) as { source: string; slug?: string | null }
     await delay(80)
     return HttpResponse.json(checkOf(body.source))
   }),

@@ -12,7 +12,7 @@ from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import scad
 from scadbuddy.library.scad import check_source, parse_diagnostics
-from scadbuddy.render.runner import ProcessOutput
+from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 
 BROKEN = "// a keychain\nsize = 10;\ncube([size, size, size)\n"
 FINE = '/* [Main] */\n// Width\nwidth = 10; // [1:100]\nname = "hi";\ncube([width, 10, 2]);\n'
@@ -139,3 +139,58 @@ async def test_an_unusable_param_export_is_a_diagnostic_and_not_a_crash(
     assert result.ok is False
     assert "could not be derived" in result.errors[0].message
     assert result.parameters is None
+
+
+async def test_a_timeout_says_so_instead_of_blaming_the_syntax(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+        raise RenderTimeoutError("openscad timed out after 120s", ["Compiling design..."])
+
+    monkeypatch.setattr(scad, "run_openscad", fake_run)
+    monkeypatch.setattr("scadbuddy.library.scad.shutil.which", lambda _: "/usr/bin/openscad")
+
+    result = await check_source(FINE, config=Config(openscad="openscad", render_timeout=120))
+    assert (result.ok, result.timed_out) == (False, True)
+    assert "timed out" in result.errors[0].message
+
+
+@pytest.mark.requires_openscad
+async def test_a_sibling_include_resolves_when_the_model_directory_comes_along(
+    tmp_path: Path,
+) -> None:
+    """Checked in its own directory, an edit to a model that includes a sibling file
+    reads clean; checked in an empty one, OpenSCAD warns about a file that is there."""
+    model_dir = tmp_path / "widget"
+    model_dir.mkdir()
+    (model_dir / "helper.scad").write_text("helper_depth = 4;\n", encoding="utf-8")
+    source = (
+        'include <helper.scad>\n/* [Main] */\n// Label\nlabel = "hi";\n'
+        "cube([10, 2, helper_depth]);\n"
+    )
+
+    with_context = await check_source(source, config=load_config(), context=model_dir)
+    assert (with_context.ok, with_context.diagnostics) == (True, [])
+
+    without_context = await check_source(source, config=load_config())
+    assert any("include" in d.message for d in without_context.diagnostics)
+
+    # Measured against OpenSCAD 2026.09.23: the .param export carries only the MAIN
+    # file's literal-initialised top-level variables, so the derived schema is the same
+    # either way — the include changes the diagnostics, never the parameter set.
+    assert with_context.parameters == without_context.parameters == 1
+
+
+@pytest.mark.requires_openscad
+async def test_the_model_directory_sidecars_are_left_behind(tmp_path: Path) -> None:
+    """Copying a thumbnail into every check would be pure waste."""
+    model_dir = tmp_path / "widget"
+    model_dir.mkdir()
+    (model_dir / "thumbnail.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"0" * 4096)
+    (model_dir / "helper.scad").write_text("helper_depth = 4;\n", encoding="utf-8")
+
+    staged = tmp_path / "sandbox"
+    staged.mkdir()
+    scad._stage("cube(1);\n", staged, model_dir)
+
+    assert sorted(path.name for path in staged.iterdir()) == ["helper.scad", "model.scad"]

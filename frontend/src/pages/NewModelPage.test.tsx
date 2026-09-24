@@ -1,8 +1,10 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { BROKEN_SOURCE, keychainSchema, keychainSource } from '../mocks/fixtures'
+import { server } from '../mocks/server'
 import { NewModelPage } from './NewModelPage'
 
 // Monaco needs layout, workers and a canvas, none of which jsdom has; the real editor
@@ -126,5 +128,25 @@ describe('NewModelPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'Save and customize' }))
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('slug'))
+  })
+
+  it('says a check that timed out timed out, rather than blaming the syntax', async () => {
+    server.use(
+      http.post('/api/v1/models/check', () =>
+        HttpResponse.json({
+          ok: false,
+          checked: true,
+          timed_out: true,
+          diagnostics: [{ severity: 'error', message: 'the check timed out after 120s' }],
+          log_tail: [],
+        }),
+      ),
+    )
+
+    const { user } = renderNew()
+    await paste(user, keychainSource)
+
+    expect(await screen.findByText(/check timed out/)).toBeInTheDocument()
+    expect(screen.queryByText('OpenSCAD could not parse this.')).not.toBeInTheDocument()
   })
 })

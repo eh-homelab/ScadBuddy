@@ -661,6 +661,11 @@ export interface components {
         /** CheckRequest */
         CheckRequest: {
             /**
+             * Slug
+             * @description An existing model whose directory the source is checked against, so its `include`/`use` of sibling files resolve as they will on render
+             */
+            slug?: string | null;
+            /**
              * Source
              * @description The OpenSCAD source to parse-check
              */
@@ -1496,6 +1501,12 @@ export interface components {
              * @description Customizer parameters derived, when the source got that far
              */
             parameters?: number | null;
+            /**
+             * Timed Out
+             * @description True when OpenSCAD was killed on the render timeout
+             * @default false
+             */
+            timed_out: boolean;
         };
         /** SourceReplacement */
         SourceReplacement: {
