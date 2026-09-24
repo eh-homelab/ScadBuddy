@@ -1,4 +1,4 @@
-import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
+import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { Output, ParamValue } from '../api/types'
@@ -14,6 +14,9 @@ import { defaultValues, type ParamValues } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
+
+/** One shared empty map, so "nothing yet" keeps a stable identity across renders. */
+const NOTHING: ParamValues = Object.freeze({})
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
@@ -33,7 +36,13 @@ export function CustomizePage() {
     [reopenId, preloaded !== null],
   )
 
-  const [values, setValues] = useState<ParamValues>({})
+  // `edited` is what the user has changed; `seed` is what the page opened on. Keeping
+  // them apart is what lets the first paint already carry the right values — seeding
+  // through an effect runs after that paint, which is one frame of the wrong numbers.
+  const [edits, setEdits] = useState<{ of: ParamValues | null; values: ParamValues | null }>({
+    of: null,
+    values: null,
+  })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
 
@@ -45,11 +54,25 @@ export function CustomizePage() {
   const foreign = resolved && resolved.slug !== slug ? resolved : undefined
   const reopened = foreign ? undefined : resolved
 
-  useEffect(() => {
-    // Wait for the reopened values rather than rendering the defaults first.
-    if (!schema || reopenState.loading) return
-    setValues(reopened ? { ...defaultValues(schema), ...reopened.params } : defaultValues(schema))
-  }, [schema, reopened, reopenState.loading])
+  // useAsync reports loading whether or not it has anything to fetch, so reading it
+  // directly would hold the values back for a render even when the target is already
+  // in hand — long enough to paint the schema defaults and snap off them.
+  const resolving = Boolean(reopenId) && !preloaded && reopenState.loading
+
+  const seed = useMemo(
+    // Null until there is something to show: the schema has to be here, and a deep
+    // link's values have to have arrived, before the defaults are the right answer.
+    () =>
+      schema && !resolving
+        ? reopened
+          ? { ...defaultValues(schema), ...reopened.params }
+          : defaultValues(schema)
+        : null,
+    [schema, reopened, resolving],
+  )
+  // A different model, or a different output, discards edits made against the old one.
+  if (edits.of !== seed) setEdits({ of: seed, values: null })
+  const values = edits.values ?? seed ?? NOTHING
 
   const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
   const { job, rendering, error: renderError } = useRenderJob(slug, debounced)
@@ -59,11 +82,14 @@ export function CustomizePage() {
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const onChange = useCallback((name: string, value: ParamValue) => {
-    setValues((current) => ({ ...current, [name]: value }))
+    setEdits((current) => ({
+      of: current.of,
+      values: { ...(current.values ?? current.of ?? NOTHING), [name]: value },
+    }))
   }, [])
 
   const onReset = useCallback(() => {
-    if (schema) setValues(defaultValues(schema))
+    if (schema) setEdits((current) => ({ of: current.of, values: defaultValues(schema) }))
   }, [schema])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])

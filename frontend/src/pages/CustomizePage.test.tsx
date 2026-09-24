@@ -228,6 +228,34 @@ describe('CustomizePage', () => {
     )
   })
 
+  it('never paints the schema defaults before a handed-over output\'s values', async () => {
+    // The panel mounts with whatever `values` holds at that commit, so the value the
+    // input carries when it first enters the DOM is the one the user would see.
+    const id = 'c'.repeat(32)
+    const first: string[] = []
+    const observer = new MutationObserver(() => {
+      const input = document.querySelector<HTMLInputElement>('input[type="text"]')
+      if (input && first.length === 0) first.push(input.value)
+    })
+    observer.observe(document.body, { childList: true, subtree: true })
+
+    render(`/m/name-keychain?from=${id}`, {
+      editTarget: {
+        output_id: id,
+        slug: 'name-keychain',
+        name: 'Handed over',
+        params: { name: 'Handed over' },
+        model_version: null,
+        source: 'record',
+      },
+    })
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Handed over'),
+    )
+    observer.disconnect()
+    expect(first).toEqual(['Handed over'])
+  })
+
   it('counts changes against the model defaults', async () => {
     const { user } = render()
     await firstRender()
