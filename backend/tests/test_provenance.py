@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import zipfile
 from pathlib import Path
 from xml.etree import ElementTree as ET
@@ -12,6 +13,7 @@ import trimesh
 from scadbuddy.render.bambu3mf import CORE_NS, write_bambu_3mf
 from scadbuddy.render.provenance import (
     PROVENANCE_KEY,
+    ROOT_MODEL,
     SCADBUDDY_NS,
     Provenance,
     read,
@@ -213,3 +215,22 @@ def test_the_version_ignores_the_renderers_transient_wrapper(tmp_path: Path) -> 
         "include <model.scad>\n", encoding="utf-8"
     )
     assert source_version(model) == alone
+
+
+def test_a_root_model_the_stamp_cannot_splice_is_refused(written: Path) -> None:
+    """The splice assumes the writer's shape; say so instead of emitting broken XML.
+
+    ``_stamped_root_model`` opens the tag by replacing its final ``>``. Against a
+    self-closing ``<model .../>`` that would eat the slash and produce XML no
+    reader can parse — silently, since nothing re-parses on the write path.
+    """
+    with zipfile.ZipFile(written) as archive:
+        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
+    with zipfile.ZipFile(written, "w", zipfile.ZIP_DEFLATED) as archive:
+        for name, payload in entries:
+            if name == ROOT_MODEL:
+                payload = re.sub(rb"<model\b[^>]*>.*", b"<model/>", payload, flags=re.DOTALL)
+            archive.writestr(name, payload)
+
+    with pytest.raises(ValueError, match="self-closing"):
+        stamp(written, PROVENANCE)

@@ -86,6 +86,11 @@ def _stamped_root_model(xml: str, provenance: Provenance) -> str:
     if tag is None:
         raise ValueError("the 3MF root model has no <model> element")
     opening = tag.group(0)
+    if opening.endswith("/>"):
+        # The namespace is added by replacing the tag's final ">", which would eat
+        # the slash here and leave XML nothing can parse. Nothing re-reads the file
+        # on the write path, so refuse loudly rather than ship a broken 3MF.
+        raise ValueError("the 3MF root model is self-closing; nothing to stamp onto")
     rest = _OWNED.sub("", xml[tag.end() :])
     if f"xmlns:{NS_PREFIX}=" not in opening:
         opening = f'{opening[:-1]} xmlns:{NS_PREFIX}="{SCADBUDDY_NS}">'
