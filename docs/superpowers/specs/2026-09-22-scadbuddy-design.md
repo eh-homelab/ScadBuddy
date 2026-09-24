@@ -357,6 +357,18 @@ product and a PNG writer are the whole requirement, and numpy plus stdlib
 `zlib` already carry all three. The output is then a pure function of the mesh,
 with no driver or GL implementation in it.
 
+It runs off the event loop and under the same `SCADBUDDY_RENDER_TIMEOUT` budget
+as a render (`render.jobs.plate_thumbnails`). §6.1's guarantee is that a job is
+time-bounded, and until now that was delivered by killing an `openscad` child;
+this step has no child to kill, and its cost rises with face count, so a mesh
+each OpenSCAD pass produced well inside its own budget could still rasterise for
+far longer than the whole job is meant to take. Blowing the budget costs the
+cover images, not the job: the 3MF is written without them, and the `png`
+content type, the three cover relationships and the plate's `thumbnail_file` /
+`top_file` / `pick_file` come out with them, so the package never carries a
+reference to an entry it does not hold. The job reports
+`plate thumbnail timed out; the 3MF carries no cover image` in `warnings`.
+
 ### 6.3 Closed parts: one solid render per colour
 
 A user-defined `color` module shadows the builtin (§3), so ScadBuddy writes a
