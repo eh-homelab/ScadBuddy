@@ -149,9 +149,12 @@ async def inspect_source(
             returncode = output.returncode
             try:
                 schema = build_schema(json.loads(param_path.read_text(encoding="utf-8")), source)
-            except (OSError, ValueError) as error:
+            except (OSError, ValueError, KeyError, TypeError) as error:
                 # It parsed, but the customizer schema cannot be built from it — the
-                # model would save and then open with no parameter panel.
+                # model would save and then open with no parameter panel. KeyError and
+                # TypeError are in the list because `build_schema` subscripts the
+                # export's dicts directly: a `.param` entry without a `name`, or an
+                # option without a `value`, raises neither OSError nor ValueError.
                 derivation = Diagnostic(
                     severity="error",
                     message=f"the customizer schema could not be derived: {error}",

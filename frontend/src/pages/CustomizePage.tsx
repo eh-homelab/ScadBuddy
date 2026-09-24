@@ -90,21 +90,21 @@ export function CustomizePage() {
           )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
-        <Link
-          to={`/m/${slug}/source`}
-          className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-        >
-          Edit source
-        </Link>
-        <Link
-          to={`/m/${slug}/history`}
-          className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-        >
-          History
-          {outputsState.data && outputsState.data.length > 0 && (
-            <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
-          )}
-        </Link>
+          <Link
+            to={`/m/${slug}/source`}
+            className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Edit source
+          </Link>
+          <Link
+            to={`/m/${slug}/history`}
+            className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            History
+            {outputsState.data && outputsState.data.length > 0 && (
+              <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
+            )}
+          </Link>
         </div>
       </div>
 

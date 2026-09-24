@@ -111,7 +111,31 @@ async def test_the_check_runs_no_more_openscads_at_once_than_its_cap(
     assert peak == 2
 
 
-def test_the_checks_cap_is_the_render_concurrency() -> None:
+async def test_the_checks_cap_is_the_render_concurrency() -> None:
     """The cap the routes hand to the check comes from the same knob renders obey."""
     state = build_state(Settings(render_concurrency=3, frontend_dir=Path("/nonexistent")))
-    assert state.checks._value == 3
+
+    for _ in range(3):
+        await asyncio.wait_for(state.checks.acquire(), timeout=0.1)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(state.checks.acquire(), timeout=0.05)
+
+
+async def test_an_unusable_param_export_is_a_diagnostic_and_not_a_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`build_schema` subscripts the export directly, so a missing key is a KeyError."""
+
+    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+        Path(args[1]).write_text(
+            json.dumps({"parameters": [{"type": "number", "initial": 1}]}), encoding="utf-8"
+        )
+        return ProcessOutput(returncode=0, log_tail=[], duration_s=0.01)
+
+    monkeypatch.setattr(scad, "run_openscad", fake_run)
+    monkeypatch.setattr("scadbuddy.library.scad.shutil.which", lambda _: "/usr/bin/openscad")
+
+    result = await check_source(FINE, config=Config(openscad="openscad"))
+    assert result.ok is False
+    assert "could not be derived" in result.errors[0].message
+    assert result.parameters is None
