@@ -201,6 +201,54 @@ class TestPlacement:
         ]
         assert max(gaps) >= TOWER_CLEARANCE, f"tower is too close to the object: {gaps}"
 
+    @staticmethod
+    def _cutout_plate(exclusions: tuple[Rect, ...]) -> PlateGeometry:
+        return PlateGeometry(
+            model="Test Cutout",
+            size=(120.0, 256.0),
+            usable=Rect(0.0, 0.0, 120.0, 256.0),
+            exclusions=exclusions,
+            extruders=2,
+        )
+
+    def test_a_tower_landing_on_a_cutout_falls_through_to_another_side(self) -> None:
+        """Forces the one line standing between a tower and the filament cutter.
+
+        The shipping-profile tests never reach it — on a P1S the front corner
+        works out around x=95, nowhere near the 0-18 mm cutout — so deleting
+        ``_tower_corner``'s exclusion check broke nothing. Here the front
+        candidate lands squarely on the cutout, so falling through to another
+        side is the only way to pass.
+        """
+        cutout = Rect(0.0, 0.0, 60.0, 70.0)
+        without = place_on_plate(_bounds(40.0, 40.0), self._cutout_plate(()))
+        assert without.tower is not None
+
+        with_cutout = place_on_plate(_bounds(40.0, 40.0), self._cutout_plate((cutout,)))
+        assert with_cutout.tower is not None
+        reserved = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM
+        corner_x = with_cutout.tower[0] - PRIME_TOWER_BRIM
+        corner_y = with_cutout.tower[1] - PRIME_TOWER_BRIM
+        footprint = Rect(corner_x, corner_y, corner_x + reserved, corner_y + reserved)
+        assert not footprint.overlaps(cutout), f"tower {footprint} sits in the cutout"
+        assert with_cutout.tower != without.tower, "the cutout should have moved it"
+
+    def test_an_object_within_the_edge_margin_of_full_width_still_fits(self) -> None:
+        """``EDGE_MARGIN`` keeps the *tower* off the edge; it must not shrink the
+        object's bound on the axis the tower does not compete for.
+
+        A 298 x 200 mm two-colour model on an H2C (300 mm reachable) was refused
+        with "no room for the prime tower" because the front/back remainder
+        inherited the tower's inset on X, losing 2 x EDGE_MARGIN of width it had
+        no claim to.
+        """
+        plate = plate_for("H2C")
+        assert plate.usable.width == 300.0
+        placement = place_on_plate(_bounds(298.0, 200.0), plate)
+        assert placement.tower is not None
+        assert plate.usable.min_x <= placement.offset[0]
+        assert placement.offset[0] + 298.0 <= plate.usable.max_x
+
     def test_an_object_wider_than_the_plate_is_refused_naming_the_axis(self) -> None:
         with pytest.raises(PlateFitError, match=r"340.*on X.*300"):
             place_on_plate(_bounds(340.0, 40.0), plate_for("H2C"))

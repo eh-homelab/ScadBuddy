@@ -59,6 +59,12 @@ export type EligibilityIssue = Schemas['EligibilityIssue']
 export type PerPrinterReport = Schemas['PerPrinterReport']
 export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
+export type PrintOptions = Schemas['PrintOptions']
+export type PrintOptionsView = Schemas['PrintOptionsView']
+export type PrintOptionsState = Schemas['PrintOptionsState']
+export type PrintOptionsUpdate = Schemas['PrintOptionsUpdate']
+/** Where an override is remembered. `request` is not one — it is not remembered. */
+export type OptionScope = PrintOptionsUpdate['scope']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

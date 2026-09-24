@@ -14,6 +14,9 @@ import type {
   PresetOptions,
   PresetRef,
   PrintRunResult,
+  PrintOptions,
+  PrintOptionsState,
+  PrintOptionsUpdate,
   SendResult,
   Settings,
 } from '../api/types'
@@ -31,6 +34,7 @@ const state = {
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
   settings: { ...fixtures.settings } as Settings,
+  printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
@@ -48,6 +52,7 @@ export function resetMockState(): void {
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.settings = { ...fixtures.settings }
+  state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
@@ -590,6 +595,30 @@ export const handlers = [
   }),
 
   // Takes no body: the server tests what it has stored.
+  http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),
+
+  // Mirrors the server: one scope is replaced wholesale, and an all-unset overlay
+  // removes it rather than storing an empty object.
+  http.put(`${base}/settings/print-options`, async ({ request }) => {
+    const body = (await request.json()) as PrintOptionsUpdate
+    const options = body.options as PrintOptions
+    const empty = Object.values(options).every((value) => value === null || value === undefined)
+    if (body.scope === 'global') {
+      state.printOptions.global_options = empty ? {} : options
+    } else {
+      const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
+      if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      if (empty) delete map[body.key]
+      else map[body.key] = options
+    }
+    // Shaped like the real response, which is declared `response_model=PrintOptionsView`
+    // and so cannot carry `printer_id` however much the server-side object holds. Reusing
+    // the GET's object here would let a component that reads `printer_id` off a PUT
+    // result pass in tests and break in the browser.
+    const { defaults, global_options, printers, models } = state.printOptions
+    return HttpResponse.json({ defaults, global_options, printers, models })
+  }),
+
   http.post(`${base}/settings/test`, async () => {
     await delay(200)
     if (!state.settings.bambuddy_url?.startsWith('http')) {
@@ -620,7 +649,7 @@ export const handlers = [
     if (created) state.sidebarLinkId = 3
     return HttpResponse.json({
       id: state.sidebarLinkId,
-      name: 'Customize',
+      name: 'ScadBuddy',
       url: state.settings.public_url ?? '',
       icon: 'shapes',
       open_in_new_tab: false,

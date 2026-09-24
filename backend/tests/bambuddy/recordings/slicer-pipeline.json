@@ -1,0 +1,28 @@
+{
+    "name": "Default",
+    "description": null,
+    "printer_preset": {
+        "source": "cloud",
+        "id": "GM041"
+    },
+    "process_preset": {
+        "source": "cloud",
+        "id": "GP243"
+    },
+    "filament_presets": [
+        {
+            "source": "cloud",
+            "id": "GFSG00_23"
+        }
+    ],
+    "bed_type": "Textured PEI Plate",
+    "id": 1,
+    "created_by": null,
+    "created_at": "2026-09-23T08:04:11.777789",
+    "updated_at": "2026-09-24T00:52:05.008846",
+    "target_kind": "specific_printer",
+    "target_printer_id": 1,
+    "target_model_class": null,
+    "fanout_strategy": "max_parallel"
+}
+

@@ -227,29 +227,43 @@ def _clear_of_exclusions(
     return None
 
 
-def _tower_sides(area: Rect, tower: float) -> list[tuple[str, Rect, Rect]]:
-    """``(name, strip, remainder)`` for each edge the tower could sit against."""
+def _tower_sides(inset: Rect, area: Rect, tower: float) -> list[tuple[str, Rect, Rect]]:
+    """``(name, strip, remainder)`` for each edge the tower could sit against.
+
+    Two rectangles, deliberately not the same one. The ``strip`` the tower takes
+    comes from ``inset`` — :data:`EDGE_MARGIN` keeps the tower and its brim off
+    the edge of the reachable area. The ``remainder`` the object is moved into
+    comes from ``area``, because that margin exists for the tower and there is no
+    reason to charge the object for it: shrinking the object's bound on the axis
+    the tower does not even compete for cost 2 x ``EDGE_MARGIN`` of usable size
+    and refused models that fit. A 298 x 200 mm two-colour model on an H2C
+    (300 mm of reachable width) was rejected with "no room for the prime tower"
+    while a valid placement existed — object at (175, 195.5), tower at (145, 5).
+
+    Only the axis the tower eats into is narrowed, and by ``band``: the tower
+    plus the clearance the object has to keep from it.
+    """
     band = tower + TOWER_CLEARANCE
     return [
         (
             "front",
-            Rect(area.min_x, area.min_y, area.max_x, area.min_y + tower),
-            Rect(area.min_x, area.min_y + band, area.max_x, area.max_y),
+            Rect(inset.min_x, inset.min_y, inset.max_x, inset.min_y + tower),
+            Rect(area.min_x, inset.min_y + band, area.max_x, area.max_y),
         ),
         (
             "back",
-            Rect(area.min_x, area.max_y - tower, area.max_x, area.max_y),
-            Rect(area.min_x, area.min_y, area.max_x, area.max_y - band),
+            Rect(inset.min_x, inset.max_y - tower, inset.max_x, inset.max_y),
+            Rect(area.min_x, area.min_y, area.max_x, inset.max_y - band),
         ),
         (
             "left",
-            Rect(area.min_x, area.min_y, area.min_x + tower, area.max_y),
-            Rect(area.min_x + band, area.min_y, area.max_x, area.max_y),
+            Rect(inset.min_x, inset.min_y, inset.min_x + tower, inset.max_y),
+            Rect(inset.min_x + band, area.min_y, area.max_x, area.max_y),
         ),
         (
             "right",
-            Rect(area.max_x - tower, area.min_y, area.max_x, area.max_y),
-            Rect(area.min_x, area.min_y, area.max_x - band, area.max_y),
+            Rect(inset.max_x - tower, inset.min_y, inset.max_x, inset.max_y),
+            Rect(area.min_x, area.min_y, inset.max_x - band, area.max_y),
         ),
     ]
 
@@ -372,12 +386,12 @@ def place_on_plate(bounds: np.ndarray, plate: PlateGeometry, *, tower: bool = Tr
     object_centre = _clear_of_exclusions(area.centre, width, depth, plate)
     if object_centre is not None:
         centred = _rect_at(object_centre)
-        for side, strip, _remainder in _tower_sides(inset, reserved):
+        for side, strip, _remainder in _tower_sides(inset, area, reserved):
             corner = _tower_corner(side, strip, centred, plate, reserved)
             if corner is not None:
                 return Placement(offset=_offset(object_centre), tower=corner)
 
-    for side, strip, remainder in _tower_sides(inset, reserved):
+    for side, strip, remainder in _tower_sides(inset, area, reserved):
         if width > remainder.width or depth > remainder.depth:
             continue
         moved_centre = _clear_of_exclusions(remainder.centre, width, depth, plate, region=remainder)

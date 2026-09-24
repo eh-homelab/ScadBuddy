@@ -103,7 +103,11 @@ def _placement(parts: Sequence[ColourPart], plate: PlateGeometry) -> Placement:
     try:
         return place_on_plate(bounds, plate, tower=len(parts) > 1)
     except PlateFitError:
-        if plate is not DEFAULT_PLATE:
+        # "No printer chosen" is a property of the plate, not of which object was
+        # passed. An identity test against the shared singleton would silently
+        # take the hard-refuse branch for an equivalent fallback built any other
+        # way, with neither a type error nor a failing test to catch it.
+        if plate.model is not None:
             raise
         # Nobody chose the fallback plate, so it is not grounds for refusing a
         # render. ``replate_3mf`` re-checks against the printer that is chosen.

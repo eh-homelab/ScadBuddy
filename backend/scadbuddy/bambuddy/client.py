@@ -224,6 +224,21 @@ class BambuddyClient:
         )
         return PipelineList.model_validate(response.json()).pipelines
 
+    async def pipeline(self, pipeline_id: int) -> Pipeline:
+        """``GET /api/v1/slicer-pipelines/{id}`` — the presets and target of one pipeline.
+
+        Needed by the send path, not just for display: a send that carries print options
+        has to slice and queue itself, and this is where it reads the presets, bed type
+        and target to do that with.
+        """
+        response = await self._send(
+            "GET",
+            f"/slicer-pipelines/{pipeline_id}",
+            scope=Scope.MANAGE_QUEUE,
+            what=f"read slicer pipeline {pipeline_id}",
+        )
+        return Pipeline.model_validate(response.json())
+
     async def presets(self) -> PresetCatalogue:
         response = await self._send(
             "GET", "/slicer/presets", scope=Scope.MANAGE_LIBRARY, what="list the slicer presets"

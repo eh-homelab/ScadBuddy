@@ -18,6 +18,9 @@ import type {
   PresetRef,
   PrintRunRequest,
   PrintRunResult,
+  PrintOptionsState,
+  PrintOptionsUpdate,
+  PrintOptionsView,
   Problem,
   RenderAccepted,
   SendRequest,
@@ -195,6 +198,19 @@ export const api = {
 
   putSettings: (body: SettingsUpdate) =>
     request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
+
+  /** `slug` so the server resolves the printer *this model's* pipeline aims at (#86). */
+  getPrintOptions: (slug?: string) =>
+    request<PrintOptionsState>(
+      slug ? `/settings/print-options?slug=${seg(slug)}` : '/settings/print-options',
+    ),
+
+  /** Replaces one scope wholesale; an all-unset `options` clears it. */
+  putPrintOptions: (body: PrintOptionsUpdate) =>
+    request<PrintOptionsView>('/settings/print-options', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
 
   /** Tests what is *stored*, so the key never travels back out of the server. */
   testSettings: () => request<ConnectionTest>('/settings/test', { method: 'POST' }),
