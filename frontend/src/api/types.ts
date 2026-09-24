@@ -57,7 +57,12 @@ export type PipelineReport = Schemas['PipelineReport']
 export type EligibilityReport = Schemas['EligibilityReport']
 export type EligibilityIssue = Schemas['EligibilityIssue']
 export type PerPrinterReport = Schemas['PerPrinterReport']
-export type PrintRunRequest = Schemas['PrintRunRequest']
+/**
+ * The intersection is the same stale-generator stand-in as the #79 block below: the
+ * backend takes `project_id` on a run, and the generated type has not caught up. Drop it
+ * when `schema.d.ts` is regenerated.
+ */
+export type PrintRunRequest = Schemas['PrintRunRequest'] & { project_id?: number | null }
 export type PrintRunResult = Schemas['PrintRunResult']
 
 /** #87 — the filament picker's wire types. */
@@ -80,6 +85,16 @@ export type PrintProgress = Schemas['PrintProgress']
 export type CopyProgress = Schemas['CopyProgress']
 export type PrintRoute = PrintProgress['route']
 export type PrintStage = PrintProgress['stage']
+
+/**
+ * #79 — projects. A project here is one of Bambuddy's plus the library folder that
+ * belongs to it; ScadBuddy stores only which project a model's prints are filed under.
+ */
+export type ProjectView = Schemas['ProjectView']
+export type ProjectChoices = Schemas['ProjectChoices']
+export type ProjectRequest = Schemas['ProjectRequest']
+export type ProjectAttach = Schemas['ProjectAttach']
+export type AttachResult = Schemas['AttachResult']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

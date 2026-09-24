@@ -558,3 +558,54 @@ describe('PrintPicker · Filaments', () => {
     expect(screen.getByTestId('run-pipeline')).toBeEnabled()
   })
 })
+
+describe('PrintPicker · Projects', () => {
+  beforeEach(() => resetMockState())
+
+  /**
+   * #79 — the run cannot file itself. `jobs[].queue_entry_id` is null when Bambuddy
+   * answers 202, so the ids only exist once the progress read (#89) has them, and the
+   * attach is a call of its own made from what that read reported.
+   */
+  it('files the print under the chosen project once the queue entries are known', async () => {
+    const attaches: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/project')) {
+        attaches.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    server.use(
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
+      ),
+    )
+    const { user } = open()
+    await listed()
+
+    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    await waitFor(() => expect(attaches).toHaveLength(1))
+    expect(attaches[0]).toEqual({ project_id: 2, queue_item_ids: [4472, 4473] })
+  })
+
+  it('does not file a print that was sent without a project', async () => {
+    const attaches: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/project')) attaches.push(request.url)
+    })
+    server.use(
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
+      ),
+    )
+    const { user } = open()
+    await listed()
+
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+    await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
+
+    expect(attaches).toEqual([])
+  })
+})

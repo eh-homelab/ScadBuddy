@@ -4,6 +4,7 @@ import type {
   FilamentOptions,
   PipelineView,
   PresetChoice,
+  ProjectView,
   BoundingBox,
   CatalogueFont,
   CustomizerSchema,
@@ -392,6 +393,40 @@ export const eligibilityReports: Record<number, EligibilityReport> = {
     ],
   },
 }
+
+/**
+ * #79 — projects, taken from the recorded Bambuddy (`backend/tests/bambuddy/recordings/`):
+ * project 1 `Reagan Keychain` owns library folder 2 `Raegan` — Bambuddy's own spelling,
+ * and the pairing that makes its project page list files.
+ *
+ * `Gridfinity Bins` has no folder at all, which is the ordinary state of a project made
+ * in Bambuddy rather than here: linking one creates its folder rather than refusing, and
+ * the picker says so before the send.
+ */
+export const projectViews: ProjectView[] = [
+  {
+    id: 1,
+    name: 'Reagan Keychain',
+    description: null,
+    colour: '#ef4444',
+    status: 'active',
+    archive_count: 1,
+    queue_count: 0,
+    folder_id: 2,
+    folder_name: 'Raegan',
+  },
+  {
+    id: 2,
+    name: 'Gridfinity Bins',
+    description: 'Drawer inserts, printed a few at a time.',
+    colour: null,
+    status: 'active',
+    archive_count: 0,
+    queue_count: 3,
+    folder_id: null,
+    folder_name: null,
+  },
+]
 
 export const printerPresets: PresetChoice[] = [
   {

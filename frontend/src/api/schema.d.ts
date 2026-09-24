@@ -417,6 +417,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/outputs/{output_id}/project": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * File this output's queue entries under its project
+         * @description ``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
+         *
+         *     Separate from the run because neither id exists when a print starts: a pipeline
+         *     run's queue entries are created by a background task, and an archive only exists
+         *     once a print has finished. Calling this again later is how the archives eventually
+         *     land on the project's page, and attaching the same id twice is Bambuddy's to dedupe.
+         */
+        post: operations["post_attach_project_api_v1_print_outputs__output_id__project_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/outputs/{output_id}/run": {
         parameters: {
             query?: never;
@@ -492,6 +517,40 @@ export interface paths {
         get: operations["get_presets_api_v1_print_presets_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bambuddy's projects
+         * @description Every Bambuddy project, with the library folder that belongs to it (#79).
+         *
+         *     Also the project the last send went to, so the picker opens where it was left.
+         *     ScadBuddy models no relationship between a model and a project: which prints
+         *     belong to a project is on the project's own page, and keeping a second answer
+         *     here would be a copy that goes stale.
+         */
+        get: operations["get_projects_api_v1_print_projects_get"];
+        put?: never;
+        /**
+         * Create or link a project
+         * @description ``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with
+         *     ``project_id``, which is the pairing Bambuddy's own UI makes.
+         *
+         *     With ``project_id`` an existing project is linked instead of created, and its folder
+         *     is left alone if it already has one — linking twice must not leave Bambuddy with two
+         *     folders of the same name.
+         */
+        post: operations["post_project_api_v1_print_projects_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -602,6 +661,18 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AttachResult
+         * @description What was attached, so the UI can say so rather than claiming more than happened.
+         */
+        AttachResult: {
+            /** Archive Ids */
+            archive_ids?: number[];
+            /** Project Id */
+            project_id: number;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+        };
         /**
          * BambuddyTargets
          * @description Everything the settings page needs to fill its pickers.
@@ -861,10 +932,20 @@ export interface components {
             /** Slot Id */
             slot_id?: number | null;
         };
-        /** Folder */
+        /**
+         * Folder
+         * @description A row of ``GET /api/v1/library/folders``.
+         *
+         *     **The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their
+         *     parent's ``children`` rather than returning them alongside it, so a folder linked to
+         *     a project is invisible to a scan of the top level if it happens to live under
+         *     another folder. :func:`walk` is what flattens it.
+         */
         Folder: {
             /** Archive Id */
             archive_id?: number | null;
+            /** Children */
+            children?: components["schemas"]["Folder"][];
             /** File Count */
             file_count?: number | null;
             /** Id */
@@ -1090,6 +1171,8 @@ export interface components {
             pipeline_run_id?: number | null;
             /** Print Route */
             print_route?: ("pipeline" | "slice_queue") | null;
+            /** Project Id */
+            project_id?: number | null;
             /** Queue Item Id */
             queue_item_id?: number | null;
             /** Slice Job Id */
@@ -1530,6 +1613,8 @@ export interface components {
             plate_id: number;
             /** Printer Id */
             printer_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
         };
         /**
          * PrintRunResult
@@ -1542,12 +1627,16 @@ export interface components {
         PrintRunResult: {
             /** Bambuddy Url */
             bambuddy_url: string;
+            /** Folder Id */
+            folder_id?: number | null;
             /** Library File Id */
             library_file_id: number;
             /** Pipeline Id */
             pipeline_id: number;
             /** Printer Id */
             printer_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
             /** Queue Item Ids */
             queue_item_ids?: number[];
             /**
@@ -1586,6 +1675,87 @@ export interface components {
             name: string;
             /** Nozzle Count */
             nozzle_count?: number | null;
+        };
+        /**
+         * ProjectAttach
+         * @description Which of this output's queue entries to file under the project.
+         *
+         *     The ids come from the progress read (#89): a pipeline run's
+         *     ``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the
+         *     only one that knows them, and only once it has polled.
+         */
+        ProjectAttach: {
+            /** Project Id */
+            project_id?: number | null;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+        };
+        /** ProjectChoices */
+        ProjectChoices: {
+            /** Last Project Id */
+            last_project_id?: number | null;
+            /** Projects */
+            projects?: components["schemas"]["ProjectView"][];
+        };
+        /**
+         * ProjectRequest
+         * @description Create a project, or link an existing one.
+         *
+         *     ``project_id`` set means "link that one"; otherwise ``name`` is required and a new
+         *     project is created. Only the fields ScadBuddy has an opinion about are sent —
+         *     ``ProjectCreate`` also carries ``target_count``, ``due_date``, ``budget`` and more,
+         *     and inventing values for them would put numbers on Bambuddy's project page that
+         *     nobody chose.
+         */
+        ProjectRequest: {
+            /** Colour */
+            colour?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Folder Id */
+            folder_id?: number | null;
+            /** Name */
+            name?: string | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Tags */
+            tags?: string | null;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * ProjectView
+         * @description A Bambuddy project and the library folder sends to it land in.
+         *
+         *     ``folder_id`` is ``None`` for a project that has no folder yet — an existing
+         *     Bambuddy project made outside ScadBuddy usually does not, and linking one creates
+         *     it rather than refusing.
+         */
+        ProjectView: {
+            /**
+             * Archive Count
+             * @default 0
+             */
+            archive_count: number;
+            /** Colour */
+            colour?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Folder Id */
+            folder_id?: number | null;
+            /** Folder Name */
+            folder_name?: string | null;
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /**
+             * Queue Count
+             * @default 0
+             */
+            queue_count: number;
+            /** Status */
+            status: string;
         };
         /** RenderAccepted */
         RenderAccepted: {
@@ -2620,6 +2790,41 @@ export interface operations {
             };
         };
     };
+    post_attach_project_api_v1_print_outputs__output_id__project_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectAttach"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     post_run_api_v1_print_outputs__output_id__run_post: {
         parameters: {
             query?: never;
@@ -2707,6 +2912,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresetOptions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_projects_api_v1_print_projects_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectChoices"];
+                };
+            };
+        };
+    };
+    post_project_api_v1_print_projects_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectView"];
                 };
             };
             /** @description Validation Error */

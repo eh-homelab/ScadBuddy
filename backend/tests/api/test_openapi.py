@@ -21,6 +21,8 @@ EXPECTED_PATHS = {
     "/api/v1/outputs/{output_id}/thumbnail",
     "/api/v1/outputs/{output_id}/send",
     "/api/v1/print/presets",
+    "/api/v1/print/projects",
+    "/api/v1/print/outputs/{output_id}/project",
     "/api/v1/print/pipelines",
     "/api/v1/print/models/{slug}/pipelines",
     "/api/v1/print/models/{slug}/pipeline",
