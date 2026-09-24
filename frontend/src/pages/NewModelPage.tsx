@@ -42,6 +42,9 @@ export function NewModelPage() {
           </span>
         </div>
       }
+      // Fixed while the name is still being typed: the URI is the editor model's
+      // identity, and rebuilding the model on every keystroke would drop undo history.
+      uri="file:///models/new/model.scad"
       source={source}
       onSourceChange={setSource}
       saveLabel="Save and customize"

@@ -52,6 +52,7 @@ export function EditSourcePage() {
           <h1 className="truncate text-[13px] font-medium">Edit source</h1>
         </>
       }
+      uri={`file:///models/${slug}/model.scad`}
       source={source}
       onSourceChange={setSource}
       saveLabel="Save source"

@@ -54,10 +54,12 @@ async def test_a_syntax_error_is_reported_against_its_line() -> None:
 
 
 @pytest.mark.requires_openscad
-async def test_source_that_parses_passes() -> None:
+async def test_source_that_parses_passes_and_reports_its_parameters() -> None:
     result = await check_source(FINE, config=load_config())
     assert (result.checked, result.ok) == (True, True)
     assert result.errors == []
+    # `width` and `name`; the check derives the schema rather than only parsing.
+    assert result.parameters == 2
 
 
 @pytest.mark.requires_openscad
@@ -66,3 +68,9 @@ async def test_a_failed_assertion_fails_the_check_despite_exit_zero() -> None:
     result = await check_source(ASSERTS, config=load_config())
     assert result.ok is False
     assert result.errors[0].line == 2
+
+
+@pytest.mark.requires_openscad
+async def test_a_failed_check_reports_no_parameter_count() -> None:
+    result = await check_source(BROKEN, config=load_config())
+    assert result.parameters is None

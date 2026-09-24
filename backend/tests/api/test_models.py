@@ -295,3 +295,6 @@ def test_the_check_endpoint_reports_diagnostics_without_saving_anything(
 def test_the_check_endpoint_passes_source_that_parses(client: TestClient) -> None:
     body = client.post("/api/v1/models/check", json={"source": SOURCE}).json()
     assert (body["ok"], body["checked"], body["diagnostics"]) == (True, True, [])
+    # The check derives the schema too, so a source that parses but yields no
+    # customizer panel is caught here rather than after it is saved.
+    assert body["parameters"] == 2

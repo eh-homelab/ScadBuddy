@@ -8,8 +8,8 @@ import { BROKEN_SOURCE, keychainSource } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { EditSourcePage } from './EditSourcePage'
 
-vi.mock('../components/ScadEditor', () => ({
-  ScadEditor: ({
+vi.mock('../components/SourceEditor', () => ({
+  SourceEditor: ({
     value,
     onChange,
     label,

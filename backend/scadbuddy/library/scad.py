@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import shutil
@@ -11,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.core.config import Config
 from scadbuddy.render.runner import OpenSCADError, run_openscad
+from scadbuddy.render.schema import build_schema
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,9 @@ class SourceCheck(BaseModel):
     checked: bool = Field(description="False when no openscad binary was available to ask")
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     log_tail: list[str] = Field(default_factory=list)
+    parameters: int | None = Field(
+        default=None, description="Customizer parameters derived, when the source got that far"
+    )
 
     @property
     def errors(self) -> list[Diagnostic]:
@@ -87,11 +92,13 @@ def parse_diagnostics(log: list[str]) -> list[Diagnostic]:
 
 
 async def check_source(source: str, *, config: Config) -> SourceCheck:
-    """Parse-check the source by exporting its AST.
+    """Parse-check the source and derive its customizer schema, without saving anything.
 
-    ``-o <file>.ast`` is OpenSCAD's parse-only export: it dumps the parse tree and
-    never evaluates geometry, so it is cheap enough to run on every keystroke-driven
-    "Check" and still reports the same ERROR/WARNING lines a render would.
+    ``-o <file>.param`` is the customizer-parameter export: it parses the file and
+    evaluates its top-level scope, but renders no geometry, so it is cheap enough to
+    run on every edit and is the same invocation the schema is really built from.
+    Checking with a different one would let a source pass the check and still fail to
+    produce a schema.
 
     The exit code is not on its own the signal — a failed top-level ``assert`` prints
     ``ERROR:`` and still exits 0 — so an ERROR diagnostic fails the check too.
@@ -99,18 +106,43 @@ async def check_source(source: str, *, config: Config) -> SourceCheck:
     if shutil.which(config.openscad) is None:
         logger.warning("openscad is not on PATH; the parse check cannot run")
         return SourceCheck(ok=True, checked=False)
+
+    derivation: Diagnostic | None = None
+    parameters: int | None = None
     with tempfile.TemporaryDirectory(prefix="scadbuddy-check-") as tmp:
         scad_path = Path(tmp) / "model.scad"
         scad_path.write_text(source, encoding="utf-8")
-        args = ["-o", str(Path(tmp) / "model.ast"), scad_path.name]
+        param_path = Path(tmp) / "model.param"
         try:
-            output = await run_openscad(args, cwd=scad_path.parent, config=config)
+            output = await run_openscad(
+                ["-o", str(param_path), scad_path.name], cwd=scad_path.parent, config=config
+            )
         except OpenSCADError as error:
             log_tail = error.log_tail
             returncode = error.returncode
         else:
             log_tail = output.log_tail
             returncode = output.returncode
+            try:
+                schema = build_schema(json.loads(param_path.read_text(encoding="utf-8")), source)
+            except (OSError, ValueError) as error:
+                # It parsed, but the customizer schema cannot be built from it — the
+                # model would save and then open with no parameter panel.
+                derivation = Diagnostic(
+                    severity="error",
+                    message=f"the customizer schema could not be derived: {error}",
+                )
+            else:
+                parameters = len(schema.parameters)
+
     diagnostics = parse_diagnostics(log_tail)
+    if derivation is not None:
+        diagnostics.append(derivation)
     ok = returncode == 0 and not any(d.severity == "error" for d in diagnostics)
-    return SourceCheck(ok=ok, checked=True, diagnostics=diagnostics, log_tail=log_tail)
+    return SourceCheck(
+        ok=ok,
+        checked=True,
+        diagnostics=diagnostics,
+        log_tail=log_tail,
+        parameters=parameters if ok else None,
+    )

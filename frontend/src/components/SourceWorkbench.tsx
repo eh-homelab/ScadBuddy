@@ -1,10 +1,14 @@
-import { useState, type ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ApiError, api } from '../api/client'
 import type { SourceCheck } from '../api/types'
-import { errorLines, refusedCheck } from '../lib/problems'
-import { ScadEditor } from './ScadEditor'
+import { refusedCheck } from '../lib/problems'
+import { useDebounced } from '../lib/useDebounced'
+import { SourceEditor } from './SourceEditor'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
+
+/** Long enough that a burst of typing is one check, short enough to feel live. */
+export const CHECK_DEBOUNCE_MS = 700
 
 interface Props {
   breadcrumb: ReactNode
@@ -12,51 +16,71 @@ interface Props {
   fields?: ReactNode
   source: string
   onSourceChange: (next: string) => void
+  /** The model URI the editor opens the source under. */
+  uri: string
   saveLabel: string
   canSave: boolean
   onSave: (force: boolean) => Promise<void>
 }
 
+/** A verdict is only ever shown for the exact text it was computed from. */
+interface Verdict {
+  source: string
+  result: SourceCheck
+}
+
 /**
- * The paste surface shared by "New model" and "Edit source": editor, an explicit
- * Check, and a Save that only goes through once OpenSCAD is happy — or once the
- * user says "Save anyway", which is what `force` is on both write routes.
+ * The paste surface shared by "New model" and "Edit source". OpenSCAD is asked to
+ * parse the source as it settles, and again — server-side, authoritatively — on save:
+ * the write routes refuse source that does not parse unless `force` is set, which is
+ * what "Save anyway" sends.
  */
 export function SourceWorkbench({
   breadcrumb,
   fields,
   source,
   onSourceChange,
+  uri,
   saveLabel,
   canSave,
   onSave,
 }: Props) {
-  const [check, setCheck] = useState<SourceCheck | undefined>(undefined)
+  const [verdict, setVerdict] = useState<Verdict | undefined>(undefined)
   const [checking, setChecking] = useState(false)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const settled = useDebounced(source, CHECK_DEBOUNCE_MS)
+
+  useEffect(() => {
+    if (!settled.trim()) {
+      setVerdict(undefined)
+      return
+    }
+    let cancelled = false
+    setChecking(true)
+    api
+      .checkSource(settled)
+      .then((result) => {
+        if (!cancelled) setVerdict({ source: settled, result })
+      })
+      .catch((cause: unknown) => {
+        if (!cancelled) {
+          setError(cause instanceof ApiError ? cause.detail : 'The parse check did not run.')
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setChecking(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [settled])
+
+  // A verdict about older text is not a verdict about this one.
+  const check = verdict?.source === source ? verdict.result : undefined
   const refused = check !== undefined && !check.ok
   const busy = checking || saving
-
-  function edit(next: string) {
-    // The old verdict is about the old text; keep it from going stale on screen.
-    setCheck(undefined)
-    setError(null)
-    onSourceChange(next)
-  }
-
-  async function runCheck() {
-    setChecking(true)
-    setError(null)
-    try {
-      setCheck(await api.checkSource(source))
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The parse check did not run.')
-    } finally {
-      setChecking(false)
-    }
-  }
 
   async function save(force: boolean) {
     setSaving(true)
@@ -66,7 +90,7 @@ export function SourceWorkbench({
     } catch (cause) {
       if (cause instanceof ApiError) {
         const fromServer = refusedCheck(cause.problem)
-        if (fromServer) setCheck(fromServer)
+        if (fromServer) setVerdict({ source, result: fromServer })
         else setError(cause.detail)
       } else {
         setError('Could not save. Try again.')
@@ -82,10 +106,6 @@ export function SourceWorkbench({
         <div className="flex items-center justify-between gap-3 px-3 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">{breadcrumb}</div>
           <div className="flex shrink-0 items-center gap-2">
-            <Button size="sm" onClick={() => void runCheck()} disabled={busy || !source.trim()}>
-              {checking && <Spinner />}
-              Check
-            </Button>
             <Button
               size="sm"
               variant="primary"
@@ -106,10 +126,11 @@ export function SourceWorkbench({
       </div>
 
       <div className="min-h-0 border-b border-line">
-        <ScadEditor
+        <SourceEditor
           value={source}
-          onChange={edit}
-          errorLines={errorLines(check)}
+          onChange={onSourceChange}
+          errors={check?.diagnostics ?? []}
+          uri={uri}
           label="OpenSCAD source"
         />
       </div>
@@ -120,18 +141,26 @@ export function SourceWorkbench({
             {error}
           </p>
         )}
-        <CheckReport check={check} />
+        <CheckReport check={check} checking={checking} />
       </div>
     </div>
   )
 }
 
-function CheckReport({ check }: { check: SourceCheck | undefined }) {
+function CheckReport({ check, checking }: { check: SourceCheck | undefined; checking: boolean }) {
+  if (checking && !check) {
+    return (
+      <p className="flex items-center gap-2 text-[12px] text-muted">
+        <Spinner /> Asking OpenSCAD
+      </p>
+    )
+  }
+
   if (!check) {
     return (
       <p className="text-[12px] text-faint">
-        Check runs OpenSCAD over the source without saving it. Errors appear here with
-        their line numbers.
+        OpenSCAD parses the source as you type. Errors appear here and in the editor,
+        against their line.
       </p>
     )
   }
@@ -140,7 +169,7 @@ function CheckReport({ check }: { check: SourceCheck | undefined }) {
     return (
       <p role="status" className="text-[13px] text-ok">
         {check.checked
-          ? 'Parses cleanly.'
+          ? `Parses cleanly${check.parameters == null ? '' : ` — ${check.parameters} parameters`}.`
           : 'No OpenSCAD available here, so the source was not checked.'}
       </p>
     )

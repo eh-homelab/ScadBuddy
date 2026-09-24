@@ -41,10 +41,15 @@ Non-goals (v1):
 - Authentication. ScadBuddy is LAN-only behind the UDM firewall, like the
   `bambuddy-slicer` sidecar. Revisit if it is ever exposed.
 - ~~Editing `.scad` source in the browser.~~ Superseded by #92: source can be
-  pasted into a CodeMirror editor to create a model and edited in place
-  afterwards, both through the same create path as an upload and both
-  parse-checked by OpenSCAD before they are stored. Multi-file pastes (a model
-  that `include`s a helper) remain out of scope — that is the libraries issue.
+  pasted into a Monaco editor to create a model and edited in place afterwards,
+  both through the same create path as an upload and both parse-checked by
+  OpenSCAD before they are stored. The editor is bundled (never a CDN loader)
+  behind a lazy route, registers an `openscad` Monarch language, and shows the
+  check's diagnostics as editor markers against their line. It is deliberately
+  syntax-only: a language server over `openscad-lsp` is #95, and the model URI
+  (`file:///models/<slug>/model.scad`) is the seam it will attach to.
+  Multi-file pastes (a model that `include`s a helper) remain out of scope —
+  that is the libraries issue.
 - Running OpenSCAD in the browser (openscad-wasm). Server-side render is
   simpler and uses the Manifold nightly; the door stays open.
 - Sandboxing OpenSCAD beyond a timeout and resource limits. `.scad` is a

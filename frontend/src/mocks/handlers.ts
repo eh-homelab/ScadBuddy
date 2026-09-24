@@ -139,7 +139,17 @@ function slugify(value: string): string {
 
 function checkOf(source: string): SourceCheck {
   const failure = fixtures.mockParseError(source)
-  if (!failure) return { ok: true, checked: true, diagnostics: [], log_tail: [] }
+  if (!failure) {
+    return {
+      ok: true,
+      checked: true,
+      diagnostics: [],
+      log_tail: [],
+      // The real check derives the schema in the same run, so it can say how many
+      // parameters the source yields; the mock answers with the keychain's.
+      parameters: fixtures.keychainSchema.parameters?.length ?? 0,
+    }
+  }
   const diagnostic: Diagnostic = {
     severity: 'error',
     message: 'Parser error: syntax error',

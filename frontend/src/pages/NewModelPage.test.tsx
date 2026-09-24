@@ -2,27 +2,27 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
-import { BROKEN_SOURCE, keychainSource } from '../mocks/fixtures'
+import { BROKEN_SOURCE, keychainSchema, keychainSource } from '../mocks/fixtures'
 import { NewModelPage } from './NewModelPage'
 
-// CodeMirror owns a contenteditable, which jsdom cannot lay out; the real editor is
-// exercised by the Playwright smoke test. Here it stands in as a textarea so the
+// Monaco needs layout, workers and a canvas, none of which jsdom has; the real editor
+// is exercised by the Playwright smoke test. Here it stands in as a textarea so the
 // page's own behaviour — check, refuse, force — is what is under test.
-vi.mock('../components/ScadEditor', () => ({
-  ScadEditor: ({
+vi.mock('../components/SourceEditor', () => ({
+  SourceEditor: ({
     value,
     onChange,
     label,
-    errorLines = [],
+    errors = [],
   }: {
     value: string
     onChange: (next: string) => void
     label: string
-    errorLines?: number[]
+    errors?: { line?: number | null }[]
   }) => (
     <textarea
       aria-label={label}
-      data-error-lines={errorLines.join(',')}
+      data-marked-lines={errors.map((error) => error.line ?? '').join(',')}
       value={value}
       onChange={(event) => onChange(event.target.value)}
     />
@@ -60,26 +60,39 @@ describe('NewModelPage', () => {
     expect(save).toBeEnabled()
   })
 
-  it('checks the source without saving it', async () => {
+  it('checks the source as it settles, without saving it', async () => {
     const { user } = renderNew()
     await paste(user, keychainSource)
 
-    await user.click(screen.getByRole('button', { name: 'Check' }))
-    expect(await screen.findByText('Parses cleanly.')).toBeInTheDocument()
+    expect(await screen.findByText(/^Parses cleanly/)).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Customizer' })).not.toBeInTheDocument()
   })
 
-  it('reports the failing line and drops the verdict once the source changes', async () => {
+  it('reports the derived parameter count alongside a clean parse', async () => {
+    const { user } = renderNew()
+    await paste(user, keychainSource)
+
+    const derived = keychainSchema.parameters?.length ?? 0
+    expect(
+      await screen.findByText(`Parses cleanly — ${derived} parameters.`),
+    ).toBeInTheDocument()
+  })
+
+  it('reports the failing line and hands it to the editor as a marker', async () => {
     const { user } = renderNew()
     await paste(user, BROKEN_SOURCE)
 
-    await user.click(screen.getByRole('button', { name: 'Check' }))
     const report = await screen.findByTestId('check-report')
     expect(report).toHaveTextContent('Line 2')
     expect(report).toHaveTextContent('Parser error: syntax error')
-    expect(screen.getByLabelText('OpenSCAD source')).toHaveAttribute('data-error-lines', '2')
+    expect(screen.getByLabelText('OpenSCAD source')).toHaveAttribute('data-marked-lines', '2')
+  })
 
-    // Editing invalidates the verdict rather than leaving a stale one on screen.
+  it('drops a verdict the moment the source it judged changes', async () => {
+    const { user } = renderNew()
+    await paste(user, BROKEN_SOURCE)
+    await screen.findByTestId('check-report')
+
     await user.type(screen.getByLabelText('OpenSCAD source'), ']')
     expect(screen.queryByTestId('check-report')).not.toBeInTheDocument()
   })
