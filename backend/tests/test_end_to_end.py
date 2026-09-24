@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,8 @@ import trimesh
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render import jobs
+from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.jobs import Job, JobResult, RenderQueue
 from tests.conftest import FIXTURES, installed_font_families
 
@@ -93,3 +96,23 @@ async def test_the_shipped_keychain_measures_as_the_spec_says(tmp_path: Path) ->
     assert result.bbox_mm.size[0] == pytest.approx(95.576, abs=0.1)
     assert result.bbox_mm.size[1] == pytest.approx(34.776, abs=0.1)
     assert result.bbox_mm.size[2] == pytest.approx(6.8, abs=0.1)
+
+
+async def test_the_3mf_is_written_off_the_event_loop(
+    data: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Writing the 3MF now rasterises four cover images, which is seconds of
+    numpy rather than the milliseconds the XML and zip used to cost. On the
+    event loop that would stall every other job's poll and `/healthz` — one loop
+    serves the whole process, and §5.3's debounced preview means a slider drag
+    submits these back to back."""
+    wrote_on: list[str] = []
+
+    def record(*args: object, **kwargs: object) -> None:
+        wrote_on.append(threading.current_thread().name)
+        write_bambu_3mf(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(jobs, "write_bambu_3mf", record)
+    await _render(data, SLUG, {"name": "Ada"})
+
+    assert wrote_on and threading.main_thread().name not in wrote_on

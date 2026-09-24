@@ -160,7 +160,14 @@ async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[Job
         scad, schema, job.params, preview_parts, work, config=config
     )
     model_path = work / MODEL_NAME
-    write_bambu_3mf(parts, model_path, model_name=job.slug)
+    # Off the event loop. Writing the 3MF used to be XML and a zip — milliseconds
+    # — but it now rasterises the plate cover images too, which is seconds of
+    # numpy on a large mesh. Everything else in this pipeline already yields:
+    # `render_3mf` and `render_solids` await a subprocess. A synchronous call
+    # here would stall every other job's poll, `/healthz`, and the other render
+    # worker, since one loop serves them all. Same `asyncio.to_thread` the font
+    # service uses for its blocking fontconfig calls.
+    await asyncio.to_thread(write_bambu_3mf, parts, model_path, model_name=job.slug)
 
     result = JobResult(
         model_3mf=str(model_path.relative_to(paths.root)),
