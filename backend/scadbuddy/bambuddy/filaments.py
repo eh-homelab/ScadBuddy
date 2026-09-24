@@ -355,8 +355,18 @@ def build_options(
         if spool.archived_at is not None:
             continue
         assignment = assignment_by_spool.get(spool.id)
-        slot_material = by_slot.get((assignment.ams_id, assignment.tray_id)) if assignment else None
-        tray = trays.get((assignment.ams_id, assignment.tray_id)) if assignment else None
+        # **The live state is one printer's, the assignments are every printer's.**
+        # ``inventory-remain`` and ``status`` were read for ``printer``, while
+        # ``/inventory/assignments`` is deliberately unfiltered so a spool loaded in
+        # another machine is still offered. Joining them on ``(ams_id, tray_id)`` alone
+        # would hand a spool sitting in printer B's AMS 0 slot 1 the flat tray id,
+        # remaining weight and extruder of printer A's AMS 0 slot 1 — a different spool
+        # — and `ams_mapping` would then address A's tray while the UI named B's spool.
+        here = assignment is not None and (printer is None or assignment.printer_id == printer.id)
+        slot_material = (
+            by_slot.get((assignment.ams_id, assignment.tray_id)) if here and assignment else None
+        )
+        tray = trays.get((assignment.ams_id, assignment.tray_id)) if here and assignment else None
         low, high, source = _temperature(spool, tray)
         remaining = spool.remaining_g
         if slot_material is not None and slot_material.remaining_g is not None:
@@ -740,7 +750,14 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
         option = by_id.get(spool_id) if spool_id is not None else None
         if option is None:
             continue
-        if option.loaded is not None:
+        # A tray id only addresses a tray of *this* printer. A spool loaded in another
+        # machine is a legitimate choice — it produces a "move it here" warning — but
+        # mapping the slot onto its tray number would address whatever this printer
+        # happens to have in the same physical position, which is a different filament.
+        # ``-1`` says "unresolved", which is what it genuinely is until someone loads it.
+        if option.loaded is not None and (
+            options.printer_id is None or option.loaded.printer_id == options.printer_id
+        ):
             mapping[slot.slot_id - 1] = option.loaded.global_tray_id
         override: dict[str, object] = {
             "slot_id": slot.slot_id,
