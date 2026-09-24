@@ -7,7 +7,6 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  ModelProject,
   ModelSummary,
   Output,
   ParamValue,
@@ -44,7 +43,7 @@ const state = {
   modelPipelines: {} as Record<string, number>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
-  modelProjects: {} as Record<string, number>,
+  lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
@@ -62,7 +61,7 @@ export function resetMockState(): void {
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
-  state.modelProjects = {}
+  state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
@@ -505,7 +504,7 @@ export const handlers = [
     const copies = body.copies ?? 1
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
-    const projectId = body.project_id ?? state.modelProjects[output.slug] ?? null
+    const projectId = body.project_id ?? state.lastProjectId
     const folderId =
       projectId === null
         ? null
@@ -591,14 +590,12 @@ export const handlers = [
 
   // --- #79 projects -----------------------------------------------------------------
 
-  http.get(`${base}/print/projects`, ({ request }) => {
-    const slug = new URL(request.url).searchParams.get('slug')
-    return HttpResponse.json({
+  http.get(`${base}/print/projects`, () =>
+    HttpResponse.json({
       projects: state.projects,
-      // The per-model memory is ScadBuddy's own, so it only exists once a model is named.
-      model_project_id: slug ? (state.modelProjects[slug] ?? null) : null,
-    } satisfies ProjectChoices)
-  }),
+      last_project_id: state.lastProjectId,
+    } satisfies ProjectChoices),
+  ),
 
   http.post(`${base}/print/projects`, async ({ request }) => {
     const body = (await request.json()) as ProjectRequest
@@ -635,22 +632,11 @@ export const handlers = [
     return HttpResponse.json(saved)
   }),
 
-  http.put(`${base}/print/models/:slug/project`, async ({ params, request }) => {
-    const slug = String(params['slug'])
-    const body = (await request.json()) as { project_id: number | null }
-    if (body.project_id === null) delete state.modelProjects[slug]
-    else state.modelProjects[slug] = body.project_id
-    return HttpResponse.json({
-      slug,
-      project_id: state.modelProjects[slug] ?? null,
-    } satisfies ModelProject)
-  }),
-
   http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
     const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
-    const projectId = body.project_id ?? state.modelProjects[output.slug] ?? null
+    const projectId = body.project_id ?? state.lastProjectId
     if (projectId === null) {
       return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
     }

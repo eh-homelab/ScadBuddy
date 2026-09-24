@@ -59,17 +59,14 @@ def test_creating_a_project_pairs_it_with_a_folder(client: TestClient, model: st
     assert json.loads(folder.calls.last.request.content)["project_id"] == 7
 
 
-def test_a_models_project_is_remembered_one_model_at_a_time(client: TestClient, model: str) -> None:
-    """Needs no Bambuddy — this is ScadBuddy's own preference, like the per-model
-    pipeline (#86)."""
+def test_scadbuddy_keeps_no_model_to_project_relationship(client: TestClient) -> None:
+    """ScadBuddy renders and sends; Bambuddy owns projects. Which prints belong to a
+    project is on the project's own page, so there is no per-model route to store a
+    second answer that would go stale."""
     configure(client)
-    assert client.put(f"/api/v1/print/models/{model}/project", json={"project_id": 7}).json() == {
-        "slug": model,
-        "project_id": 7,
-    }
     assert client.put(
-        f"/api/v1/print/models/{model}/project", json={"project_id": None}
-    ).json() == {"slug": model, "project_id": None}
+        "/api/v1/print/models/anything/project", json={"project_id": 7}
+    ).status_code in (404, 405)
 
 
 @respx.mock
@@ -95,6 +92,42 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
     assert body["folder_id"] == 9
     # The folder is a query parameter on the upload, not part of the body.
     assert uploaded.calls.last.request.url.params["folder_id"] == "9"
+
+
+@respx.mock
+def test_an_already_uploaded_output_is_moved_into_the_project_folder(
+    client: TestClient, model: str
+) -> None:
+    """The second run is the one that bites. An output uploaded before a project was
+    chosen keeps its library file — re-uploading would make a second copy — so it is
+    Bambuddy's own move route that puts it where `folder_id` says it is. Without this
+    the response reports a folder the file is not in."""
+    configure(client, library_folder_id=2)
+    output_id = make_output(client, model)
+    uploaded = upload_route()
+    respx.get(f"{API}/library/folders/by-project/7").mock(
+        return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
+    )
+    moved = respx.post(f"{API}/library/files/move").mock(
+        return_value=httpx.Response(200, json={"moved": 1, "skipped": []})
+    )
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(200, json=run_body())
+    )
+
+    # First run, no project: the 3MF lands in the folder from Settings.
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    assert uploaded.call_count == 1
+    assert not moved.called
+
+    # Second run, this time filed under a project.
+    body = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "project_id": 7}
+    ).json()
+    assert body["folder_id"] == 9
+    # Not re-uploaded, and not left behind either.
+    assert uploaded.call_count == 1
+    assert json.loads(moved.calls.last.request.content)["folder_id"] == 9
 
 
 @respx.mock

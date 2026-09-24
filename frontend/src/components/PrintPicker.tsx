@@ -614,12 +614,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
           {/* #79 — a send to a project uploads into that project's folder, which is what
               puts it on Bambuddy's project page. */}
           <div className="mt-4">
-            <ProjectPicker
-              slug={slug}
-              value={projectId}
-              onChange={setProjectId}
-              onLoaded={setProjectId}
-            />
+            <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
           </div>
 
           {asksForPrinter && (

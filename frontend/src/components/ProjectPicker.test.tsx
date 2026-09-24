@@ -19,7 +19,6 @@ function mount(onChange: (projectId: number | null) => void = vi.fn()) {
     const [value, setValue] = useState<number | null>(null)
     return (
       <ProjectPicker
-        slug="name-keychain"
         value={value}
         onChange={(projectId) => {
           setValue(projectId)
@@ -42,24 +41,13 @@ async function listed() {
   await waitFor(() => expect(within(select()).getAllByRole('option').length).toBeGreaterThan(2))
 }
 
-/** The model already files its prints under `Reagan Keychain`. */
-function withModelProject(projectId: number | null = 1) {
+/** The last send went to `Reagan Keychain`, so the picker opens on it. */
+function withLastProject(projectId: number | null = 1) {
   server.use(
     http.get('/api/v1/print/projects', () =>
-      HttpResponse.json({ projects: fixtures.projectViews, model_project_id: projectId }),
+      HttpResponse.json({ projects: fixtures.projectViews, last_project_id: projectId }),
     ),
   )
-}
-
-/** Every `PUT /print/models/{slug}/project` body, in order. */
-function watchRemembered(): { project_id: number | null }[] {
-  const writes: { project_id: number | null }[] = []
-  server.events.on('request:start', async ({ request }) => {
-    if (request.method === 'PUT' && request.url.endsWith('/project')) {
-      writes.push((await request.clone().json()) as { project_id: number | null })
-    }
-  })
-  return writes
 }
 
 describe('ProjectPicker', () => {
@@ -119,48 +107,36 @@ describe('ProjectPicker', () => {
     expect(posted).toEqual([{ name: 'Workshop Bins', description: null, colour: '#ef4444' }])
   })
 
-  it('remembers the project for this model when the tick is a real change', async () => {
-    const writes = watchRemembered()
-    const { user } = mount()
+  it('opens on the project the last send went to', async () => {
+    withLastProject(1)
+    mount()
     await listed()
 
-    // Nothing to remember until a project is in view.
-    expect(screen.getByTestId('remember-project')).toBeDisabled()
-
-    await user.selectOptions(select(), '1')
-    await user.click(screen.getByTestId('remember-project'))
-
-    await waitFor(() => expect(writes).toEqual([{ project_id: 1 }]))
+    // ScadBuddy remembers one id so the picker opens where it was left. It models no
+    // relationship between a model and a project — which prints belong to a project is
+    // on the project's own page, and a second answer here would go stale.
+    await waitFor(() => expect(select()).toHaveValue('1'))
   })
 
-  it('does not re-point an existing model project at whatever is selected next', async () => {
-    withModelProject(1)
-    const writes = watchRemembered()
+  it('opens unset when nothing has been sent yet', async () => {
+    withLastProject(null)
+    mount()
+    await listed()
+    expect(select()).toHaveValue('')
+  })
+
+  it('writes nothing of its own when a project is chosen', async () => {
+    const writes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method !== 'GET' && request.url.includes('/print/')) writes.push(request.url)
+    })
     const { user } = mount()
     await listed()
-
-    // Opened on the model's project, so the tick says "this one *is* it".
-    await waitFor(() => expect(screen.getByTestId('remember-project')).toBeChecked())
 
     await user.selectOptions(select(), '2')
 
-    // Printing to a different project once says nothing about where this model belongs,
-    // so the tick does not follow the selection and nothing is written — in either
-    // direction: the stored project is neither moved nor cleared.
-    expect(screen.getByTestId('remember-project')).not.toBeChecked()
+    // The choice rides on the run request; there is no per-model store to update.
     expect(writes).toEqual([])
-  })
-
-  it('clears the model project only when the user unticks the one that is stored', async () => {
-    withModelProject(1)
-    const writes = watchRemembered()
-    const { user } = mount()
-    await listed()
-    await waitFor(() => expect(screen.getByTestId('remember-project')).toBeChecked())
-
-    await user.click(screen.getByTestId('remember-project'))
-
-    await waitFor(() => expect(writes).toEqual([{ project_id: null }]))
   })
 
   it('reports a refused list as a message rather than an empty control', async () => {

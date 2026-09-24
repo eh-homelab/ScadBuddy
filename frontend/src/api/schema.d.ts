@@ -331,26 +331,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/print/models/{slug}/project": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        /**
-         * Remember this model's project
-         * @description ScadBuddy's own preference, stored per slug; needs no Bambuddy.
-         */
-        put: operations["put_model_project_api_v1_print_models__slug__project_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/v1/print/outputs/{output_id}/eligibility": {
         parameters: {
             query?: never;
@@ -554,8 +534,10 @@ export interface paths {
          * Bambuddy's projects
          * @description Every Bambuddy project, with the library folder that belongs to it (#79).
          *
-         *     ``slug`` names a model, and reports which project that model's sends are filed
-         *     under — a per-model memory in the same shape as its default pipeline (#86).
+         *     Also the project the last send went to, so the picker opens where it was left.
+         *     ScadBuddy models no relationship between a model and a project: which prints
+         *     belong to a project is on the project's own page, and keeping a second answer
+         *     here would be a copy that goes stale.
          */
         get: operations["get_projects_api_v1_print_projects_get"];
         put?: never;
@@ -1126,21 +1108,6 @@ export interface components {
             name?: string | null;
             /** Tags */
             tags?: string[] | null;
-        };
-        /** ModelProject */
-        ModelProject: {
-            /** Project Id */
-            project_id?: number | null;
-            /** Slug */
-            slug: string;
-        };
-        /**
-         * ModelProjectPatch
-         * @description ``null`` clears this model's project. There is no global fallback.
-         */
-        ModelProjectPatch: {
-            /** Project Id */
-            project_id?: number | null;
         };
         /** ModelRecord */
         ModelRecord: {
@@ -1725,8 +1692,8 @@ export interface components {
         };
         /** ProjectChoices */
         ProjectChoices: {
-            /** Model Project Id */
-            model_project_id?: number | null;
+            /** Last Project Id */
+            last_project_id?: number | null;
             /** Projects */
             projects?: components["schemas"]["ProjectView"][];
         };
@@ -2723,41 +2690,6 @@ export interface operations {
             };
         };
     };
-    put_model_project_api_v1_print_models__slug__project_put: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                slug: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["ModelProjectPatch"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["ModelProject"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     post_eligibility_api_v1_print_outputs__output_id__eligibility_post: {
         parameters: {
             query?: never;
@@ -2995,9 +2927,7 @@ export interface operations {
     };
     get_projects_api_v1_print_projects_get: {
         parameters: {
-            query?: {
-                slug?: string | null;
-            };
+            query?: never;
             header?: never;
             path?: never;
             cookie?: never;
@@ -3011,15 +2941,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProjectChoices"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

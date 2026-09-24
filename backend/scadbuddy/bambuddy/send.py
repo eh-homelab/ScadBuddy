@@ -137,6 +137,11 @@ async def ensure_uploaded(
     file in Bambuddy, and must not re-upload on every open.
     """
     if meta.library_file_id is not None:
+        if folder_id is not None:
+            # The file was uploaded before this project was chosen, so it is sitting in
+            # whatever folder that send used. Bambuddy has a move route, and a caller
+            # that reports `folder_id` must not report one the file is not in.
+            await client.move_library_files([meta.library_file_id], folder_id)
         return meta, meta.library_file_id
     meta, _ = await upload_output(client, store, meta, settings, folder_id=folder_id)
     if meta.library_file_id is None:  # pragma: no cover - upload_output always records one

@@ -60,17 +60,6 @@ class PipelineDefaultPatch(BaseModel):
     pipeline_id: int | None = None
 
 
-class ModelProjectPatch(BaseModel):
-    """``null`` clears this model's project. There is no global fallback."""
-
-    project_id: int | None = None
-
-
-class ModelProject(BaseModel):
-    slug: str
-    project_id: int | None = None
-
-
 class ProjectAttach(BaseModel):
     """Which of this output's queue entries to file under the project.
 
@@ -276,20 +265,17 @@ async def get_progress(
 
 
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")
-async def get_projects(
-    store: SettingsStoreDep,
-    slug: Annotated[str | None, Query()] = None,
-) -> ProjectChoices:
+async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
     """Every Bambuddy project, with the library folder that belongs to it (#79).
 
-    ``slug`` names a model, and reports which project that model's sends are filed
-    under — a per-model memory in the same shape as its default pipeline (#86).
+    Also the project the last send went to, so the picker opens where it was left.
+    ScadBuddy models no relationship between a model and a project: which prints
+    belong to a project is on the project's own page, and keeping a second answer
+    here would be a copy that goes stale.
     """
     settings = store.load()
     async with client_for(settings) as client:
-        return await describe_projects(
-            client, model_project_id=settings.project_for(slug) if slug else None
-        )
+        return await describe_projects(client, last_project_id=settings.last_project_id)
 
 
 @router.post("/projects", response_model=ProjectView, summary="Create or link a project")
@@ -303,19 +289,6 @@ async def post_project(body: ProjectRequest, store: SettingsStoreDep) -> Project
     """
     async with client_for(store.load()) as client:
         return await ensure_project(client, body)
-
-
-@router.put(
-    "/models/{slug}/project",
-    response_model=ModelProject,
-    summary="Remember this model's project",
-)
-def put_model_project(
-    slug: SlugPath, body: ModelProjectPatch, store: SettingsStoreDep
-) -> ModelProject:
-    """ScadBuddy's own preference, stored per slug; needs no Bambuddy."""
-    settings = store.set_model_project(slug, body.project_id)
-    return ModelProject(slug=slug, project_id=settings.model_projects.get(slug))
 
 
 @router.post(
@@ -338,7 +311,7 @@ async def post_attach_project(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    project_id = body.project_id or settings.project_for(meta.slug)
+    project_id = body.project_id or settings.last_project_id
     if project_id is None:
         raise ApiError(
             status.HTTP_409_CONFLICT,

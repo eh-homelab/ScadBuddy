@@ -93,7 +93,6 @@ export type PrintStage = PrintProgress['stage']
 export type ProjectView = Schemas['ProjectView']
 export type ProjectChoices = Schemas['ProjectChoices']
 export type ProjectRequest = Schemas['ProjectRequest']
-export type ModelProject = Schemas['ModelProject']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type AttachResult = Schemas['AttachResult']
 

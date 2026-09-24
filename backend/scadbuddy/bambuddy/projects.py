@@ -55,8 +55,8 @@ class ProjectView(BaseModel):
 
 class ProjectChoices(BaseModel):
     projects: list[ProjectView] = Field(default_factory=list)
-    #: This model's own project, if one has been remembered for it.
-    model_project_id: int | None = None
+    #: The project the last send went to, so the picker opens where it was left.
+    last_project_id: int | None = None
 
 
 class ProjectRequest(BaseModel):
@@ -94,7 +94,7 @@ def _view(project: Project, folder: Folder | None) -> ProjectView:
 
 
 async def describe_projects(
-    client: BambuddyClient, *, model_project_id: int | None = None
+    client: BambuddyClient, *, last_project_id: int | None = None
 ) -> ProjectChoices:
     """Every project, with the folder it owns.
 
@@ -113,7 +113,7 @@ async def describe_projects(
             by_project.setdefault(folder.project_id, folder)
     return ProjectChoices(
         projects=[_view(project, by_project.get(project.id)) for project in projects],
-        model_project_id=model_project_id,
+        last_project_id=last_project_id,
     )
 
 
@@ -141,7 +141,18 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
 
     folder = next(iter(await client.folders_by_project(project.id)), None)
     if folder is None and request.folder_id is not None:
-        folder = next((row for row in await client.folders() if row.id == request.folder_id), None)
+        # Flattened, like every other folder lookup here: `/library/folders` answers
+        # with a tree, so a folder nested under another is invisible to a scan of the
+        # top level — and this path would then silently create a second one.
+        folder = next(
+            (
+                row
+                for top in await client.folders()
+                for row in top.walk()
+                if row.id == request.folder_id
+            ),
+            None,
+        )
     if folder is None:
         folder = await client.create_folder(FolderCreate(name=project.name, project_id=project.id))
     return _view(project, folder)

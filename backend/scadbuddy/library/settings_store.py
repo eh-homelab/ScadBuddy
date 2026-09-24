@@ -44,16 +44,11 @@ class StoredSettings(BambuddyIds):
     #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
 
-    #: Model slug -> the Bambuddy project its sends belong to (#79). Stored the same
-    #: way as ``model_pipelines`` and for the same reason: a patch replaces a whole
-    #: value, while this has to be settable one model at a time.
-    model_projects: dict[str, int] = Field(default_factory=dict)
-
-    def project_for(self, slug: str) -> int | None:
-        """This model's project, if one has been remembered. There is no global
-        fallback: a project is a grouping someone chose, and defaulting every model into
-        one would file prints under a project nobody picked."""
-        return self.model_projects.get(slug)
+    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
+    #: enough to open the picker where it was left rather than modelling which models
+    #: belong to which project — that question is Bambuddy's to answer.
+    last_project_id: int | None = None
 
     def pipeline_for(self, slug: str) -> int | None:
         """This model's own pipeline, else the global fallback (#86)."""
@@ -127,15 +122,9 @@ class SettingsStore:
             pipelines[slug] = pipeline_id
         return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
 
-    def set_model_project(self, slug: str, project_id: int | None) -> StoredSettings:
-        """Point one model at a Bambuddy project, or clear it."""
-        settings = self.load()
-        projects = dict(settings.model_projects)
-        if project_id is None:
-            projects.pop(slug, None)
-        else:
-            projects[slug] = project_id
-        return self._write(settings.model_copy(update={"model_projects": projects}))
+    def remember_project(self, project_id: int | None) -> StoredSettings:
+        """Remember the project the last send went to, so the picker opens on it."""
+        return self._write(self.load().model_copy(update={"last_project_id": project_id}))
 
     def _write(self, settings: StoredSettings) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)

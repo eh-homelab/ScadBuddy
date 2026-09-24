@@ -1190,48 +1190,6 @@
         "title": "ModelPatch",
         "type": "object"
       },
-      "ModelProject": {
-        "properties": {
-          "project_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Project Id"
-          },
-          "slug": {
-            "title": "Slug",
-            "type": "string"
-          }
-        },
-        "required": [
-          "slug"
-        ],
-        "title": "ModelProject",
-        "type": "object"
-      },
-      "ModelProjectPatch": {
-        "description": "``null`` clears this model's project. There is no global fallback.",
-        "properties": {
-          "project_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Project Id"
-          }
-        },
-        "title": "ModelProjectPatch",
-        "type": "object"
-      },
       "ModelRecord": {
         "properties": {
           "description": {
@@ -2956,7 +2914,7 @@
       },
       "ProjectChoices": {
         "properties": {
-          "model_project_id": {
+          "last_project_id": {
             "anyOf": [
               {
                 "type": "integer"
@@ -2965,7 +2923,7 @@
                 "type": "null"
               }
             ],
-            "title": "Model Project Id"
+            "title": "Last Project Id"
           },
           "projects": {
             "items": {
@@ -4805,61 +4763,6 @@
         ]
       }
     },
-    "/api/v1/print/models/{slug}/project": {
-      "put": {
-        "description": "ScadBuddy's own preference, stored per slug; needs no Bambuddy.",
-        "operationId": "put_model_project_api_v1_print_models__slug__project_put",
-        "parameters": [
-          {
-            "in": "path",
-            "name": "slug",
-            "required": true,
-            "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
-              "title": "Slug",
-              "type": "string"
-            }
-          }
-        ],
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/ModelProjectPatch"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ModelProject"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Remember this model's project",
-        "tags": [
-          "print"
-        ]
-      }
-    },
     "/api/v1/print/outputs/{output_id}/eligibility": {
       "post": {
         "description": "Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.\n\nBambuddy judges a *library file*, so there is no eligibility answer before an\nupload. The upload happens once per output: an output is immutable, so a recorded\n``library_file_id`` still describes this 3MF.\n\nEvery report comes back as Bambuddy sent it, including ``printer_reports`` \u2014 under\n``target_kind=\"printer_class\"`` that is where the per-printer reasons are, and the\ntop-level ``ok`` means only that *some* printer passes.",
@@ -5261,26 +5164,8 @@
     },
     "/api/v1/print/projects": {
       "get": {
-        "description": "Every Bambuddy project, with the library folder that belongs to it (#79).\n\n``slug`` names a model, and reports which project that model's sends are filed\nunder \u2014 a per-model memory in the same shape as its default pipeline (#86).",
+        "description": "Every Bambuddy project, with the library folder that belongs to it (#79).\n\nAlso the project the last send went to, so the picker opens where it was left.\nScadBuddy models no relationship between a model and a project: which prints\nbelong to a project is on the project's own page, and keeping a second answer\nhere would be a copy that goes stale.",
         "operationId": "get_projects_api_v1_print_projects_get",
-        "parameters": [
-          {
-            "in": "query",
-            "name": "slug",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "title": "Slug"
-            }
-          }
-        ],
         "responses": {
           "200": {
             "content": {
@@ -5291,16 +5176,6 @@
               }
             },
             "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
           }
         },
         "summary": "Bambuddy's projects",

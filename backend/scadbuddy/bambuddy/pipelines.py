@@ -533,7 +533,7 @@ async def run_for_output(
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
     # there.
-    project_id = request.project_id or settings.project_for(meta.slug)
+    project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     meta, library_file_id = await ensure_uploaded(
         client, store, meta, settings, folder_id=folder_id

@@ -330,6 +330,23 @@ class BambuddyClient:
         )
         return Folder.model_validate(response.json())
 
+    async def move_library_files(self, file_ids: list[int], folder_id: int | None) -> None:
+        """``POST /api/v1/library/files/move`` — Bambuddy's own "put these in that folder".
+
+        Used when an output was uploaded before a project was chosen for it. Re-uploading
+        would make a second copy, and leaving it where it is while reporting the project's
+        folder would be a lie; Bambuddy has a route for exactly this, so it is called
+        rather than worked around. Moving a file into the folder it is already in is a
+        no-op there, so this needs no read of where the file currently lives.
+        """
+        await self._send(
+            "POST",
+            "/library/files/move",
+            scope=Scope.MANAGE_LIBRARY,
+            what="move the uploaded 3MF into the project's folder",
+            json={"file_ids": file_ids, "folder_id": folder_id},
+        )
+
     async def upload_library_file(
         self, filename: str, content: bytes, *, folder_id: int | None = None
     ) -> LibraryFile:

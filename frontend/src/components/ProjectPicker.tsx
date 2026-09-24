@@ -36,20 +36,18 @@ function optionLabel(project: ProjectView): string {
 }
 
 interface Props {
-  slug: string
   /** The project in view. The parent owns it because the run request carries it. */
   value: number | null
   onChange: (projectId: number | null) => void
   /**
-   * The model's remembered project, reported once the list has loaded, so the parent can
-   * seed `value` from it without ever handling a `ProjectChoices`.
+   * The project the last send went to, reported once the list has loaded, so the parent
+   * can seed `value` from it without ever handling a `ProjectChoices`.
    */
   onLoaded?: (projectId: number | null) => void
 }
 
-export function ProjectPicker({ slug, value, onChange, onLoaded }: Props) {
+export function ProjectPicker({ value, onChange, onLoaded }: Props) {
   const [choices, setChoices] = useState<ProjectChoices | null>(null)
-  const [remembered, setRemembered] = useState(false)
   const [creating, setCreating] = useState(false)
   const [name, setName] = useState('')
   const [description, setDescription] = useState('')
@@ -73,51 +71,22 @@ export function ProjectPicker({ slug, value, onChange, onLoaded }: Props) {
     setLoading(true)
     setError(null)
     try {
-      const next = await api.getProjects(slug)
+      const next = await api.getProjects()
       setChoices(next)
-      report.current?.(next.model_project_id ?? null)
+      report.current?.(next.last_project_id ?? null)
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'Could not list the projects.')
     } finally {
       setLoading(false)
     }
-  }, [slug])
+  }, [])
 
   useEffect(() => {
     void load()
   }, [load])
 
-  /**
-   * The tick follows the selection: it means "the project in view *is* this model's
-   * project", not "this model has one". Without that, opening the picker on a model that
-   * already has a project and choosing another one for a single print would leave the box
-   * ticked and silently re-point the model at it.
-   */
-  useEffect(() => {
-    setRemembered(value !== null && value === (choices?.model_project_id ?? null))
-  }, [value, choices])
-
   const projects = choices?.projects ?? []
   const current = projects.find((project) => project.id === value)
-
-  async function remember(next: boolean) {
-    setRemembered(next)
-    const stored = choices?.model_project_id ?? null
-    // Same rule as the pipeline default in `PrintPicker`: the stored value only moves on
-    // a real change of intent — ticking the box on a project that is not already stored,
-    // or unticking it on the one that is. Selecting a different project for one print
-    // says nothing about what this model should be filed under, so it writes nothing.
-    const target = next && stored !== value ? value : !next && stored === value ? null : undefined
-    if (target === undefined) return
-    try {
-      await api.putModelProject(slug, target)
-      setChoices((choice) => (choice ? { ...choice, model_project_id: target } : choice))
-    } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'Could not remember the project.')
-      // The tick states what is stored, so it has to go back when the write did not land.
-      setRemembered(!next)
-    }
-  }
 
   async function create() {
     const body: ProjectRequest = {
@@ -262,18 +231,6 @@ export function ProjectPicker({ slug, value, onChange, onLoaded }: Props) {
           </div>
         </div>
       )}
-
-      <label className="mt-3 flex cursor-pointer items-center gap-2 text-[13px]">
-        <input
-          type="checkbox"
-          data-testid="remember-project"
-          checked={remembered}
-          disabled={value === null}
-          onChange={(event) => void remember(event.target.checked)}
-          className="accent-[var(--sb-accent)]"
-        />
-        Remember this project for this model
-      </label>
 
       {error && (
         <p role="alert" className="mt-2 text-[13px] text-warn">
