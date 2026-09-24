@@ -469,7 +469,7 @@ export interface paths {
         put?: never;
         /**
          * Add ScadBuddy to Bambuddy's sidebar
-         * @description Upsert the ``Customize`` External Link by name.
+         * @description Upsert the ``ScadBuddy`` External Link by name.
          *
          *     Bambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a
          *     sandboxed iframe at ``/external/{id}`` — so ScadBuddy appears as a sidebar page
