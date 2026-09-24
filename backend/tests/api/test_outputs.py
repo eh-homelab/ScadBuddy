@@ -5,6 +5,8 @@ import json
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.provenance import Provenance, source_version
+from scadbuddy.render.provenance import read as read_provenance
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
 
@@ -151,3 +153,39 @@ def test_deleting_an_output_removes_it(client: TestClient, model: str) -> None:
 
 def test_an_unknown_output_is_a_404(client: TestClient) -> None:
     assert client.get("/api/v1/outputs/" + "0" * 32).status_code == 404
+
+
+def test_every_output_records_its_model_version_and_stamps_the_3mf(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Issue #80 — the record and the file agree on what produced the output."""
+    assert (
+        client.put("/api/v1/settings", json={"public_url": "https://scad.test/"}).status_code == 200
+    )
+    job_id = _finished_job(client, model)
+    body = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": job_id, "name": "Stamped"}
+    ).json()
+
+    expected = source_version(paths.model_source(model))
+    assert body["model_version"] == expected
+
+    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    assert stamped == Provenance(
+        model=model,
+        version=expected,
+        output=body["id"],
+        params={"width": 12},
+        edit_url=f"https://scad.test/edit/{body['id']}",
+    )
+
+
+def test_the_stamp_leaves_out_a_link_when_no_public_url_is_set(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    body = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    stamped = read_provenance(paths.output_dir(model, body["id"]) / "model.3mf")
+    assert stamped is not None
+    assert stamped.edit_url is None

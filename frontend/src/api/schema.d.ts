@@ -921,6 +921,8 @@ export interface components {
             job_id: string;
             /** Library File Id */
             library_file_id?: number | null;
+            /** Model Version */
+            model_version?: string | null;
             /** Name */
             name?: string | null;
             /** Params */

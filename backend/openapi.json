@@ -1052,6 +1052,17 @@
             ],
             "title": "Library File Id"
           },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          },
           "name": {
             "anyOf": [
               {

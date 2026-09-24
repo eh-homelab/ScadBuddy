@@ -74,6 +74,7 @@ def create_output(
     catalogue: CatalogueDep,
     outputs: OutputsDep,
     queue: QueueDep,
+    store: SettingsStoreDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
     job = require_job(queue, body.job_id)
@@ -85,7 +86,7 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    return _detail(outputs, outputs.create(job, name=body.name))
+    return _detail(outputs, outputs.create(job, name=body.name, public_url=store.load().public_url))
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
