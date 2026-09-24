@@ -115,6 +115,38 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
    * `null` an unprinted output answers with.
    */
   const { progress, polling } = usePrintProgress(outputId, open && result !== null)
+
+  /**
+   * #79 — file the finished print under its project.
+   *
+   * This cannot happen when the run starts. A pipeline run's `jobs[].queue_entry_id` is
+   * null when Bambuddy answers 202, and an archive only exists once a print has
+   * finished — so the ids only become known through the progress read (#89), which is
+   * why `POST /print/outputs/{id}/project` is a call of its own rather than part of the
+   * run. On the slice-and-queue route the queue item already carries `project_id`, and
+   * attaching the same id twice is Bambuddy's to dedupe, so this runs for both routes.
+   *
+   * Once per settled print, tracked by a ref rather than by state: the guard must not
+   * itself re-render and re-run the effect.
+   */
+  const attached = useRef<string | null>(null)
+  useEffect(() => {
+    if (!outputId || projectId === null || !progress?.settled) return
+    const entries = (progress.copies_detail ?? [])
+      .map((copy) => copy.queue_entry_id)
+      .filter((id): id is number => typeof id === 'number')
+    if (entries.length === 0) return
+    const key = `${outputId}:${projectId}:${entries.join(',')}`
+    if (attached.current === key) return
+    attached.current = key
+    // Best effort on purpose: the print has already been queued, and failing to file it
+    // must not turn a successful send into an error on the panel.
+    void api
+      .attachToProject(outputId, { project_id: projectId, queue_item_ids: entries })
+      .catch(() => {
+        attached.current = null
+      })
+  }, [outputId, projectId, progress])
   /**
    * Supersedes an in-flight load or check. The panel is not unmounted when it closes —
    * `ActionBar` renders it always and `Dialog` only drops its children — so a request
