@@ -1,0 +1,41 @@
+{
+  "id": 1,
+  "pipeline_id": 1,
+  "pipeline_name": "H2C 0.2 · 0.08mm HQ · PLA Silk + PLA",
+  "source_library_file_id": 62,
+  "source_archive_id": null,
+  "source_filename": "name-keychain-9edc180b00394d678e475b8ecad2976c.3mf",
+  "parent_run_id": null,
+  "copies": 1,
+  "copies_completed": 0,
+  "copies_failed": 0,
+  "copies_cancelled": 0,
+  "copies_in_progress": 1,
+  "status": "in_progress",
+  "slice_job_id": 7,
+  "sliced_library_file_id": null,
+  "eligibility_overridden": false,
+  "error_message": "Slice failed: The selected printer is not compatible with the process preset in the 3mf.",
+  "created_by": null,
+  "created_at": "2026-09-24T04:13:45.870604",
+  "started_at": "2026-09-24T04:13:46.994800",
+  "completed_at": "2026-09-24T04:13:51.293714",
+  "jobs": [
+    {
+      "id": 1,
+      "pipeline_run_id": 1,
+      "copy_index": 0,
+      "assigned_printer_id": null,
+      "assigned_printer_name": null,
+      "queue_entry_id": null,
+      "status": "pending",
+      "error_message": null,
+      "dispatched_at": null,
+      "completed_at": null
+    }
+  ],
+  "target_kind": "specific_printer",
+  "target_printer_id": 1,
+  "target_model_class": null,
+  "fanout_strategy": "max_parallel"
+}

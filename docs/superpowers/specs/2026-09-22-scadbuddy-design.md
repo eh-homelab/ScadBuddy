@@ -554,14 +554,26 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 
 ## 10. CI (full)
 
-Workflows, all on the `clusters-runner-light` pool unless a job needs Docker
-(then `clusters-runner`):
+Workflows, all on `ubuntu-latest`. This repository is PUBLIC, and the
+`clusters-runner*` pools this section originally named are ARC scale sets
+inside the homelab cluster, on the LAN with Hindsight and the Nexus cache — a
+fork PR on those pools would run attacker-controlled code in that network. The
+`type=gha` buildx cache works on hosted runners too, which the self-hosted
+pools break outright. `ci.yml`'s own header carries the full reasoning.
 
 - `ci.yml` (PR + main): backend `ruff`, `mypy`, `pytest` (with a real
   `openscad` from the image — tests run inside the container image built in
-  the same job); frontend `eslint`, `tsc`, `vitest`, `playwright` smoke against
-  the built container; `actionlint`; `hadolint`. A `CI Summary` job is the
-  required check and asserts every upstream job succeeded (no skip-passes).
+  the same job); frontend `eslint`, `tsc`, `vitest`; `actionlint`; `hadolint`.
+  The Playwright suite is split across two jobs by the same `E2E_BASE_URL` that
+  `playwright.config.ts` keys on: the frontend job runs the msw-mocked half
+  against its own `pnpm preview` of the production bundle, and the image job
+  runs `e2e/real-backend.spec.ts` against the container it has just built and
+  smoke-tested — a real OpenSCAD render, a two-extruder 3MF downloaded and
+  unpacked, and §5.4's install-on-demand font path end to end. That last test
+  needs Google Fonts, so `.github/scripts/fonts-probe.sh` decides beforehand
+  whether the upstreams are reachable and skips only that test when they are
+  not; anything ScadBuddy itself gets wrong still reds. A `CI Summary` job is
+  the required check and asserts every upstream job succeeded (no skip-passes).
 - `build-image.yml`: buildx multi-arch to GHCR on main and tags; digest
   output; **no `type=gha` cache** (self-hosted TLS intercept breaks it) —
   registry cache on GHCR instead.

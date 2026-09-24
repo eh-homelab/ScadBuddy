@@ -32,6 +32,11 @@ def remember(
 
 
 def slice_routes(sliced_id: int = 52) -> respx.Route:
+    # A send resolves the target printer's plate before uploading, to lay the 3MF
+    # out on it (#105); with a configured printer that is a read of /printers/.
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=recording("printers.json"))
+    )
     route = respx.post(f"{API}/library/files/41/slice").mock(
         return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
     )
@@ -50,6 +55,17 @@ def queue_route() -> respx.Route:
 
 
 def pipeline_route(pipeline_id: int = 4, body: dict[str, Any] | None = None) -> respx.Route:
+    # The send also resolves the target printer's plate to lay the 3MF out on it
+    # (#105), which reads the pipeline list and the printers. Registered here so a
+    # test that has a pipeline has the whole lookup, rather than in every caller.
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(
+            200, json={"pipelines": [{**PIPELINE, **(body or {}), "id": pipeline_id}]}
+        )
+    )
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=recording("printers.json"))
+    )
     return respx.get(f"{API}/slicer-pipelines/{pipeline_id}").mock(
         return_value=httpx.Response(200, json={**PIPELINE, **(body or {}), "id": pipeline_id})
     )
@@ -202,6 +218,13 @@ def test_a_remembered_quantity_rides_a_pipeline_run_as_copies(
     remember(client, "global", {"quantity": 3})
     output_id = make_output(client, model)
     upload_route()
+    # The send resolves the pipeline's printer to lay the 3MF out on its plate (#105).
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(200, json={"pipelines": [{**PIPELINE, "id": 4}]})
+    )
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(200, json=recording("printers.json"))
+    )
     run = respx.post(f"{API}/slicer-pipelines/4/run").mock(
         return_value=httpx.Response(202, json={"id": 12, "status": "queued"})
     )

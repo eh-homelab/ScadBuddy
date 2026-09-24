@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# Decide whether the install-on-demand font test can run, and say why when it
+# cannot. Writes `offline=` or `offline=1` to stdout and, when it is set, to
+# $GITHUB_OUTPUT; ci.yml passes that to the Playwright step as E2E_OFFLINE.
+#
+# WHY THIS EXISTS. `frontend/e2e/real-backend.spec.ts`'s second test is the only
+# thing in this repository that depends on a service outside it, and it sits
+# behind `CI Summary`, the one required check. Unguarded, a Google-side outage
+# reds somebody else's unrelated PR; guarded carelessly, every real regression
+# in the font pipeline turns into a quiet skip, which is worse. Four rules keep
+# both away:
+#
+#   1. Only a DEPENDENCY being unreachable skips the test. Anything this
+#      application does wrong lets the test run and red.
+#   2. Reachability is measured against the upstreams THEMSELVES, never
+#      inferred from our own route's status. `api/fonts.py` maps every
+#      `GoogleFontsError` to 503, and that class covers a schema drift in
+#      Google's undocumented payload and an empty catalogue as well as a dead
+#      socket — so "our route said 503" cannot tell an outage from a bug.
+#   3. Nothing about the upstreams is written down here. The URLs and the
+#      timeouts are read out of the running container, so a change in the
+#      Python cannot leave a second, stale copy of itself in CI.
+#   4. Every skip is a ::warning:: that names what was not proved. A skip that
+#      nobody reads is the failure this guard exists to prevent.
+#
+# Its branches are covered by fonts-probe.test.sh, which runs in the `lint` job.
+set -euo pipefail
+
+CONTAINER="${CONTAINER:-scadbuddy-ci}"
+
+# Every call into the container goes through here so the tests can substitute a
+# stub for the whole container without docker.
+#
+# The outer `timeout` bounds the EXEC, which `curl --max-time` does not: that
+# bounds the request once curl is running, and says nothing about a wedged
+# container or a stuck daemon, where `docker exec` simply never returns. Without
+# it this step inherits the job's 45-minute ceiling and dies with no diagnosis.
+# It starts at 30s for the one read below and widens to the measured budget once
+# there is one.
+exec_timeout="${EXEC_TIMEOUT:-30}"
+
+exec_in() {
+  if [ -n "${PROBE_EXEC:-}" ]; then
+    timeout "$exec_timeout" "$PROBE_EXEC" "$@"
+  else
+    timeout "$exec_timeout" docker exec "$CONTAINER" "$@"
+  fi
+}
+
+# "Unreachable" means the dependency did not serve us, which is broader than
+# "the socket died":
+#
+#   000          curl never got a response at all — DNS, TLS, connect, or our
+#                own --max-time.
+#   401 403 429  the host is up and REFUSING us. raw.githubusercontent.com
+#                rate-limits anonymous traffic from shared CI egress with 429
+#                (403 historically), and an install would hit the same wall, so
+#                reding the acceptance test would blame this repo for someone
+#                else's quota. 408 joins them as a server-side timeout.
+#   5xx          the host is broken.
+#
+# Everything else is reachable, and 404 deliberately so: `REPO_BASE_URL` is a
+# directory path that legitimately answers 404, and proving the host serves us
+# is the whole question here — WHICH object exists is the application's problem,
+# and it reds if it gets that wrong.
+unreachable() {
+  case "$1" in
+    ''|*[!0-9]*) return 0 ;;
+    000|401|403|408|429) return 0 ;;
+    *) [ "$1" -ge 500 ] ;;
+  esac
+}
+
+# `exec-failed` rather than a status when the EXEC layer broke — timeout(1)
+# reports 124 when it fires and 125-127 when the command could not be run, which
+# is `docker exec` failing rather than the network. That distinction is the whole
+# point: a wedged container is OUR problem and must not be laundered into "the
+# upstream is unreachable", which would skip the test that would have shown it.
+status_of() {
+  local out rc=0
+  out="$(exec_in curl --silent --show-error --max-time "$budget" -o /dev/null -w '%{http_code}' "$1")" || rc=$?
+  if [ "$rc" -ge 124 ]; then
+    printf 'exec-failed'
+    return
+  fi
+  printf '%s' "$out"
+}
+
+# One read, three answers: the budget is the sum of BOTH timeouts the catalogue
+# route can spend — the httpx request and the `fc-list` subprocess it runs
+# through asyncio.to_thread — plus headroom, so a merely slow stack is not
+# mistaken for a dead one.
+info="$(exec_in python -c 'from scadbuddy.library.fonts import FC_TIMEOUT
+from scadbuddy.library.googlefonts import DEFAULT_TIMEOUT, METADATA_URL, REPO_BASE_URL
+print(int(DEFAULT_TIMEOUT) + int(FC_TIMEOUT) + 10)
+print(METADATA_URL)
+print(REPO_BASE_URL)' 2>/dev/null || true)"
+
+budget="$(printf '%s\n' "$info" | sed -n 1p)"
+metadata_url="$(printf '%s\n' "$info" | sed -n 2p)"
+repo_url="$(printf '%s\n' "$info" | sed -n 3p)"
+
+# One test for all three, because they come from one read: if any is missing or
+# the budget is not a number, the read did not work and none of them is trusted.
+usable=1
+case "$budget" in
+  ''|*[!0-9]*) usable= ;;
+esac
+if [ -z "$metadata_url" ] || [ -z "$repo_url" ]; then
+  usable=
+fi
+if [ -z "$usable" ]; then
+  budget=70
+  metadata_url="https://fonts.google.com/metadata/fonts"
+  repo_url="https://raw.githubusercontent.com/google/fonts/main"
+  echo "::warning::Could not read the font URLs and timeouts out of the container, so the probe is using its own copies (${budget}s, ${metadata_url}, ${repo_url}). Those can be stale — check them against backend/scadbuddy/library/googlefonts.py if this warning persists."
+fi
+# Widened to the measured budget now that there is one — unless the caller
+# named a bound, which is honoured as given rather than silently overridden.
+if [ -z "${EXEC_TIMEOUT:-}" ]; then
+  exec_timeout=$((budget + 15))
+fi
+echo "probe budget: ${budget}s (googlefonts.DEFAULT_TIMEOUT + fonts.FC_TIMEOUT + 10), exec bound ${exec_timeout}s"
+
+offline=
+catalogue_status="$(status_of "$metadata_url")"
+if [ "$catalogue_status" = exec-failed ]; then
+  # Nothing was learned about Google: the container did not answer US. It is
+  # unusable either way, so `offline` stays empty and the suite reds on it.
+  echo "::warning::Could not run a command inside the container within ${exec_timeout}s, so nothing could be measured about the font upstreams. That is a wedged container rather than an outage: NOT a skip — the tests will run and are expected to fail."
+elif unreachable "$catalogue_status"; then
+  offline=1
+  echo "::warning::${metadata_url} did not answer from the container (status ${catalogue_status}), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
+else
+  repo_status="$(status_of "$repo_url")"
+  if [ "$repo_status" = exec-failed ]; then
+    echo "::warning::Could not run a command inside the container within ${exec_timeout}s while probing the download host. That is a wedged container rather than an outage: NOT a skip — the tests will run and are expected to fail."
+  elif unreachable "$repo_status"; then
+    offline=1
+    echo "::warning::${repo_url}, where the font files are downloaded from, did not answer from the container (status ${repo_status}), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue upstream answered, so this is the download host alone."
+  else
+    # Both dependencies answer, so from here on nothing skips: whatever is
+    # wrong is ours, and the test is the right place for it to surface.
+    answer="$(exec_in curl --silent --show-error --max-time "$budget" -w '%{http_code}' \
+                "http://127.0.0.1:8080/api/v1/fonts/catalogue?q=Pacifico&limit=1" || true)"
+    route_status="${answer: -3}"
+    body="${answer%???}"
+    case "$route_status" in
+      ''|*[!0-9]*) route_status=000 ;;
+    esac
+
+    if [ "$route_status" != 200 ]; then
+      echo "::warning::Both font upstreams answer, but this app's own /api/v1/fonts/catalogue returned ${route_status}. That is ScadBuddy failing, not an outage — note that its 503 also covers a schema drift or an empty catalogue, which is why reachability is measured upstream and not here. NOT a skip: the install-on-demand test will RUN and is expected to fail."
+    elif ! printf '%s' "$body" | grep -q '"family":"Pacifico"'; then
+      echo "::warning::The catalogue answered but does not name Pacifico. This is NOT an outage, so the install-on-demand test will RUN and is expected to fail on its missing row — an upstream removal or a regression in this repo's catalogue search is a red, not a skip."
+    fi
+  fi
+fi
+
+echo "offline=${offline}"
+if [ -n "${GITHUB_OUTPUT:-}" ]; then
+  echo "offline=${offline}" >> "$GITHUB_OUTPUT"
+fi
