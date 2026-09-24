@@ -258,3 +258,34 @@ def test_a_root_model_the_stamp_cannot_splice_is_refused(written: Path) -> None:
 
     with pytest.raises(ValueError, match="self-closing"):
         stamp(written, PROVENANCE)
+
+
+# A customizer string parameter is arbitrary text: /models/{slug}/render takes params
+# as a JSON body, so these reach the stamp without passing through the UI.
+HOSTILE = {
+    "markup": '</metadata><metadata name="Injected">pwned</metadata>',
+    "entities": "a & b < c > d",
+    "controls": "bell\x07 formfeed\x0c vtab\x0b unit\x1f",
+    "quotes": "he said \"hi\" & 'bye'",
+}
+
+
+def test_a_hostile_parameter_value_cannot_break_the_root_model(written: Path) -> None:
+    """The JSON blob is the only untrusted text in the file; pin what keeps it inert.
+
+    Two layers do it, and both matter. Pydantic's serializer escapes the C0 control
+    characters XML has no representation for — one raw byte would invalidate the
+    whole document, geometry included, not just the stamp. ``escape`` then handles
+    ``&``/``<``/``>``, which JSON leaves alone.
+    """
+    hostile = PROVENANCE.model_copy(update={"params": dict(HOSTILE)})
+    stamp(written, hostile)
+
+    with zipfile.ZipFile(written) as archive:
+        xml = archive.read(ROOT_MODEL).decode("utf-8")
+    root = ET.fromstring(xml)  # well-formed, not merely round-trippable
+    assert [element.get("name") for element in root.findall(f"{{{CORE_NS}}}metadata")].count(
+        "Injected"
+    ) == 0
+    assert not any(character in xml for character in "\x07\x0b\x0c\x1f")
+    assert read(written) == hostile
