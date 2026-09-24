@@ -386,6 +386,89 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/outputs/{output_id}/filaments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Spools that can print this output, and what the plate needs
+         * @description Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
+         *
+         *     One route rather than three calls from the browser, because the join is the part
+         *     with the traps in it: ``/inventory/assignments`` covers every printer while
+         *     ``inventory-remain`` covers one, ``remain: -1`` means unknown and so does
+         *     ``used_grams: 0``.
+         *
+         *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
+         *     this printer": without one the spools are still listed, with their last known
+         *     assignment, but the reconciled remaining weights are not.
+         */
+        get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/outputs/{output_id}/progress": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How the last print of this output is going
+         * @description Follow whichever of Bambuddy's two routes this output last took (#89).
+         *
+         *     ``null`` means this output has never been printed — that is an answer, not an
+         *     error, and the send bar shows nothing rather than a failure.
+         *
+         *     The poll is needed rather than optional on the pipeline route: ``run`` answers 202
+         *     and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
+         *     still null when the run response arrives. ``settled`` is what says the polling can
+         *     stop; it is computed from the copies, because a run can report a terminal status
+         *     while a copy is still being dispatched.
+         */
+        get: operations["get_progress_api_v1_print_outputs__output_id__progress_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/print/outputs/{output_id}/project": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * File this output's queue entries under its project
+         * @description ``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
+         *
+         *     Separate from the run because neither id exists when a print starts: a pipeline
+         *     run's queue entries are created by a background task, and an archive only exists
+         *     once a print has finished. Calling this again later is how the archives eventually
+         *     land on the project's page, and attaching the same id twice is Bambuddy's to dedupe.
+         */
+        post: operations["post_attach_project_api_v1_print_outputs__output_id__project_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/outputs/{output_id}/run": {
         parameters: {
             query?: never;
@@ -467,6 +550,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/projects": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Bambuddy's projects
+         * @description Every Bambuddy project, with the library folder that belongs to it (#79).
+         *
+         *     Also the project the last send went to, so the picker opens where it was left.
+         *     ScadBuddy models no relationship between a model and a project: which prints
+         *     belong to a project is on the project's own page, and keeping a second answer
+         *     here would be a copy that goes stale.
+         */
+        get: operations["get_projects_api_v1_print_projects_get"];
+        put?: never;
+        /**
+         * Create or link a project
+         * @description ``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with
+         *     ``project_id``, which is the pairing Bambuddy's own UI makes.
+         *
+         *     With ``project_id`` an existing project is linked instead of created, and its folder
+         *     is left alone if it already has one — linking twice must not leave Bambuddy with two
+         *     folders of the same name.
+         */
+        post: operations["post_project_api_v1_print_projects_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings": {
         parameters: {
             query?: never;
@@ -485,6 +602,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/settings/print-options": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Remembered print options */
+        get: operations["get_print_options_api_v1_settings_print_options_get"];
+        /**
+         * Remember print options for one scope
+         * @description Only the named scope changes; the other two are left exactly as they were.
+         */
+        put: operations["put_print_options_api_v1_settings_print_options_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings/register-sidebar": {
         parameters: {
             query?: never;
@@ -496,7 +634,7 @@ export interface paths {
         put?: never;
         /**
          * Add ScadBuddy to Bambuddy's sidebar
-         * @description Upsert the ``Customize`` External Link by name.
+         * @description Upsert the ``ScadBuddy`` External Link by name.
          *
          *     Bambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a
          *     sandboxed iframe at ``/external/{id}`` — so ScadBuddy appears as a sidebar page
@@ -571,6 +709,18 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AttachResult
+         * @description What was attached, so the UI can say so rather than claiming more than happened.
+         */
+        AttachResult: {
+            /** Archive Ids */
+            archive_ids?: number[];
+            /** Project Id */
+            project_id: number;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+        };
         /**
          * BambuddyTargets
          * @description Everything the settings page needs to fill its pickers.
@@ -680,6 +830,32 @@ export interface components {
             /** Printers */
             printers?: components["schemas"]["Printer"][];
         };
+        /**
+         * CopyProgress
+         * @description One copy of a print: where it went and what it is doing.
+         *
+         *     A pipeline run reports one of these per copy; the queue route has exactly one,
+         *     because Bambuddy's queue models repeats through ``quantity`` rather than through
+         *     separate rows.
+         */
+        CopyProgress: {
+            /** Copy Index */
+            copy_index?: number | null;
+            /** Message */
+            message?: string | null;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Queue Entry Id */
+            queue_entry_id?: number | null;
+            /**
+             * Stage
+             * @default unknown
+             * @enum {string}
+             */
+            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            /** Waiting Reason */
+            waiting_reason?: string | null;
+        };
         /** CreateOutputRequest */
         CreateOutputRequest: {
             /** Job Id */
@@ -777,10 +953,77 @@ export interface components {
             /** Target Printer Name */
             target_printer_name?: string | null;
         };
-        /** Folder */
+        /**
+         * FilamentOptions
+         * @description Everything the filament step of the dialog needs, in one answer.
+         *
+         *     One route rather than three, because the join — inventory against assignments
+         *     against the per-slot remaining weights — is the part that is easy to get wrong, and
+         *     doing it in the browser would mean shipping every spool's history to do it.
+         */
+        FilamentOptions: {
+            /** Library File Id */
+            library_file_id: number;
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Slots */
+            slots?: components["schemas"]["SlotNeed"][];
+            /** Spools */
+            spools?: components["schemas"]["SpoolOption"][];
+            /** Suggested */
+            suggested?: components["schemas"]["SlotChoice"][];
+            /** Warnings */
+            warnings?: components["schemas"]["FilamentWarning"][];
+        };
+        /**
+         * FilamentPlan
+         * @description What the dialog submits: one spool per slot, and how hard to insist on it.
+         *
+         *     ``force_colour_match`` becomes ``force_color_match`` on every override, which is
+         *     the flag Bambuddy's scheduler reads to require an exact type+colour match rather
+         *     than merely preferring one. It is off by default because it only bites on a
+         *     model-targeted queue item, where insisting can leave the job unschedulable.
+         */
+        FilamentPlan: {
+            /**
+             * Force Colour Match
+             * @default false
+             */
+            force_colour_match: boolean;
+            /** Slots */
+            slots?: components["schemas"]["SlotChoice"][];
+        };
+        /**
+         * FilamentWarning
+         * @description Advisory, never blocking. Bambuddy's own refusals are the eligibility report.
+         */
+        FilamentWarning: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset";
+            /** Message */
+            message: string;
+            /** Slot Id */
+            slot_id?: number | null;
+        };
+        /**
+         * Folder
+         * @description A row of ``GET /api/v1/library/folders``.
+         *
+         *     **The list is a tree, not a flat list.** Bambuddy nests sub-folders inside their
+         *     parent's ``children`` rather than returning them alongside it, so a folder linked to
+         *     a project is invisible to a scan of the top level if it happens to live under
+         *     another folder. :func:`walk` is what flattens it.
+         */
         Folder: {
             /** Archive Id */
             archive_id?: number | null;
+            /** Children */
+            children?: components["schemas"]["Folder"][];
             /** File Count */
             file_count?: number | null;
             /** Id */
@@ -919,6 +1162,22 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
+        /**
+         * LoadedAt
+         * @description Where a spool physically is, when Bambuddy says it is loaded somewhere.
+         *
+         *     Purely a label. It is not an address: nothing here turns it into a tray number.
+         */
+        LoadedAt: {
+            /** Ams Id */
+            ams_id: number;
+            /** Printer Id */
+            printer_id: number;
+            /** Printer Name */
+            printer_name?: string | null;
+            /** Tray Id */
+            tray_id: number;
+        };
         /** ModelPatch */
         ModelPatch: {
             /** Description */
@@ -978,6 +1237,8 @@ export interface components {
             job_id: string;
             /** Library File Id */
             library_file_id?: number | null;
+            /** Library File Plate */
+            library_file_plate?: string | null;
             /** Name */
             name?: string | null;
             /** Params */
@@ -988,8 +1249,14 @@ export interface components {
             parts?: components["schemas"]["PartInfo"][];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
+            /** Print Route */
+            print_route?: ("pipeline" | "slice_queue") | null;
+            /** Project Id */
+            project_id?: number | null;
             /** Queue Item Id */
             queue_item_id?: number | null;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
             /** Slug */
             slug: string;
             /** Warnings */
@@ -1136,8 +1403,12 @@ export interface components {
             assigned_printer_id?: number | null;
             /** Assigned Printer Name */
             assigned_printer_name?: string | null;
+            /** Completed At */
+            completed_at?: string | null;
             /** Copy Index */
             copy_index: number;
+            /** Dispatched At */
+            dispatched_at?: string | null;
             /** Error Message */
             error_message?: string | null;
             /** Id */
@@ -1152,14 +1423,24 @@ export interface components {
         /**
          * PipelineReport
          * @description Bambuddy's report for one pipeline, passed through as it came.
+         *
+         *     ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
+         *     judged, which is neither ready nor blocked, and the picker says so rather than
+         *     guessing either way. That either-or is enforced below rather than merely described,
+         *     because the browser branches on it: a row with neither would render as silently
+         *     absent, and one with both would claim two states at once.
          */
         PipelineReport: {
+            /** Error */
+            error?: string | null;
             /** Pipeline Id */
             pipeline_id: number;
-            report: components["schemas"]["EligibilityReport"];
+            report?: components["schemas"]["EligibilityReport"] | null;
         };
         /** PipelineRun */
         PipelineRun: {
+            /** Completed At */
+            completed_at?: string | null;
             /**
              * Copies
              * @default 1
@@ -1185,6 +1466,8 @@ export interface components {
              * @default 0
              */
             copies_in_progress: number;
+            /** Created At */
+            created_at?: string | null;
             /**
              * Eligibility Overridden
              * @default false
@@ -1198,6 +1481,8 @@ export interface components {
             id: number;
             /** Jobs */
             jobs?: components["schemas"]["PipelineJob"][];
+            /** Parent Run Id */
+            parent_run_id?: number | null;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Pipeline Name */
@@ -1212,6 +1497,8 @@ export interface components {
             source_filename?: string | null;
             /** Source Library File Id */
             source_library_file_id?: number | null;
+            /** Started At */
+            started_at?: string | null;
             /** Status */
             status: string;
             /** Target Kind */
@@ -1313,11 +1600,174 @@ export interface components {
             source: "orca_cloud" | "cloud" | "local" | "standard";
         };
         /**
+         * PrintOptions
+         * @description A sparse overlay on ``PrintQueueItemCreate``'s option fields.
+         *
+         *     ``extra="forbid"`` on purpose: a misspelled option must 422 rather than be
+         *     remembered under a name nothing will ever read.
+         */
+        PrintOptions: {
+            /** Auto Off After */
+            auto_off_after?: boolean | null;
+            /** Bed Levelling */
+            bed_levelling?: ("off" | "on" | "auto") | null;
+            /** Flow Cali */
+            flow_cali?: ("off" | "on" | "auto") | null;
+            /** Insert At Top */
+            insert_at_top?: boolean | null;
+            /** Layer Inspect */
+            layer_inspect?: boolean | null;
+            /** Manual Start */
+            manual_start?: boolean | null;
+            /** Nozzle Offset Cali */
+            nozzle_offset_cali?: ("off" | "on" | "auto") | null;
+            /** Preheat Chamber Target Override */
+            preheat_chamber_target_override?: number | null;
+            /** Preheat Override */
+            preheat_override?: ("inherit" | "on" | "off") | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Quantity */
+            quantity?: number | null;
+            /** Timelapse */
+            timelapse?: boolean | null;
+            /** Use Ams */
+            use_ams?: boolean | null;
+            /** Vibration Cali */
+            vibration_cali?: boolean | null;
+        };
+        /**
+         * PrintOptionsState
+         * @description The view plus the printer the per-printer scope keys on.
+         *
+         *     Only the GET carries it, and only the GET may touch Bambuddy: with a slicer pipeline
+         *     configured the target printer lives on the pipeline, so reading it costs one
+         *     ``GET /slicer-pipelines/{id}``. The PUT deliberately does not resolve it — remembering
+         *     an option must not need a reachable Bambuddy — and an override saved against the wrong
+         *     id would silently never apply, which is why this is served rather than guessed.
+         */
+        PrintOptionsState: {
+            defaults: components["schemas"]["PrintOptions"];
+            global_options: components["schemas"]["PrintOptions"];
+            /** Models */
+            models?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printers */
+            printers?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+        };
+        /**
+         * PrintOptionsUpdate
+         * @description Replaces one scope's overrides wholesale.
+         *
+         *     An all-unset ``options`` clears the scope rather than storing an empty object.
+         */
+        PrintOptionsUpdate: {
+            /** Key */
+            key?: string | null;
+            options: components["schemas"]["PrintOptions"];
+            /**
+             * Scope
+             * @enum {string}
+             */
+            scope: "global" | "printer" | "model";
+        };
+        /**
+         * PrintOptionsView
+         * @description The remembered print options, plus what Bambuddy would do without them.
+         *
+         *     ``defaults`` is Bambuddy 1.2.5.5's own ``PrintQueueItemCreate`` defaults and is the
+         *     baseline the UI marks a value as non-default against. It is served rather than
+         *     duplicated in the frontend so there is one copy of it in the codebase.
+         */
+        PrintOptionsView: {
+            defaults: components["schemas"]["PrintOptions"];
+            global_options: components["schemas"]["PrintOptions"];
+            /** Models */
+            models?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+            /** Printers */
+            printers?: {
+                [key: string]: components["schemas"]["PrintOptions"];
+            };
+        };
+        /**
+         * PrintProgress
+         * @description What the send bar shows until every copy is queued, failed or cancelled.
+         */
+        PrintProgress: {
+            /** Bambuddy Url */
+            bambuddy_url: string;
+            /**
+             * Copies
+             * @default 1
+             */
+            copies: number;
+            /**
+             * Copies Cancelled
+             * @default 0
+             */
+            copies_cancelled: number;
+            /**
+             * Copies Completed
+             * @default 0
+             */
+            copies_completed: number;
+            /** Copies Detail */
+            copies_detail?: components["schemas"]["CopyProgress"][];
+            /**
+             * Copies Failed
+             * @default 0
+             */
+            copies_failed: number;
+            /**
+             * Copies In Progress
+             * @default 0
+             */
+            copies_in_progress: number;
+            /** Error Message */
+            error_message?: string | null;
+            /** Fix */
+            fix?: string | null;
+            /** Pipeline Run Id */
+            pipeline_run_id?: number | null;
+            /** Queue Item Id */
+            queue_item_id?: number | null;
+            /**
+             * Route
+             * @enum {string}
+             */
+            route: "pipeline" | "slice_queue";
+            /**
+             * Settled
+             * @default false
+             */
+            settled: boolean;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
+            /**
+             * Stage
+             * @default unknown
+             * @enum {string}
+             */
+            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+        };
+        /**
          * PrintRunRequest
          * @description ``pipeline_id`` omitted means "whatever this model defaults to".
          *
          *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
          *     only offers it once the issues have been shown.
+         *
+         *     ``filament_plan`` is what makes this request choose its route rather than its
+         *     caller. A plan names one spool per plate slot, and those three queue-item fields
+         *     exist on no other Bambuddy call — so a request carrying one is sliced and queued,
+         *     and one without one runs the pipeline exactly as it did before (#87).
          */
         PrintRunRequest: {
             /**
@@ -1325,6 +1775,7 @@ export interface components {
              * @default 1
              */
             copies: number;
+            filament_plan?: components["schemas"]["FilamentPlan"] | null;
             /**
              * Force
              * @default false
@@ -1332,16 +1783,52 @@ export interface components {
             force: boolean;
             /** Pipeline Id */
             pipeline_id?: number | null;
+            /**
+             * Plate Id
+             * @default 1
+             */
+            plate_id: number;
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
         };
-        /** PrintRunResult */
+        /**
+         * PrintRunResult
+         * @description One shape for both routes, so the caller need not know which one ran.
+         *
+         *     ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
+         *     populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
+         *     is a single row carrying ``quantity``. Following either to completion is #89.
+         */
         PrintRunResult: {
             /** Bambuddy Url */
             bambuddy_url: string;
+            /** Folder Id */
+            folder_id?: number | null;
             /** Library File Id */
             library_file_id: number;
             /** Pipeline Id */
             pipeline_id: number;
-            run: components["schemas"]["PipelineRun"];
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+            /**
+             * Route
+             * @default pipeline
+             * @enum {string}
+             */
+            route: "pipeline" | "slice_queue";
+            run?: components["schemas"]["PipelineRun"] | null;
+            /** Slice Job Id */
+            slice_job_id?: number | null;
+            /** Sliced Library File Id */
+            sliced_library_file_id?: number | null;
+            /** Warnings */
+            warnings?: components["schemas"]["FilamentWarning"][];
         };
         /**
          * Printer
@@ -1366,6 +1853,87 @@ export interface components {
             /** Nozzle Count */
             nozzle_count?: number | null;
         };
+        /**
+         * ProjectAttach
+         * @description Which of this output's queue entries to file under the project.
+         *
+         *     The ids come from the progress read (#89): a pipeline run's
+         *     ``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the
+         *     only one that knows them, and only once it has polled.
+         */
+        ProjectAttach: {
+            /** Project Id */
+            project_id?: number | null;
+            /** Queue Item Ids */
+            queue_item_ids?: number[];
+        };
+        /** ProjectChoices */
+        ProjectChoices: {
+            /** Last Project Id */
+            last_project_id?: number | null;
+            /** Projects */
+            projects?: components["schemas"]["ProjectView"][];
+        };
+        /**
+         * ProjectRequest
+         * @description Create a project, or link an existing one.
+         *
+         *     ``project_id`` set means "link that one"; otherwise ``name`` is required and a new
+         *     project is created. Only the fields ScadBuddy has an opinion about are sent —
+         *     ``ProjectCreate`` also carries ``target_count``, ``due_date``, ``budget`` and more,
+         *     and inventing values for them would put numbers on Bambuddy's project page that
+         *     nobody chose.
+         */
+        ProjectRequest: {
+            /** Colour */
+            colour?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Folder Id */
+            folder_id?: number | null;
+            /** Name */
+            name?: string | null;
+            /** Project Id */
+            project_id?: number | null;
+            /** Tags */
+            tags?: string | null;
+            /** Url */
+            url?: string | null;
+        };
+        /**
+         * ProjectView
+         * @description A Bambuddy project and the library folder sends to it land in.
+         *
+         *     ``folder_id`` is ``None`` for a project that has no folder yet — an existing
+         *     Bambuddy project made outside ScadBuddy usually does not, and linking one creates
+         *     it rather than refusing.
+         */
+        ProjectView: {
+            /**
+             * Archive Count
+             * @default 0
+             */
+            archive_count: number;
+            /** Colour */
+            colour?: string | null;
+            /** Description */
+            description?: string | null;
+            /** Folder Id */
+            folder_id?: number | null;
+            /** Folder Name */
+            folder_name?: string | null;
+            /** Id */
+            id: number;
+            /** Name */
+            name: string;
+            /**
+             * Queue Count
+             * @default 0
+             */
+            queue_count: number;
+            /** Status */
+            status: string;
+        };
         /** RenderAccepted */
         RenderAccepted: {
             /** Job Id */
@@ -1382,17 +1950,15 @@ export interface components {
         };
         /** SendRequest */
         SendRequest: {
-            /**
-             * Copies
-             * @default 1
-             */
-            copies: number;
+            /** Copies */
+            copies?: number | null;
             /**
              * Mode
              * @default library
              * @enum {string}
              */
             mode: "library" | "queue";
+            options?: components["schemas"]["PrintOptions"];
         };
         /** SendResult */
         SendResult: {
@@ -1407,6 +1973,7 @@ export interface components {
              * @enum {string}
              */
             mode: "library" | "queue";
+            options?: components["schemas"]["PrintOptions"];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
             /** Queue Item Id */
@@ -1483,6 +2050,27 @@ export interface components {
             /** Url */
             url: string;
         };
+        /** SlotChoice */
+        SlotChoice: {
+            /** Slot Id */
+            slot_id: number;
+            /** Spool Id */
+            spool_id: number;
+        };
+        /**
+         * SlotNeed
+         * @description One filament slot of the plate, as Bambuddy reads the 3MF. ``slot_id`` is 1-based.
+         */
+        SlotNeed: {
+            /** Colour */
+            colour?: string | null;
+            /** Material */
+            material?: string | null;
+            /** Slot Id */
+            slot_id: number;
+            /** Used Grams */
+            used_grams?: number | null;
+        };
         /** SourceCheck */
         SourceCheck: {
             /**
@@ -1521,6 +2109,33 @@ export interface components {
              * @description The replacement OpenSCAD source
              */
             source: string;
+        };
+        /**
+         * SpoolOption
+         * @description One row of the picker: a spool, and where it is.
+         */
+        SpoolOption: {
+            /** Brand */
+            brand?: string | null;
+            /** Color Name */
+            color_name?: string | null;
+            /** Colour */
+            colour?: string | null;
+            loaded?: components["schemas"]["LoadedAt"] | null;
+            /** Material */
+            material: string;
+            /** Remaining G */
+            remaining_g?: number | null;
+            /** Slicer Filament */
+            slicer_filament?: string | null;
+            /** Slicer Filament Name */
+            slicer_filament_name?: string | null;
+            /** Spool Id */
+            spool_id: number;
+            /** Storage Location */
+            storage_location?: string | null;
+            /** Subtype */
+            subtype?: string | null;
         };
         /** ValidationError */
         ValidationError: {
@@ -2425,6 +3040,106 @@ export interface operations {
             };
         };
     };
+    get_filaments_api_v1_print_outputs__output_id__filaments_get: {
+        parameters: {
+            query?: {
+                printer_id?: number | null;
+                plate_id?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FilamentOptions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_progress_api_v1_print_outputs__output_id__progress_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintProgress"] | null;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_attach_project_api_v1_print_outputs__output_id__project_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectAttach"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachResult"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     post_run_api_v1_print_outputs__output_id__run_post: {
         parameters: {
             query?: never;
@@ -2525,6 +3240,59 @@ export interface operations {
             };
         };
     };
+    get_projects_api_v1_print_projects_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectChoices"];
+                };
+            };
+        };
+    };
+    post_project_api_v1_print_projects_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProjectRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProjectView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_settings_api_v1_settings_get: {
         parameters: {
             query?: never;
@@ -2565,6 +3333,71 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SettingsView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_print_options_api_v1_settings_print_options_get: {
+        parameters: {
+            query?: {
+                /** @description The model about to be printed, whose own pipeline may differ */
+                slug?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintOptionsState"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_print_options_api_v1_settings_print_options_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrintOptionsUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrintOptionsView"];
                 };
             };
             /** @description Validation Error */

@@ -154,37 +154,47 @@ describe('PrintPicker', () => {
   })
 
   it('remembers the pipeline for this model when asked to', async () => {
-    const put = vi.fn()
-    server.events.on('request:start', ({ request }) => {
-      if (request.method === 'PUT' && request.url.includes('/print/models/')) put(request.url)
-    })
+    const writes = watchDefaultWrites()
     const { user } = open()
     await listed()
 
+    // No model default yet, so ticking the box is a real change and is written.
     await user.click(screen.getByLabelText(/Always use this pipeline/))
     await user.click(screen.getByTestId('run-pipeline'))
     await screen.findByText(/Pipeline run/)
 
-    expect(put).toHaveBeenCalled()
+    expect(writes).toEqual([{ pipeline_id: 1 }])
   })
 
-  it('does not re-point an existing model default at whatever is selected next', async () => {
-    // The model already prints with pipeline 2; the user opens the picker to try 1 once.
+  /** The model already prints with pipeline 2 (Draft); 1 (Textured) is the global fallback. */
+  function withModelDefault(pipelineId: number | null = 2) {
     server.use(
       http.get('/api/v1/print/models/:slug/pipelines', () =>
         HttpResponse.json({
           pipelines: fixtures.pipelineViews,
           printers: fixtures.targets.printers,
-          model_pipeline_id: 2,
+          model_pipeline_id: pipelineId,
           global_pipeline_id: 1,
-          default_pipeline_id: 2,
+          default_pipeline_id: pipelineId ?? 1,
         }),
       ),
     )
-    const puts: unknown[] = []
-    server.events.on('request:start', ({ request }) => {
-      if (request.method === 'PUT' && request.url.includes('/print/models/')) puts.push(request.url)
+  }
+
+  /** Every `PUT /print/models/{slug}/pipeline` body, in order. */
+  function watchDefaultWrites(): { pipeline_id: number | null }[] {
+    const writes: { pipeline_id: number | null }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT' && request.url.includes('/print/models/')) {
+        writes.push((await request.clone().json()) as { pipeline_id: number | null })
+      }
     })
+    return writes
+  }
+
+  it('does not re-point an existing model default at whatever is selected next', async () => {
+    withModelDefault(2)
+    const writes = watchDefaultWrites()
     const { user } = open()
     await listed()
 
@@ -201,8 +211,40 @@ describe('PrintPicker', () => {
     await user.click(screen.getByTestId('run-pipeline'))
     await screen.findByText(/Pipeline run/)
 
-    // Exactly one PUT, and it is the one that CLEARS the default rather than moving it.
-    expect(puts).toHaveLength(1)
+    // And it must not CLEAR the default either: printing something else once says nothing
+    // about what this model should default to, so the stored default is left alone.
+    expect(writes).toEqual([])
+  })
+
+  it('clears the default only when the user unticks the pipeline that is the default', async () => {
+    withModelDefault(2)
+    const writes = watchDefaultWrites()
+    const { user } = open()
+    await listed()
+    expect(screen.getByRole('radio', { name: DRAFT })).toBeChecked()
+
+    // Deliberately unticking the box on the pipeline that *is* the default is the one
+    // gesture that means "stop defaulting to this".
+    await user.click(screen.getByLabelText(/Always use this pipeline/))
+    await user.click(screen.getByTestId('force'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+
+    expect(writes).toEqual([{ pipeline_id: null }])
+  })
+
+  it('writes the default only when the tick actually changes it', async () => {
+    withModelDefault(2)
+    const writes = watchDefaultWrites()
+    const { user } = open()
+    await listed()
+
+    // Ticked and unchanged on the pipeline that already is the default: nothing to write.
+    await user.click(screen.getByTestId('force'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+
+    expect(writes).toEqual([])
   })
 
   it('ignores an eligibility answer that arrives after the output has changed', async () => {
@@ -253,6 +295,80 @@ describe('PrintPicker', () => {
     await new Promise((resolve) => setTimeout(resolve, 500))
     expect(screen.queryByText(/stale answer/)).not.toBeInTheDocument()
     expect(row(TEXTURED)).not.toHaveTextContent('not ready')
+  })
+
+  it('marks a pipeline Bambuddy could not judge as unchecked, not as blocked', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', () =>
+        HttpResponse.json({
+          library_file_id: 8801,
+          reports: [
+            { pipeline_id: 1, report: null, error: 'Bambuddy answered 500: the slicer fell over' },
+            { pipeline_id: 2, report: fixtures.eligibilityReports[2] },
+          ],
+        }),
+      ),
+    )
+    open()
+    await screen.findByRole('radio', { name: TEXTURED })
+
+    // The row that could not be answered says so, and claims neither state.
+    expect(await screen.findByTestId('uncheckable-1')).toHaveTextContent('the slicer fell over')
+    expect(row(TEXTURED)).not.toHaveTextContent('ready')
+    // The one that did answer is unaffected — a single failure does not blank the picker.
+    expect(row(DRAFT)).toHaveTextContent('not ready')
+    // And an unanswered check is not grounds for offering `force`: nothing was shown to
+    // override, so Run just gets Bambuddy's own verdict.
+    expect(screen.queryByTestId('force')).not.toBeInTheDocument()
+  })
+
+  it('reports a failure that hit every pipeline once, not once per row', async () => {
+    // A bad API key or an unreachable Bambuddy fails every check with the same message;
+    // repeating it per row says nothing extra and buries the actual problem.
+    const detail = "Bambuddy refused the API key. The key needs the 'Manage Queue' scope"
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', () =>
+        HttpResponse.json({
+          library_file_id: 8801,
+          reports: fixtures.pipelineViews.map((pipeline) => ({
+            pipeline_id: pipeline.id,
+            report: null,
+            error: detail,
+          })),
+        }),
+      ),
+    )
+    open()
+    await screen.findByRole('radio', { name: TEXTURED })
+
+    expect(await screen.findByTestId('eligibility-unavailable')).toHaveTextContent(detail)
+    // Said once, not three times.
+    expect(screen.queryByTestId('uncheckable-1')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('uncheckable-2')).not.toBeInTheDocument()
+    // And nothing claims to be ready or blocked off the back of an answer nobody got.
+    expect(screen.queryByText(/^(ready|not ready)$/)).not.toBeInTheDocument()
+  })
+
+  it('still shows a blank reason as unchecked rather than as nothing at all', async () => {
+    server.use(
+      http.post('/api/v1/print/outputs/:id/eligibility', () =>
+        HttpResponse.json({
+          library_file_id: 8801,
+          // The backend rejects a blank reason, so this is the belt to that braces: the
+          // row is decided by whether a REPORT arrived, not by the error string's truth.
+          reports: [
+            { pipeline_id: 1, report: null, error: '' },
+            { pipeline_id: 2, report: fixtures.eligibilityReports[2] },
+          ],
+        }),
+      ),
+    )
+    open()
+    await screen.findByRole('radio', { name: TEXTURED })
+
+    expect(await screen.findByTestId('uncheckable-1')).toBeInTheDocument()
+    expect(row(TEXTURED)).toHaveTextContent('not checked')
+    expect(row(TEXTURED)).not.toHaveTextContent(/^ready/)
   })
 
   it('says so when Bambuddy has no pipelines at all', async () => {
@@ -330,5 +446,166 @@ describe('PrintPicker · New pipeline', () => {
     await user.selectOptions(screen.getByLabelText('Filament for slot 1'), 'cloud:GFSA05_22')
 
     expect(screen.getByRole('button', { name: 'Create pipeline' })).toBeDisabled()
+  })
+})
+
+describe('PrintPicker · Filaments', () => {
+  beforeEach(() => resetMockState())
+
+  /** Every `POST /print/outputs/{id}/run` body, in order. */
+  function watchRuns(): Record<string, unknown>[] {
+    const bodies: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.includes('/run')) {
+        bodies.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    return bodies
+  }
+
+  it('shows one slot per plate colour, pre-selected from the server’s suggestion', async () => {
+    open()
+    await listed()
+
+    const slot = await screen.findByTestId('filament-slot-1')
+    expect(within(slot).getByTestId('spool-21')).toBeChecked()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
+  })
+
+  it('keeps the #86 request shape while the plan is still the suggested one', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('filament-slot-1')
+
+    // The box is off and nothing has been moved, so this must stay a pipeline run —
+    // Bambuddy's own fan-out across the pipeline's printers is the default behaviour.
+    expect(screen.getByTestId('use-exact-filaments')).not.toBeChecked()
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+
+    expect(runs).toHaveLength(1)
+    expect(runs[0]).not.toHaveProperty('filament_plan')
+    expect(runs[0]).not.toHaveProperty('printer_id')
+  })
+
+  it('sends the plan and reports the queue entries once the user asks for these spools', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('filament-slot-1')
+
+    await user.click(screen.getByTestId('use-exact-filaments'))
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    // `run` is null on this route, so the success panel reports the queue entries the
+    // slice produced rather than a pipeline run that does not exist.
+    const queued = await screen.findByTestId('queued-items')
+    expect(queued).toHaveTextContent('Sliced and queued for 3DP-31B-598')
+    expect(queued).toHaveTextContent('Slice job')
+    expect(screen.queryByText(/Pipeline run/)).not.toBeInTheDocument()
+
+    expect(runs[0]).toMatchObject({
+      printer_id: 1,
+      plate_id: 1,
+      filament_plan: {
+        slots: [
+          { slot_id: 1, spool_id: 21 },
+          { slot_id: 2, spool_id: 27 },
+        ],
+        force_colour_match: false,
+      },
+    })
+  })
+
+  it('treats moving a slot as the same request, without the box', async () => {
+    const runs = watchRuns()
+    const { user } = open()
+    await listed()
+
+    const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('spool-22'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+
+    expect(runs[0]).toMatchObject({
+      printer_id: 1,
+      filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 22 }]) },
+    })
+  })
+
+  it('says so rather than going quiet when the inventory cannot be read', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Bad Gateway',
+            status: 502,
+            detail: "Bambuddy refused the API key when asked for the spool inventory",
+          },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    open()
+    await listed()
+
+    expect(await screen.findByTestId('filaments-unavailable')).toHaveTextContent(
+      'refused the API key',
+    )
+    // The pipeline still runs; the picker is an addition to #86, not a gate on it.
+    expect(screen.getByTestId('run-pipeline')).toBeEnabled()
+  })
+})
+
+describe('PrintPicker · Projects', () => {
+  beforeEach(() => resetMockState())
+
+  /**
+   * #79 — the run cannot file itself. `jobs[].queue_entry_id` is null when Bambuddy
+   * answers 202, so the ids only exist once the progress read (#89) has them, and the
+   * attach is a call of its own made from what that read reported.
+   */
+  it('files the print under the chosen project once the queue entries are known', async () => {
+    const attaches: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/project')) {
+        attaches.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    server.use(
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
+      ),
+    )
+    const { user } = open()
+    await listed()
+
+    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    await waitFor(() => expect(attaches).toHaveLength(1))
+    expect(attaches[0]).toEqual({ project_id: 2, queue_item_ids: [4472, 4473] })
+  })
+
+  it('does not file a print that was sent without a project', async () => {
+    const attaches: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/project')) attaches.push(request.url)
+    })
+    server.use(
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
+      ),
+    )
+    const { user } = open()
+    await listed()
+
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+    await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
+
+    expect(attaches).toEqual([])
   })
 })

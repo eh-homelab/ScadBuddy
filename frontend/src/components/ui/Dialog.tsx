@@ -31,21 +31,25 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
         if (event.target === event.currentTarget) onClose()
       }}
     >
+      {/* Bounded, with the body scrolling, so the title and the buttons stay reachable
+          however tall the content grows. The print picker's filament step (#87) is the
+          first content to exceed a short viewport, and without this the Run button sits
+          off screen with nothing to scroll it into view. */}
       <div
         ref={panelRef}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
-        className="w-full max-w-lg rounded-lg border border-line bg-surface shadow-2xl outline-none"
+        className="flex max-h-[calc(100vh-2rem)] w-full max-w-lg flex-col rounded-lg border border-line bg-surface shadow-2xl outline-none"
       >
-        <header className="border-b border-line px-5 py-3.5">
+        <header className="shrink-0 border-b border-line px-5 py-3.5">
           <h2 className="text-[15px] font-semibold">{title}</h2>
           {description && <p className="mt-1 text-[13px] text-muted">{description}</p>}
         </header>
-        <div className="px-5 py-4">{children}</div>
+        <div className="overflow-y-auto px-5 py-4">{children}</div>
         {footer && (
-          <footer className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
+          <footer className="flex shrink-0 items-center justify-end gap-2 border-t border-line px-5 py-3">
             {footer}
           </footer>
         )}

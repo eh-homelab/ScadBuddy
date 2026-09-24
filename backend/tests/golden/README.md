@@ -3,7 +3,10 @@
 Two kinds of golden live here.
 
 - `two_boxes/` — the 3MF writer's unit golden. Two boxes built in Python, no
-  OpenSCAD involved, compared byte for byte by `tests/test_bambu3mf.py`.
+  OpenSCAD involved, compared byte for byte by `tests/test_bambu3mf.py`. Its
+  `project_settings.config` carries `wipe_tower_x`/`wipe_tower_y` as well as the
+  filament colours: the writer reserves a prime-tower position clear of the
+  object, because the default one is unprintable on an H2C (#105).
 - `name-keychain-*/` — integration goldens for the example models in `models/`.
   Each one is a real render through the production pipeline, recorded by
   `tests/test_golden_models.py`.
@@ -36,6 +39,16 @@ piece, which the weld in the model exists to guarantee) and `euler_number`
 (genus: the Reagan base is 0 because the keyring hole makes it a torus, the
 `hole=false` base is 2 because it has no hole). Those are invariants of the
 shape, not of how it was triangulated.
+
+## The cover images are pinned by name, not by bytes
+
+`Metadata/plate_1.png` and its three companions appear in `archive_entries`, so
+losing one fails a golden. Their pixels do not: the renderer is a pure function
+of the mesh, but a recorded PNG would turn every lighting or framing tweak into
+a binary diff nobody can review, and the same retessellation that moves the mesh
+moves the image. `tests/test_thumbnail.py` pins them as properties instead —
+size, transparent background, and that a two-colour model really does show two
+colours, which is the whole point of them.
 
 ## The two files that are stored verbatim
 

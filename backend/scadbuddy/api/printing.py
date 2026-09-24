@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from typing import Annotated
 
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter, Query, status
+from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import OutputIdPath, OutputsDep, SettingsStoreDep, SlugPath
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.filaments import FilamentOptions
 from scadbuddy.bambuddy.models import PipelineCreate, PresetRef, PresetSource
 from scadbuddy.bambuddy.pipelines import (
     EligibilityOverview,
@@ -28,9 +29,21 @@ from scadbuddy.bambuddy.pipelines import (
     check_pipelines,
     create_pipeline,
     describe_pipelines,
+    filament_options_for_output,
     preset_options,
     run_for_output,
 )
+from scadbuddy.bambuddy.progress import PrintProgress, progress_for
+from scadbuddy.bambuddy.projects import (
+    AttachResult,
+    ProjectChoices,
+    ProjectRequest,
+    ProjectView,
+    attach_results,
+    describe_projects,
+    ensure_project,
+)
+from scadbuddy.core.problems import ApiError
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -45,6 +58,18 @@ class PipelineDefaultPatch(BaseModel):
     """``null`` clears this model's default, falling back to the global one."""
 
     pipeline_id: int | None = None
+
+
+class ProjectAttach(BaseModel):
+    """Which of this output's queue entries to file under the project.
+
+    The ids come from the progress read (#89): a pipeline run's
+    ``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the
+    only one that knows them, and only once it has polled.
+    """
+
+    project_id: int | None = None
+    queue_item_ids: list[int] = Field(default_factory=list)
 
 
 @router.get(
@@ -175,3 +200,123 @@ async def post_run(
     settings = store.load()
     async with client_for(settings) as client:
         return await run_for_output(client, outputs, meta, settings, body)
+
+
+@router.get(
+    "/outputs/{output_id}/filaments",
+    response_model=FilamentOptions,
+    summary="Spools that can print this output, and what the plate needs",
+)
+async def get_filaments(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    printer_id: Annotated[int | None, Query()] = None,
+    plate_id: Annotated[int, Query(ge=1)] = 1,
+) -> FilamentOptions:
+    """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
+
+    One route rather than three calls from the browser, because the join is the part
+    with the traps in it: ``/inventory/assignments`` covers every printer while
+    ``inventory-remain`` covers one, ``remain: -1`` means unknown and so does
+    ``used_grams: 0``.
+
+    ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
+    this printer": without one the spools are still listed, with their last known
+    assignment, but the reconciled remaining weights are not.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await filament_options_for_output(
+            client,
+            outputs,
+            meta,
+            settings,
+            printer_id=printer_id,
+            plate_id=plate_id,
+        )
+
+
+@router.get(
+    "/outputs/{output_id}/progress",
+    response_model=PrintProgress | None,
+    summary="How the last print of this output is going",
+)
+async def get_progress(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+) -> PrintProgress | None:
+    """Follow whichever of Bambuddy's two routes this output last took (#89).
+
+    ``null`` means this output has never been printed — that is an answer, not an
+    error, and the send bar shows nothing rather than a failure.
+
+    The poll is needed rather than optional on the pipeline route: ``run`` answers 202
+    and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
+    still null when the run response arrives. ``settled`` is what says the polling can
+    stop; it is computed from the copies, because a run can report a terminal status
+    while a copy is still being dispatched.
+    """
+    meta = require_output(outputs, output_id)
+    async with client_for(store.load()) as client:
+        return await progress_for(client, meta)
+
+
+@router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")
+async def get_projects(store: SettingsStoreDep) -> ProjectChoices:
+    """Every Bambuddy project, with the library folder that belongs to it (#79).
+
+    Also the project the last send went to, so the picker opens where it was left.
+    ScadBuddy models no relationship between a model and a project: which prints
+    belong to a project is on the project's own page, and keeping a second answer
+    here would be a copy that goes stale.
+    """
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await describe_projects(client, last_project_id=settings.last_project_id)
+
+
+@router.post("/projects", response_model=ProjectView, summary="Create or link a project")
+async def post_project(body: ProjectRequest, store: SettingsStoreDep) -> ProjectView:
+    """``POST /api/v1/projects/`` and ``POST /api/v1/library/folders/`` with
+    ``project_id``, which is the pairing Bambuddy's own UI makes.
+
+    With ``project_id`` an existing project is linked instead of created, and its folder
+    is left alone if it already has one — linking twice must not leave Bambuddy with two
+    folders of the same name.
+    """
+    async with client_for(store.load()) as client:
+        return await ensure_project(client, body)
+
+
+@router.post(
+    "/outputs/{output_id}/project",
+    response_model=AttachResult,
+    summary="File this output's queue entries under its project",
+)
+async def post_attach_project(
+    output_id: OutputIdPath,
+    body: ProjectAttach,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+) -> AttachResult:
+    """``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
+
+    Separate from the run because neither id exists when a print starts: a pipeline
+    run's queue entries are created by a background task, and an archive only exists
+    once a print has finished. Calling this again later is how the archives eventually
+    land on the project's page, and attaching the same id twice is Bambuddy's to dedupe.
+    """
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    project_id = body.project_id or settings.last_project_id
+    if project_id is None:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            "this output has no project, so there is nothing to file it under",
+        )
+    ids = body.queue_item_ids or ([meta.queue_item_id] if meta.queue_item_id else [])
+    async with client_for(settings) as client:
+        return await attach_results(client, project_id, queue_item_ids=ids)

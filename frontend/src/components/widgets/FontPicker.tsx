@@ -202,7 +202,13 @@ export function FontPicker({
                   row.family === family ? 'bg-surface-2' : ''
                 }`}
               >
+                {/* The specimen is decorative: it repeats the SAME sample word on every
+                    row, so leaving it in the accessible name makes each row announce as
+                    "<sample> <family>" — the sample forty times over, and the family
+                    (the only thing that distinguishes one row from the next) last. Hidden
+                    here so the row is named by its family alone. */}
                 <span
+                  aria-hidden="true"
                   className="truncate text-[20px] leading-tight text-ink"
                   style={{ fontFamily: cssFontFamily(row.family) }}
                 >

@@ -183,6 +183,14 @@ jobs:
           fail-on-error: true
           flags: -ignore create-github-app-token
 
+      # `.github/scripts/fonts-probe.sh` decides whether the image job's
+      # install-on-demand e2e test runs at all, and a wrong verdict there is
+      # invisible — it skips a test and stays green. Its branches are covered
+      # by a stub-driven suite that needs neither docker nor the network, so it
+      # belongs in this job rather than behind the image build.
+      - name: fonts-probe unit tests
+        run: .github/scripts/fonts-probe.test.sh
+
       # The config lives in .hadolint.yaml so the same rules apply to a local
       # `hadolint Dockerfile` as to this job.
       - name: hadolint
@@ -191,6 +199,16 @@ jobs:
           dockerfile: Dockerfile
           config: .hadolint.yaml
           failure-threshold: warning
+
+      # The merge gate's fail-closed check (#123) is a shell script, so it gets
+      # shell linting and its own tests. They are pure functions over a comments
+      # payload — no network, no `gh` — so they run here in a couple of seconds
+      # rather than needing a live PR to exercise.
+      - name: shellcheck the CI scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test the review-summary lookup
+        run: .github/scripts/review-summary-for-sha.test.sh
 
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
   frontend:
@@ -237,15 +255,20 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # The e2e suite lives here and NOT in the image job, which is where it
-      # started. frontend/playwright.config.ts is self-contained: it runs its
-      # own `webServer` (`pnpm build && pnpm preview --port 4173`) against the
-      # production bundle with the msw worker mocking the API — by its own
-      # comment, "so it exercises the same build the backend will host". It
-      # never talks to the backend, so pointing it at the running container was
-      # simply wrong, and gating it on the container's entrypoint was wrong for
-      # the same reason. Here it also reuses the node_modules this job already
+      # The MSW-BACKED half of the e2e suite lives here and NOT in the image
+      # job, which is where it started. frontend/playwright.config.ts is
+      # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
+      # (`pnpm build && pnpm preview --port 4173`) against the production
+      # bundle with the msw worker mocking the API — by its own comment, "so it
+      # exercises the same build the backend will host". Those specs never talk
+      # to a backend, so pointing them at the running container was simply
+      # wrong, and gating them on the container's entrypoint was wrong for the
+      # same reason. Here they also reuse the node_modules this job already
       # installed instead of a second `pnpm install`.
+      #
+      # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
+      # design — it needs a real openscad. The image job runs it against the
+      # container it builds; see the e2e steps there.
       - name: Install Playwright browsers
         if: ${{ needs.layout.outputs.e2e == 'true' }}
         run: pnpm exec playwright install --with-deps chromium
@@ -281,7 +304,7 @@ jobs:
   # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
   # to push a PR image to), which costs far more than it saves.
   image:
-    name: Image build, backend checks, container smoke
+    name: Image build, backend checks, container smoke, real-backend e2e
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
@@ -382,6 +405,104 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: curl --fail --silent --show-error http://127.0.0.1:18080/healthz
 
+      # ── The real-stack e2e suite ────────────────────────────────────────────
+      #
+      # `e2e/real-backend.spec.ts` gates itself on `E2E_BASE_URL` (and the msw
+      # specs skip themselves when it IS set, so one `playwright test` run
+      # covers exactly the half that belongs here). Nothing in CI set that
+      # variable, so both of its tests — the two-extruder 3MF download and the
+      # install-Pacifico-on-demand acceptance for #82 — had SKIPPED on every
+      # run since they were written. A skipped test in a green job is
+      # indistinguishable from a passing one on the checks UI, which is the
+      # same vacuous-green trap the `freshness` job's comment describes.
+      #
+      # Run HERE, against the container the two steps above just started, and
+      # NOT in a job of its own. A separate job cannot be handed a ~1.5 GB
+      # image (there is no registry to push a PR image to), so it would have to
+      # rebuild from the `type=gha` cache — and that re-resolves
+      # `openscad/openscad:dev`, a ROLLING tag. A nightly that lands between
+      # the two jobs gives the e2e job a different image from the one the smoke
+      # test passed against: either a full uncached rebuild, or a red
+      # OPENSCAD_VERSION assertion, for a suite whose whole point is to
+      # exercise the shipped artefact. This way the bytes under test are
+      # exactly the bytes that were built and probed.
+      #
+      # The msw-backed suite stays in the `frontend` job, where its own
+      # `webServer` serves the production bundle with no backend at all. The
+      # two suites are complements, not duplicates: that one pins the UI
+      # against a fixed contract, this one proves a real OpenSCAD renders,
+      # splits and packs a 3MF the browser can download.
+      - uses: actions/setup-node@v7
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The install-on-demand test is the only thing in this repo that depends
+      # on a service outside it, and `CI Summary` — the one required check —
+      # asserts this job. Left unguarded that makes a Google-side outage a hard
+      # red on somebody else's unrelated PR, and it contradicts the design's own
+      # position that a 503 from the catalogue is a SUPPORTED state (§5.4)
+      # rather than an error. A fresh container has no Pacifico for that
+      # fallback to offer, so an outage does not make the test skip — the row
+      # simply never appears and it times out 60s later, naming the wrong
+      # culprit.
+      #
+      # The decision lives in `.github/scripts/fonts-probe.sh` rather than in
+      # this file, because it turned out to be the subtle half of this change —
+      # only an unreachable DEPENDENCY may skip, everything this application
+      # does wrong must red — and a `run:` block cannot be tested. The script
+      # explains its own rules, and `fonts-probe.test.sh` (in the `lint` job)
+      # drives all thirteen of its branches through a stub, including the ones
+      # a healthy CI run never reaches.
+      - name: Probe the Google Fonts path from inside the container
+        id: fonts-probe
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        env:
+          CONTAINER: scadbuddy-ci
+        run: .github/scripts/fonts-probe.sh
+
+      # No webServer: `E2E_BASE_URL` makes playwright.config.ts use the URL
+      # as-is, so this drives the container published on 18080 above — its own
+      # bundle, its own API, its own openscad.
+      #
+      # `E2E_OFFLINE` carries the probe's verdict. Empty is the normal case and
+      # is NOT "1", so the spec's `test.skip(process.env.E2E_OFFLINE === '1')`
+      # does not fire and the font test runs. The first test — render, generate,
+      # download, unpack the two-extruder 3MF — needs nothing outside the
+      # container and runs either way.
+      - name: Real-backend Playwright suite
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        env:
+          E2E_BASE_URL: http://127.0.0.1:18080
+          E2E_OFFLINE: ${{ steps.fonts-probe.outputs.offline }}
+        run: pnpm exec playwright test
+
+      - name: Upload the real-backend Playwright report
+        if: ${{ failure() && needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-real-backend
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
         run: docker logs scadbuddy-ci || true
@@ -392,9 +513,9 @@ jobs:
 
   # ── Committed generated files must match their generator ────────────────────
   #
-  # Ported from WonderForgeLabs/forge's `freshness` job. Two files in this repo
-  # are written by a tool and committed, so they can silently drift from the
-  # inputs they were generated from:
+  # Ported from WonderForgeLabs/forge's `freshness` job. Three files in this
+  # repo are written by a tool and committed, so they can silently drift from
+  # the inputs they were generated from:
   #
   #   backend/openapi.json
   #     Written by `scadbuddy.tools.export_openapi`, which builds the FastAPI
@@ -413,6 +534,19 @@ jobs:
   #     breaks `pnpm test` and the Playwright suite, both of which mock the API
   #     with msw. It is a pure copy, so regenerating it is deterministic.
   #
+  #   frontend/src/api/schema.d.ts
+  #     Written by `pnpm gen:api` (openapi-typescript) FROM
+  #     backend/openapi.json, which is why its step runs after the export
+  #     above. Every wire type in frontend/src/api/types.ts is an alias into
+  #     it, so a backend model change that does not reach it leaves the browser
+  #     typed against a contract the server no longer serves — and `tsc` cannot
+  #     tell, because the stale file is internally consistent. That is not
+  #     hypothetical: #91 widened the Bambuddy `Folder` and `Pipeline` models
+  #     and this file was not regenerated, so main carried stale client types
+  #     until the next PR that happened to run the generator, where the errors
+  #     surfaced in someone else's diff (#101, and #96/#98 found it
+  #     independently).
+  #
   # Deliberately NOT covered:
   #   models/<slug>/model.json — hand-authored catalogue metadata (name,
   #     description, tags, source). The design doc calls it a "params schema
@@ -422,9 +556,15 @@ jobs:
   #     runtime state produced by a real openscad against a real data dir, not
   #     a committed build product — regenerating it here would need the image
   #     and would still not be a function of the tree alone.
-  #   frontend/src/api/types.ts — its own header says "Hand-written against
-  #     the documented contract". There is no openapi-typescript (or any other
-  #     generator) in frontend/package.json, so nothing generates it.
+  #   frontend/src/api/types.ts — hand-maintained *aliases* into the generated
+  #     schema.d.ts above ("export type Job = Schemas['JobStatus']"), so adding
+  #     or renaming one is a human act and there is nothing to regenerate. Note
+  #     this entry USED to say "there is no openapi-typescript (or any other
+  #     generator) in frontend/package.json, so nothing generates it" — true
+  #     when the job was written, false since the generator and its `gen:api`
+  #     script were added, and that unrevised claim is a large part of why
+  #     schema.d.ts went uncovered for as long as it did. A "not covered" note
+  #     that has stopped being true is worse than no note.
   #   frontend/pnpm-lock.yaml, backend/uv.lock — owned by Dependabot and by
   #     `--frozen-lockfile` / `--frozen`, which already fail loudly on drift.
   #
@@ -550,6 +690,21 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile
 
+      # AFTER "Regenerate backend/openapi.json" on purpose: this reads that
+      # file, so generating first would type the client against the spec the
+      # tree already had and let a stale pair pass together.
+      #
+      # The only step gated on BOTH trees: the generator is a frontend
+      # devDependency (openapi-typescript, pinned via pnpm-lock.yaml, so its
+      # output is a pure function of the spec) and its input is the backend's
+      # exported spec. With one tree absent there is nothing to generate either
+      # FROM or WITH, and `pnpm gen:api` would fail on the missing input rather
+      # than report drift.
+      - name: Regenerate frontend/src/api/schema.d.ts
+        if: ${{ steps.detect.outputs.backend == 'true' && steps.detect.outputs.frontend == 'true' }}
+        working-directory: frontend
+        run: pnpm gen:api
+
       # `--save` is REQUIRED and is not about saving anything here: without it
       # `msw init` opens an @inquirer prompt asking whether to record the
       # worker directory, and on a runner (no TTY) that aborts with
@@ -565,17 +720,25 @@ jobs:
         id: check
         run: |
           set -uo pipefail
-          # Scoped to the two generated paths on purpose: `pnpm install` and
+          # Scoped to the three generated paths on purpose: `pnpm install` and
           # `uv run` touch other things (node_modules is ignored, but a future
           # tool need not be), and this job must never commit a file it did not
-          # deliberately regenerate.
-          if git diff --quiet -- backend/openapi.json frontend/public/mockServiceWorker.js; then
+          # deliberately regenerate. A pathspec that matches nothing — the
+          # frontend tree absent, say — is not an error to `git diff`, so the
+          # list needs no per-tree branching.
+          if git diff --quiet -- \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts; then
             echo "stale=false" | tee -a "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "stale=true" | tee -a "$GITHUB_OUTPUT"
           echo "Generated files differ from their generators:"
-          git --no-pager diff --stat -- backend/openapi.json frontend/public/mockServiceWorker.js
+          git --no-pager diff --stat -- \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts
 
       # The commit message deliberately carries NO `[skip ci]`. That tag stops
       # every workflow running on the new head; required checks are evaluated
@@ -594,7 +757,10 @@ jobs:
           # avoids GH007 (push rejected for publishing a private email).
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add backend/openapi.json frontend/public/mockServiceWorker.js
+          git add \
+            backend/openapi.json \
+            frontend/public/mockServiceWorker.js \
+            frontend/src/api/schema.d.ts
           git commit -m "chore: regenerate committed generated files
 
           Auto-generated by the CI freshness check."
@@ -628,7 +794,7 @@ jobs:
           if [ "$PUSHED" = "true" ]; then
             echo "::error::Generated files were stale and have been auto-fixed. The new commit's CI run will verify them."
           else
-            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi' and 'cd frontend && pnpm exec msw init public --save', then commit the result."
+            echo "::error::Generated files are stale and this run cannot push a fix (Dependabot or fork PR). Run 'cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi', then 'cd frontend && pnpm gen:api && pnpm exec msw init public --save' (in that order — gen:api reads the exported spec), then commit the result."
           fi
           exit 1
 
@@ -712,7 +878,7 @@ jobs:
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
-          assert "Image build, backend checks, smoke"     "$IMAGE_RESULT"    "$has_image"
+          assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
 
           # `freshness` is PR-only — it auto-commits regenerated files back to
           # the PR branch, and a push to main has no branch to push to. It is

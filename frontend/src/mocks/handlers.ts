@@ -1,9 +1,11 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  AttachResult,
   BoundingBox,
   CatalogueFont,
   Diagnostic,
   EligibilityOverview,
+  FilamentOptions,
   FontFamily,
   Job,
   ModelSummary,
@@ -14,7 +16,14 @@ import type {
   PipelineView,
   PresetOptions,
   PresetRef,
+  PrintProgress,
   PrintRunResult,
+  PrintOptions,
+  PrintOptionsState,
+  PrintOptionsUpdate,
+  ProjectChoices,
+  ProjectRequest,
+  ProjectView,
   SendResult,
   Settings,
   SourceCheck,
@@ -34,10 +43,14 @@ const state = {
   outputs: [...fixtures.outputs] as Output[],
   sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
+  printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
+  projects: [...fixtures.projectViews] as ProjectView[],
+  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   catalogueOffline: false,
@@ -52,9 +65,12 @@ export function resetMockState(): void {
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.sources = { 'name-keychain': fixtures.keychainSource }
   state.settings = { ...fixtures.settings }
+  state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
+  state.projects = fixtures.projectViews.map((p) => ({ ...p }))
+  state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.catalogueOffline = false
@@ -563,6 +579,22 @@ export const handlers = [
     } satisfies EligibilityOverview)
   }),
 
+  /**
+   * #87 — the aggregation the picker reads. `printer_id` scopes it: the server reports
+   * `loaded` against that printer, so without one a spool in the other machine would
+   * look local. The recorded estate is in `fixtures.filamentOptions`.
+   */
+  http.get(`${base}/print/outputs/:id/filaments`, ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const printerId = new URL(request.url).searchParams.get('printer_id')
+    return HttpResponse.json({
+      ...fixtures.filamentOptions,
+      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      printer_id: printerId === null ? null : Number(printerId),
+    } satisfies FilamentOptions)
+  }),
+
   http.post(`${base}/print/outputs/:id/run`, async ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
@@ -570,6 +602,10 @@ export const handlers = [
       pipeline_id?: number | null
       copies?: number
       force?: boolean
+      printer_id?: number | null
+      plate_id?: number
+      filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
+      project_id?: number | null
     }
     const pipelineId = body.pipeline_id ?? state.settings.pipeline_id ?? null
     if (pipelineId === null) {
@@ -587,6 +623,13 @@ export const handlers = [
       )
     }
     const copies = body.copies ?? 1
+    // #79 — the project's own library folder replaces the one from Settings for this
+    // send, which is what puts the file on Bambuddy's project page.
+    const projectId = body.project_id ?? state.lastProjectId
+    const folderId =
+      projectId === null
+        ? null
+        : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
     const runId = nextNumber()
     const libraryFileId = output.library_file_id ?? nextNumber()
     state.outputs = state.outputs.map((o) =>
@@ -595,7 +638,36 @@ export const handlers = [
         : o,
     )
     await delay(200)
+
+    /**
+     * #87 — the escalation. A `PipelineRunCreateRequest` carries no printer and no
+     * filament mapping, so a request that names either cannot go down the pipeline
+     * route at all: the backend slices the library file with the pipeline's own presets
+     * and posts queue entries itself. `run` is null on that route — there is no
+     * pipeline run to report — which is why the success panel has to guard it.
+     */
+    if (body.filament_plan || typeof body.printer_id === 'number') {
+      const sliceJobId = nextNumber()
+      const queueItemIds = Array.from({ length: copies }, () => nextNumber())
+      const queued: PrintRunResult = {
+        route: 'slice_queue',
+        pipeline_id: pipelineId,
+        library_file_id: libraryFileId,
+        printer_id: body.printer_id ?? null,
+        run: null,
+        slice_job_id: sliceJobId,
+        sliced_library_file_id: nextNumber(),
+        queue_item_ids: queueItemIds,
+        warnings: fixtures.filamentOptions.warnings,
+        project_id: projectId,
+        folder_id: folderId,
+        bambuddy_url: `${state.settings.bambuddy_url}/queue`,
+      }
+      return HttpResponse.json(queued)
+    }
+
     const result: PrintRunResult = {
+      route: 'pipeline',
       pipeline_id: pipelineId,
       library_file_id: libraryFileId,
       run: {
@@ -630,9 +702,95 @@ export const handlers = [
         target_model_class: null,
         fanout_strategy: 'max_parallel',
       },
+      project_id: projectId,
+      folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     }
     return HttpResponse.json(result)
+  }),
+
+  // --- #79 projects -----------------------------------------------------------------
+
+  http.get(`${base}/print/projects`, () =>
+    HttpResponse.json({
+      projects: state.projects,
+      last_project_id: state.lastProjectId,
+    } satisfies ProjectChoices),
+  ),
+
+  http.post(`${base}/print/projects`, async ({ request }) => {
+    const body = (await request.json()) as ProjectRequest
+    const linked =
+      body.project_id === undefined || body.project_id === null
+        ? undefined
+        : state.projects.find((project) => project.id === body.project_id)
+    if (body.project_id !== undefined && body.project_id !== null && !linked) {
+      return problem(404, 'Not Found', `no project ${body.project_id}`)
+    }
+    if (!linked && !body.name) {
+      return problem(400, 'Bad Request', 'a new project needs a name')
+    }
+    const base_ = linked ?? {
+      id: nextNumber(),
+      name: body.name ?? '',
+      description: body.description ?? null,
+      colour: body.colour ?? null,
+      status: 'active',
+      archive_count: 0,
+      queue_count: 0,
+      folder_id: null,
+      folder_name: null,
+    }
+    // Creating a project creates its library folder, and linking one that has none
+    // creates it too — a project with no folder lists no files on Bambuddy's own page.
+    const saved: ProjectView = {
+      ...base_,
+      folder_id: base_.folder_id ?? nextNumber(),
+      folder_name: base_.folder_name ?? base_.name,
+    }
+    state.projects = [saved, ...state.projects.filter((project) => project.id !== saved.id)]
+    await delay(150)
+    return HttpResponse.json(saved)
+  }),
+
+  http.post(`${base}/print/outputs/:id/project`, async ({ params, request }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const body = (await request.json()) as { project_id?: number | null; queue_item_ids: number[] }
+    const projectId = body.project_id ?? state.lastProjectId
+    if (projectId === null) {
+      return problem(409, 'Conflict', 'this output has no project, so there is nothing to file it under')
+    }
+    // An archive only exists once a print has finished, so the mock reports none: the
+    // caller attaches again later rather than the run pretending it already happened.
+    return HttpResponse.json({
+      project_id: projectId,
+      queue_item_ids: body.queue_item_ids,
+      archive_ids: [],
+    } satisfies AttachResult)
+  }),
+
+  /**
+   * #89 — following the print. Which route answers is read off what the output recorded,
+   * the way the backend does it, so an output that has never been printed answers `200
+   * null` rather than a 404: never printed is an answer, not a missing resource.
+   */
+  http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    if (output.pipeline_run_id) {
+      return HttpResponse.json({
+        ...fixtures.pipelineProgress,
+        pipeline_run_id: output.pipeline_run_id,
+      } satisfies PrintProgress)
+    }
+    if (output.queue_item_id) {
+      return HttpResponse.json({
+        ...fixtures.queuedSliceProgress,
+        queue_item_id: output.queue_item_id,
+      } satisfies PrintProgress)
+    }
+    return HttpResponse.json(null)
   }),
 
   http.get(`${base}/fonts`, () => HttpResponse.json(state.fonts)),
@@ -706,6 +864,30 @@ export const handlers = [
   }),
 
   // Takes no body: the server tests what it has stored.
+  http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),
+
+  // Mirrors the server: one scope is replaced wholesale, and an all-unset overlay
+  // removes it rather than storing an empty object.
+  http.put(`${base}/settings/print-options`, async ({ request }) => {
+    const body = (await request.json()) as PrintOptionsUpdate
+    const options = body.options as PrintOptions
+    const empty = Object.values(options).every((value) => value === null || value === undefined)
+    if (body.scope === 'global') {
+      state.printOptions.global_options = empty ? {} : options
+    } else {
+      const map = body.scope === 'printer' ? state.printOptions.printers : state.printOptions.models
+      if (!map || !body.key) return problem(422, 'Unprocessable', 'the scope needs a key')
+      if (empty) delete map[body.key]
+      else map[body.key] = options
+    }
+    // Shaped like the real response, which is declared `response_model=PrintOptionsView`
+    // and so cannot carry `printer_id` however much the server-side object holds. Reusing
+    // the GET's object here would let a component that reads `printer_id` off a PUT
+    // result pass in tests and break in the browser.
+    const { defaults, global_options, printers, models } = state.printOptions
+    return HttpResponse.json({ defaults, global_options, printers, models })
+  }),
+
   http.post(`${base}/settings/test`, async () => {
     await delay(200)
     if (!state.settings.bambuddy_url?.startsWith('http')) {
@@ -736,7 +918,7 @@ export const handlers = [
     if (created) state.sidebarLinkId = 3
     return HttpResponse.json({
       id: state.sidebarLinkId,
-      name: 'Customize',
+      name: 'ScadBuddy',
       url: state.settings.public_url ?? '',
       icon: 'shapes',
       open_in_new_tab: false,

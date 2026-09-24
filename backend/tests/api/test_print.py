@@ -12,10 +12,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
-from scadbuddy.bambuddy.pipelines import BED_TYPES
+from scadbuddy.bambuddy.models import EligibilityReport
+from scadbuddy.bambuddy.pipelines import BED_TYPES, PipelineReport
 from tests.api.conftest import wait_for_job
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
@@ -436,6 +439,60 @@ def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
 
 
 @respx.mock
+def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
+    client: TestClient, model: str
+) -> None:
+    """A pipeline Bambuddy cannot judge must not blank the whole picker.
+
+    The reports are gathered concurrently, so without per-pipeline isolation the first
+    exception would be the response and the rows that *did* answer would be lost.
+    """
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report())
+    )
+    respx.post(f"{API}/slicer-pipelines/2/check-eligibility").mock(
+        return_value=httpx.Response(500, json={"detail": "the slicer fell over"})
+    )
+    respx.post(f"{API}/slicer-pipelines/3/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report(ok=False))
+    )
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/eligibility",
+        json={"pipeline_ids": [1, 2, 3]},
+    )
+
+    assert response.status_code == 200
+    reports = {entry["pipeline_id"]: entry for entry in response.json()["reports"]}
+    assert reports[1]["report"]["ok"] is True
+    assert reports[3]["report"]["ok"] is False
+    # The one that failed carries why, and no report at all — neither ready nor blocked.
+    assert reports[2]["report"] is None
+    assert "the slicer fell over" in reports[2]["error"]
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({}, id="neither"),
+        pytest.param({"report": EligibilityReport(ok=True), "error": "both"}, id="both"),
+        # An empty reason is no reason: the browser branches on which field is set, and a
+        # blank string reads as "no error" there, which would render the row as absent.
+        pytest.param({"error": ""}, id="blank-error"),
+    ],
+)
+def test_a_pipeline_report_must_carry_either_a_report_or_a_reason(kwargs: Any) -> None:
+    """The browser branches on which of the two is set: a row with neither renders as
+    silently absent, and one with both claims two states at once. Enforced on the model
+    rather than left to whatever constructs it."""
+    with pytest.raises(ValidationError):
+        PipelineReport(pipeline_id=1, **kwargs)
+
+
+@respx.mock
 def test_an_ineligible_pipeline_is_a_200_not_a_409(client: TestClient, model: str) -> None:
     """``check-eligibility`` answers 200 with the report; only ``run`` turns it into 409.
     Reading it as an error would make the picker unable to list what is wrong."""
@@ -505,6 +562,9 @@ def test_run_uses_the_named_pipeline_with_copies_and_records_the_run(
     client: TestClient, model: str
 ) -> None:
     configure(client)
+    # The run reads these to lay the 3MF out for the pipeline's printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
@@ -530,6 +590,9 @@ def test_run_without_a_pipeline_uses_the_models_default_before_the_global_one(
     client: TestClient, model: str
 ) -> None:
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 4})
@@ -548,6 +611,9 @@ def test_run_falls_back_to_the_global_pipeline_when_the_model_has_none(
     client: TestClient, model: str
 ) -> None:
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
@@ -578,6 +644,8 @@ def test_a_blocking_issue_surfaces_bambuddys_report_and_force_overrides_it(
     client: TestClient, model: str
 ) -> None:
     configure(client)
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     blocked = report(
@@ -613,6 +681,9 @@ def test_the_send_bar_still_works_and_now_honours_the_models_pipeline(
     """``POST /outputs/{id}/send`` predates this router; its global ``pipeline_id`` is
     the fallback now, not the only answer."""
     configure(client, pipeline_id=1)
+    # The send path reads these to lay the 3MF out for the target printer (#105).
+    pipelines_route()
+    printers_route()
     output_id = make_output(client, model)
     upload_route()
     client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 4})
@@ -632,6 +703,8 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
 ) -> None:
     """Printing straight from the picker, without pressing Send first."""
     configure(client)
+    pipelines_route()
+    printers_route()
     job_id = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}).json()[
         "job_id"
     ]
@@ -646,3 +719,124 @@ def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
 
     assert upload.called
     assert body["library_file_id"] == 41
+
+
+def _two_pipelines() -> dict[str, Any]:
+    """Pipeline 1 aims at an H2C, pipeline 2 at a P1S — two different plates."""
+    base = recording("slicer-pipelines-configured.json")["pipelines"][0]
+    return {
+        "pipelines": [
+            {
+                **base,
+                "id": 1,
+                "target_kind": "printer_class",
+                "target_printer_id": None,
+                "target_model_class": "H2C",
+            },
+            {
+                **base,
+                "id": 2,
+                "target_kind": "printer_class",
+                "target_printer_id": None,
+                "target_model_class": "P1S",
+            },
+        ]
+    }
+
+
+@respx.mock
+def test_changing_the_target_printer_re_uploads_instead_of_reusing_the_old_placement(
+    client: TestClient, model: str
+) -> None:
+    """A recorded library file id is only good while the plate it was placed for holds.
+
+    The 3MF is centred on the target printer's reachable area and carries that
+    printer's prime-tower position (#105), so reusing it after the pipeline changed
+    would hand Bambuddy a file laid out for the previous machine.
+    """
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    # Re-placing means replacing: the previous file is deleted, not duplicated.
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    for pipeline_id in (1, 2):
+        respx.post(f"{API}/slicer-pipelines/{pipeline_id}/check-eligibility").mock(
+            return_value=httpx.Response(200, json=report())
+        )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+    assert upload.call_count == 1
+
+    # Same output, same 3MF on disk — but now heading for a different printer.
+    configure(client, pipeline_id=2)
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+
+    assert upload.call_count == 2, "the file was reused although the plate changed"
+
+    # And back to the first: still re-placed, never reused across a change.
+    configure(client, pipeline_id=1)
+    client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={})
+    assert upload.call_count == 3
+
+
+@respx.mock
+def test_running_a_pipeline_lays_the_file_out_for_that_pipeline_not_the_default(
+    client: TestClient, model: str
+) -> None:
+    """``pipeline_id`` in the run request overrides the model's default (#86), so the
+    plate has to follow the pipeline being run rather than the one settings would pick."""
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+    respx.post(f"{API}/slicer-pipelines/2/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    assert upload.call_count == 1
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 2})
+
+    assert upload.call_count == 2, "the P1S run reused a file laid out for the H2C"
+
+
+@respx.mock
+def test_checking_several_pipelines_judges_them_all_against_one_upload(
+    client: TestClient, model: str
+) -> None:
+    """One upload, many pipelines — including pipelines aimed at different models.
+
+    Bambuddy's eligibility check reads printer availability and filament matching
+    only (its ``kind`` enum has no geometry member), so the placement the file
+    carries cannot change any of the answers. Pinning it here because the safety
+    of sharing one placement rests entirely on that, and a future geometry issue
+    in that enum would have to turn this into one upload per distinct target.
+    """
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_pipelines())
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    checks = {
+        pipeline_id: respx.post(f"{API}/slicer-pipelines/{pipeline_id}/check-eligibility").mock(
+            return_value=httpx.Response(200, json=report())
+        )
+        for pipeline_id in (1, 2)
+    }
+
+    body = client.post(f"/api/v1/print/outputs/{output_id}/eligibility", json={}).json()
+
+    assert upload.call_count == 1
+    assert sorted(entry["pipeline_id"] for entry in body["reports"]) == [1, 2]
+    # Both pipelines were judged against the same file, whatever they target.
+    for pipeline_id, route in checks.items():
+        sent = json.loads(route.calls.last.request.read())
+        assert sent["source_library_file_id"] == body["library_file_id"], pipeline_id

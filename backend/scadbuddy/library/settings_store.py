@@ -6,6 +6,7 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.settings import Settings
 
 SETTINGS_NAME = "settings.json"
@@ -44,9 +45,24 @@ class StoredSettings(BambuddyIds):
     #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
 
+    #: The Bambuddy project the last send went to (#79), and nothing more. A project
+    #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
+    #: enough to open the picker where it was left rather than modelling which models
+    #: belong to which project — that question is Bambuddy's to answer.
+    last_project_id: int | None = None
+
     def pipeline_for(self, slug: str) -> int | None:
         """This model's own pipeline, else the global fallback (#86)."""
         return self.model_pipelines.get(slug, self.pipeline_id)
+
+    # #88 — remembered print options, least to most specific. All three start empty, so
+    # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
+    # defaults. The dict keys are strings because JSON has no integer keys: the printer
+    # map is keyed by a stringified Bambuddy printer id, the model map by ScadBuddy's
+    # own model slug.
+    print_options: PrintOptions = Field(default_factory=PrintOptions)
+    printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
+    model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
 
 
 class SettingsPatch(BaseModel):
@@ -116,6 +132,10 @@ class SettingsStore:
             pipelines[slug] = pipeline_id
         return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
 
+    def remember_project(self, project_id: int | None) -> StoredSettings:
+        """Remember the project the last send went to, so the picker opens on it."""
+        return self._write(self.load().model_copy(update={"last_project_id": project_id}))
+
     def _write(self, settings: StoredSettings) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
@@ -123,3 +143,28 @@ class SettingsStore:
         )
         self.path.chmod(KEY_FILE_MODE)
         return settings
+
+    def save_print_options(
+        self, scope: OptionScope, key: str | None, options: PrintOptions
+    ) -> StoredSettings:
+        """Replace one scope's print-option overrides.
+
+        Deliberately not part of :class:`SettingsPatch`, for the same reason
+        :meth:`set_model_pipeline` is not: a patch replaces a whole value, so the browser
+        would have to send every printer and model back and would lose any it had not
+        loaded. An all-unset ``options`` **removes** the scope rather than storing an
+        empty object, so the file does not accumulate a row per printer someone once
+        opened the disclosure for.
+        """
+        settings = self.load()
+        if scope == "global":
+            return self._write(settings.model_copy(update={"print_options": options}))
+        if not key:  # pragma: no cover - the route validates this first
+            raise ValueError(f"the {scope!r} scope needs a key")
+        field = "printer_print_options" if scope == "printer" else "model_print_options"
+        mapping = dict(getattr(settings, field))
+        if options.is_empty():
+            mapping.pop(key, None)
+        else:
+            mapping[key] = options
+        return self._write(settings.model_copy(update={field: mapping}))
