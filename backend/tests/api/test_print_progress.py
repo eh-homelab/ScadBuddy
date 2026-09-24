@@ -28,6 +28,10 @@ def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, mod
     configure(client)
     output_id = make_output(client, model)
     upload_route()
+    # A send resolves the target printer's plate before uploading, to lay the 3MF out
+    # on it (#105) — a read of the pipeline list and the printers.
+    pipelines_route()
+    printers_route()
     respx.post(f"{API}/slicer-pipelines/1/run").mock(
         return_value=httpx.Response(200, json=run_body())
     )
@@ -85,6 +89,10 @@ def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
     configure(client)
     output_id = make_output(client, model)
     upload_route()
+    # A send resolves the target printer's plate before uploading, to lay the 3MF out
+    # on it (#105) — a read of the pipeline list and the printers.
+    pipelines_route()
+    printers_route()
     respx.post(f"{API}/slicer-pipelines/1/run").mock(
         return_value=httpx.Response(200, json=run_body(1))
     )

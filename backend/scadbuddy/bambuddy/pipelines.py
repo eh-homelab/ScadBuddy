@@ -56,7 +56,7 @@ from scadbuddy.bambuddy.models import (
     TargetKind,
 )
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import ensure_uploaded
+from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -434,7 +434,24 @@ async def check_pipelines(
     the client's own connection pool is the limit that matters; a semaphore here would be
     a guess about a number nothing has yet needed.
     """
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    # One upload is judged against every pipeline, including pipelines aimed at
+    # different printer models — so the file carries one model's placement while
+    # being checked for several. That is safe because eligibility does not look at
+    # geometry: Bambuddy's ``EligibilityIssueResponse.kind`` is a closed enum of
+    # ``printer_not_set``, ``printer_not_found``, ``printer_disabled``,
+    # ``printer_offline``, ``filament_type_mismatch``, ``filament_color_mismatch``,
+    # ``ams_slot_missing``, ``filament_unverified``, ``no_class_matches`` and
+    # ``class_not_set`` — printer availability and filament matching, nothing that
+    # reads the plate. The unprintable-area failure this module exists to prevent
+    # is a slicing-time G-code check, which eligibility never performs.
+    #
+    # So the placement here only has to be right for the pipeline that will
+    # actually run, and ``run_for_output`` re-places for whichever that turns out
+    # to be. Uploading once is the point of this endpoint — the picker opens on it.
+    # If that enum ever grows a geometry issue, this has to become one upload per
+    # distinct target instead.
+    plate = await target_plate(client, settings, meta.slug)
+    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
     if pipeline_ids is None:
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
@@ -529,6 +546,9 @@ async def run_for_output(
             "no slicer pipeline is set for this model and there is no default, "
             "so there is nothing to print with"
         )
+    # Placed for the pipeline being run, which ``request.pipeline_id`` may have
+    # overridden — not for whatever the settings would have defaulted to.
+    plate = await target_plate(client, settings, meta.slug, pipeline_id=pipeline_id)
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
@@ -536,7 +556,7 @@ async def run_for_output(
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     meta, library_file_id = await ensure_uploaded(
-        client, store, meta, settings, folder_id=folder_id
+        client, store, meta, settings, plate=plate, folder_id=folder_id
     )
 
     if request.filament_plan is None:

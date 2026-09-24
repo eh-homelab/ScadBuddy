@@ -78,6 +78,10 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
     uploaded = upload_route()
+    # A send resolves the target printer's plate before uploading, to lay the 3MF out
+    # on it (#105) — a read of the pipeline list and the printers.
+    pipelines_route()
+    printers_route()
     respx.get(f"{API}/library/folders/by-project/7").mock(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )
@@ -105,6 +109,10 @@ def test_an_already_uploaded_output_is_moved_into_the_project_folder(
     configure(client, library_folder_id=2)
     output_id = make_output(client, model)
     uploaded = upload_route()
+    # A send resolves the target printer's plate before uploading, to lay the 3MF out
+    # on it (#105) — a read of the pipeline list and the printers.
+    pipelines_route()
+    printers_route()
     respx.get(f"{API}/library/folders/by-project/7").mock(
         return_value=httpx.Response(200, json=[{"id": 9, "name": "Reagan", "project_id": 7}])
     )

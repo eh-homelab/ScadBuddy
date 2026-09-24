@@ -23,6 +23,7 @@ ELIGIBILITY_PROBLEM = "https://scadbuddy.dev/problems/pipeline-ineligible"
 REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
+PLATE_FIT_PROBLEM = "https://scadbuddy.dev/problems/plate-does-not-fit"
 
 
 class Scope(StrEnum):
