@@ -52,7 +52,7 @@ RUN pnpm build
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
 # and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.9.9 AS uv
+FROM ghcr.io/astral-sh/uv:0.12.18 AS uv
 
 # ── base: OS packages, fonts, users ───────────────────────────────────────────
 FROM openscad/openscad:dev AS base
