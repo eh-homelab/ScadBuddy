@@ -3,7 +3,10 @@
 Two kinds of golden live here.
 
 - `two_boxes/` — the 3MF writer's unit golden. Two boxes built in Python, no
-  OpenSCAD involved, compared byte for byte by `tests/test_bambu3mf.py`.
+  OpenSCAD involved, compared byte for byte by `tests/test_bambu3mf.py`. Its
+  `project_settings.config` carries `wipe_tower_x`/`wipe_tower_y` as well as the
+  filament colours: the writer reserves a prime-tower position clear of the
+  object, because the default one is unprintable on an H2C (#105).
 - `name-keychain-*/` — integration goldens for the example models in `models/`.
   Each one is a real render through the production pipeline, recorded by
   `tests/test_golden_models.py`.

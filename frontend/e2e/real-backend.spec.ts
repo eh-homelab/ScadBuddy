@@ -4,10 +4,31 @@ import { expect, test } from '@playwright/test'
 /**
  * The real stack: a real OpenSCAD behind the real FastAPI app, no msw anywhere.
  *
- * Gated on `E2E_BASE_URL` because it needs that stack running — see the README. Run it
- * against a container built from `openscad/openscad:dev` plus
- * `fonts-lobster fonts-lobstertwo fonts-dejavu fonts-noto-core`: without Lobster Two the
- * keychain silently falls back to DejaVu and measures ~107 × 32 instead (spec §11).
+ * Two environment variables drive this file, and they are documented HERE because there
+ * is no README in this repository to point at — an earlier version of this comment sent
+ * the reader to one that does not exist, which matters now that CI runs these tests
+ * behind the required check:
+ *
+ *   E2E_BASE_URL  The running stack, e.g. `http://127.0.0.1:8080`. Without it every test
+ *                 below skips and playwright.config.ts starts its own msw-mocked preview
+ *                 server instead, which `customize.spec.ts` and `print.spec.ts` drive —
+ *                 they skip when it IS set, so one `playwright test` run covers exactly
+ *                 one half either way.
+ *   E2E_OFFLINE   `1` skips the font test alone, for a stack with no outbound network.
+ *                 An air-gapped ScadBuddy is supported, so that is a skip and not a
+ *                 failure; everything else here runs against the container alone.
+ *
+ * CI sets both in `.github/workflows/ci.yml`'s `image` job, which runs this suite against
+ * the container it has just built and smoke-tested; `E2E_OFFLINE` there is the verdict of
+ * a reachability probe rather than a constant. Locally:
+ *
+ *   docker build --target runtime -t scadbuddy .
+ *   docker run -d --name scadbuddy -p 8080:8080 scadbuddy
+ *   cd frontend && E2E_BASE_URL=http://127.0.0.1:8080 pnpm exec playwright test
+ *
+ * The image must be that one — `openscad/openscad:dev` plus `fonts-lobster
+ * fonts-lobstertwo fonts-dejavu fonts-noto-core`: without Lobster Two the keychain
+ * silently falls back to DejaVu and measures ~107 × 32 instead (spec §11).
  */
 test.describe('real backend', () => {
   test.skip(!process.env.E2E_BASE_URL, 'set E2E_BASE_URL to the running stack')

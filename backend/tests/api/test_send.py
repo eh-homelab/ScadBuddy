@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import io
 import json
+import zipfile
 from typing import Any
+from xml.etree import ElementTree as ET
 
 import httpx
 import pytest
 import respx
+import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.bambuddy.conftest import recording
 
@@ -60,6 +66,48 @@ def upload_route(file_id: int = 41) -> respx.Route:
                 "file_size": 9,
                 "thumbnail_path": None,
             },
+        )
+    )
+
+
+def plate_routes(
+    *, pipeline_id: int | None = None, printer_id: int | None = None, model: str = "H2C"
+) -> None:
+    """Mock what the send path reads to learn which printer's plate to lay out for.
+
+    Registered by every test that configures a pipeline or a printer, because
+    ``upload_output`` re-places the 3MF for that printer before uploading (#105).
+    """
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "pipelines": [
+                    {
+                        "id": pipeline_id,
+                        "name": "keychains",
+                        "target_kind": "printer_class",
+                        "target_model_class": model,
+                        "fanout_strategy": "max_parallel",
+                    }
+                ]
+                if pipeline_id is not None
+                else []
+            },
+        )
+    )
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "id": printer_id if printer_id is not None else 1,
+                    "name": "3DP-31B-598",
+                    "model": model,
+                    "is_active": True,
+                    "nozzle_count": 2,
+                }
+            ],
         )
     )
 
@@ -167,6 +215,7 @@ def test_queue_mode_runs_the_configured_pipeline(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4)
     output_id = make_output(client, model)
     upload_route()
     run = respx.post(f"{API}/slicer-pipelines/4/run").mock(
@@ -209,6 +258,7 @@ def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
     client: TestClient, model: str
 ) -> None:
     configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4)
     output_id = make_output(client, model)
     upload_route()
     report = {
@@ -232,6 +282,7 @@ def test_queue_mode_without_a_pipeline_slices_then_enqueues(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     configure(client, printer_id=1, **PRESETS)
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
     slice_route = respx.post(f"{API}/library/files/41/slice").mock(
@@ -278,6 +329,7 @@ def test_queue_mode_without_a_pipeline_slices_then_enqueues(
 @respx.mock
 def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, **PRESETS)
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
     respx.post(f"{API}/library/files/41/slice").mock(
@@ -302,6 +354,7 @@ def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
     client: TestClient, model: str
 ) -> None:
     configure(client, printer_id=1)
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
 
@@ -334,6 +387,7 @@ def test_more_colours_than_filament_slots_is_refused_before_slicing(
         process_preset=PRESETS["process_preset"],
         filament_presets=[],
     )
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
     sliced = respx.post(f"{API}/library/files/41/slice")
@@ -351,6 +405,185 @@ def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
         f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": copies}
     )
     assert response.status_code == 422
+
+
+# --- #105 the plate follows the target printer --------------------------------------
+
+
+@respx.mock
+def test_the_upload_is_laid_out_for_the_target_printers_plate(
+    client: TestClient, model: str
+) -> None:
+    """An H2C reaches x 25..325, so its centre is 175,160 — not the 256-plate's 128,128."""
+    configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4, model="H2C")
+    output_id = make_output(client, model)
+    upload = upload_route()
+    respx.post(f"{API}/slicer-pipelines/4/run").mock(
+        return_value=httpx.Response(
+            202,
+            json={
+                "id": 12,
+                "pipeline_id": 4,
+                "source_library_file_id": 41,
+                "copies": 1,
+                "status": "queued",
+                "slice_job_id": None,
+                "sliced_library_file_id": None,
+                "eligibility_overridden": False,
+                "created_by": None,
+                "created_at": "2026-09-23T01:00:00Z",
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+    )
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).status_code
+
+    uploaded = _uploaded_3mf(upload)
+    with zipfile.ZipFile(io.BytesIO(uploaded)) as archive:
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+    item = root.find(".//{*}item")
+    assert item is not None
+    transform = [float(value) for value in (item.get("transform") or "").split()]
+    assert transform[9:11] == [175.0, 160.0]
+
+
+@respx.mock
+def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
+    client: TestClient, model: str
+) -> None:
+    configure(client, printer_id=1)
+    plate_routes(printer_id=1, model="SomeFuturePrinter")
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).status_code
+
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(upload))) as archive:
+        root = ET.fromstring(archive.read("3D/3dmodel.model"))
+    item = root.find(".//{*}item")
+    assert item is not None
+    assert [float(v) for v in (item.get("transform") or "").split()][9:11] == [128.0, 128.0]
+
+
+@respx.mock
+def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, printer_id=1)
+    plate_routes(printer_id=1, model="A1 mini")
+    output_id = make_output(client, model)
+    # 200 mm across does not fit an A1 mini's 180 mm bed.
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
+        paths.output_dir(model, output_id) / "model.3mf",
+        thumbnails=None,
+        model_name=model,
+    )
+    upload = upload_route()
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "A1 mini" in response.json()["detail"]
+    assert not upload.called
+
+
+def _uploaded_3mf(route: respx.Route) -> bytes:
+    """The ``file`` part of the multipart upload Bambuddy received."""
+    request = route.calls.last.request
+    boundary = request.headers["content-type"].split("boundary=", 1)[1].encode()
+    for part in request.read().split(b"--" + boundary):
+        head, _, body = part.partition(b"\r\n\r\n")
+        if b'name="file"' in head:
+            return body.rsplit(b"\r\n", 1)[0]
+    raise AssertionError("the upload carried no file part")
+
+
+@respx.mock
+def test_a_refused_re_send_leaves_the_previous_file_in_place(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The fit check runs before the delete, so a refusal costs nothing.
+
+    Deleting first would strand ``library_file_id`` pointing at a file that is no
+    longer in Bambuddy: the button would report 409 and the deep link would 404.
+    """
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(200, json={"pipelines": []})
+    )
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {"id": 1, "name": "big", "model": "H2C", "is_active": True, "nozzle_count": 2},
+                {
+                    "id": 2,
+                    "name": "small",
+                    "model": "A1 mini",
+                    "is_active": True,
+                    "nozzle_count": 1,
+                },
+            ],
+        )
+    )
+    configure(client, printer_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    assert (
+        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
+            "library_file_id"
+        ]
+        == 41
+    )
+
+    delete = respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    # Same output, but now aimed at a printer it cannot possibly fit on.
+    write_bambu_3mf(
+        [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(200, 200, 4)))],
+        paths.output_dir(model, output_id) / "model.3mf",
+        thumbnails=None,
+        model_name=model,
+    )
+    configure(client, printer_id=2)
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.status_code == 409
+    assert not delete.called, "the old file was removed before the refusal"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+
+
+@respx.mock
+def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, model: str) -> None:
+    """A delete that is not a 404 leaves the previous send intact and retryable.
+
+    Clearing the id first would strand the file in Bambuddy with nothing pointing
+    at it, and every retry would upload another copy — the duplication this delete
+    exists to prevent.
+    """
+    configure(client)
+    output_id = make_output(client, model)
+    upload = upload_route()
+    assert (
+        client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()[
+            "library_file_id"
+        ]
+        == 41
+    )
+
+    respx.delete(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert response.status_code >= 500
+    assert upload.call_count == 1, "a second copy was uploaded despite the failed delete"
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
 
 
 # --- #80 the Edit in ScadBuddy back-link ---------------------------------------------
@@ -424,6 +657,7 @@ def test_a_failed_annotation_still_queues_the_print(
 ) -> None:
     """The note is cosmetic; queueing the print is the point of the request."""
     configure(client, pipeline_id=4, public_url="https://scad.test")
+    plate_routes(pipeline_id=4)
     output_id = make_output(client, model)
     upload_route()
     run = pipeline_run_route()
@@ -451,6 +685,7 @@ def test_a_failed_annotation_still_queues_the_print(
 def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
     """A slow or broken annotate must not sit in front of the pipeline run."""
     configure(client, pipeline_id=4, public_url="https://scad.test")
+    plate_routes(pipeline_id=4)
     output_id = make_output(client, model)
     upload_route()
     pipeline_run_route()
@@ -491,6 +726,7 @@ def test_the_slice_and_queue_branch_annotates_both_files_last(
     the 3MF ScadBuddy uploaded.
     """
     configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
     respx.post(f"{API}/library/files/41/slice").mock(
@@ -529,6 +765,7 @@ def test_the_slice_and_queue_branch_annotates_both_files_last(
 @respx.mock
 def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    plate_routes(printer_id=1)
     output_id = make_output(client, model)
     upload_route()
     respx.post(f"{API}/library/files/41/slice").mock(

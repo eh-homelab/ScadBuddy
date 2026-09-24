@@ -1227,6 +1227,8 @@ export interface components {
             job_id: string;
             /** Library File Id */
             library_file_id?: number | null;
+            /** Library File Plate */
+            library_file_plate?: string | null;
             /** Model Version */
             model_version?: string | null;
             /** Name */

@@ -49,6 +49,24 @@ describe('FontPicker', () => {
     expect(preview).toHaveStyle({ fontFamily: '"Pacifico", sans-serif' })
   })
 
+  it('names each row by its family, not by the specimen text', async () => {
+    setup()
+    await loaded()
+
+    // The specimen is the SAME word on every row, so if it reaches the accessible
+    // name every row announces as "Reagan <family>" — forty rows that differ only
+    // in their last word. It shipped that way once; this pins it. The e2e suite
+    // catches it too, but only once per CI run and minutes in.
+    expect(screen.getByRole('button', { name: /^Pacifico/ })).toHaveAccessibleName('Pacifico')
+    // An installed row keeps its badge, so the assertion is that the name STARTS with the
+    // family and never carries the specimen — not the exact string. jsdom joins adjacent
+    // inline spans with no separator ("Noto Sansinstalled") where a browser inserts one,
+    // and pinning either spelling would be pinning the engine rather than the behaviour.
+    const installed = screen.getByRole('button', { name: /^Noto Sans/ })
+    expect(installed).toHaveAccessibleName(/^Noto Sans/)
+    expect(installed).not.toHaveAccessibleName(/Reagan/)
+  })
+
   it('previews the parameter’s current text by default and follows the sample box', async () => {
     const { user } = setup()
     await loaded()

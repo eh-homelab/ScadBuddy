@@ -1389,6 +1389,17 @@
             ],
             "title": "Library File Id"
           },
+          "library_file_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Library File Plate"
+          },
           "model_version": {
             "anyOf": [
               {

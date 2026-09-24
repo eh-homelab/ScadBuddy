@@ -72,6 +72,10 @@ jobs:
       # steps below. Empty when the step succeeded or left no execution log.
       review_error: ${{ steps.review_error.outputs.reason }}
       gate_error: ${{ steps.gate_error.outputs.reason }}
+      # Did the review actually post a summary FOR THIS COMMIT (#123)? The gate
+      # job re-checks this itself rather than trusting the answer — this output
+      # exists so a failure is legible here, at the step that noticed.
+      summary_id: ${{ steps.summary.outputs.id }}
 
     steps:
       - name: Checkout repository
@@ -220,13 +224,29 @@ jobs:
             ## Output
 
             Write your review as a single Markdown document listing all findings
-            grouped by concern, then post it as ONE top-level PR comment:
+            grouped by concern. **The last line of that document MUST be exactly
+            this HTML comment, copied verbatim:**
+
+                <!-- claude-review-sha: ${{ github.sha }} -->
+
+            That marker is what ties this review to the commit it read. The merge
+            gate refuses to grade a summary that does not carry the SHA it is
+            gating (eh-homelab/ScadBuddy#123), so a review posted without it counts
+            as no review at all and the PR stays red. Write it even when you found
+            nothing — an all-clear still has to be attributable to a commit.
+
+            Then post the document as ONE top-level PR comment:
 
               gh pr comment ${{ github.event.inputs.pr_number }} --repo ${{ github.repository }} --body-file <path-to-your-review.md>
 
             This is a plain new comment each run, not an edited-in-place one — do
             not attempt inline per-line review comments, and do not search for or
             try to update a prior comment.
+
+            Posting that comment is not optional and is not the last thing you do
+            if you run short of room — it IS the deliverable. A run that analyses
+            the diff and posts nothing is indistinguishable from one that never
+            ran.
 
             Do NOT create GitHub issues — use the `claude-make-follow-up-issues` label on the PR to trigger follow-up issue creation separately.
 
@@ -351,6 +371,49 @@ jobs:
       # follows once findings are fixed or filed as issues.
       # Shared in substance with eh-homelab/clusters and WonderForgeLabs/forge — keep
   # the three in sync when the gate logic changes.
+      # ── Did the review actually post anything? (#123) ─────────────────────
+      # The classifier below reads a review summary out of the PR's comments. It
+      # used to take "the most recent one by claude[bot]" on trust, which is fine
+      # right up until a review run completes without posting — two of the three
+      # runs on PR #115 did exactly that. The classifier then graded the PREVIOUS
+      # head's review, and because that review's findings had genuinely been fixed
+      # it returned a confident, well-argued `pass`. ~2000 lines merged unreviewed.
+      #
+      # So: establish here, mechanically, that a summary exists carrying THIS
+      # commit's sha. `continue-on-error` because the classifier and its explainer
+      # should still run and say their piece; the gate job treats a missing
+      # summary as fatal on its own.
+      - name: Assert the review posted a summary for this commit
+        id: summary
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          comments="$(mktemp)"
+          gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" \
+            --jq '.' > "$comments" || {
+              echo "::warning::Could not list PR comments; the gate job re-checks this."
+              exit 1
+            }
+
+          # --paginate emits one JSON array per page; splice them into one.
+          jq -s 'add // []' "$comments" > "${comments}.all"
+
+          if id="$(.github/scripts/review-summary-for-sha.sh "$HEAD_SHA" "${comments}.all")"; then
+            echo "id=$id" >> "$GITHUB_OUTPUT"
+            echo "Review summary for ${HEAD_SHA} is comment ${id}."
+          else
+            echo "id=" >> "$GITHUB_OUTPUT"
+            echo "::error::The review step posted no summary for ${HEAD_SHA}. It may have completed cleanly and simply not commented — check its turn count and cost. Re-dispatch this workflow against the PR branch; the gate will not grade an older commit's review."
+            exit 1
+          fi
+
       - name: Merge-gate classification
         id: gate
         if: always()
@@ -378,29 +441,39 @@ jobs:
 
             ## Steps
 
-            1. Find the latest review summary written by the review bot:
+            1. Find the review summary written FOR THIS COMMIT, `${{ github.sha }}`:
                - `gh api --paginate repos/${{ github.repository }}/issues/${{ github.event.inputs.pr_number }}/comments`
-                 and pick the MOST RECENT comment authored by `claude[bot]` that is a
-                 code-review summary (it lists findings grouped by concern). Ignore
-                 progress-tracking checklist comments.
+                 and pick the most recent comment authored by `claude[bot]` whose body
+                 carries the marker `<!-- claude-review-sha: ${{ github.sha }} -->`.
+                 A short sha in the marker is still a match if it is a prefix of the one
+                 above. Ignore progress-tracking checklist comments.
+               - **A summary without that marker, or with a different sha, is a review of
+                 a different commit. It is NOT evidence about this one — do not grade it,
+                 do not treat its findings as fixed, and do not treat its absence of
+                 findings as a pass.** If no summary carries this commit's sha, return
+                 `fail` saying the review posted no summary for `${{ github.sha }}`.
+                 (This is eh-homelab/ScadBuddy#123: grading an older commit's review
+                 merged ~2000 unreviewed lines on PR #115.)
                - Also read review bodies:
                  `gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.inputs.pr_number }}/reviews`.
-            2. Extract every actionable finding from that latest summary. Treat ALL findings
+            2. Extract every actionable finding from that summary. Treat ALL findings
                as actionable — nits included; the review is instructed never to minimize them.
             3. Fetch open follow-up issues for this PR:
                `gh issue list --repo ${{ github.repository }} --state open --label pr-feedback --search "[PR #${{ github.event.inputs.pr_number }} feedback]" --json number,title,body`
             4. For each finding, mark it ADDRESSED if a matching open `pr-feedback` issue
-               covers it. A finding the latest review no longer lists is already fixed in the
-               branch and need not be considered.
-            5. If the latest review summary reports NO actionable findings, the verdict is `pass`.
+               covers it. A finding this commit's review no longer lists is already fixed in
+               the branch and need not be considered.
+            5. If this commit's review summary reports NO actionable findings, the verdict is
+               `pass`.
 
             ## Verdict
 
-            - `pass` only if EVERY actionable finding in the latest review summary is covered
-              by an open `pr-feedback` issue (or there are no findings at all).
+            - `pass` only if EVERY actionable finding in THIS COMMIT's review summary is
+              covered by an open `pr-feedback` issue (or there are no findings at all).
             - `fail` if ANY actionable finding is neither fixed nor tracked.
-            - If you cannot locate a review summary comment at all, return `fail` with a reason
-              that says so (fail closed).
+            - If you cannot locate a review summary comment carrying `${{ github.sha }}`,
+              return `fail` with a reason that says so (fail closed). An older summary does
+              not substitute for one, however recent or however thorough it looks.
 
             Return the structured result: `verdict`, `outstanding_findings` (each a short
             `title` + `severity`), `addressed_count`, and a one-paragraph `reason`.
@@ -556,6 +629,24 @@ jobs:
       # they are added the gate still works on the ambient token; only the
       # sticky comment degrades, and a comment-API failure is already a
       # `::warning::` that never changes the verdict.
+      # The gate runs its own copy of the summary check, and takes it from the
+      # DEFAULT BRANCH rather than from the PR's tree. This workflow is
+      # dispatched against the PR branch, so an ordinary checkout here would be
+      # the PR author's code — and a PR could then rewrite the very script that
+      # decides whether it may merge. That is why the identical check up in
+      # `claude-review-run` is advisory (it runs the PR's copy, for a fast and
+      # legible failure) while this one is authoritative.
+      #
+      # Same reasoning the review job already applies to an MCP config: never
+      # read the rules of the review out of the thing being reviewed.
+      - name: Check out the gate's own scripts
+        if: always()
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 1
+          path: .gate
+
       - name: Generate app token
         id: app-token
         if: always()
@@ -598,6 +689,7 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.inputs.pr_number }}
+          HEAD_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
 
@@ -678,6 +770,47 @@ jobs:
           if [ -z "${REVIEW_EXECUTION:-}" ]; then
             echo "Claude review action was skipped (no execution_file; workflow-validation guard). Merge gate not enforced on this run."
             pass "The code review action was skipped (workflow-validation guard), so the merge gate was not enforced on this run."
+          fi
+
+          # ── The review must have reviewed THIS commit (#123) ────────────────
+          # Everything below reads a verdict the classifier reached by looking at
+          # a review summary comment. Until now nothing checked WHICH commit that
+          # summary was about, and a review run that completes without posting is
+          # not rare — two of the three runs on PR #115 did it. The classifier
+          # then graded the previous head's review and, because those findings had
+          # genuinely been fixed, passed: ~2000 lines merged that no review had
+          # read.
+          #
+          # This is deliberately not a timestamp comparison. On #115 the stale
+          # summary was newer than the previous push — it post-dated the commit it
+          # reviewed and pre-dated the one being gated — so only commit identity
+          # separates the two.
+          #
+          # Placed AFTER the workflow-validation skip above so the PR that edits
+          # this workflow (or first adds the script) is not blocked by a check
+          # that cannot yet exist on the default branch.
+          FINDER=.gate/.github/scripts/review-summary-for-sha.sh
+          if [ ! -x "$FINDER" ]; then
+            echo "::warning::${FINDER} is missing from the default branch, so the summary-for-this-commit check was skipped. This is expected only on the PR that introduces it."
+          else
+            comments="$(mktemp)"
+            if ! gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.' > "$comments"; then
+              echo "::error::Could not list this PR's comments, so the review summary could not be verified. Failing closed."
+              fail "Could not read this PR's comments to verify that the review covered \`${HEAD_SHA}\`. Failing closed."
+            fi
+            # `--paginate` emits one JSON array per page; splice them into one.
+            jq -s 'add // []' "$comments" > "${comments}.all"
+
+            if summary_id="$("$FINDER" "$HEAD_SHA" "${comments}.all")"; then
+              echo "Review summary for ${HEAD_SHA}: comment ${summary_id}."
+            else
+              echo "::error::No review summary carries ${HEAD_SHA}. The review did not review this commit, so the gate cannot clear it. Failing closed."
+              fail "The code review posted **no summary for \`${HEAD_SHA}\`**, so there is nothing that reviewed this commit.
+
+          An older review of an earlier commit is not evidence about this one, and the gate will not grade it — that is what let PR #115 merge ~2000 unreviewed lines (see #123).
+
+          This is a failure of the review job, not a finding about this PR. Re-dispatch \`claude-code-review.yml\` against this branch; pushing a change also works, since it dispatches a fresh review."
+            fi
           fi
 
           if [ "$GATE_OUTCOME" != "success" ]; then

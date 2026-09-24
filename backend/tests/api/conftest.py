@@ -127,7 +127,9 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
     (work / "preview.glb").write_bytes(b"glTF\x02\x00\x00\x00fake")
-    # A real 3MF, because saving an output stamps its provenance into the file.
+    # A real archive, not a stub: saving an output stamps its provenance into the
+    # file, and the send path re-places it for the target printer's plate before
+    # uploading, so it has to be readable (#105).
     write_bambu_3mf(
         [ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 5)))],
         work / "model.3mf",

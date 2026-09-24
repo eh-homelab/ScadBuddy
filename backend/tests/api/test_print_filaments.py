@@ -132,6 +132,10 @@ def test_a_run_without_a_plan_still_runs_the_pipeline(client: TestClient, model:
 
     output_id = prepared(client, model)
     upload_route()
+    # A send resolves the target printer's plate before uploading, to lay the 3MF out
+    # on it (#105) — a read of the pipeline list and the printers.
+    pipelines_route()
+    printers_route()
     ran = respx.post(f"{API}/slicer-pipelines/1/run").mock(
         return_value=httpx.Response(200, json=run_body())
     )
