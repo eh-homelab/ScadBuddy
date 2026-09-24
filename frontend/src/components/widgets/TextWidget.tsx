@@ -11,9 +11,10 @@ export function TextWidget({
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
-  const readout = param.maxLength ? (
-    <span className={value.length >= param.maxLength ? 'text-accent' : undefined}>
-      {value.length}/{param.maxLength}
+  const maxLength = param.max_length ?? undefined
+  const readout = maxLength ? (
+    <span className={value.length >= maxLength ? 'text-accent' : undefined}>
+      {value.length}/{maxLength}
     </span>
   ) : undefined
 
@@ -23,7 +24,7 @@ export function TextWidget({
         id={id}
         type="text"
         value={value}
-        maxLength={param.maxLength}
+        maxLength={maxLength}
         onChange={(event) => onChange(event.target.value)}
         className="sb-field"
       />

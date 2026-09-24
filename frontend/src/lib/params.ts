@@ -1,23 +1,51 @@
-import type { ModelSchema, Param, ParamValue } from '../api/types'
+import type { CustomizerSchema, Param, ParamGroup, ParamValue } from '../api/types'
 
 export type ParamValues = Record<string, ParamValue>
 
-export function allParams(schema: ModelSchema): Param[] {
-  return schema.groups.flatMap((group) => group.params)
+export const UNGROUPED = 'Parameters'
+
+export function allParams(schema: CustomizerSchema): Param[] {
+  return schema.parameters ?? []
 }
 
-export function defaultValues(schema: ModelSchema): ParamValues {
-  return Object.fromEntries(allParams(schema).map((param) => [param.name, param.initial]))
+/**
+ * Bucket the flat `parameters` list into the panel's tabs, in the order
+ * `schema.groups` records — which is the order the `/* [Group] *\/` comments appear in
+ * the source, not alphabetical.
+ */
+export function groupsOf(schema: CustomizerSchema): ParamGroup[] {
+  const buckets = new Map<string, Param[]>()
+  for (const name of schema.groups ?? []) {
+    buckets.set(name || UNGROUPED, [])
+  }
+  for (const param of allParams(schema)) {
+    const name = param.group || UNGROUPED
+    const bucket = buckets.get(name)
+    if (bucket) bucket.push(param)
+    else buckets.set(name, [param])
+  }
+  return [...buckets].filter(([, params]) => params.length > 0).map(([name, params]) => ({
+    name,
+    params,
+  }))
+}
+
+export function defaultValues(schema: CustomizerSchema): ParamValues {
+  return Object.fromEntries(
+    allParams(schema)
+      .filter((param) => param.initial !== null && param.initial !== undefined)
+      .map((param) => [param.name, param.initial as ParamValue]),
+  )
 }
 
 /** Colour parameters in schema order — extruder 1 is the first one (spec §7). */
-export function colorParamNames(schema: ModelSchema): string[] {
+export function colorParamNames(schema: CustomizerSchema): string[] {
   return allParams(schema)
     .filter((param) => param.type === 'color')
     .map((param) => param.name)
 }
 
-export function colorsFrom(schema: ModelSchema, values: ParamValues): string[] {
+export function colorsFrom(schema: CustomizerSchema, values: ParamValues): string[] {
   return colorParamNames(schema).map((name) => String(values[name] ?? '#9AA4B2'))
 }
 
@@ -29,7 +57,7 @@ export interface ParamDiff {
 }
 
 /** Parameters whose value differs from the model's defaults. */
-export function diffFromDefaults(schema: ModelSchema, values: ParamValues): ParamDiff[] {
+export function diffFromDefaults(schema: CustomizerSchema, values: ParamValues): ParamDiff[] {
   return allParams(schema)
     .filter((param) => {
       const value = values[param.name]
@@ -39,7 +67,7 @@ export function diffFromDefaults(schema: ModelSchema, values: ParamValues): Para
       name: param.name,
       caption: param.caption ?? param.name,
       value: values[param.name] as ParamValue,
-      initial: param.initial,
+      initial: (param.initial ?? '') as ParamValue,
     }))
 }
 

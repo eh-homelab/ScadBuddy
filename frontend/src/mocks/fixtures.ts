@@ -1,115 +1,105 @@
-import type { FontFamily, ModelSchema, ModelSummary, Output, Settings } from '../api/types'
-import type { BambuddyTargets } from '../api/types'
+import type {
+  BambuddyTargets,
+  BoundingBox,
+  CustomizerSchema,
+  FontFamily,
+  ModelSummary,
+  Output,
+  Param,
+  Settings,
+} from '../api/types'
 
-export const keychainSchema: ModelSchema = {
+/**
+ * `group` carries a default on the wire, so the generated type makes it required —
+ * every fixture parameter really does arrive with one.
+ */
+function param(group: string, rest: Omit<Param, 'group'>): Param {
+  return { group, ...rest }
+}
+
+/** A bounding box as the API reports it: corners plus the size, not a bare `{x,y,z}`. */
+export function bbox(x: number, y: number, z: number): BoundingBox {
+  return { min: [-x / 2, -y / 2, 0], max: [x / 2, y / 2, z], size: [x, y, z] }
+}
+
+export const keychainSchema: CustomizerSchema = {
   title: 'Name Keychain',
-  groups: [
-    {
-      name: 'Text',
-      params: [
-        {
-          name: 'name',
-          type: 'string',
-          initial: 'Reagan',
-          caption: 'Name on the tag',
-          maxLength: 20,
-        },
-        {
-          name: 'font',
-          type: 'font',
-          initial: 'Liberation Sans:style=Bold',
-          caption: 'Typeface',
-        },
-        {
-          name: 'text_size',
-          type: 'slider',
-          initial: 14,
-          caption: 'Text size',
-          min: 6,
-          max: 28,
-          step: 0.5,
-        },
-        {
-          name: 'text_depth',
-          type: 'slider',
-          initial: 1.6,
-          caption: 'Raised height',
-          min: 0.4,
-          max: 4,
-          step: 0.2,
-        },
+  source_sha256: 'f'.repeat(64),
+  groups: ['Text', 'Plate', 'Colours'],
+  parameters: [
+    param('Text', {
+      name: 'name',
+      type: 'string',
+      initial: 'Reagan',
+      caption: 'Name on the tag',
+      max_length: 20,
+    }),
+    param('Text', { name: 'font', type: 'font', initial: 'Liberation Sans:style=Bold', caption: 'Typeface' }),
+    param('Text', {
+      name: 'text_size',
+      type: 'slider',
+      initial: 14,
+      caption: 'Text size',
+      min: 6,
+      max: 28,
+      step: 0.5,
+    }),
+    param('Text', {
+      name: 'text_depth',
+      type: 'slider',
+      initial: 1.6,
+      caption: 'Raised height',
+      min: 0.4,
+      max: 4,
+      step: 0.2,
+    }),
+    param('Plate', {
+      name: 'thickness',
+      type: 'slider',
+      initial: 5.2,
+      caption: 'Plate thickness',
+      min: 2,
+      max: 10,
+      step: 0.2,
+    }),
+    param('Plate', { name: 'padding', type: 'number', initial: 6, caption: 'Margin around the text' }),
+    param('Plate', { name: 'corner_radius', type: 'integer', initial: 4, caption: 'Corner radius' }),
+    param('Plate', { name: 'keyring_hole', type: 'boolean', initial: true, caption: 'Keyring hole' }),
+    param('Plate', {
+      name: 'hole_side',
+      type: 'select',
+      initial: 'left',
+      caption: 'Hole position',
+      options: [
+        { name: 'Left', value: 'left' },
+        { name: 'Right', value: 'right' },
+        { name: 'Top centre', value: 'top' },
       ],
-    },
-    {
-      name: 'Plate',
-      params: [
-        {
-          name: 'thickness',
-          type: 'slider',
-          initial: 5.2,
-          caption: 'Plate thickness',
-          min: 2,
-          max: 10,
-          step: 0.2,
-        },
-        {
-          name: 'padding',
-          type: 'number',
-          initial: 6,
-          caption: 'Margin around the text',
-        },
-        { name: 'corner_radius', type: 'integer', initial: 4, caption: 'Corner radius' },
-        { name: 'keyring_hole', type: 'boolean', initial: true, caption: 'Keyring hole' },
-        {
-          name: 'hole_side',
-          type: 'select',
-          initial: 'left',
-          caption: 'Hole position',
-          options: [
-            { name: 'Left', value: 'left' },
-            { name: 'Right', value: 'right' },
-            { name: 'Top centre', value: 'top' },
-          ],
-        },
-      ],
-    },
-    {
-      name: 'Colours',
-      params: [
-        { name: 'body_color', type: 'color', initial: '#1B6CA8', caption: 'Plate' },
-        { name: 'text_color', type: 'color', initial: '#E8532F', caption: 'Text' },
-      ],
-    },
+    }),
+    param('Colours', { name: 'body_color', type: 'color', initial: '#1B6CA8', caption: 'Plate' }),
+    param('Colours', { name: 'text_color', type: 'color', initial: '#E8532F', caption: 'Text' }),
   ],
 }
 
-export const gridfinitySchema: ModelSchema = {
+export const gridfinitySchema: CustomizerSchema = {
   title: 'Gridfinity Bin',
-  groups: [
-    {
-      name: 'Size',
-      params: [
-        { name: 'units_x', type: 'integer', initial: 2, caption: 'Width in grid units' },
-        { name: 'units_y', type: 'integer', initial: 1, caption: 'Depth in grid units' },
-        {
-          name: 'height_units',
-          type: 'slider',
-          initial: 3,
-          caption: 'Height in 7 mm units',
-          min: 1,
-          max: 12,
-          step: 1,
-        },
-      ],
-    },
-    {
-      name: 'Features',
-      params: [
-        { name: 'magnets', type: 'boolean', initial: false, caption: 'Magnet holes' },
-        { name: 'label_tab', type: 'boolean', initial: true, caption: 'Label tab' },
-        { name: 'bin_color', type: 'color', initial: '#2E7D5B', caption: 'Bin' },
-      ],
-    },
+  source_sha256: 'a'.repeat(64),
+  groups: ['Size', 'Features'],
+  parameters: [
+    param('Size', { name: 'units_x', type: 'integer', initial: 2, caption: 'Width in grid units' }),
+    param('Size', { name: 'units_y', type: 'integer', initial: 1, caption: 'Depth in grid units' }),
+    param('Size', {
+      name: 'height_units',
+      type: 'slider',
+      initial: 3,
+      caption: 'Height in 7 mm units',
+      min: 1,
+      max: 12,
+      step: 1,
+    }),
+    param('Features', { name: 'magnets', type: 'boolean', initial: false, caption: 'Magnet holes' }),
+    param('Features', { name: 'label_tab', type: 'boolean', initial: true, caption: 'Label tab' }),
+    param('Features', { name: 'bin_color', type: 'color', initial: '#2E7D5B', caption: 'Bin' }),
   ],
 }
 
@@ -120,8 +110,8 @@ export const models: ModelSummary[] = [
     description: 'Two-colour keychain with raised text. The reference model for ScadBuddy.',
     tags: ['keychain', 'two-colour', 'text'],
     updated_at: '2026-09-21T18:04:00Z',
-    last_generated_at: '2026-09-21T19:31:00Z',
-    output_count: 3,
+    has_thumbnail: true,
+    has_readme: true,
   },
   {
     slug: 'gridfinity-bin',
@@ -129,11 +119,12 @@ export const models: ModelSummary[] = [
     description: 'Parametric storage bin on the 42 mm Gridfinity grid.',
     tags: ['storage', 'gridfinity'],
     updated_at: '2026-09-14T09:12:00Z',
-    output_count: 0,
+    has_thumbnail: false,
+    has_readme: false,
   },
 ]
 
-export const schemas: Record<string, ModelSchema> = {
+export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
 }
@@ -148,9 +139,12 @@ export const fonts: FontFamily[] = [
 
 export const outputs: Output[] = [
   {
-    id: 'out-20260921-1931',
+    id: 'a'.repeat(32),
     slug: 'name-keychain',
+    name: 'Reagan',
+    job_id: 'b'.repeat(32),
     created_at: '2026-09-21T19:31:00Z',
+    has_thumbnail: true,
     params: {
       name: 'Reagan',
       font: 'Liberation Sans:style=Bold',
@@ -164,15 +158,20 @@ export const outputs: Output[] = [
       body_color: '#1B6CA8',
       text_color: '#E8532F',
     },
-    bbox_mm: { x: 95.7, y: 34.6, z: 6.8 },
+    bbox_mm: bbox(95.7, 34.6, 6.8),
     colors: ['#1B6CA8', '#E8532F'],
-    library_file_id: 'lib-8812',
-    queue_item_id: 'q-4471',
+    parts: [],
+    warnings: [],
+    library_file_id: 8812,
+    queue_item_id: 4471,
   },
   {
-    id: 'out-20260920-1122',
+    id: 'c'.repeat(32),
     slug: 'name-keychain',
+    name: 'Nova',
+    job_id: 'd'.repeat(32),
     created_at: '2026-09-20T11:22:00Z',
+    has_thumbnail: false,
     params: {
       name: 'Nova',
       font: 'Liberation Sans:style=Bold',
@@ -186,14 +185,19 @@ export const outputs: Output[] = [
       body_color: '#F2A93B',
       text_color: '#14181F',
     },
-    bbox_mm: { x: 78.4, y: 40.2, z: 7.2 },
+    bbox_mm: bbox(78.4, 40.2, 7.2),
     colors: ['#F2A93B', '#14181F'],
-    library_file_id: 'lib-8790',
+    parts: [],
+    warnings: [],
+    library_file_id: 8790,
   },
   {
-    id: 'out-20260918-0903',
+    id: 'e'.repeat(32),
     slug: 'name-keychain',
+    name: 'Workshop',
+    job_id: 'f'.repeat(32),
     created_at: '2026-09-18T09:03:00Z',
+    has_thumbnail: false,
     params: {
       name: 'Workshop',
       font: 'DejaVu Sans:style=Bold',
@@ -207,35 +211,45 @@ export const outputs: Output[] = [
       body_color: '#1B6CA8',
       text_color: '#E8532F',
     },
-    bbox_mm: { x: 104.1, y: 30.8, z: 5.6 },
+    bbox_mm: bbox(104.1, 30.8, 5.6),
     colors: ['#1B6CA8', '#E8532F'],
+    parts: [],
+    warnings: [],
   },
 ]
 
 export const settings: Settings = {
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
-  api_key_set: true,
-  library_folder_id: 'folder-scadbuddy',
-  pipeline_id: 'pipeline-textured-pei',
-  sidebar_registered: false,
+  has_api_key: true,
+  public_url: 'https://scadbuddy.internal.nullreference.io',
+  library_folder_id: 2,
+  pipeline_id: 1,
+  printer_id: 1,
+  printer_preset: null,
+  process_preset: null,
+  filament_presets: [],
+  bed_type: null,
 }
 
 export const targets: BambuddyTargets = {
   folders: [
-    { id: 'folder-root', name: 'Library root' },
-    { id: 'folder-scadbuddy', name: 'ScadBuddy' },
-    { id: 'folder-keychains', name: 'Keychains' },
+    { id: 1, name: 'MakerWorld' },
+    { id: 2, name: 'ScadBuddy' },
+    { id: 3, name: 'Keychains' },
   ],
   pipelines: [
-    { id: 'pipeline-textured-pei', name: 'Textured PEI · 0.20 mm · AMS' },
-    { id: 'pipeline-draft', name: 'Draft · 0.28 mm' },
+    { id: 1, name: 'Textured PEI · 0.20 mm · AMS' },
+    { id: 2, name: 'Draft · 0.28 mm' },
   ],
+  printers: [{ id: 1, name: '3DP-31B-598', model: 'H2C', is_active: true, nozzle_count: 2 }],
 }
 
 export const FAILING_NAME = 'boom'
 
-export const OPENSCAD_LOG_TAIL = `Compiling design (CSG Tree generation)...
-ERROR: Parser error: syntax error in file model.scad, line 42
-ERROR: Compilation failed!
-WARNING: Object may not be a valid 2-manifold and may need repair!
-Execution aborted`
+export const OPENSCAD_LOG_TAIL = [
+  'Compiling design (CSG Tree generation)...',
+  'ERROR: Parser error: syntax error in file model.scad, line 42',
+  'ERROR: Compilation failed!',
+  'WARNING: Object may not be a valid 2-manifold and may need repair!',
+  'Execution aborted',
+]

@@ -19,8 +19,11 @@ EXPECTED_PATHS = {
     "/api/v1/outputs/{output_id}",
     "/api/v1/outputs/{output_id}/model.3mf",
     "/api/v1/outputs/{output_id}/thumbnail",
+    "/api/v1/outputs/{output_id}/send",
     "/api/v1/settings",
     "/api/v1/settings/test",
+    "/api/v1/settings/targets",
+    "/api/v1/settings/register-sidebar",
     "/api/v1/fonts",
 }
 

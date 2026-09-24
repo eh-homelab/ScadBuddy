@@ -1,0 +1,203 @@
+{
+  "_note": "trimmed for the repo: each tier's list is truncated to 3 rows (live: cloud 56/233/1928, standard 70/233/1792, local 0/0/0)",
+  "cloud": {
+    "printer": [
+      {
+        "id": "GM030",
+        "name": "Bambu Lab A1 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "GM029",
+        "name": "Bambu Lab A1 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "GM031",
+        "name": "Bambu Lab A1 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      }
+    ],
+    "process": [
+      {
+        "id": "GP139",
+        "name": "0.08mm Extra Fine @BBL H2D 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2D 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GP040",
+        "name": "0.08mm Extra Fine @BBL H2DP 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2D Pro 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GP243",
+        "name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      }
+    ],
+    "filament": [
+      {
+        "id": "GFSB00_07",
+        "name": "Bambu ABS @BBL A1",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 0.4 nozzle",
+          "Bambu Lab A1 0.6 nozzle",
+          "Bambu Lab A1 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB00_08",
+        "name": "Bambu ABS @BBL A1 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB00_22",
+        "name": "Bambu ABS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      }
+    ]
+  },
+  "standard": {
+    "printer": [
+      {
+        "id": "Bambu Lab A1",
+        "name": "Bambu Lab A1",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab A1 0.2 nozzle",
+        "name": "Bambu Lab A1 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab A1 0.4 nozzle",
+        "name": "Bambu Lab A1 0.4 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      }
+    ],
+    "process": [
+      {
+        "id": "0.06mm Fine @BBL A1 0.2 nozzle",
+        "name": "0.06mm Fine @BBL A1 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "0.06mm Fine @BBL A1M 0.2 nozzle",
+        "name": "0.06mm Fine @BBL A1M 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 mini 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "0.06mm Fine @BBL P1P 0.2 nozzle",
+        "name": "0.06mm Fine @BBL P1P 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab P1P 0.2 nozzle"
+        ]
+      }
+    ],
+    "filament": [
+      {
+        "id": "Bambu ABS @BBL A1",
+        "name": "Bambu ABS @BBL A1",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 0.4 nozzle",
+          "Bambu Lab A1 0.6 nozzle",
+          "Bambu Lab A1 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS @BBL A1 0.2 nozzle",
+        "name": "Bambu ABS @BBL A1 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab A1 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS @BBL H2C",
+        "name": "Bambu ABS @BBL H2C",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      }
+    ]
+  },
+  "local": {
+    "printer": [],
+    "process": [],
+    "filament": []
+  },
+  "orca_cloud": {
+    "printer": [],
+    "process": [],
+    "filament": []
+  },
+  "cloud_status": "ok",
+  "orca_cloud_status": "not_authenticated"
+}

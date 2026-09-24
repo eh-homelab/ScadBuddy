@@ -9,7 +9,11 @@
 export interface GlbPart {
   /** `#rrggbb` */
   color: string
-  /** millimetres, z-up, matching OpenSCAD's coordinate system */
+  /**
+   * Millimetres, **Y-up**, as the real writer emits it: `glb.py` applies
+   * `Z_UP_TO_Y_UP` before serialising, so what the viewer loads is already in
+   * glTF's convention. `min`/`max` are `[x, height, depth]`.
+   */
   min: [number, number, number]
   max: [number, number, number]
 }
@@ -166,18 +170,23 @@ export function buildGlb(parts: GlbPart[]): Uint8Array {
   return out
 }
 
-/** The two-colour keychain the mock catalogue ships: a plate plus raised text. */
+/**
+ * The two-colour keychain the mock catalogue ships: a plate plus raised text.
+ *
+ * `bbox` is given in model space (`x` wide, `y` deep, `z` tall); the parts come out
+ * Y-up, so the model's `z` becomes the GLB's second axis.
+ */
 export function keychainGlb(colors: string[], bbox: { x: number; y: number; z: number }): Uint8Array {
   const [body = '#1b6ca8', text = '#e8532f'] = colors
   const halfX = bbox.x / 2
-  const halfY = bbox.y / 2
+  const halfDepth = bbox.y / 2
   const plateHeight = Math.min(3, bbox.z * 0.5)
   return buildGlb([
-    { color: body, min: [-halfX, -halfY, 0], max: [halfX, halfY, plateHeight] },
+    { color: body, min: [-halfX, 0, -halfDepth], max: [halfX, plateHeight, halfDepth] },
     {
       color: text,
-      min: [-halfX * 0.78, -halfY * 0.45, plateHeight],
-      max: [halfX * 0.86, halfY * 0.45, bbox.z],
+      min: [-halfX * 0.78, plateHeight, -halfDepth * 0.45],
+      max: [halfX * 0.86, bbox.z, halfDepth * 0.45],
     },
   ])
 }

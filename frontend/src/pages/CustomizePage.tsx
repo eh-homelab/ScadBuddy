@@ -40,7 +40,7 @@ export function CustomizePage() {
 
   // A parameter change invalidates the saved output — Generate has to run again.
   const settled = debounced === values
-  const output = settled && saved && saved.jobId === job?.job_id ? saved.output : undefined
+  const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setValues((current) => ({ ...current, [name]: value }))
@@ -85,7 +85,7 @@ export function CustomizePage() {
           <h1 className="truncate text-[13px] font-medium">{schema.title}</h1>
           {reopened && (
             <span className="sb-num shrink-0 text-[11px] text-faint">
-              reopened from {reopened.id}
+              reopened from {reopened.name ?? reopened.id.slice(0, 8)}
             </span>
           )}
         </div>
@@ -133,7 +133,7 @@ export function CustomizePage() {
             output={output}
             capture={capture}
             onGenerated={(created) => {
-              if (job) setSaved({ jobId: job.job_id, output: created })
+              if (job) setSaved({ jobId: job.id, output: created })
               outputsState.reload()
             }}
             onSent={() => outputsState.reload()}

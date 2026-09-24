@@ -1,13 +1,13 @@
 import { useMemo, useState } from 'react'
-import type { FontFamily, ModelSchema, ParamValue } from '../api/types'
-import { colorParamNames, diffFromDefaults, type ParamValues } from '../lib/params'
+import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
+import { colorParamNames, diffFromDefaults, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
 
 const GLOBAL_GROUP = 'Global'
 
 interface Props {
-  schema: ModelSchema
+  schema: CustomizerSchema
   values: ParamValues
   fonts: FontFamily[]
   onChange: (name: string, value: ParamValue) => void
@@ -15,11 +15,9 @@ interface Props {
 }
 
 export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Props) {
-  const tabs = useMemo(
-    () => schema.groups.filter((group) => group.name !== GLOBAL_GROUP),
-    [schema],
-  )
-  const globalGroup = schema.groups.find((group) => group.name === GLOBAL_GROUP)
+  const groups = useMemo(() => groupsOf(schema), [schema])
+  const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
+  const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
   const [active, setActive] = useState(() => tabs[0]?.name ?? GLOBAL_GROUP)
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
@@ -73,7 +71,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
                 <li key={param.name}>
                   <ParamWidget
                     param={param}
-                    value={values[param.name] ?? param.initial}
+                    value={values[param.name] ?? (param.initial as ParamValue)}
                     fonts={fonts}
                     extruder={extruderOf(param.name)}
                     onChange={(next) => onChange(param.name, next)}
@@ -90,7 +88,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
               <li key={param.name}>
                 <ParamWidget
                   param={param}
-                  value={values[param.name] ?? param.initial}
+                  value={values[param.name] ?? (param.initial as ParamValue)}
                   fonts={fonts}
                   extruder={extruderOf(param.name)}
                   onChange={(next) => onChange(param.name, next)}

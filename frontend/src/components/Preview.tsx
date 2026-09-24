@@ -3,7 +3,7 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import type { Bbox, Job } from '../api/types'
+import type { BoundingBox, Job } from '../api/types'
 import { formatBbox } from '../lib/format'
 import { Spinner } from './ui/Spinner'
 
@@ -54,11 +54,11 @@ interface Props {
 
 export function Preview({ job, rendering, captureRef }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
-  const [shown, setShown] = useState<{ url: string; bbox?: Bbox; colors: string[] } | undefined>()
+  const [shown, setShown] = useState<{ url: string; bbox?: BoundingBox; colors: string[] } | undefined>()
 
   useEffect(() => {
     if (job?.status === 'done' && job.preview_url) {
-      setShown({ url: job.preview_url, bbox: job.bbox_mm, colors: job.colors ?? [] })
+      setShown({ url: job.preview_url, bbox: job.bbox_mm ?? undefined, colors: job.colors ?? [] })
     }
   }, [job])
 
@@ -120,7 +120,7 @@ export function Preview({ job, rendering, captureRef }: Props) {
         {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} />}
       </div>
 
-      {failed && <RenderError log={job.log_tail} />}
+      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
 
       {!shown && !failed && !rendering && (
         <p className="absolute inset-0 flex items-center justify-center text-[13px] text-faint">
@@ -139,7 +139,7 @@ function PlateBadge() {
   )
 }
 
-function Dimensions({ bbox }: { bbox: Bbox }) {
+function Dimensions({ bbox }: { bbox: BoundingBox }) {
   return (
     <dl
       data-testid="bbox-readout"
@@ -198,7 +198,7 @@ function BuildPlate({ theme }: { theme: ViewerTheme }) {
  * Frames the model once, when its size is first known. After that the view is the
  * viewer's: orbiting is never yanked back by the next render.
  */
-function FitCamera({ bbox }: { bbox?: Bbox }) {
+function FitCamera({ bbox }: { bbox?: BoundingBox }) {
   const camera = useThree((state) => state.camera)
   const controls = useThree((state) => state.controls) as { target: THREE.Vector3; update: () => void } | null
   const framed = useRef(false)
@@ -207,11 +207,12 @@ function FitCamera({ bbox }: { bbox?: Bbox }) {
     if (!bbox || framed.current || !controls) return
     framed.current = true
 
-    const span = Math.max(bbox.x, bbox.y, bbox.z, 20)
+    const [width, depth, height] = bbox.size
+    const span = Math.max(width, depth, height, 20)
     const distance = span * 1.9 + 40
     const direction = new THREE.Vector3(0.78, 0.62, 0.86).normalize()
     camera.position.copy(direction.multiplyScalar(distance))
-    controls.target.set(0, bbox.z / 2, 0)
+    controls.target.set(0, height / 2, 0)
     camera.lookAt(controls.target)
     controls.update()
   }, [bbox, camera, controls])
@@ -220,26 +221,31 @@ function FitCamera({ bbox }: { bbox?: Bbox }) {
 }
 
 /**
- * The GLB is authored z-up in millimetres, the way OpenSCAD emits it; three.js is
- * y-up, so the whole model is rotated a quarter turn about X and dropped onto z=0.
+ * The GLB arrives **Y-up already** — the backend's writer applies its own
+ * `Z_UP_TO_Y_UP` before serialising — so it drops straight into the three.js scene.
+ * An earlier version rotated it a quarter turn about X on the assumption it was
+ * OpenSCAD's Z-up, which stood the model on its edge; the msw fixture happened to be
+ * authored Z-up too, so every mocked test agreed with it.
  */
-function Model({ url, bbox }: { url: string; bbox?: Bbox }) {
+function Model({ url, bbox }: { url: string; bbox?: BoundingBox }) {
   const gltf = useLoader(GLTFLoader, url)
   const scene = useMemo(() => gltf.scene.clone(true), [gltf])
   const group = useRef<THREE.Group>(null)
 
   const edges = useMemo(() => {
     if (!bbox) return null
-    return new THREE.BoxGeometry(bbox.x, bbox.y, bbox.z)
+    // bbox.size is model space (wide, deep, tall); the scene is Y-up.
+    const [width, depth, height] = bbox.size
+    return new THREE.BoxGeometry(width, height, depth)
   }, [bbox])
 
   useEffect(() => () => edges?.dispose(), [edges])
 
   return (
-    <group ref={group} rotation={[-Math.PI / 2, 0, 0]}>
+    <group ref={group}>
       <primitive object={scene} />
       {edges && (
-        <lineSegments position={[0, 0, bbox ? bbox.z / 2 : 0]}>
+        <lineSegments position={[0, bbox ? bbox.size[2] / 2 : 0, 0]}>
           <edgesGeometry args={[edges]} attach="geometry" />
           <lineBasicMaterial
             color="#f2a93b"

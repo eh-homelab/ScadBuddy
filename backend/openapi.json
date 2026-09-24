@@ -1,6 +1,34 @@
 {
   "components": {
     "schemas": {
+      "BambuddyTargets": {
+        "description": "Everything the settings page needs to fill its pickers.",
+        "properties": {
+          "folders": {
+            "items": {
+              "$ref": "#/components/schemas/Folder"
+            },
+            "title": "Folders",
+            "type": "array"
+          },
+          "pipelines": {
+            "items": {
+              "$ref": "#/components/schemas/Pipeline"
+            },
+            "title": "Pipelines",
+            "type": "array"
+          },
+          "printers": {
+            "items": {
+              "$ref": "#/components/schemas/Printer"
+            },
+            "title": "Printers",
+            "type": "array"
+          }
+        },
+        "title": "BambuddyTargets",
+        "type": "object"
+      },
       "Body_create_model_api_v1_models_post": {
         "properties": {
           "description": {
@@ -155,16 +183,9 @@
       },
       "ConnectionTest": {
         "properties": {
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Error"
+          "detail": {
+            "title": "Detail",
+            "type": "string"
           },
           "ok": {
             "title": "Ok",
@@ -179,7 +200,8 @@
           }
         },
         "required": [
-          "ok"
+          "ok",
+          "detail"
         ],
         "title": "ConnectionTest",
         "type": "object"
@@ -242,6 +264,46 @@
           }
         },
         "title": "CustomizerSchema",
+        "type": "object"
+      },
+      "Folder": {
+        "properties": {
+          "file_count": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "File Count"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "parent_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Parent Id"
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "Folder",
         "type": "object"
       },
       "FontFamily": {
@@ -634,7 +696,7 @@
           "library_file_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -683,7 +745,7 @@
           "pipeline_run_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -694,7 +756,7 @@
           "queue_item_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -723,109 +785,6 @@
           "has_thumbnail"
         ],
         "title": "OutputDetail",
-        "type": "object"
-      },
-      "OutputSummary": {
-        "properties": {
-          "bbox_mm": {
-            "$ref": "#/components/schemas/BoundingBox"
-          },
-          "colors": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Colors",
-            "type": "array"
-          },
-          "created_at": {
-            "format": "date-time",
-            "title": "Created At",
-            "type": "string"
-          },
-          "has_thumbnail": {
-            "title": "Has Thumbnail",
-            "type": "boolean"
-          },
-          "id": {
-            "title": "Id",
-            "type": "string"
-          },
-          "job_id": {
-            "title": "Job Id",
-            "type": "string"
-          },
-          "library_file_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Library File Id"
-          },
-          "name": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Name"
-          },
-          "parts": {
-            "items": {
-              "$ref": "#/components/schemas/PartInfo"
-            },
-            "title": "Parts",
-            "type": "array"
-          },
-          "pipeline_run_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Pipeline Run Id"
-          },
-          "queue_item_id": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Queue Item Id"
-          },
-          "slug": {
-            "title": "Slug",
-            "type": "string"
-          },
-          "warnings": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Warnings",
-            "type": "array"
-          }
-        },
-        "required": [
-          "id",
-          "slug",
-          "job_id",
-          "created_at",
-          "bbox_mm",
-          "has_thumbnail"
-        ],
-        "title": "OutputSummary",
         "type": "object"
       },
       "Parameter": {
@@ -971,9 +930,9 @@
         "title": "PartInfo",
         "type": "object"
       },
-      "Printer": {
+      "Pipeline": {
         "properties": {
-          "id": {
+          "bed_type": {
             "anyOf": [
               {
                 "type": "string"
@@ -982,7 +941,97 @@
                 "type": "null"
               }
             ],
-            "title": "Id"
+            "title": "Bed Type"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "filament_presets": {
+            "items": {
+              "$ref": "#/components/schemas/PresetRef"
+            },
+            "title": "Filament Presets",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "printer_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name"
+        ],
+        "title": "Pipeline",
+        "type": "object"
+      },
+      "PresetRef": {
+        "description": "A slicer preset, identified by tier and id (``{\"source\":\"cloud\",\"id\":\"GM041\"}``).",
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "orca_cloud",
+              "cloud",
+              "local",
+              "standard"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "id"
+        ],
+        "title": "PresetRef",
+        "type": "object"
+      },
+      "Printer": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "is_active": {
+            "default": true,
+            "title": "Is Active",
+            "type": "boolean"
           },
           "model": {
             "anyOf": [
@@ -996,17 +1045,25 @@
             "title": "Model"
           },
           "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "nozzle_count": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Name"
+            "title": "Nozzle Count"
           }
         },
+        "required": [
+          "id",
+          "name"
+        ],
         "title": "Printer",
         "type": "object"
       },
@@ -1054,7 +1111,90 @@
         "title": "RenderRequest",
         "type": "object"
       },
+      "SendRequest": {
+        "properties": {
+          "copies": {
+            "default": 1,
+            "maximum": 1000.0,
+            "minimum": 1.0,
+            "title": "Copies",
+            "type": "integer"
+          },
+          "mode": {
+            "default": "library",
+            "enum": [
+              "library",
+              "queue"
+            ],
+            "title": "Mode",
+            "type": "string"
+          }
+        },
+        "title": "SendRequest",
+        "type": "object"
+      },
+      "SendResult": {
+        "properties": {
+          "bambuddy_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bambuddy Url"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "library_file_id": {
+            "title": "Library File Id",
+            "type": "integer"
+          },
+          "mode": {
+            "enum": [
+              "library",
+              "queue"
+            ],
+            "title": "Mode",
+            "type": "string"
+          },
+          "pipeline_run_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Run Id"
+          },
+          "queue_item_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Queue Item Id"
+          }
+        },
+        "required": [
+          "mode",
+          "library_file_id",
+          "filename"
+        ],
+        "title": "SendResult",
+        "type": "object"
+      },
       "SettingsPatch": {
+        "description": "An omitted field is left alone; an explicit ``null`` clears it.",
         "properties": {
           "bambuddy_api_key": {
             "anyOf": [
@@ -1078,10 +1218,35 @@
             ],
             "title": "Bambuddy Url"
           },
-          "library_folder_id": {
+          "bed_type": {
             "anyOf": [
               {
                 "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "filament_presets": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/PresetRef"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filament Presets"
+          },
+          "library_folder_id": {
+            "anyOf": [
+              {
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -1092,7 +1257,7 @@
           "pipeline_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -1103,13 +1268,33 @@
           "printer_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Printer Id"
+          },
+          "printer_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "public_url": {
             "anyOf": [
@@ -1127,6 +1312,7 @@
         "type": "object"
       },
       "SettingsView": {
+        "description": "What the browser may see. The API key itself never appears here.",
         "properties": {
           "bambuddy_url": {
             "anyOf": [
@@ -1139,6 +1325,24 @@
             ],
             "title": "Bambuddy Url"
           },
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "filament_presets": {
+            "items": {
+              "$ref": "#/components/schemas/PresetRef"
+            },
+            "title": "Filament Presets",
+            "type": "array"
+          },
           "has_api_key": {
             "default": false,
             "title": "Has Api Key",
@@ -1147,7 +1351,7 @@
           "library_folder_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -1158,7 +1362,7 @@
           "pipeline_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
@@ -1169,13 +1373,33 @@
           "printer_id": {
             "anyOf": [
               {
-                "type": "string"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
             "title": "Printer Id"
+          },
+          "printer_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "process_preset": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PresetRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "public_url": {
             "anyOf": [
@@ -1190,6 +1414,50 @@
           }
         },
         "title": "SettingsView",
+        "type": "object"
+      },
+      "SidebarLink": {
+        "description": "The External Link ScadBuddy registers, plus where Bambuddy renders it.",
+        "properties": {
+          "created": {
+            "title": "Created",
+            "type": "boolean"
+          },
+          "embed_path": {
+            "title": "Embed Path",
+            "type": "string"
+          },
+          "icon": {
+            "title": "Icon",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "open_in_new_tab": {
+            "title": "Open In New Tab",
+            "type": "boolean"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "url",
+          "icon",
+          "open_in_new_tab",
+          "created",
+          "embed_path"
+        ],
+        "title": "SidebarLink",
         "type": "object"
       },
       "ValidationError": {
@@ -1545,6 +1813,7 @@
     },
     "/api/v1/models/{slug}/outputs": {
       "get": {
+        "description": "Details, not summaries: the history page shows each output's parameter diff, and\na summary list would make it fetch every row again one at a time.",
         "operationId": "list_outputs_api_v1_models__slug__outputs_get",
         "parameters": [
           {
@@ -1565,7 +1834,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/OutputSummary"
+                    "$ref": "#/components/schemas/OutputDetail"
                   },
                   "title": "Response List Outputs Api V1 Models  Slug  Outputs Get",
                   "type": "array"
@@ -1937,6 +2206,60 @@
         ]
       }
     },
+    "/api/v1/outputs/{output_id}/send": {
+      "post": {
+        "description": "Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,\nslice and queue it.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send replaces the file Bambuddy already holds rather\nthan adding a second copy.",
+        "operationId": "send_output_to_bambuddy_api_v1_outputs__output_id__send_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Send the 3MF to Bambuddy",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
     "/api/v1/outputs/{output_id}/thumbnail": {
       "get": {
         "operationId": "get_output_thumbnail_api_v1_outputs__output_id__thumbnail_get",
@@ -2080,8 +2403,52 @@
         ]
       }
     },
+    "/api/v1/settings/register-sidebar": {
+      "post": {
+        "description": "Upsert the ``Customize`` External Link by name.\n\nBambuddy renders a link with ``open_in_new_tab: false`` inside its own shell, in a\nsandboxed iframe at ``/external/{id}`` \u2014 so ScadBuddy appears as a sidebar page\nrather than a tab.",
+        "operationId": "post_register_sidebar_api_v1_settings_register_sidebar_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SidebarLink"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Add ScadBuddy to Bambuddy's sidebar",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
+    "/api/v1/settings/targets": {
+      "get": {
+        "operationId": "get_targets_api_v1_settings_targets_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BambuddyTargets"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Folders, pipelines and printers to choose from",
+        "tags": [
+          "settings"
+        ]
+      }
+    },
     "/api/v1/settings/test": {
       "post": {
+        "description": "``GET /api/v1/printers/`` on Bambuddy \u2014 note the trailing slash, without which\n1.2.5.5 answers 404.\n\nA reachable Bambuddy that refuses the key is a *result* (``ok: false``), not an\nerror; only a missing URL \u2014 nothing to test at all \u2014 is still a 409.",
         "operationId": "test_settings_api_v1_settings_test_post",
         "responses": {
           "200": {

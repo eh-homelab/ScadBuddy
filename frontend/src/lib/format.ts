@@ -1,11 +1,12 @@
-import type { Bbox, ParamValue } from '../api/types'
+import type { BoundingBox, ParamValue } from '../api/types'
 
 export function mm(value: number): string {
   return value.toFixed(1)
 }
 
-export function formatBbox(bbox: Bbox): string {
-  return `${mm(bbox.x)} × ${mm(bbox.y)} × ${mm(bbox.z)} mm`
+export function formatBbox(bbox: BoundingBox): string {
+  const [x, y, z] = bbox.size
+  return `${mm(x)} × ${mm(y)} × ${mm(z)} mm`
 }
 
 export function formatValue(value: ParamValue): string {

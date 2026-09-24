@@ -19,8 +19,8 @@ export function NumberWidget({
         id={id}
         type="number"
         value={value}
-        min={param.min}
-        max={param.max}
+        min={param.min ?? undefined}
+        max={param.max ?? undefined}
         step={step}
         onChange={(event) => {
           const next = Number(event.target.value)

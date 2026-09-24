@@ -8,21 +8,23 @@ import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
 
 describe('CataloguePage', () => {
-  it('lists every model with its tags and generation count', async () => {
+  it('lists every model with its tags and when it last changed', async () => {
     renderPage(<CataloguePage />)
 
     const keychain = await screen.findByRole('heading', { name: 'Name Keychain' })
     const card = keychain.closest('li') as HTMLElement
     expect(within(card).getByText('keychain')).toBeInTheDocument()
-    expect(within(card).getByText(/outputs/).textContent).toMatch(/3\s*outputs · last generated/)
+    expect(within(card).getByText(/^Updated /)).toBeInTheDocument()
     expect(await screen.findByRole('heading', { name: 'Gridfinity Bin' })).toBeInTheDocument()
   })
 
-  it('says a model has never been generated', async () => {
+  it('shows an empty build plate for a model with no thumbnail', async () => {
     renderPage(<CataloguePage />)
     const gridfinity = await screen.findByRole('heading', { name: 'Gridfinity Bin' })
     const card = gridfinity.closest('li') as HTMLElement
-    expect(within(card).getByText('Never generated')).toBeInTheDocument()
+    expect(
+      within(card).getByRole('img', { name: 'Gridfinity Bin — not generated yet' }),
+    ).toBeInTheDocument()
   })
 
   it('links each card at the customizer', async () => {

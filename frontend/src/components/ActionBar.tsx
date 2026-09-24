@@ -40,7 +40,7 @@ export function ActionBar({
     setGenerating(true)
     setError(null)
     try {
-      const created = await api.createOutput(slug, job.job_id)
+      const created = await api.createOutput(slug, job.id)
       const png = await capture()
       if (png) {
         // A missing thumbnail is cosmetic — never fail the generate over it.
@@ -91,7 +91,9 @@ export function ActionBar({
             </span>
           )}
           {!error && output && !stale && (
-            <span className="sb-num truncate text-[12px] text-ok">Saved {output.id}</span>
+            <span className="truncate text-[12px] text-ok">
+              Saved {output.name ?? output.id.slice(0, 8)}
+            </span>
           )}
         </div>
 

@@ -44,7 +44,10 @@ describe('buildGlb', () => {
     expect(plate.type).toBe('VEC3')
     expect(plate.count).toBe(8)
     expect(plate.max[0] - plate.min[0]).toBeCloseTo(95.7, 5)
-    expect(json.accessors[1].max[2]).toBeCloseTo(6.8, 5)
+    // Y-up, like the real writer: the model's height is the SECOND axis, and the
+    // raised text reaches the top of the bounding box.
+    expect(json.accessors[1].max[1]).toBeCloseTo(6.8, 5)
+    expect(plate.max[2] - plate.min[2]).toBeCloseTo(34.6, 5)
   })
 })
 

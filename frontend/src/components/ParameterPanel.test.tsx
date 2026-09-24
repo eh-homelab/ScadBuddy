@@ -2,12 +2,12 @@ import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { describe, expect, it } from 'vitest'
-import type { ModelSchema, ParamValue } from '../api/types'
+import type { CustomizerSchema, ParamValue } from '../api/types'
 import { fonts, keychainSchema } from '../mocks/fixtures'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { ParameterPanel } from './ParameterPanel'
 
-function Harness({ schema = keychainSchema }: { schema?: ModelSchema }) {
+function Harness({ schema = keychainSchema }: { schema?: CustomizerSchema }) {
   const [values, setValues] = useState<ParamValues>(() => defaultValues(schema))
   return (
     <ParameterPanel
@@ -42,14 +42,13 @@ describe('ParameterPanel', () => {
 
   it('pins a Global group above every tab', async () => {
     const user = userEvent.setup()
-    const schema: ModelSchema = {
+    const schema: CustomizerSchema = {
       title: 'With globals',
-      groups: [
-        {
-          name: 'Global',
-          params: [{ name: 'scale', type: 'number', initial: 1, caption: 'Scale' }],
-        },
-        ...keychainSchema.groups,
+      source_sha256: keychainSchema.source_sha256,
+      groups: ['Global', ...(keychainSchema.groups ?? [])],
+      parameters: [
+        { group: 'Global', name: 'scale', type: 'number', initial: 1, caption: 'Scale' },
+        ...(keychainSchema.parameters ?? []),
       ],
     }
     render(<Harness schema={schema} />)
