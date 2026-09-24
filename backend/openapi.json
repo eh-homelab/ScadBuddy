@@ -1561,6 +1561,17 @@
             ],
             "title": "Print Route"
           },
+          "project_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Project Id"
+          },
           "queue_item_id": {
             "anyOf": [
               {

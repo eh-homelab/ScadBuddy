@@ -563,7 +563,12 @@ async def run_for_output(
                 force=request.force,
             ),
         )
-        store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
+        store.record_send(
+            meta.id,
+            pipeline_run_id=run.id,
+            print_route="pipeline",
+            project_id=project_id,
+        )
         return PrintRunResult(
             pipeline_id=pipeline_id,
             library_file_id=library_file_id,
@@ -614,6 +619,7 @@ async def run_for_output(
             queue_item_id=queue_item_id,
             print_route="slice_queue",
             slice_job_id=outcome.slice_job_id,
+            project_id=project_id,
         )
     return PrintRunResult(
         pipeline_id=pipeline_id,
