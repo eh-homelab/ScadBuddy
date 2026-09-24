@@ -169,6 +169,7 @@ class TestPlacement:
             usable=Rect(25.0, 0.0, 300.0, 300.0),
             exclusions=(Rect(25.0, 0.0, 60.0, 50.0),),
             extruders=2,
+            height=250.0,
         )
         placement = place_on_plate(_bounds(180.0, 120.0), plate)
         assert placement.tower is not None
@@ -209,6 +210,7 @@ class TestPlacement:
             usable=Rect(0.0, 0.0, 120.0, 256.0),
             exclusions=exclusions,
             extruders=2,
+            height=250.0,
         )
 
     def test_a_tower_landing_on_a_cutout_falls_through_to_another_side(self) -> None:
