@@ -183,6 +183,14 @@ jobs:
           fail-on-error: true
           flags: -ignore create-github-app-token
 
+      # `.github/scripts/fonts-probe.sh` decides whether the image job's
+      # install-on-demand e2e test runs at all, and a wrong verdict there is
+      # invisible — it skips a test and stays green. Its branches are covered
+      # by a stub-driven suite that needs neither docker nor the network, so it
+      # belongs in this job rather than behind the image build.
+      - name: fonts-probe unit tests
+        run: .github/scripts/fonts-probe.test.sh
+
       # The config lives in .hadolint.yaml so the same rules apply to a local
       # `hadolint Dockerfile` as to this job.
       - name: hadolint
@@ -247,15 +255,20 @@ jobs:
       - name: Build
         run: pnpm build
 
-      # The e2e suite lives here and NOT in the image job, which is where it
-      # started. frontend/playwright.config.ts is self-contained: it runs its
-      # own `webServer` (`pnpm build && pnpm preview --port 4173`) against the
-      # production bundle with the msw worker mocking the API — by its own
-      # comment, "so it exercises the same build the backend will host". It
-      # never talks to the backend, so pointing it at the running container was
-      # simply wrong, and gating it on the container's entrypoint was wrong for
-      # the same reason. Here it also reuses the node_modules this job already
+      # The MSW-BACKED half of the e2e suite lives here and NOT in the image
+      # job, which is where it started. frontend/playwright.config.ts is
+      # self-contained without `E2E_BASE_URL`: it runs its own `webServer`
+      # (`pnpm build && pnpm preview --port 4173`) against the production
+      # bundle with the msw worker mocking the API — by its own comment, "so it
+      # exercises the same build the backend will host". Those specs never talk
+      # to a backend, so pointing them at the running container was simply
+      # wrong, and gating them on the container's entrypoint was wrong for the
+      # same reason. Here they also reuse the node_modules this job already
       # installed instead of a second `pnpm install`.
+      #
+      # `e2e/real-backend.spec.ts` is the other half and skips itself here, by
+      # design — it needs a real openscad. The image job runs it against the
+      # container it builds; see the e2e steps there.
       - name: Install Playwright browsers
         if: ${{ needs.layout.outputs.e2e == 'true' }}
         run: pnpm exec playwright install --with-deps chromium
@@ -291,7 +304,7 @@ jobs:
   # shuttling a ~1.5 GB image between jobs as an artifact (there is no registry
   # to push a PR image to), which costs far more than it saves.
   image:
-    name: Image build, backend checks, container smoke
+    name: Image build, backend checks, container smoke, real-backend e2e
     needs: layout
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
@@ -391,6 +404,104 @@ jobs:
       - name: Probe /healthz from outside the container
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: curl --fail --silent --show-error http://127.0.0.1:18080/healthz
+
+      # ── The real-stack e2e suite ────────────────────────────────────────────
+      #
+      # `e2e/real-backend.spec.ts` gates itself on `E2E_BASE_URL` (and the msw
+      # specs skip themselves when it IS set, so one `playwright test` run
+      # covers exactly the half that belongs here). Nothing in CI set that
+      # variable, so both of its tests — the two-extruder 3MF download and the
+      # install-Pacifico-on-demand acceptance for #82 — had SKIPPED on every
+      # run since they were written. A skipped test in a green job is
+      # indistinguishable from a passing one on the checks UI, which is the
+      # same vacuous-green trap the `freshness` job's comment describes.
+      #
+      # Run HERE, against the container the two steps above just started, and
+      # NOT in a job of its own. A separate job cannot be handed a ~1.5 GB
+      # image (there is no registry to push a PR image to), so it would have to
+      # rebuild from the `type=gha` cache — and that re-resolves
+      # `openscad/openscad:dev`, a ROLLING tag. A nightly that lands between
+      # the two jobs gives the e2e job a different image from the one the smoke
+      # test passed against: either a full uncached rebuild, or a red
+      # OPENSCAD_VERSION assertion, for a suite whose whole point is to
+      # exercise the shipped artefact. This way the bytes under test are
+      # exactly the bytes that were built and probed.
+      #
+      # The msw-backed suite stays in the `frontend` job, where its own
+      # `webServer` serves the production bundle with no backend at all. The
+      # two suites are complements, not duplicates: that one pins the UI
+      # against a fixed contract, this one proves a real OpenSCAD renders,
+      # splits and packs a 3MF the browser can download.
+      - uses: actions/setup-node@v7
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        run: corepack enable
+
+      - name: Install frontend dependencies
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        run: pnpm exec playwright install --with-deps chromium
+
+      # The install-on-demand test is the only thing in this repo that depends
+      # on a service outside it, and `CI Summary` — the one required check —
+      # asserts this job. Left unguarded that makes a Google-side outage a hard
+      # red on somebody else's unrelated PR, and it contradicts the design's own
+      # position that a 503 from the catalogue is a SUPPORTED state (§5.4)
+      # rather than an error. A fresh container has no Pacifico for that
+      # fallback to offer, so an outage does not make the test skip — the row
+      # simply never appears and it times out 60s later, naming the wrong
+      # culprit.
+      #
+      # The decision lives in `.github/scripts/fonts-probe.sh` rather than in
+      # this file, because it turned out to be the subtle half of this change —
+      # only an unreachable DEPENDENCY may skip, everything this application
+      # does wrong must red — and a `run:` block cannot be tested. The script
+      # explains its own rules, and `fonts-probe.test.sh` (in the `lint` job)
+      # drives all thirteen of its branches through a stub, including the ones
+      # a healthy CI run never reaches.
+      - name: Probe the Google Fonts path from inside the container
+        id: fonts-probe
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        env:
+          CONTAINER: scadbuddy-ci
+        run: .github/scripts/fonts-probe.sh
+
+      # No webServer: `E2E_BASE_URL` makes playwright.config.ts use the URL
+      # as-is, so this drives the container published on 18080 above — its own
+      # bundle, its own API, its own openscad.
+      #
+      # `E2E_OFFLINE` carries the probe's verdict. Empty is the normal case and
+      # is NOT "1", so the spec's `test.skip(process.env.E2E_OFFLINE === '1')`
+      # does not fire and the font test runs. The first test — render, generate,
+      # download, unpack the two-extruder 3MF — needs nothing outside the
+      # container and runs either way.
+      - name: Real-backend Playwright suite
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        working-directory: frontend
+        env:
+          E2E_BASE_URL: http://127.0.0.1:18080
+          E2E_OFFLINE: ${{ steps.fonts-probe.outputs.offline }}
+        run: pnpm exec playwright test
+
+      - name: Upload the real-backend Playwright report
+        if: ${{ failure() && needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report-real-backend
+          path: |
+            frontend/playwright-report
+            frontend/test-results
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Container logs on failure
         if: ${{ failure() && needs.layout.outputs.app == 'true' }}
@@ -767,7 +878,7 @@ jobs:
           assert "Detect layout"                          "$LAYOUT_RESULT"   true
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
-          assert "Image build, backend checks, smoke"     "$IMAGE_RESULT"    "$has_image"
+          assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
 
           # `freshness` is PR-only — it auto-commits regenerated files back to
           # the PR branch, and a push to main has no branch to push to. It is
