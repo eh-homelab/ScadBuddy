@@ -192,6 +192,16 @@ jobs:
           config: .hadolint.yaml
           failure-threshold: warning
 
+      # The merge gate's fail-closed check (#123) is a shell script, so it gets
+      # shell linting and its own tests. They are pure functions over a comments
+      # payload — no network, no `gh` — so they run here in a couple of seconds
+      # rather than needing a live PR to exercise.
+      - name: shellcheck the CI scripts
+        run: shellcheck .github/scripts/*.sh
+
+      - name: Test the review-summary lookup
+        run: .github/scripts/review-summary-for-sha.test.sh
+
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
   frontend:
     name: Frontend lint, typecheck, test, build
