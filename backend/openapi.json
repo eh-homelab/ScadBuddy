@@ -181,6 +181,47 @@
         "title": "BoundingBox",
         "type": "object"
       },
+      "CatalogueEntry": {
+        "properties": {
+          "category": {
+            "default": "",
+            "title": "Category",
+            "type": "string"
+          },
+          "family": {
+            "title": "Family",
+            "type": "string"
+          },
+          "installed": {
+            "default": false,
+            "title": "Installed",
+            "type": "boolean"
+          },
+          "popularity": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Popularity"
+          },
+          "variants": {
+            "items": {
+              "$ref": "#/components/schemas/FontVariant"
+            },
+            "title": "Variants",
+            "type": "array"
+          }
+        },
+        "required": [
+          "family"
+        ],
+        "title": "CatalogueEntry",
+        "type": "object"
+      },
       "ConnectionTest": {
         "properties": {
           "detail": {
@@ -306,6 +347,42 @@
         "title": "Folder",
         "type": "object"
       },
+      "FontCatalogueView": {
+        "description": "``source`` says which of the two catalogue endpoints answered \u2014 the keyed\nDeveloper API or the keyless fonts.google.com metadata.",
+        "properties": {
+          "fetched_at": {
+            "format": "date-time",
+            "title": "Fetched At",
+            "type": "string"
+          },
+          "fonts": {
+            "items": {
+              "$ref": "#/components/schemas/CatalogueEntry"
+            },
+            "title": "Fonts",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "developer-api",
+              "google-fonts-metadata"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "source",
+          "fetched_at",
+          "total"
+        ],
+        "title": "FontCatalogueView",
+        "type": "object"
+      },
       "FontFamily": {
         "properties": {
           "family": {
@@ -325,6 +402,22 @@
           "styles"
         ],
         "title": "FontFamily",
+        "type": "object"
+      },
+      "FontVariant": {
+        "properties": {
+          "italic": {
+            "default": false,
+            "title": "Italic",
+            "type": "boolean"
+          },
+          "weight": {
+            "default": 400,
+            "title": "Weight",
+            "type": "integer"
+          }
+        },
+        "title": "FontVariant",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -372,6 +465,65 @@
           "data_dir_writable"
         ],
         "title": "Health",
+        "type": "object"
+      },
+      "InstallRequest": {
+        "properties": {
+          "family": {
+            "maxLength": 100,
+            "minLength": 1,
+            "title": "Family",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "title": "Force",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "family"
+        ],
+        "title": "InstallRequest",
+        "type": "object"
+      },
+      "InstalledFamily": {
+        "description": "What an install left on disk, reported back with fontconfig's own style names.",
+        "properties": {
+          "family": {
+            "title": "Family",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "licence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Licence"
+          },
+          "styles": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Styles",
+            "type": "array"
+          }
+        },
+        "required": [
+          "family"
+        ],
+        "title": "InstalledFamily",
         "type": "object"
       },
       "JobStatus": {
@@ -1529,6 +1681,114 @@
           }
         },
         "summary": "Installed font families",
+        "tags": [
+          "fonts"
+        ]
+      }
+    },
+    "/api/v1/fonts/catalogue": {
+      "get": {
+        "operationId": "get_catalogue_api_v1_fonts_catalogue_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 100,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "category",
+            "required": false,
+            "schema": {
+              "default": "",
+              "maxLength": 40,
+              "title": "Category",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 60,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FontCatalogueView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search the Google Fonts catalogue",
+        "tags": [
+          "fonts"
+        ]
+      }
+    },
+    "/api/v1/fonts/install": {
+      "post": {
+        "operationId": "install_font_api_v1_fonts_install_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InstallRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InstalledFamily"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Install a family onto the data volume",
         "tags": [
           "fonts"
         ]

@@ -21,6 +21,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/fonts/catalogue": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Search the Google Fonts catalogue */
+        get: operations["get_catalogue_api_v1_fonts_catalogue_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/fonts/install": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Install a family onto the data volume */
+        post: operations["install_font_api_v1_fonts_install_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/jobs/{job_id}": {
         parameters: {
             query?: never;
@@ -432,6 +466,25 @@ export interface components {
                 number
             ];
         };
+        /** CatalogueEntry */
+        CatalogueEntry: {
+            /**
+             * Category
+             * @default
+             */
+            category: string;
+            /** Family */
+            family: string;
+            /**
+             * Installed
+             * @default false
+             */
+            installed: boolean;
+            /** Popularity */
+            popularity?: number | null;
+            /** Variants */
+            variants?: components["schemas"]["FontVariant"][];
+        };
         /** ConnectionTest */
         ConnectionTest: {
             /** Detail */
@@ -473,12 +526,46 @@ export interface components {
             /** Parent Id */
             parent_id?: number | null;
         };
+        /**
+         * FontCatalogueView
+         * @description ``source`` says which of the two catalogue endpoints answered — the keyed
+         *     Developer API or the keyless fonts.google.com metadata.
+         */
+        FontCatalogueView: {
+            /**
+             * Fetched At
+             * Format: date-time
+             */
+            fetched_at: string;
+            /** Fonts */
+            fonts?: components["schemas"]["CatalogueEntry"][];
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "developer-api" | "google-fonts-metadata";
+            /** Total */
+            total: number;
+        };
         /** FontFamily */
         FontFamily: {
             /** Family */
             family: string;
             /** Styles */
             styles: string[];
+        };
+        /** FontVariant */
+        FontVariant: {
+            /**
+             * Italic
+             * @default false
+             */
+            italic: boolean;
+            /**
+             * Weight
+             * @default 400
+             */
+            weight: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -496,6 +583,30 @@ export interface components {
              * @enum {string}
              */
             status: "ok" | "degraded";
+        };
+        /** InstallRequest */
+        InstallRequest: {
+            /** Family */
+            family: string;
+            /**
+             * Force
+             * @default false
+             */
+            force: boolean;
+        };
+        /**
+         * InstalledFamily
+         * @description What an install left on disk, reported back with fontconfig's own style names.
+         */
+        InstalledFamily: {
+            /** Family */
+            family: string;
+            /** Files */
+            files?: string[];
+            /** Licence */
+            licence?: string | null;
+            /** Styles */
+            styles?: string[];
         };
         /** JobStatus */
         JobStatus: {
@@ -850,6 +961,72 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["FontFamily"][];
+                };
+            };
+        };
+    };
+    get_catalogue_api_v1_fonts_catalogue_get: {
+        parameters: {
+            query?: {
+                q?: string;
+                category?: string;
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FontCatalogueView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    install_font_api_v1_fonts_install_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["InstallRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstalledFamily"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

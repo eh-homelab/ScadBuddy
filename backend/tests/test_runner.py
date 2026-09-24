@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.core.config import Config, load_config
+from scadbuddy.core.fontconfig import conf_path, write_conf
 from scadbuddy.render.runner import (
     OpenSCADError,
     RenderTimeoutError,
@@ -17,6 +18,7 @@ from scadbuddy.render.runner import (
     format_scad_value,
     quote_string,
     render_3mf,
+    run_openscad,
 )
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter, build_schema
 from tests.conftest import FIXTURES, load_fixture_param, load_fixture_source
@@ -131,3 +133,35 @@ async def test_render_timeout_kills_openscad_and_keeps_the_log(tmp_path: Path) -
         await render_3mf(scad, CustomizerSchema(), {}, tmp_path / "out.3mf", config=config)
     assert isinstance(caught.value, OpenSCADError)
     assert caught.value.returncode is None
+
+
+ECHO_FONTCONFIG = """#!/bin/sh
+echo "FONTCONFIG_FILE=${FONTCONFIG_FILE:-<unset>}"
+"""
+
+
+async def _fontconfig_seen_by(tmp_path: Path, data_dir: Path) -> str:
+    """Run a stand-in 'openscad' that prints the variable the render inherits."""
+    binary = tmp_path / "echo-openscad"
+    binary.write_text(ECHO_FONTCONFIG, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=data_dir)
+    output = await run_openscad([], cwd=tmp_path, config=config)
+    return "\n".join(output.log_tail)
+
+
+async def test_the_render_inherits_the_data_volumes_fontconfig(tmp_path: Path) -> None:
+    """Without this, `text(font = ...)` only ever sees the image's own families."""
+    data_dir = tmp_path / "data"
+    write_conf(data_dir)
+
+    assert f"FONTCONFIG_FILE={conf_path(data_dir)}" in await _fontconfig_seen_by(tmp_path, data_dir)
+
+
+async def test_no_fontconfig_file_is_set_before_one_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Pointing at a missing config is a fatal fontconfig error, so it is left unset."""
+    monkeypatch.delenv("FONTCONFIG_FILE", raising=False)
+    seen = await _fontconfig_seen_by(tmp_path, tmp_path / "empty")
+    assert "FONTCONFIG_FILE=<unset>" in seen

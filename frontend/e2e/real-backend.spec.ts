@@ -54,6 +54,42 @@ test.describe('real backend', () => {
     expect(bambu.extruders).toEqual([1, 2])
     expect(bambu.meshes).toEqual(['3D/Objects/object_1.model', '3D/Objects/object_2.model'])
   })
+
+  /**
+   * Issue #82's acceptance, end to end: Pacifico is NOT one of the image's font
+   * packages, so this only passes if the picker downloaded it onto the data volume and
+   * fontconfig picked it up before the next render. The bounding box is the evidence —
+   * a missing family does not error, it silently substitutes, and a substitution would
+   * leave the measurement where Lobster Two put it.
+   *
+   * Needs outbound HTTPS to fonts.google.com; skipped without it rather than failing,
+   * since an air-gapped stack is a supported way to run ScadBuddy.
+   */
+  test('installs Pacifico on demand and renders the keychain in it', async ({ page }, testInfo) => {
+    test.setTimeout(240_000)
+    test.skip(process.env.E2E_OFFLINE === '1', 'no outbound network to Google Fonts')
+
+    await page.goto('/m/name-keychain')
+    const bbox = page.getByTestId('bbox-readout')
+    await expect(bbox).toContainText('mm', { timeout: 120_000 })
+    const beforeBbox = await bbox.textContent()
+
+    await page.getByRole('button', { name: 'Browse' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Choose a font' })
+    await dialog.getByRole('searchbox', { name: 'Search fonts' }).fill('Pacifico')
+    const row = dialog.getByRole('button', { name: /^Pacifico/ })
+    await expect(row).toBeVisible({ timeout: 60_000 })
+    await row.click()
+    await expect(dialog).toBeHidden({ timeout: 120_000 })
+
+    await expect(page.getByRole('combobox', { name: /Typeface/ })).toHaveValue(/^Pacifico/)
+    await expect(bbox).not.toHaveText(beforeBbox ?? '', { timeout: 120_000 })
+    await expect(page.getByText('Rendering')).toBeHidden({ timeout: 120_000 })
+    await testInfo.attach('preview-pacifico.png', {
+      body: await page.screenshot({ fullPage: true }),
+      contentType: 'image/png',
+    })
+  })
 })
 
 /**

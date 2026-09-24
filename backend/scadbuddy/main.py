@@ -35,6 +35,9 @@ def _api_router() -> APIRouter:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     state.paths.ensure()
+    # Before anything shells out to openscad or fc-list: it is what points
+    # fontconfig at the fonts on the data volume.
+    state.fonts.prepare()
     state.openscad_version = await probe_openscad_version(state.config)
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:

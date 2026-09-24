@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from scadbuddy.core.fontconfig import fonts_dir
+
 
 @dataclass(frozen=True)
 class DataPaths:
@@ -19,6 +21,10 @@ class DataPaths:
     @property
     def jobs(self) -> Path:
         return self.root / "jobs"
+
+    @property
+    def fonts(self) -> Path:
+        return fonts_dir(self.root)
 
     def model_dir(self, slug: str) -> Path:
         return self.models / slug
@@ -39,5 +45,5 @@ class DataPaths:
         return self.jobs / f"{job_id}.work"
 
     def ensure(self) -> None:
-        for directory in (self.models, self.outputs, self.jobs):
+        for directory in (self.models, self.outputs, self.jobs, self.fonts):
             directory.mkdir(parents=True, exist_ok=True)

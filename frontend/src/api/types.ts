@@ -30,6 +30,10 @@ export type RenderAccepted = Schemas['RenderAccepted']
 export type Output = Schemas['OutputDetail']
 
 export type FontFamily = Schemas['FontFamily']
+export type FontCatalogue = Schemas['FontCatalogueView']
+export type CatalogueFont = Schemas['CatalogueEntry']
+export type FontVariant = Schemas['FontVariant']
+export type InstalledFamily = Schemas['InstalledFamily']
 
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']
