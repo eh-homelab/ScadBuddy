@@ -85,6 +85,7 @@ jobs:
           VERSION: ${{ inputs.version }}
           REVISION: ${{ inputs.revision }}
           KIND: ${{ inputs.source_kind }}
+          SOURCE_URL: ${{ inputs.source_url }}
         run: |
           set -euo pipefail
           [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest must be sha256:<64 hex>, got '$DIGEST'"; exit 1; }
@@ -93,6 +94,9 @@ jobs:
           # a short sha. Anything else would produce an unpullable image ref.
           [[ "$VERSION" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo "::error::version '$VERSION' is not a valid image tag"; exit 1; }
           [[ "$KIND" == "release" || "$KIND" == "main" ]] || { echo "::error::source_kind must be release or main"; exit 1; }
+          # A github.com URL over a conservative charset: it is interpolated
+          # into a sed replacement below, where `&`, `\` and `|` are special.
+          [[ "$SOURCE_URL" =~ ^https://github\.com/[A-Za-z0-9._/-]+$ ]] || { echo "::error::source_url must be a plain https://github.com/... URL, got '$SOURCE_URL'"; exit 1; }
 
       # The digest must be pullable before it is pinned: a typo here would
       # merge cleanly in clusters and then ImagePullBackOff in production.

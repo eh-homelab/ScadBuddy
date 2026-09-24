@@ -32,10 +32,16 @@ jobs:
     name: Wait for the ${{ github.event.release.tag_name }} image
     if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # `gh run list` (the fail-fast check below) reads the Actions API.
+      actions: read
     # Build Image takes ~7 min on a warm cache and up to ~40 cold (two
     # architectures, arm64 emulated). Waiting here costs hosted minutes but is
-    # what makes the release event alone sufficient.
-    timeout-minutes: 50
+    # what makes the release event alone sufficient. The poll below gives up at
+    # 45 min; the job timeout sits well above it so the loop's own error is
+    # what gets reported, not an opaque job timeout.
+    timeout-minutes: 60
     outputs:
       digest: ${{ steps.image.outputs.digest }}
       version: ${{ steps.image.outputs.version }}
@@ -84,9 +90,13 @@ jobs:
             fi
             # Any concluded Build Image run for this tag that did not succeed
             # means the image is not coming.
+            # `|| true`: a transient API error must not abort the wait — under
+            # `set -e` a failed command substitution in a plain assignment is
+            # fatal. An empty answer just means "keep waiting".
             bad=$(gh run list --workflow 'Build Image' --branch "$TAG" --event push \
                     --json status,conclusion,url \
-                    --jq '[.[] | select(.status=="completed" and .conclusion!="success")] | .[0].url // empty')
+                    --jq '[.[] | select(.status=="completed" and .conclusion!="success")] | .[0].url // empty' \
+                  || true)
             if [ -n "$bad" ]; then
               echo "::error::Build Image for $TAG did not succeed: $bad"; exit 1
             fi
