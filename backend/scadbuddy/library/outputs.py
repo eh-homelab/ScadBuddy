@@ -7,12 +7,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, PartInfo
+from scadbuddy.render.provenance import Provenance, source_version, stamp
+from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
 
 META_NAME = "meta.json"
@@ -32,8 +35,16 @@ class OutputNotFoundError(KeyError):
 
 
 class OutputMeta(BaseModel):
+    # #80 asks for the "model version"; pydantic reserves the "model_" prefix for
+    # its own methods, so its guard is turned off rather than the field renamed.
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     slug: str
+    #: What the model was when this was rendered — today a content hash of its
+    #: sources, a git commit id once #90 lands, so the field stays a free string.
+    #: None on records written before provenance was stamped.
+    model_version: str | None = None
     name: str | None = None
     job_id: str
     created_at: datetime
@@ -79,6 +90,12 @@ class OutputStore:
         directory = self._find_dir(output_id)
         return OutputMeta.model_validate_json((directory / META_NAME).read_text(encoding="utf-8"))
 
+    def provenance(self, output_id: str) -> Provenance | None:
+        """What the 3MF itself says produced it — the fallback when the record is gone."""
+        for path in self.paths.outputs.glob(f"*/{output_id}/{MODEL_NAME}"):
+            return read_provenance(path)
+        return None
+
     def params(self, output_id: str) -> dict[str, ParamValue]:
         directory = self._find_dir(output_id)
         params_path = directory / PARAMS_NAME
@@ -97,7 +114,9 @@ class OutputStore:
         ]
         return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
 
-    def create(self, job: Job, *, name: str | None = None) -> OutputMeta:
+    def create(
+        self, job: Job, *, name: str | None = None, public_url: str | None = None
+    ) -> OutputMeta:
         if job.result is None:
             raise ValueError("the job has no result to persist")
         output_id = uuid.uuid4().hex
@@ -110,9 +129,24 @@ class OutputStore:
             json.dumps(job.params, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
 
+        # A job from before the hash existed has none to read back; the live tree is
+        # then the closest thing to what it rendered.
+        version = job.result.source_version or source_version(self.paths.model_dir(job.slug))
+        stamp(
+            directory / MODEL_NAME,
+            Provenance(
+                model=job.slug,
+                version=version,
+                output=output_id,
+                params=dict(job.params),
+                edit_url=edit_url(public_url, output_id),
+            ),
+        )
+
         meta = OutputMeta(
             id=output_id,
             slug=job.slug,
+            model_version=version,
             name=name or None,
             job_id=job.id,
             created_at=datetime.now(UTC),

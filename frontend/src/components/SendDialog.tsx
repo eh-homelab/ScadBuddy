@@ -8,6 +8,7 @@ import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
+import { useAsync } from '../lib/useAsync'
 
 const MODES: { value: SendMode; label: string; detail: string }[] = [
   {
@@ -44,6 +45,12 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
   // `options.quantity` are the same value, and two independent controls for it left the
   // disclosure's Quantity row showing a number that was no longer going to be sent.
   const [options, setOptions] = useState<PrintOptions>({})
+  // Only to tell "no link was configured" apart from "Bambuddy refused the note":
+  // the send result reports an absent link the same way for both. Read each time the
+  // dialog opens, not once per mount — the dialog outlives every send on the page,
+  // and the setting can change between them.
+  const settings = useAsync(async () => (open ? await api.getSettings() : null), [open])
+  const publicUrl = settings.data?.public_url ?? null
   const [effective, setEffective] = useState<PrintOptions>({})
   const [sending, setSending] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -126,26 +133,40 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
       }
     >
       {result ? (
-        <p className="text-[13px] text-ink">
-          {result.queue_item_id ? (
-            <>
-              Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
-              <span className="sb-num">{quantity}</span>{' '}
-              {quantity === 1 ? 'copy' : 'copies'}.
-            </>
-          ) : result.pipeline_run_id ? (
-            <>
-              Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
-              <span className="sb-num">{quantity}</span>{' '}
-              {quantity === 1 ? 'copy' : 'copies'}.
-            </>
-          ) : (
-            <>
-              Added to the library as{' '}
-              <span className="sb-num">{result.filename}</span> (#{result.library_file_id}).
-            </>
-          )}
-        </p>
+        <>
+          <p className="text-[13px] text-ink">
+            {result.queue_item_id ? (
+              <>
+                Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
+                <span className="sb-num">{quantity}</span>{' '}
+                {quantity === 1 ? 'copy' : 'copies'}.
+              </>
+            ) : result.pipeline_run_id ? (
+              <>
+                Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
+                <span className="sb-num">{quantity}</span>{' '}
+                {quantity === 1 ? 'copy' : 'copies'}.
+              </>
+            ) : (
+              <>
+                Added to the library as{' '}
+                <span className="sb-num">{result.filename}</span> (#{result.library_file_id}).
+              </>
+            )}
+          </p>
+          {/* The note is best-effort, so say which way it went rather than implying
+              the link is on the file when Bambuddy refused it. Silence when no public
+              URL is set: there was no link to attach, which is not a failure. */}
+          {result.edit_url ? (
+            <p className="mt-1.5 text-[12px] text-muted">
+              Bambuddy has the link back to these parameters.
+            </p>
+          ) : publicUrl ? (
+            <p className="mt-1.5 text-[12px] text-muted">
+              Bambuddy would not take the link back to these parameters.
+            </p>
+          ) : null}
+        </>
       ) : (
         <>
           <fieldset>

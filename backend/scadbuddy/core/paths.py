@@ -5,6 +5,9 @@ from pathlib import Path
 
 from scadbuddy.core.fontconfig import fonts_dir
 
+#: The renderer's schema cache, beside the model it describes.
+MODEL_META_NAME = "model.json"
+
 
 @dataclass(frozen=True)
 class DataPaths:
@@ -33,7 +36,7 @@ class DataPaths:
         return self.model_dir(slug) / "model.scad"
 
     def model_meta(self, slug: str) -> Path:
-        return self.model_dir(slug) / "model.json"
+        return self.model_dir(slug) / MODEL_META_NAME
 
     def output_dir(self, slug: str, output_id: str) -> Path:
         return self.outputs / slug / output_id

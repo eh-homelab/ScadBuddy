@@ -6,6 +6,7 @@ a FastAPI app, and so the route stays a thin adapter.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from pathlib import Path
 from typing import Literal
@@ -26,6 +27,7 @@ from scadbuddy.bambuddy.models import (
 )
 from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.deeplink import edit_url, merge_edit_note
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, download_filename
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
@@ -69,6 +71,8 @@ class SendResult(BaseModel):
     queue_item_id: int | None = None
     #: Deep link into Bambuddy for what this send produced.
     bambuddy_url: str | None = None
+    #: The "Edit in ScadBuddy" link attached to the library file, when one is known.
+    edit_url: str | None = None
     #: What was actually sent, after the four scopes were merged. Unset fields were
     #: left to Bambuddy.
     options: PrintOptions = Field(default_factory=PrintOptions)
@@ -256,6 +260,38 @@ async def ensure_uploaded(
     return meta, meta.library_file_id
 
 
+async def attach_edit_link(
+    client: BambuddyClient,
+    library_file_id: int,
+    meta: OutputMeta,
+    settings: StoredSettings,
+) -> str | None:
+    """Best-effort: note the "Edit in ScadBuddy" link on the uploaded library file.
+
+    Deliberately the last thing a send does, and deliberately swallowing every
+    ApiError. The note is cosmetic — the file is already uploaded and the print
+    already queued — so letting a timeout or a rejected note abort the send would
+    fail the request for work that had in fact succeeded. Same reasoning as the
+    tolerated 404 in upload_output.
+
+    Returns the link only when Bambuddy took it, so the result never claims a link
+    that is not actually on the file.
+    """
+    link = edit_url(settings.public_url, meta.id)
+    if link is None:
+        return None
+    try:
+        existing = await client.library_file(library_file_id)
+        await client.annotate_library_file(library_file_id, merge_edit_note(existing.notes, link))
+    except ApiError:
+        logger.warning(
+            "could not attach the edit link to the library file",
+            extra={"library_file_id": library_file_id, "output_id": meta.id},
+        )
+        return None
+    return link
+
+
 def _check_colours(meta: OutputMeta, presets: list[PresetRef], what: str) -> None:
     if len(meta.colors) > len(presets):
         raise not_configured(
@@ -399,6 +435,7 @@ async def _queue_send(
             pipeline_run_id=run.id,
             bambuddy_url=client.config.web_url(QUEUE_PATH),
             options=options,
+            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
         )
 
     printer_id: int | None
@@ -454,6 +491,14 @@ async def _queue_send(
         print_route="slice_queue",
         slice_job_id=accepted.job_id,
     )
+    # Slicing leaves a second library entry, and the queue references that one — so
+    # it is what a reader opens from the queue. Both are this output, so both get the
+    # link; the note is best-effort either way.
+    # Two independent best-effort notes; nothing waits on the first to send the second.
+    noted, noted_sliced = await asyncio.gather(
+        attach_edit_link(client, library_file_id, meta, settings),
+        attach_edit_link(client, sliced, meta, settings),
+    )
     return SendResult(
         mode="queue",
         library_file_id=library_file_id,
@@ -461,6 +506,7 @@ async def _queue_send(
         queue_item_id=item.id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
         options=options,
+        edit_url=noted or noted_sliced,
     )
 
 
@@ -482,6 +528,7 @@ async def send_output(
             library_file_id=library_file_id,
             filename=filename,
             bambuddy_url=client.config.web_url(LIBRARY_PATH),
+            edit_url=await attach_edit_link(client, library_file_id, meta, settings),
         )
 
     return await _queue_send(client, store, meta, settings, request, library_file_id, filename)

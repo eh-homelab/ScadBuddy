@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
+import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
 import { server } from '../mocks/server'
@@ -7,7 +8,20 @@ import { renderPage } from '../test/utils'
 import { HistoryPage } from './HistoryPage'
 
 function render() {
-  return renderPage(<HistoryPage />, { route: '/m/name-keychain/history', path: '/m/:slug/history' })
+  return renderPage(
+    <Routes>
+      <Route path="/m/:slug/history" element={<HistoryPage />} />
+      <Route path="/edit/:outputId" element={<EditRoute />} />
+    </Routes>,
+    { route: '/m/name-keychain/history' },
+  )
+}
+
+/** Stands in for the deep-link page so the test can read what it was given. */
+function EditRoute() {
+  const { outputId } = useParams()
+  const state = useLocation().state as { editTarget?: { name?: string | null } } | null
+  return <div data-testid="edit-route">{`${outputId ?? ''}:${state?.editTarget?.name ?? 'no-state'}`}</div>
 }
 
 /**
@@ -78,9 +92,16 @@ describe('HistoryPage', () => {
     )
   })
 
-  it('re-opens the customizer with that output loaded', async () => {
-    render()
-    expect(within(await row('Nova')).getByRole('button', { name: 'Re-open' })).toBeEnabled()
+  it('edits an output through its deep link', async () => {
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    expect(await screen.findByTestId('edit-route')).toHaveTextContent('c'.repeat(32))
+  })
+
+  it('hands the row it already rendered over rather than making it be resolved again', async () => {
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))
+    expect(await screen.findByTestId('edit-route')).toHaveTextContent(':Nova')
   })
 
   it('deletes an output', async () => {
