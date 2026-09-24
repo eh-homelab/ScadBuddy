@@ -27,7 +27,11 @@ export function VersionsPage() {
   const versions = versionsState.data
   const current = versions?.find((version) => version.current)
 
-  // Open on the newest revision, and follow the list when a restore adds one.
+  // Open on the newest revision, and re-home the selection if the one being
+  // shown disappears. It CANNOT carry a restore to the new head: a restore only
+  // ever adds a commit, so the previously selected one is still in the list and
+  // this never fires. `restore` moves the selection itself, off the revision it
+  // is handed back.
   useEffect(() => {
     if (versions && versions.length > 0 && !versions.some((v) => v.commit === selected)) {
       setSelected(versions[0]?.commit)
@@ -59,7 +63,10 @@ export function VersionsPage() {
     setBusy(true)
     setError(undefined)
     try {
-      await api.restoreVersion(slug, commit)
+      const created = await api.restoreVersion(slug, commit)
+      // Show what just happened, not what was selected before it.
+      setSelected(created.commit)
+      setBase(PARENT)
       versionsState.reload()
       modelState.reload()
     } catch (cause) {

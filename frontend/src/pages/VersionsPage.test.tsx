@@ -84,6 +84,27 @@ describe('VersionsPage', () => {
     })
   })
 
+  it('shows the restore it just made, not whatever was selected before it', async () => {
+    // A restore only ever ADDS a commit, so the previously selected one is still
+    // in the list — nothing re-homes the selection on its own.
+    const { user } = render()
+    const listed = await rows()
+    await screen.findByTestId('diff')
+
+    await user.click(
+      within(listed[2] as HTMLElement).getByRole('button', { name: 'Restore this version' }),
+    )
+
+    await waitFor(async () => {
+      const updated = await rows()
+      expect(within(updated[0] as HTMLElement).getByRole('button', { pressed: true })).toBeVisible()
+    })
+    const updated = await rows()
+    expect(
+      within(updated[1] as HTMLElement).getByRole('button', { pressed: false }),
+    ).toBeVisible()
+  })
+
   it('will not offer to restore the revision the model is already at', async () => {
     render()
     const listed = await rows()

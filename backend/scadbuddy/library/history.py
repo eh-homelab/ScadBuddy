@@ -231,22 +231,38 @@ class ModelHistory:
     def ensure_repo(self) -> str | None:
         """Initialise the repository if it is not one yet, and commit what is there.
 
-        Returns the commit id when this call created one. A models directory that
-        already holds files becomes revision 1 rather than being left untracked,
-        which is what makes the image's seed the first revision on a fresh volume.
+        Returns the commit id when this call created one, and ``None`` when there
+        was nothing to commit OR when the repository could not be initialised at
+        all -- the app has to boot either way. A models directory that already
+        holds files becomes revision 1 rather than being left untracked, which is
+        what makes the image's seed the first revision on a fresh volume.
         """
         if shutil.which(self.git) is None:
             logger.warning("git is not on PATH; model history is disabled", extra={"git": self.git})
             return None
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self._exclusive():
-            if not (self.root / ".git").is_dir():
-                self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
-            gitignore = self.root / GITIGNORE_NAME
-            body = _gitignore_body(self.wrapper_prefix)
-            if not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body:
-                gitignore.write_text(body, encoding="utf-8")
-            return self._commit_locked("Initial revision", ".")
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            with self._exclusive():
+                if not (self.root / ".git").is_dir():
+                    self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
+                gitignore = self.root / GITIGNORE_NAME
+                body = _gitignore_body(self.wrapper_prefix)
+                if not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body:
+                    gitignore.write_text(body, encoding="utf-8")
+                return self._commit_locked("Initial revision", ".")
+        except (GitError, OSError):
+            # A missing binary is not the only way this fails, and the others are
+            # the ones that would hurt: a models directory uid 10001 cannot write
+            # (`safe.directory` answers git\'s ownership check, not the
+            # filesystem\'s), a full disk, a half-written `.git` from a previous
+            # crash. None of that is a reason to refuse to serve models, so it
+            # degrades exactly like a missing binary does -- `available` reports
+            # False and the history routes answer 503.
+            logger.exception(
+                "could not initialise the models repository; model history is disabled",
+                extra={"models": str(self.root)},
+            )
+            return None
 
     # ── writing ───────────────────────────────────────────────────────────────
 

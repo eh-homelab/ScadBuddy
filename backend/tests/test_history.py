@@ -64,6 +64,29 @@ def test_ensure_repo_is_idempotent(models: Path, history: ModelHistory) -> None:
     assert history.head() == first
 
 
+def test_ensure_repo_survives_a_models_path_it_cannot_create(tmp_path: Path) -> None:
+    """A git failure other than a missing binary must not take the app down.
+
+    The app boots and serves models whether or not history works, so an
+    uninitialisable repository degrades exactly like an absent `git`: nothing is
+    versioned and the history routes answer 503.
+    """
+    blocked = tmp_path / "models"
+    blocked.write_text("not a directory", encoding="utf-8")
+    history = ModelHistory(blocked, wrapper_prefix=WRAPPER_PREFIX)
+
+    assert history.ensure_repo() is None
+    assert not history.available
+
+
+def test_ensure_repo_survives_a_broken_dot_git(models: Path) -> None:
+    (models / ".git").mkdir()
+    (models / ".git" / "HEAD").write_text("not a ref\n", encoding="utf-8")
+    history = ModelHistory(models, wrapper_prefix=WRAPPER_PREFIX)
+
+    assert history.ensure_repo() is None
+
+
 def test_ensure_repo_ignores_the_render_wrapper(models: Path, history: ModelHistory) -> None:
     write_model(models, "keychain", "cube(10);\n")
     history.ensure_repo()

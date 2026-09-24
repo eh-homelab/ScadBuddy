@@ -26,7 +26,11 @@ test.describe('model versions', () => {
     await oldest.getByRole('button', { name: 'Restore this version' }).click()
 
     await expect(versions.locator('li')).toHaveCount(4)
-    await expect(versions.locator('li').first()).toContainText('Restore name-keychain to')
+    const head = versions.locator('li').first()
+    await expect(head).toContainText('Restore name-keychain to')
+    // The panel follows the restore rather than staying on whatever was selected
+    // before it — a restore only ADDS a commit, so nothing re-homes it on its own.
+    await expect(head.getByRole('button', { pressed: true })).toBeVisible()
   })
 
   test('customizes an old revision without restoring it', async ({ page }) => {
