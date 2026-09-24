@@ -436,6 +436,42 @@ def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
 
 
 @respx.mock
+def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
+    client: TestClient, model: str
+) -> None:
+    """A pipeline Bambuddy cannot judge must not blank the whole picker.
+
+    The reports are gathered concurrently, so without per-pipeline isolation the first
+    exception would be the response and the rows that *did* answer would be lost.
+    """
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report())
+    )
+    respx.post(f"{API}/slicer-pipelines/2/check-eligibility").mock(
+        return_value=httpx.Response(500, json={"detail": "the slicer fell over"})
+    )
+    respx.post(f"{API}/slicer-pipelines/3/check-eligibility").mock(
+        return_value=httpx.Response(200, json=report(ok=False))
+    )
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/eligibility",
+        json={"pipeline_ids": [1, 2, 3]},
+    )
+
+    assert response.status_code == 200
+    reports = {entry["pipeline_id"]: entry for entry in response.json()["reports"]}
+    assert reports[1]["report"]["ok"] is True
+    assert reports[3]["report"]["ok"] is False
+    # The one that failed carries why, and no report at all — neither ready nor blocked.
+    assert reports[2]["report"] is None
+    assert "the slicer fell over" in reports[2]["error"]
+
+
+@respx.mock
 def test_an_ineligible_pipeline_is_a_200_not_a_409(client: TestClient, model: str) -> None:
     """``check-eligibility`` answers 200 with the report; only ``run`` turns it into 409.
     Reading it as an error would make the picker unable to list what is wrong."""

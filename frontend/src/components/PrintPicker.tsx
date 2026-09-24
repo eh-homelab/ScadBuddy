@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api, ApiError } from '../api/client'
 import type {
-  EligibilityReport,
   Output,
+  PipelineReport,
   PipelineChoices,
   PipelineView,
   PrintRunResult,
@@ -65,7 +65,9 @@ interface Props {
 
 export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const [choices, setChoices] = useState<PipelineChoices | null>(null)
-  const [reports, setReports] = useState<Record<number, EligibilityReport>>({})
+  // Keyed by pipeline id, and holding the whole row: a pipeline Bambuddy could not judge
+  // arrives with `error` set and no `report`, which is neither ready nor blocked.
+  const [reports, setReports] = useState<Record<number, PipelineReport>>({})
   const [selected, setSelected] = useState<number | null>(null)
   const [printerId, setPrinterId] = useState<number | null>(null)
   const [copies, setCopies] = useState(1)
@@ -125,9 +127,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
       const overview = await api.checkEligibility(outputId)
       if (token !== attempt.current) return
       setReports(
-        Object.fromEntries(
-          (overview.reports ?? []).map((entry) => [entry.pipeline_id, entry.report]),
-        ),
+        Object.fromEntries((overview.reports ?? []).map((entry) => [entry.pipeline_id, entry])),
       )
     } catch (cause) {
       if (token !== attempt.current) return
@@ -160,7 +160,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
 
   const pipelines = choices?.pipelines ?? []
   const current = pipelines.find((pipeline) => pipeline.id === selected)
-  const report = selected === null ? undefined : reports[selected]
+  const entry = selected === null ? undefined : reports[selected]
+  const report = entry?.report ?? undefined
   // A class target with more than one printer is the case Bambuddy cannot answer for us.
   const asksForPrinter = Boolean(
     current && current.target_kind === 'printer_class' && (current.printer_ids ?? []).length > 1,
@@ -188,8 +189,18 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
     setError(null)
     setRunIssues([])
     try {
-      if (asDefault) await api.putModelPipeline(slug, selected)
-      else if (choices?.model_pipeline_id) await api.putModelPipeline(slug, null)
+      // The stored default only moves on a real change of intent: ticking the box on a
+      // pipeline that is not already the default, or unticking it on the one that is.
+      // Printing something else once says nothing about what this model should default
+      // to, so neither switching pipelines nor leaving the box alone writes anything.
+      const stored = choices?.model_pipeline_id ?? null
+      if (asDefault && stored !== selected) {
+        await api.putModelPipeline(slug, selected)
+        setChoices({ ...choices, model_pipeline_id: selected })
+      } else if (!asDefault && stored === selected) {
+        await api.putModelPipeline(slug, null)
+        setChoices({ ...choices, model_pipeline_id: null })
+      }
       const ran = await api.runPipeline(outputId, {
         pipeline_id: selected,
         copies,
@@ -302,8 +313,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                   const own = reports[pipeline.id]
                   // The selected row is narrowed to the printer in play; the others are
                   // shown as the class as a whole, since no printer has been chosen for them.
-                  const rowVerdict = own
-                    ? verdictFor(own, pipeline.id === selected ? derivedPrinterId : null)
+                  const rowVerdict = own?.report
+                    ? verdictFor(own.report, pipeline.id === selected ? derivedPrinterId : null)
                     : undefined
                   return (
                     <li key={pipeline.id}>
@@ -337,6 +348,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                                 {rowVerdict.ok ? 'ready' : 'not ready'}
                               </span>
                             )}
+                            {own?.error && (
+                              <span className="text-[11px] text-faint">not checked</span>
+                            )}
                           </span>
                           <span className="mt-0.5 block text-[12px] text-muted">
                             {targetLabel(pipeline)}
@@ -345,6 +359,14 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                           {presetSummary(pipeline) && (
                             <span className="mt-0.5 block truncate text-[12px] text-faint">
                               {presetSummary(pipeline)}
+                            </span>
+                          )}
+                          {own?.error && (
+                            <span
+                              className="mt-1 block text-[12px] text-faint"
+                              data-testid={`uncheckable-${pipeline.id}`}
+                            >
+                              Bambuddy could not check this pipeline: {own.error}
                             </span>
                           )}
                           {rowVerdict && rowVerdict.issues.length > 0 && (

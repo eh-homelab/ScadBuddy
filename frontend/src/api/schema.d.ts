@@ -1095,11 +1095,17 @@ export interface components {
         /**
          * PipelineReport
          * @description Bambuddy's report for one pipeline, passed through as it came.
+         *
+         *     ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
+         *     judged, which is neither ready nor blocked, and the picker says so rather than
+         *     guessing either way.
          */
         PipelineReport: {
+            /** Error */
+            error?: string | null;
             /** Pipeline Id */
             pipeline_id: number;
-            report: components["schemas"]["EligibilityReport"];
+            report?: components["schemas"]["EligibilityReport"] | null;
         };
         /** PipelineRun */
         PipelineRun: {
