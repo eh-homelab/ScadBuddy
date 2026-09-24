@@ -2,7 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import time
 from collections.abc import Sequence
+from os import PathLike
 from pathlib import Path
 
 import pytest
@@ -13,6 +16,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library import scad
 from scadbuddy.library.scad import check_source, parse_diagnostics
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
+
+StrPath = str | PathLike[str]
 
 BROKEN = "// a keychain\nsize = 10;\ncube([size, size, size)\n"
 FINE = '/* [Main] */\n// Width\nwidth = 10; // [1:100]\nname = "hi";\ncube([width, 10, 2]);\n'
@@ -195,3 +200,49 @@ async def test_the_model_directory_sidecars_are_left_behind(tmp_path: Path) -> N
     scad._stage("cube(1);\n", staged, model_dir)
 
     assert sorted(path.name for path in staged.iterdir()) == ["helper.scad", "model.scad"]
+
+
+async def test_staging_the_check_does_not_block_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A model directory is copied per check, and a check runs on every keystroke
+    pause: doing that copy on the loop stalls every other request in the pod for its
+    duration — renders, the health probe, the other users' checks."""
+    context = tmp_path / "model"
+    context.mkdir()
+    (context / "helper.scad").write_text("helper = 1;\n", encoding="utf-8")
+
+    real_copy = shutil.copy2
+
+    def slow_copy(src: StrPath, dst: StrPath) -> StrPath:
+        time.sleep(0.3)
+        return real_copy(src, dst)
+
+    async def fake_run(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
+        Path(args[1]).write_text(json.dumps({"parameters": []}), encoding="utf-8")
+        return ProcessOutput(returncode=0, log_tail=[], duration_s=0.0)
+
+    monkeypatch.setattr("scadbuddy.library.scad.shutil.copy2", slow_copy)
+    monkeypatch.setattr(scad, "run_openscad", fake_run)
+    monkeypatch.setattr("scadbuddy.library.scad.shutil.which", lambda _: "/usr/bin/openscad")
+
+    gaps: list[float] = []
+
+    async def heartbeat() -> None:
+        last = time.monotonic()
+        while True:
+            await asyncio.sleep(0.01)
+            now = time.monotonic()
+            gaps.append(now - last)
+            last = now
+
+    ticker = asyncio.create_task(heartbeat())
+    try:
+        await check_source(FINE, config=Config(openscad="openscad"), context=context)
+    finally:
+        ticker.cancel()
+
+    # The copy takes 300ms; anything close to that in one gap means the loop sat idle
+    # through it. A generous ceiling keeps this about blocking, not about scheduler jitter.
+    assert gaps, "the heartbeat never ran at all"
+    assert max(gaps) < 0.15

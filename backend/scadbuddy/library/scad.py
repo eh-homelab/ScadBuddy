@@ -169,7 +169,10 @@ async def inspect_source(
     schema: CustomizerSchema | None = None
     timed_out = False
     with tempfile.TemporaryDirectory(prefix="scadbuddy-check-") as tmp:
-        scad_path = _stage(source, Path(tmp), context)
+        # Off the loop: this copies the model's whole directory, and a check runs on
+        # every keystroke pause, so on the loop it stalls every other request in the
+        # pod — renders, probes, other users' checks — for the length of the copy.
+        scad_path = await asyncio.to_thread(_stage, source, Path(tmp), context)
         param_path = Path(tmp) / "model.param"
         args = ["-o", str(param_path), scad_path.name]
         try:

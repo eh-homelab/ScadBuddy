@@ -408,7 +408,7 @@ async def put_source(
         # checked — and has its schema derived — against the files it will really see.
         context=paths.model_dir(slug),
     )
-    catalogue.replace_source(slug, body.source)
+    await asyncio.to_thread(catalogue.replace_source, slug, body.source)
     if checked is not None and checked.schema is not None:
         store_cached_schema(paths.model_meta(slug), checked.schema)
     else:
