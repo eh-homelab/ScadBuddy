@@ -263,13 +263,18 @@ async def send_output(
         )
     )
     store.record_send(meta.id, queue_item_id=item.id)
+    # Slicing leaves a second library entry, and the queue references that one — so
+    # it is what a reader opens from the queue. Both are this output, so both get the
+    # link; the note is best-effort either way.
+    noted = await attach_edit_link(client, library_file_id, meta, settings)
+    noted_sliced = await attach_edit_link(client, sliced, meta, settings)
     return SendResult(
         mode="queue",
         library_file_id=library_file_id,
         filename=filename,
         queue_item_id=item.id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
-        edit_url=await attach_edit_link(client, library_file_id, meta, settings),
+        edit_url=noted or noted_sliced,
     )
 
 

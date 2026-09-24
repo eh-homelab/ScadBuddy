@@ -481,8 +481,15 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
 
 
 @respx.mock
-def test_the_slice_and_queue_branch_also_annotates_last(client: TestClient, model: str) -> None:
-    """The third send path reaches attach_edit_link too, and only after enqueueing."""
+def test_the_slice_and_queue_branch_annotates_both_files_last(
+    client: TestClient, model: str
+) -> None:
+    """The third send path reaches attach_edit_link too, and only after enqueueing.
+
+    Slicing leaves a second library entry, and it is that one the queue references —
+    so it is the one a reader opens from the queue, and it needs the link as much as
+    the 3MF ScadBuddy uploaded.
+    """
     configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
     output_id = make_output(client, model)
     upload_route()
@@ -498,16 +505,24 @@ def test_the_slice_and_queue_branch_also_annotates_last(client: TestClient, mode
         return_value=httpx.Response(200, json=recording("queue-item.json"))
     )
     annotate = annotate_route()
+    annotate_sliced = annotate_route(52)
 
     body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).json()
 
     assert body["queue_item_id"] == 9
     assert body["edit_url"] == f"https://scad.test/edit/{output_id}"
     assert annotate.called
+    assert annotate_sliced.called
+    assert json.loads(annotate_sliced.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
+    }
 
     order = [(call.request.method, call.request.url.path) for call in respx.calls]
     assert order.index(("POST", "/api/v1/queue/")) < order.index(
         ("PUT", "/api/v1/library/files/41")
+    )
+    assert order.index(("POST", "/api/v1/queue/")) < order.index(
+        ("PUT", "/api/v1/library/files/52")
     )
 
 
@@ -527,7 +542,9 @@ def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, m
     respx.post(f"{API}/queue/").mock(
         return_value=httpx.Response(200, json=recording("queue-item.json"))
     )
+    # Both library entries refuse the note; the queued print is unaffected either way.
     respx.put(f"{API}/library/files/41").mock(return_value=httpx.Response(502))
+    respx.put(f"{API}/library/files/52").mock(return_value=httpx.Response(502))
 
     response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
 
