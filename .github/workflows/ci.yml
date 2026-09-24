@@ -443,25 +443,66 @@ jobs:
         working-directory: frontend
         run: pnpm exec playwright install --with-deps chromium
 
+      # The install-on-demand test is the only thing in this repo that depends
+      # on a service outside it, and `CI Summary` — the one required check —
+      # asserts this job. Left unguarded that makes a Google-side outage or a
+      # rate-limited raw.githubusercontent.com a hard red on somebody else's
+      # unrelated PR, and it contradicts the design's own position that a 503
+      # from the catalogue is a SUPPORTED state (§5.4: the picker says so and
+      # falls back to what `fc-list` reports) rather than an error. A fresh
+      # container has no Pacifico for that fallback to offer, so an outage does
+      # not make the test skip — the row simply never appears and it times out
+      # 60s later, naming the wrong culprit.
+      #
+      # So the state is DETECTED rather than left to a human to spot from the
+      # failure pattern. Both probes run `docker exec`, inside the container,
+      # because the container's egress is what the test actually needs — the
+      # runner's own connectivity is a proxy for it and can differ. They cover
+      # the two different hosts the feature uses: the keyless catalogue
+      # (fonts.google.com, no API key — `SCADBUDDY_GOOGLE_FONTS_API_KEY` is
+      # unset here) and the TTF download (raw.githubusercontent.com), which can
+      # fail independently. The catalogue probe asserts the BODY names Pacifico
+      # and not merely that something answered 200: a reachable catalogue that
+      # does not carry the family is an upstream change worth a red, not a skip.
+      #
+      # This fails OPEN by construction — an unreachable dependency skips one
+      # test rather than reding the gate — so it is written to be impossible to
+      # mistake for a pass: the skip is a `::warning::` in the log and the run
+      # summary, and it cannot mask a product bug, because if the probes
+      # succeed the test runs and any failure is real.
+      - name: Probe the Google Fonts path from inside the container
+        id: fonts-probe
+        if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
+        run: |
+          set -uo pipefail
+          offline=
+          if ! docker exec scadbuddy-ci curl --fail --silent --show-error --max-time 20 \
+                 'http://127.0.0.1:8080/api/v1/fonts/catalogue?q=Pacifico&limit=1' \
+               | grep -q '"family":"Pacifico"'; then
+            offline=1
+            echo "::warning::The Google Fonts catalogue is unreachable from the container, so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
+          elif ! docker exec scadbuddy-ci curl --fail --silent --show-error --max-time 20 --head \
+                   https://raw.githubusercontent.com/google/fonts/main/ofl/pacifico/METADATA.pb >/dev/null; then
+            offline=1
+            echo "::warning::google/fonts on raw.githubusercontent.com is unreachable from the container, so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue answered, so this is the download host alone."
+          fi
+          echo "offline=${offline}" | tee -a "$GITHUB_OUTPUT"
+
       # No webServer: `E2E_BASE_URL` makes playwright.config.ts use the URL
       # as-is, so this drives the container published on 18080 above — its own
       # bundle, its own API, its own openscad.
       #
-      # E2E_OFFLINE is deliberately NOT set. The Pacifico test needs outbound
-      # HTTPS from the CONTAINER (fonts.google.com for the catalogue,
-      # raw.githubusercontent.com for the TTF) and from the BROWSER (the
-      # specimen stylesheet), which a hosted runner has. It needs no API key:
-      # with `SCADBUDDY_GOOGLE_FONTS_API_KEY` unset the backend reads the
-      # keyless fonts.google.com metadata endpoint. If Google ever becomes
-      # unreachable from here, set E2E_OFFLINE=1 on this step — the test skips
-      # itself rather than reding, since an air-gapped stack is supported — but
-      # do that deliberately and not as a reflex, because that skip is the
-      # acceptance for #82 going quiet again.
+      # `E2E_OFFLINE` carries the probe's verdict. Empty is the normal case and
+      # is NOT "1", so the spec's `test.skip(process.env.E2E_OFFLINE === '1')`
+      # does not fire and the font test runs. The first test — render, generate,
+      # download, unpack the two-extruder 3MF — needs nothing outside the
+      # container and runs either way.
       - name: Real-backend Playwright suite
         if: ${{ needs.layout.outputs.app == 'true' && needs.layout.outputs.e2e == 'true' }}
         working-directory: frontend
         env:
           E2E_BASE_URL: http://127.0.0.1:18080
+          E2E_OFFLINE: ${{ steps.fonts-probe.outputs.offline }}
         run: pnpm exec playwright test
 
       - name: Upload the real-backend Playwright report
