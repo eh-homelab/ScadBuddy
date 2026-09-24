@@ -110,8 +110,3 @@ export function isNonDefault(
   if (!isSet(value)) return false
   return value !== optionValue(defaults, name)
 }
-
-/** Drops unset fields, so an all-empty overlay clears its scope on the server. */
-export function compactOptions(options: PrintOptions): PrintOptions {
-  return resolveOptions(options)
-}

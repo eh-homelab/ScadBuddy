@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { OptionScope, PrintOptions, PrintOptionsState } from '../api/types'
+import type { OptionScope, PrintOptions, PrintOptionsView } from '../api/types'
 import {
   CALIBRATION_CHOICES,
   effectiveScope,
@@ -56,7 +56,12 @@ export function PrintOptionsDisclosure({
   onChange,
   onEffective,
 }: Props) {
-  const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
+  // Typed as the narrower view, because that is what the PUT answers with. The printer
+  // the scope keys on is kept separately: only the GET resolves it, so reading it off
+  // this object would make it vanish the moment a save lands — and `printer_id` being
+  // optional in the generated types means TypeScript would not have said a word.
+  const [remembered, setRemembered] = useState<PrintOptionsView | null>(null)
+  const [serverPrinterId, setServerPrinterId] = useState<number | null>(null)
   const [loading, setLoading] = useState(true)
   const [scope, setScope] = useState<OptionScope>('printer')
   const [busy, setBusy] = useState(false)
@@ -67,7 +72,11 @@ export function PrintOptionsDisclosure({
     let live = true
     api
       .getPrintOptions(slug)
-      .then((view) => live && setRemembered(view))
+      .then((view) => {
+        if (!live) return
+        setRemembered(view)
+        setServerPrinterId(view.printer_id ?? null)
+      })
       .catch((cause: unknown) =>
         live && setError(cause instanceof ApiError ? cause.detail : 'Could not read the options.'),
       )
@@ -80,7 +89,7 @@ export function PrintOptionsDisclosure({
   // The per-printer scope only applies once the printer is known; with a printer-class
   // pipeline and no configured printer nothing knows it, and saving there would go
   // nowhere — hence the disabled option and the note below.
-  const resolvedPrinterId = printerId ?? remembered?.printer_id ?? null
+  const resolvedPrinterId = printerId ?? serverPrinterId
   const printerKey = resolvedPrinterId === null ? null : String(resolvedPrinterId)
 
   const layers = useMemo<OptionLayer[]>(
@@ -109,6 +118,12 @@ export function PrintOptionsDisclosure({
     onChange(draft as PrintOptions)
   }
 
+  function storedFor(target: OptionScope): PrintOptions | undefined {
+    if (target === 'global') return remembered?.global_options
+    if (target === 'printer') return printerKey ? remembered?.printers?.[printerKey] : undefined
+    return remembered?.models?.[slug]
+  }
+
   async function remember(clear: boolean) {
     if (scope === 'printer' && !printerKey) return
     setBusy(true)
@@ -118,7 +133,10 @@ export function PrintOptionsDisclosure({
       const view = await api.putPrintOptions({
         scope,
         key: scope === 'global' ? null : scope === 'printer' ? printerKey : slug,
-        options: clear ? {} : resolveOptions(value),
+        // Merged with what that scope already holds, never just this dialog's edits: the
+        // PUT replaces a scope wholesale, so sending only the current overlay would
+        // delete every option remembered there on an earlier visit.
+        options: clear ? {} : resolveOptions(storedFor(scope), value),
       })
       setRemembered(view)
       setSavedScope(scope)
@@ -194,6 +212,10 @@ export function PrintOptionsDisclosure({
               )}
             </div>
 
+            <p className="mt-1 text-[12px] text-faint">
+              Remember merges these into what that scope already holds; Forget clears the
+              whole scope.
+            </p>
             {!printerKey && (
               <p className="mt-2 text-[12px] text-faint">
                 No printer is picked yet, so options can only be remembered for this model or

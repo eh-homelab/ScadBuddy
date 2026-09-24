@@ -611,7 +611,12 @@ export const handlers = [
       if (empty) delete map[body.key]
       else map[body.key] = options
     }
-    return HttpResponse.json(state.printOptions)
+    // Shaped like the real response, which is declared `response_model=PrintOptionsView`
+    // and so cannot carry `printer_id` however much the server-side object holds. Reusing
+    // the GET's object here would let a component that reads `printer_id` off a PUT
+    // result pass in tests and break in the browser.
+    const { defaults, global_options, printers, models } = state.printOptions
+    return HttpResponse.json({ defaults, global_options, printers, models })
   }),
 
   http.post(`${base}/settings/test`, async () => {

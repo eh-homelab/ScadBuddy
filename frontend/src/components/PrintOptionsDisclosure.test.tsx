@@ -146,6 +146,54 @@ describe('PrintOptionsDisclosure', () => {
     expect(within(row('Timelapse')).getByText(/On · from this model/)).toBeInTheDocument()
   })
 
+  it('keeps what a scope already remembered when a second option is saved to it', async () => {
+    server.use(
+      http.get('/api/v1/settings/print-options', () =>
+        HttpResponse.json({ ...printOptionsFixture, printers: { '1': { timelapse: true } } }),
+      ),
+    )
+    const puts: unknown[] = []
+    server.use(
+      http.put('/api/v1/settings/print-options', async ({ request }) => {
+        const body = (await request.json()) as { options: PrintOptions }
+        puts.push(body)
+        return HttpResponse.json({
+          defaults: printOptionsFixture.defaults,
+          global_options: {},
+          printers: { '1': body.options },
+          models: {},
+        })
+      }),
+    )
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+    await user.selectOptions(screen.getByLabelText('Bed levelling'), 'off')
+
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() => expect(puts).toHaveLength(1))
+    // Not just the one field the dialog touched: the PUT replaces the scope wholesale.
+    expect(puts[0]).toMatchObject({ options: { bed_levelling: 'off', timelapse: true } })
+    expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
+  })
+
+  it('still knows the printer after a save, since the PUT does not report one', async () => {
+    const user = userEvent.setup()
+    render(<Harness />)
+    await open(user)
+    await user.selectOptions(screen.getByLabelText('Timelapse'), 'true')
+
+    await user.click(screen.getByRole('button', { name: 'Remember' }))
+
+    await waitFor(() =>
+      expect(screen.getByText('Remembered for this printer.')).toBeInTheDocument(),
+    )
+    // Reading printer_id off the PUT response would have blanked both of these.
+    expect(screen.getByRole('option', { name: 'This printer' })).toBeEnabled()
+    expect(within(row('Timelapse')).getByText(/On · from this printer/)).toBeInTheDocument()
+  })
+
   it('forgets a scope', async () => {
     server.use(
       http.get('/api/v1/settings/print-options', () =>
