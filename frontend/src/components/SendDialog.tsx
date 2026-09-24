@@ -92,31 +92,31 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
     >
       {result ? (
         <>
-        <p className="text-[13px] text-ink">
-          {result.queue_item_id ? (
-            <>
-              Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
-              <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
-            </>
-          ) : result.pipeline_run_id ? (
-            <>
-              Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
-              <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
-            </>
-          ) : (
-            <>
-              Added to the library as{' '}
-              <span className="sb-num">{result.filename}</span> (#{result.library_file_id}).
-            </>
-          )}
-        </p>
-        {/* The note is best-effort, so say which way it went rather than implying
-            the link is on the file when Bambuddy refused it. */}
-        <p className="mt-1.5 text-[12px] text-muted">
-          {result.edit_url
-            ? 'Bambuddy has the link back to these parameters.'
-            : 'No link back to these parameters was attached.'}
-        </p>
+          <p className="text-[13px] text-ink">
+            {result.queue_item_id ? (
+              <>
+                Queued as <span className="sb-num">#{result.queue_item_id}</span> with{' '}
+                <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
+              </>
+            ) : result.pipeline_run_id ? (
+              <>
+                Pipeline run <span className="sb-num">#{result.pipeline_run_id}</span> started for{' '}
+                <span className="sb-num">{copies}</span> {copies === 1 ? 'copy' : 'copies'}.
+              </>
+            ) : (
+              <>
+                Added to the library as{' '}
+                <span className="sb-num">{result.filename}</span> (#{result.library_file_id}).
+              </>
+            )}
+          </p>
+          {/* The note is best-effort, so say which way it went rather than implying
+              the link is on the file when Bambuddy refused it. */}
+          <p className="mt-1.5 text-[12px] text-muted">
+            {result.edit_url
+              ? 'Bambuddy has the link back to these parameters.'
+              : 'No link back to these parameters was attached.'}
+          </p>
         </>
       ) : (
         <>
