@@ -93,9 +93,12 @@ class PlateGeometry:
     #: Cutouts nothing may be printed in (the X1/P1 filament cutter corner).
     exclusions: tuple[Rect, ...]
     extruders: int
-    #: The profile's ``printable_height``. The 3MF writer states it in
-    #: ``project_settings.config``; see #110.
-    height: float = 0.0
+    #: The profile's ``printable_height``. Required, not defaulted: the 3MF
+    #: writer states it in ``project_settings.config``, and this whole module
+    #: exists because a wrong value in that file is not rejected — it is either
+    #: silently honoured or, in #110's case, a segfault. A default would let a
+    #: future call site write ``"printable_height": "0"`` and find out later.
+    height: float
 
     @property
     def key(self) -> str:
