@@ -7,6 +7,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
@@ -472,3 +473,35 @@ def test_an_unusable_export_is_refused_at_save_time_without_force(client: TestCl
     )
     assert response.status_code == 422
     assert "could not be derived" in response.json()["diagnostics"][0]["message"]
+
+
+def test_a_source_too_large_to_be_a_model_is_refused_before_openscad_runs(
+    client: TestClient, model: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The check runs one OpenSCAD at a time, so a body nobody could have typed is a
+    way to hold that permit — it has to be refused on shape, before it is spent."""
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    huge = "x" * (MAX_SOURCE_CHARS + 1)
+
+    checked = client.post("/api/v1/models/check", json={"source": huge})
+    assert checked.status_code == 422
+
+    created = client.post("/api/v1/models", json={"name": "Huge", "source": huge})
+    assert created.status_code == 422
+
+    replaced = client.put(f"/api/v1/models/{model}/source", json={"source": huge})
+    assert replaced.status_code == 422
+
+    assert not log.exists(), "openscad ran for a body that was refused on shape"
+
+
+def test_a_text_plain_paste_is_capped_the_same_way(client: TestClient) -> None:
+    """The bare-source branch never sees the pydantic model, so its cap is its own."""
+    response = client.post(
+        "/api/v1/models",
+        content="y" * (MAX_SOURCE_CHARS + 1),
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge Text"},
+    )
+    assert response.status_code == 422
+    assert "too large" in response.json()["detail"]

@@ -45,6 +45,13 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 #: source is a wider contract than anything here promises.
 FORM_CONTENT_TYPES = frozenset({"multipart/form-data", "application/x-www-form-urlencoded"})
 
+#: The longest source any of the paste routes will look at. A check spends the one
+#: `SCADBUDDY_CHECK_CONCURRENCY` permit for as long as OpenSCAD takes to read what it
+#: is given, so an unbounded body is a way to hold that permit against everyone else.
+#: 1M characters is far past anything hand-written or generated for this tool, so the
+#: cap only ever refuses something that was not going to be a model.
+MAX_SOURCE_CHARS = 1_000_000
+
 
 def require_model(catalogue: Catalogue, slug: str) -> ModelRecord:
     try:
@@ -82,19 +89,21 @@ class PastedSource(BaseModel):
     """A model pasted as source rather than uploaded as a file."""
 
     name: str = Field(description="Display name; its slug is derived from it")
-    source: str = Field(description="The OpenSCAD source")
+    source: str = Field(max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source")
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     force: bool = Field(default=False, description="Save even when the parse check fails")
 
 
 class SourceReplacement(BaseModel):
-    source: str = Field(description="The replacement OpenSCAD source")
+    source: str = Field(max_length=MAX_SOURCE_CHARS, description="The replacement OpenSCAD source")
     force: bool = Field(default=False, description="Save even when the parse check fails")
 
 
 class CheckRequest(BaseModel):
-    source: str = Field(description="The OpenSCAD source to parse-check")
+    source: str = Field(
+        max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source to parse-check"
+    )
     slug: str | None = Field(
         default=None,
         pattern=SLUG_PATTERN,
@@ -229,6 +238,14 @@ async def create_model(
             pasted_text = decode_source(await request.body())
         except NotOpenSCADError as error:
             raise _rejected(error) from None
+        # This branch never reaches `PastedSource`, so the cap the other two get from
+        # pydantic has to be applied here by hand.
+        if len(pasted_text) > MAX_SOURCE_CHARS:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"the paste is too large: {len(pasted_text)} characters, "
+                f"and this route reads at most {MAX_SOURCE_CHARS}",
+            )
         return await _create(
             catalogue,
             config,

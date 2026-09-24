@@ -272,6 +272,7 @@
           },
           "source": {
             "description": "The OpenSCAD source to parse-check",
+            "maxLength": 1000000,
             "title": "Source",
             "type": "string"
           }
@@ -4011,6 +4012,7 @@
           },
           "source": {
             "description": "The replacement OpenSCAD source",
+            "maxLength": 1000000,
             "title": "Source",
             "type": "string"
           }
@@ -4485,6 +4487,7 @@
                   },
                   "source": {
                     "description": "The OpenSCAD source",
+                    "maxLength": 1000000,
                     "title": "Source",
                     "type": "string"
                   },
