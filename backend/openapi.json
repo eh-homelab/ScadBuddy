@@ -1648,19 +1648,36 @@
         "type": "object"
       },
       "PipelineReport": {
-        "description": "Bambuddy's report for one pipeline, passed through as it came.",
+        "description": "Bambuddy's report for one pipeline, passed through as it came.\n\n``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be\njudged, which is neither ready nor blocked, and the picker says so rather than\nguessing either way. That either-or is enforced below rather than merely described,\nbecause the browser branches on it: a row with neither would render as silently\nabsent, and one with both would claim two states at once.",
         "properties": {
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
           "pipeline_id": {
             "title": "Pipeline Id",
             "type": "integer"
           },
           "report": {
-            "$ref": "#/components/schemas/EligibilityReport"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/EligibilityReport"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
-          "pipeline_id",
-          "report"
+          "pipeline_id"
         ],
         "title": "PipelineReport",
         "type": "object"
