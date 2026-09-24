@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
+import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job } from '../api/types'
 import { server } from '../mocks/server'
@@ -26,6 +27,12 @@ vi.mock('../components/Preview', () => ({
 
 function render(route = '/m/name-keychain', state?: unknown) {
   return renderPage(<CustomizePage />, { route, path: '/m/:slug', state })
+}
+
+/** Reads back where the router ended up, so a redirect is observable. */
+function Where() {
+  const { pathname, search } = useLocation()
+  return <div data-testid="where">{pathname + search}</div>
 }
 
 async function firstRender() {
@@ -194,6 +201,30 @@ describe('CustomizePage', () => {
     render(`/m/name-keychain?from=${id}`)
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova'),
+    )
+  })
+
+  it('sends a hand-typed link on to the model the output belongs to', async () => {
+    // EditPage always builds the URL from the resolved slug, so only a typed or
+    // bookmarked one can name the wrong model — and applying another model's
+    // values to this schema silently is worse than moving to the right one.
+    const id = 'c'.repeat(32)
+    renderPage(
+      <Routes>
+        <Route
+          path="/m/:slug"
+          element={
+            <>
+              <Where />
+              <CustomizePage />
+            </>
+          }
+        />
+      </Routes>,
+      { route: `/m/some-other-model?from=${id}` },
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId('where')).toHaveTextContent(`/m/name-keychain?from=${id}`),
     )
   })
 

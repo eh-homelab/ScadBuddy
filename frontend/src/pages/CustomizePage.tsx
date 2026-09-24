@@ -1,5 +1,5 @@
 import { Suspense, lazy, useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useLocation, useParams, useSearchParams } from 'react-router'
+import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import type { Output, ParamValue } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
@@ -38,7 +38,12 @@ export function CustomizePage() {
   const captureRef = useRef<PreviewCapture | null>(null)
 
   const schema = schemaState.data
-  const reopened = preloaded ?? reopenState.data ?? undefined
+  const resolved = preloaded ?? reopenState.data ?? undefined
+  // An output belongs to one model. EditPage builds the URL from the resolved slug,
+  // so only a typed or bookmarked link can pair an id with the wrong model — and
+  // spreading another model's values onto this schema is a silent wrong answer.
+  const foreign = resolved && resolved.slug !== slug ? resolved : undefined
+  const reopened = foreign ? undefined : resolved
 
   useEffect(() => {
     // Wait for the reopened values rather than rendering the defaults first.
@@ -62,6 +67,16 @@ export function CustomizePage() {
   }, [schema])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
+
+  if (foreign) {
+    return (
+      <Navigate
+        to={`/m/${foreign.slug}?from=${foreign.output_id}`}
+        state={{ editTarget: foreign } satisfies EditNavigationState}
+        replace
+      />
+    )
+  }
 
   if (schemaState.loading) {
     return (
