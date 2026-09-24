@@ -31,11 +31,20 @@ CONTAINER="${CONTAINER:-scadbuddy-ci}"
 
 # Every call into the container goes through here so the tests can substitute a
 # stub for the whole container without docker.
+#
+# The outer `timeout` bounds the EXEC, which `curl --max-time` does not: that
+# bounds the request once curl is running, and says nothing about a wedged
+# container or a stuck daemon, where `docker exec` simply never returns. Without
+# it this step inherits the job's 45-minute ceiling and dies with no diagnosis.
+# It starts at 30s for the one read below and widens to the measured budget once
+# there is one.
+exec_timeout="${EXEC_TIMEOUT:-30}"
+
 exec_in() {
   if [ -n "${PROBE_EXEC:-}" ]; then
-    "$PROBE_EXEC" "$@"
+    timeout "$exec_timeout" "$PROBE_EXEC" "$@"
   else
-    docker exec "$CONTAINER" "$@"
+    timeout "$exec_timeout" docker exec "$CONTAINER" "$@"
   fi
 }
 
@@ -63,8 +72,19 @@ unreachable() {
   esac
 }
 
+# `exec-failed` rather than a status when the EXEC layer broke — timeout(1)
+# reports 124 when it fires and 125-127 when the command could not be run, which
+# is `docker exec` failing rather than the network. That distinction is the whole
+# point: a wedged container is OUR problem and must not be laundered into "the
+# upstream is unreachable", which would skip the test that would have shown it.
 status_of() {
-  exec_in curl --silent --show-error --max-time "$budget" -o /dev/null -w '%{http_code}' "$1" || true
+  local out rc=0
+  out="$(exec_in curl --silent --show-error --max-time "$budget" -o /dev/null -w '%{http_code}' "$1")" || rc=$?
+  if [ "$rc" -ge 124 ]; then
+    printf 'exec-failed'
+    return
+  fi
+  printf '%s' "$out"
 }
 
 # One read, three answers: the budget is the sum of BOTH timeouts the catalogue
@@ -96,16 +116,27 @@ if [ -z "$usable" ]; then
   repo_url="https://raw.githubusercontent.com/google/fonts/main"
   echo "::warning::Could not read the font URLs and timeouts out of the container, so the probe is using its own copies (${budget}s, ${metadata_url}, ${repo_url}). Those can be stale — check them against backend/scadbuddy/library/googlefonts.py if this warning persists."
 fi
-echo "probe budget: ${budget}s (googlefonts.DEFAULT_TIMEOUT + fonts.FC_TIMEOUT + 10)"
+# Widened to the measured budget now that there is one — unless the caller
+# named a bound, which is honoured as given rather than silently overridden.
+if [ -z "${EXEC_TIMEOUT:-}" ]; then
+  exec_timeout=$((budget + 15))
+fi
+echo "probe budget: ${budget}s (googlefonts.DEFAULT_TIMEOUT + fonts.FC_TIMEOUT + 10), exec bound ${exec_timeout}s"
 
 offline=
 catalogue_status="$(status_of "$metadata_url")"
-if unreachable "$catalogue_status"; then
+if [ "$catalogue_status" = exec-failed ]; then
+  # Nothing was learned about Google: the container did not answer US. It is
+  # unusable either way, so `offline` stays empty and the suite reds on it.
+  echo "::warning::Could not run a command inside the container within ${exec_timeout}s, so nothing could be measured about the font upstreams. That is a wedged container rather than an outage: NOT a skip — the tests will run and are expected to fail."
+elif unreachable "$catalogue_status"; then
   offline=1
   echo "::warning::${metadata_url} did not answer from the container (status ${catalogue_status}), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
 else
   repo_status="$(status_of "$repo_url")"
-  if unreachable "$repo_status"; then
+  if [ "$repo_status" = exec-failed ]; then
+    echo "::warning::Could not run a command inside the container within ${exec_timeout}s while probing the download host. That is a wedged container rather than an outage: NOT a skip — the tests will run and are expected to fail."
+  elif unreachable "$repo_status"; then
     offline=1
     echo "::warning::${repo_url}, where the font files are downloaded from, did not answer from the container (status ${repo_status}), so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. The catalogue upstream answered, so this is the download host alone."
   else

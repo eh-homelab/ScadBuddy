@@ -24,6 +24,11 @@ trap 'rm -rf "$work"' EXIT
 cat > "$work/stub" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
+# A container that never answers. The script's outer `timeout` is what has to
+# notice, so this sleeps rather than exiting.
+if [ -n "${STUB_HANGS:-}" ] && [ "$1" = curl ]; then
+  sleep "$STUB_HANGS"
+fi
 case "$1" in
   python)
     if [ -n "${STUB_PYTHON_FAILS:-}" ]; then exit 1; fi
@@ -142,6 +147,13 @@ run "route never answers (backend wedged)" "" "will RUN and is expected to fail"
   STUB_ROUTE_STATUS=000 STUB_ROUTE_BODY=
 run "route answers 200 without the family" "" "does not name Pacifico" \
   STUB_ROUTE_BODY='{"fonts":[]}'
+
+# ── A wedged container is OURS: bound it, and never call it an outage ────────
+# `curl --max-time` bounds the request, not the exec: if `docker exec` itself
+# never returns, only the outer `timeout` ends the step, and the verdict must
+# still be "run the tests", because nothing was learned about Google.
+run "container never answers: bounded, and not a skip" "" "wedged container rather than an outage" \
+  STUB_HANGS=5 EXEC_TIMEOUT=1
 
 # ── The container read failing must be loud, not silent ──────────────────────
 run "constants unreadable: falls back and says so" "" "using its own copies" \
