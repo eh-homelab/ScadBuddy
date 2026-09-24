@@ -487,6 +487,17 @@ jobs:
       # something else. The body is still inspected, but only to ANNOUNCE that
       # the test is about to fail for that reason, never to skip it.
       #
+      # The budget is READ OUT of the backend rather than written here. Its
+      # httpx client uses `googlefonts.DEFAULT_TIMEOUT` (30s) per request, so a
+      # number of this file's own choosing that happened to be smaller would
+      # turn a merely SLOW network into "unreachable": the backend would still
+      # have answered at 29s, the probe would have given up first, and the
+      # acceptance test would be skipped under a warning that named the wrong
+      # cause. Asking the container for the constant and adding headroom means
+      # the two cannot drift — a bump in the Python is picked up here with no
+      # commit to this file. The fallback only applies if that read itself
+      # fails, which it cannot do silently: the step says so.
+      #
       # This fails OPEN by construction — an unreachable dependency skips one
       # test rather than reding the gate — so it is written to be impossible to
       # mistake for a pass: the skip is a `::warning::` in the log and the run
@@ -499,11 +510,25 @@ jobs:
           set -uo pipefail
           offline=
           catalogue=
-          if ! catalogue="$(docker exec scadbuddy-ci curl --fail --silent --show-error --max-time 20 \
+
+          # Headroom over the backend's own per-request timeout, from the
+          # backend itself. `|| true` so a read that fails cannot abort the
+          # step before the fallback below can speak up.
+          budget="$(docker exec scadbuddy-ci python -c \
+            'from scadbuddy.library.googlefonts import DEFAULT_TIMEOUT; print(int(DEFAULT_TIMEOUT) + 10)' \
+            2>/dev/null || true)"
+          case "$budget" in
+            ''|*[!0-9]*)
+              budget=40
+              echo "::warning::Could not read googlefonts.DEFAULT_TIMEOUT out of the container; the reachability probes are using ${budget}s. If the backend's timeout has been raised above that, a slow network can now read as an outage here."
+              ;;
+          esac
+          echo "probe budget: ${budget}s (googlefonts.DEFAULT_TIMEOUT + 10)"
+          if ! catalogue="$(docker exec scadbuddy-ci curl --fail --silent --show-error --max-time "$budget" \
                               'http://127.0.0.1:8080/api/v1/fonts/catalogue?q=Pacifico&limit=1')"; then
             offline=1
             echo "::warning::The Google Fonts catalogue is unreachable from the container, so the install-on-demand test (#82's acceptance) is being SKIPPED, not run. An air-gapped stack is supported, so this is not a failure — but nothing proved that path today."
-          elif status="$(docker exec scadbuddy-ci curl --silent --show-error --max-time 20 \
+          elif status="$(docker exec scadbuddy-ci curl --silent --show-error --max-time "$budget" \
                            -o /dev/null -w '%{http_code}' https://raw.githubusercontent.com/ || true)" \
                && { [ -z "$status" ] || [ "$status" = 000 ] || [ "$status" -ge 500 ]; }; then
             offline=1
