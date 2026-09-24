@@ -82,6 +82,15 @@ def source_version(model_dir: Path) -> str:
 
 
 def _stamped_root_model(xml: str, provenance: Provenance) -> str:
+    """Splice the stamp into the root model, leaving every other byte as written.
+
+    Deliberately not an ElementTree round trip, though `read` parses with one: the
+    3MF's production extension is read by prefix (`p:path`, `p:UUID` on every
+    component and build item), and re-serializing is free to rename that prefix,
+    reorder attributes and re-indent. Nothing downstream would notice until Bambu
+    Studio refused the file. The cost of splicing is that it assumes the shape
+    `bambu3mf.root_model` writes, so both assumptions are checked below.
+    """
     tag = _MODEL_TAG.search(xml)
     if tag is None:
         raise ValueError("the 3MF root model has no <model> element")

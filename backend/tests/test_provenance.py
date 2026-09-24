@@ -10,8 +10,9 @@ from xml.etree import ElementTree as ET
 import pytest
 import trimesh
 
-from scadbuddy.render.bambu3mf import CORE_NS, write_bambu_3mf
+from scadbuddy.render.bambu3mf import CORE_NS, PRODUCTION_NS, write_bambu_3mf
 from scadbuddy.render.provenance import (
+    NS_PREFIX,
     PROVENANCE_KEY,
     ROOT_MODEL,
     SCADBUDDY_NS,
@@ -98,6 +99,29 @@ def test_bambu_studio_still_reads_the_root_model(written: Path) -> None:
     assert after["Designer"] == "ScadBuddy"
     assert PROVENANCE.edit_url is not None
     assert PROVENANCE.edit_url in after["Description"]
+
+
+def test_the_root_model_keeps_the_prefixes_bambu_studio_reads(written: Path) -> None:
+    """Why the write side splices instead of round-tripping through ElementTree.
+
+    Bambu Studio reads the production extension by prefix — ``p:path``, ``p:UUID``
+    on every component and build item. Re-serializing the document is free to
+    rename that prefix and rewrite the declaration; the splice cannot.
+    """
+    with zipfile.ZipFile(written) as archive:
+        before = archive.read(ROOT_MODEL).decode("utf-8")
+    stamp(written, PROVENANCE)
+    with zipfile.ZipFile(written) as archive:
+        after = archive.read(ROOT_MODEL).decode("utf-8")
+
+    assert f'xmlns:p="{PRODUCTION_NS}"' in after
+    # Only the <model> tag changes, and only by the ScadBuddy declaration; every
+    # other line survives verbatim, prefixed attributes and all.
+    kept = [line for line in before.splitlines() if not line.startswith("<model ")]
+    assert all(line in after.splitlines() for line in kept)
+    assert after.replace(f' xmlns:{NS_PREFIX}="{SCADBUDDY_NS}"', "").splitlines()[1] == next(
+        line for line in before.splitlines() if line.startswith("<model ")
+    )
 
 
 def test_re_stamping_replaces_rather_than_appends(written: Path) -> None:
