@@ -346,6 +346,40 @@ def test_an_unloaded_spool_says_how_to_load_it_rather_than_failing() -> None:
     assert "Load" in not_loaded[0].message
 
 
+def test_a_spool_in_another_printers_tray_takes_none_of_this_printers_state() -> None:
+    """The live state is ONE printer's and the assignments are every printer's.
+
+    `inventory-remain` and `status` were read for the chosen printer; joining them on
+    `(ams_id, tray_id)` alone would hand a spool sitting in another machine's AMS 0
+    slot 1 this printer's flat tray id, remaining weight, extruder and temperature
+    window — all belonging to a different filament.
+    """
+    rows = assignments()
+    # Spool 9 really is in AMS 0 tray 1, which `inventory-remain` reports as flat tray 1
+    # with 1000 g. Move it to another printer and none of that may follow it.
+    moved = rows[0].model_copy(update={"printer_id": 7, "printer_name": "Other"})
+    built = options(assignments=[moved, *rows[1:]])
+    misty = next(row for row in built.spools if row.spool_id == 9)
+
+    assert misty.loaded is not None
+    assert misty.loaded.printer_id == 7
+    assert misty.loaded.extruder is None
+    # label_weight - weight_used, not inventory-remain's figure for the other spool.
+    assert misty.remaining_g == 1000.0
+    assert misty.temperature_from == "unknown"
+
+
+def test_a_spool_in_another_printer_is_never_mapped_onto_this_printers_tray() -> None:
+    """``ams_mapping`` addresses *this* printer's trays. A spool loaded elsewhere is a
+    legitimate choice — it produces a "move it here" warning — but mapping it onto its
+    tray number would address whatever this printer has in the same physical slot."""
+    rows = assignments()
+    moved = rows[0].model_copy(update={"printer_id": 7, "printer_name": "Other"})
+    built = options(assignments=[moved, *rows[1:]])
+    fields = queue_filaments(built, FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=9)]))
+    assert fields.ams_mapping[0] == -1
+
+
 def test_a_spool_loaded_in_another_printer_says_which_one() -> None:
     rows = assignments()
     moved = rows[0].model_copy(update={"printer_id": 7, "printer_name": "Other"})
