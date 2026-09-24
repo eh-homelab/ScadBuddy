@@ -495,25 +495,6 @@ class SpoolAssignment(BambuddyModel):
     spool: Spool | None = None
 
 
-class SpoolFilamentPreset(BambuddyModel):
-    """``GET /api/v1/inventory/spools/{id}/filament-presets``.
-
-    One row per printer model **and nozzle diameter** — the same spool slices as
-    ``GFSG00_23`` through a 0.4 nozzle and ``GFSG00_24`` through a 0.2. That is why the
-    nozzle-mismatch check can be a lookup rather than a guess, and why the slice request
-    cannot pick a preset without knowing the diameter.
-
-    ``nozzle_diameter`` is a **string** here, as it is on ``PrinterStatus.nozzles``.
-    """
-
-    id: int
-    spool_id: int
-    printer_model: str
-    nozzle_diameter: str
-    slicer_filament: str | None = None
-    slicer_filament_name: str | None = None
-
-
 class FilamentRequirement(BambuddyModel):
     """One slot of ``GET /api/v1/library/files/{id}/filament-requirements``.
 

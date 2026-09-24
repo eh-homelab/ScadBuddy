@@ -100,22 +100,24 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     presets_routes()
     inventory_routes()
 
-    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&pipeline_id=1")
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
     assert response.status_code == 200
     body = response.json()
-    assert body["printer_model"] == "H2C"
+    assert body["printer_name"] is not None
     assert [slot["slot_id"] for slot in body["slots"]] == [1, 2]
     # Every spool in the inventory is offered, not only the loaded ones — that is the
     # whole point of #87's "inventory, not just what is loaded".
     assert len(body["spools"]) == len(recording("inventory-spools.json"))
     assert {choice["slot_id"] for choice in body["suggested"]} == {1, 2}
     loaded = [row for row in body["spools"] if row["loaded"]]
-    assert loaded and loaded[0]["loaded"]["global_tray_id"] is not None
+    # Where it is, as a label — not an address. No tray number is computed here.
+    assert loaded and loaded[0]["loaded"]["printer_id"] == 1
+    assert "global_tray_id" not in loaded[0]["loaded"]
 
 
 @respx.mock
 def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model: str) -> None:
-    """The inventory does not need a printer; only the live AMS state does."""
+    """The inventory does not need a printer; only the reconciled weights do."""
     output_id = prepared(client, model)
     upload_route()
     pipelines_route()
@@ -125,7 +127,7 @@ def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model
     body = client.get(f"/api/v1/print/outputs/{output_id}/filaments").json()
     assert body["printer_id"] is None
     assert body["spools"]
-    assert body["nozzle_diameters"] == []
+    assert all(row["loaded"] is None or row["loaded"]["printer_id"] for row in body["spools"])
 
 
 @respx.mock
@@ -194,8 +196,9 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
     assert sent["printer_id"] == 1
     assert sent["library_file_id"] == 77
     assert sent["quantity"] == 3
-    # Positional, and the shelf spool keeps its place as Bambuddy's own -1 sentinel.
-    assert sent["ams_mapping"] == [1, -1]
+    # No ams_mapping: Bambuddy computes it from the overrides, against the printer it
+    # is actually dispatching to and the filament switcher that printer actually has.
+    assert sent.get("ams_mapping") is None
     assert sent["required_filament_types"] == ["PETG", "PLA"]
     assert [override["slot_id"] for override in sent["filament_overrides"]] == [1, 2]
 

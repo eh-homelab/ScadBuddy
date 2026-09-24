@@ -1,4 +1,4 @@
-import type { FilamentWarning, SlotNeed, SpoolOption } from '../api/types'
+import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
 
 /**
  * View-model helpers for the filament picker (#87). No React and no fetching: the
@@ -29,12 +29,9 @@ export function spoolLabel(spool: SpoolOption): string {
 /**
  * Where a spool physically is, or `null` when it is on the shelf.
  *
- * Three things about Bambuddy's numbering are visible here. `tray_id` is the printer's
- * 0-based index while Bambu's own UI counts AMS slots from 1, so the human number wins.
- * The AMS-HT is `ams_id` 128 and holds a single spool, so it has no slot to name, and an
- * external spool is not in an AMS at all. `inlet` is the A/B the filament switcher has
- * this AMS on — on a two-extruder machine that is what decides whether a slot can reach
- * the spool, so it is shown on the row rather than left for a warning to explain.
+ `tray_id` is the printer's 0-based index while Bambu's own UI counts AMS slots from
+ * 1, so the human number wins. This is a label and nothing more: which tray the print
+ * actually draws from is Bambuddy's to decide at dispatch.
  *
  * `printerId` is the printer the print is scoped to. A spool loaded somewhere else is
  * still a legitimate choice, and naming the other printer is the difference between
@@ -44,11 +41,7 @@ export function spoolLabel(spool: SpoolOption): string {
 export function loadedLabel(spool: SpoolOption, printerId?: number | null): string | null {
   const loaded = spool.loaded
   if (!loaded) return null
-  let where: string
-  if (loaded.is_external) where = 'External spool'
-  else if (loaded.is_ams_ht) where = 'AMS-HT'
-  else where = `AMS ${loaded.ams_id} · slot ${loaded.tray_id + 1}`
-  if (loaded.inlet) where += ` · inlet ${loaded.inlet}`
+  let where = `AMS ${loaded.ams_id} · slot ${loaded.tray_id + 1}`
   if (printerId !== null && printerId !== undefined && loaded.printer_id !== printerId) {
     where += ` · on ${loaded.printer_name ?? 'another printer'}`
   }
@@ -157,15 +150,73 @@ export function warningsFor(warnings: FilamentWarning[], slotId: number): Filame
 }
 
 /**
- * Plate-wide warnings last.
+ * The picker's warnings for the plan the user is actually looking at.
  *
- * The temperature rules are about the plate as a whole — an empty intersection across
- * the spools sharing one extruder — so they arrive with `slot_id: null`. Left in the
- * server's order they would read as a remark on whichever slot happened to precede
- * them. The sort is stable, so within each band the server's order survives.
+ * The server computes the same two rules for its own opening selection, but that
+ * answer stops being true the moment a slot is changed — which is the entire point of
+ * the picker. Both rules are a read of data the browser already holds, so they are
+ * recomputed here rather than re-fetched or, worse, dropped.
+ *
+ * There are only two on purpose. Whether these filaments can share a plate, and which
+ * AMS tray each one is drawn from, are Bambuddy's questions: its eligibility report
+ * answers them beside these, and its scheduler resolves the tray at dispatch.
  */
-export function sortWarnings(warnings: FilamentWarning[]): FilamentWarning[] {
-  const rank = (warning: FilamentWarning) =>
-    warning.slot_id === null || warning.slot_id === undefined ? 1 : 0
-  return [...warnings].sort((a, b) => rank(a) - rank(b))
+export function checkPlan(
+  options: FilamentOptions,
+  plan: SlotChoice[],
+  copies: number,
+): FilamentWarning[] {
+  const byId = new Map((options.spools ?? []).map((spool) => [spool.spool_id, spool]))
+  const printerId = options.printer_id
+  const found: FilamentWarning[] = []
+
+  for (const slot of options.slots ?? []) {
+    const choice = plan.find((entry) => entry.slot_id === slot.slot_id)
+    const spool = choice ? byId.get(choice.spool_id) : undefined
+    if (!spool) {
+      found.push({
+        kind: 'no-choice',
+        slot_id: slot.slot_id,
+        message: `Slot ${slot.slot_id} has no filament chosen.`,
+      })
+      continue
+    }
+
+    const label = spoolLabel(spool)
+    if (!spool.loaded) {
+      found.push({
+        kind: 'not-loaded',
+        slot_id: slot.slot_id,
+        message: spool.storage_location
+          ? `Load ${label} into the printer before this prints — it is stored in ${spool.storage_location}.`
+          : `Load ${label} into the printer before this prints.`,
+      })
+    } else if (
+      printerId !== null &&
+      printerId !== undefined &&
+      spool.loaded.printer_id !== printerId
+    ) {
+      found.push({
+        kind: 'not-loaded',
+        slot_id: slot.slot_id,
+        message: `${label} is loaded in ${spool.loaded.printer_name ?? 'another printer'}, not in ${
+          options.printer_name ?? 'the chosen printer'
+        } — move it into an AMS slot there first.`,
+      })
+    }
+
+    const needed = slotNeed(slot, copies)
+    const left = spool.remaining_g
+    if (needed !== null && left !== null && left !== undefined && left < needed) {
+      found.push({
+        kind: 'low-filament',
+        slot_id: slot.slot_id,
+        message: `${label} has about ${Math.round(left)} g left and this needs ${Math.round(
+          needed,
+        )} g.`,
+      })
+    }
+  }
+
+  return found
 }

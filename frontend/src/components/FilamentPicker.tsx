@@ -7,7 +7,7 @@ import {
   filterSpools,
   loadedLabel,
   slotNeed,
-  sortWarnings,
+  checkPlan,
   spoolLabel,
   warningsFor,
   type SpoolFilters,
@@ -33,25 +33,21 @@ import {
  * - **An untagged spool has no remaining weight** (`remain: -1` on the tray). It shows
  *   an em dash, and no filter may hide it: "unknown" is not "empty".
  *
- * Every warning here is advisory. They are ScadBuddy's own derived rules, not
- * Bambuddy's eligibility report, and none of them disables Run — #86's `force` already
- * covers the things Bambuddy itself refuses.
+ * Every warning here is advisory and none of them disables Run. Whether the filaments
+ * can share a plate, and which tray each one is drawn from, are Bambuddy's questions —
+ * its eligibility report answers them beside these, and #86's `force` covers the things
+ * it refuses outright.
  */
 
 /**
- * Only the two rules that describe something the printer will get *wrong* read as a
- * warning. "Load this spool into AMS 0 slot 2" is an instruction, and colouring it like
- * a fault trains the user to ignore the colour.
+ * Only a slot with nothing chosen reads as a fault. "Load this spool into AMS 0 slot 2"
+ * is an instruction, and colouring it like a fault trains the user to ignore the colour.
  */
 const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
-  temperature: 'text-warn',
-  unreachable: 'text-warn',
-  // A slot with nothing chosen is the one case that really is incomplete.
   'no-choice': 'text-warn',
   'not-loaded': 'text-muted',
   'low-filament': 'text-muted',
-  'unknown-temperature': 'text-muted',
-  'nozzle-mismatch': 'text-muted',
+  'no-preset': 'text-muted',
 }
 
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {
@@ -83,7 +79,7 @@ function WarningList({ warnings, testId }: { warnings: FilamentWarning[]; testId
   if (warnings.length === 0) return null
   return (
     <ul className="mt-1.5 space-y-0.5 text-[12px]" data-testid={testId}>
-      {sortWarnings(warnings).map((warning, index) => (
+      {warnings.map((warning, index) => (
         <li key={`${warning.kind}-${warning.slot_id ?? 'plate'}-${index}`} className={WARNING_TONE[warning.kind]}>
           {warning.message}
         </li>
@@ -104,7 +100,6 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
 
   const spools = options.spools ?? []
   const slots = options.slots ?? []
-  const warnings = options.warnings ?? []
   const suggested = options.suggested ?? []
   const choices = facets(spools)
 
@@ -121,9 +116,9 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
   const set = <K extends keyof SpoolFilters>(key: K, value: SpoolFilters[K]) =>
     setFilters((current) => ({ ...current, [key]: value }))
 
-  const plateWarnings = warnings.filter(
-    (warning) => warning.slot_id === null || warning.slot_id === undefined,
-  )
+  // Recomputed from the plan on screen, not read off the server's answer for its own
+  // opening selection — that one stops being true the moment a slot is changed.
+  const warnings = checkPlan(options, plan, copies)
 
   return (
     <section className="mt-4">
@@ -301,21 +296,15 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                 })}
               </ul>
 
-              {/* The server computed these against `suggested`; once a slot points
-                  somewhere else they describe a spool that is no longer chosen, so they
-                  are dropped rather than left asserting something untrue. */}
-              {chosen === suggested.find((choice) => choice.slot_id === slot.slot_id)?.spool_id && (
-                <WarningList
-                  warnings={warningsFor(warnings, slot.slot_id)}
-                  testId={`filament-warnings-${slot.slot_id}`}
-                />
-              )}
+              <WarningList
+                warnings={warningsFor(warnings, slot.slot_id)}
+                testId={`filament-warnings-${slot.slot_id}`}
+              />
             </fieldset>
           )
         })}
       </div>
 
-      <WarningList warnings={plateWarnings} testId="filament-warnings" />
     </section>
   )
 }

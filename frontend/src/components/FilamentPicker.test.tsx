@@ -76,11 +76,9 @@ describe('FilamentPicker', () => {
     const misty = within(rows).getByTestId('spool-9').closest('label') as HTMLElement
     expect(misty).toHaveTextContent('Bambu Lab PETG Basic — Misty Blue')
     expect(misty).toHaveTextContent('1000 g')
-    expect(misty).toHaveTextContent('AMS 0 · slot 2 · inlet B')
-
-    // The AMS-HT holds one spool, so it has no slot number to show.
-    const pink = within(rows).getByTestId('spool-22').closest('label') as HTMLElement
-    expect(pink).toHaveTextContent('AMS-HT · inlet A')
+    // Where it is, as a label. Which tray the print actually draws from is Bambuddy's
+    // to decide at dispatch, so no tray number is computed here.
+    expect(misty).toHaveTextContent('AMS 0 · slot 2')
 
     // Loaded, but in the other machine — the difference between "ready" and "fetch it".
     const away = within(rows).getByTestId('spool-30').closest('label') as HTMLElement
@@ -194,47 +192,36 @@ describe('FilamentPicker', () => {
     expect(within(slot(2)).getByTestId('spool-27')).toBeChecked()
   })
 
-  it('shows the per-slot warnings under that slot and the plate-wide ones once', () => {
+  it('shows a slot’s warnings under that slot', () => {
     open()
 
     expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent(
-      'Load Elegoo PLA Basic Deep Pink into the printer',
+      'Load Elegoo PLA Basic — Deep Pink into the printer',
     )
     expect(screen.queryByTestId('filament-warnings-1')).not.toBeInTheDocument()
-    expect(screen.getByTestId('filament-warnings')).toHaveTextContent(
-      'no nozzle temperature for Elegoo PLA Basic Deep Pink',
-    )
   })
 
-  it('reads an advisory as muted and a real mismatch as a warning', () => {
-    const options: FilamentOptions = {
-      ...fixtures.filamentOptions,
-      warnings: [
-        { kind: 'not-loaded', slot_id: 1, message: 'Load it in.' },
-        { kind: 'unreachable', slot_id: 1, message: 'The other inlet feeds that extruder.' },
-      ],
-      suggested: [
-        { slot_id: 1, spool_id: 21 },
-        { slot_id: 2, spool_id: 27 },
-      ],
-    }
-    open(options)
+  it('reads an instruction as muted and an unfilled slot as a fault', () => {
+    open({ ...fixtures.filamentOptions, suggested: [{ slot_id: 1, spool_id: 27 }] })
 
     // "Load this spool into AMS 0 slot 2" is an instruction, not a fault; colouring it
     // like one trains the user to ignore the colour.
-    expect(screen.getByText('Load it in.')).toHaveClass('text-muted')
-    expect(screen.getByText('The other inlet feeds that extruder.')).toHaveClass('text-warn')
+    expect(screen.getByTestId('filament-warnings-1').firstChild).toHaveClass('text-muted')
+    expect(screen.getByTestId('filament-warnings-2').firstChild).toHaveClass('text-warn')
   })
 
-  it('drops a slot’s warnings once that slot points somewhere else', async () => {
+  it('recomputes a slot’s warnings for the spool the user actually picked', async () => {
     const { user } = open()
-    expect(screen.getByTestId('filament-warnings-2')).toBeInTheDocument()
+    expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent('Load Elegoo')
 
+    // Spool 22 is loaded in this printer, so the "load it in" instruction must go —
+    // and it must go because it was recomputed, not because warnings were dropped.
     await user.click(within(slot(2)).getByTestId('spool-22'))
-
-    // The server computed those against `suggested`; the spool they describe is no
-    // longer chosen, so leaving them would assert something untrue.
     expect(screen.queryByTestId('filament-warnings-2')).not.toBeInTheDocument()
+
+    // Back to the shelf spool and it comes back, which a dropped list could not do.
+    await user.click(within(slot(2)).getByTestId('spool-27'))
+    expect(screen.getByTestId('filament-warnings-2')).toHaveTextContent('Load Elegoo')
   })
 
   it('gives every slot a labelled radio group and every filter a label', () => {

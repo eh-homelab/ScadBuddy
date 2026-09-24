@@ -223,22 +223,18 @@ async def get_filaments(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
-    pipeline_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
 
-    One route rather than six calls from the browser, because the join is the part with
-    the traps in it: an AMS id is the printer's numbering and not a list index, the flat
-    tray id ``ams_mapping`` carries is ``inventory-remain``'s own ``global_tray_id``,
-    ``remain: -1`` means unknown and so does ``used_grams: 0``, and the nozzle
-    temperature window is on the AMS tray rather than on the spool row.
+    One route rather than three calls from the browser, because the join is the part
+    with the traps in it: ``/inventory/assignments`` covers every printer while
+    ``inventory-remain`` covers one, ``remain: -1`` means unknown and so does
+    ``used_grams: 0``.
 
     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
     this printer": without one the spools are still listed, with their last known
-    assignment, but nothing that depends on live AMS state is reported. ``pipeline_id``
-    is read only for its process preset's *name*, which is the one place a nozzle
-    diameter is written down.
+    assignment, but the reconciled remaining weights are not.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -249,7 +245,6 @@ async def get_filaments(
             meta,
             settings,
             printer_id=printer_id,
-            pipeline_id=pipeline_id,
             plate_id=plate_id,
         )
 

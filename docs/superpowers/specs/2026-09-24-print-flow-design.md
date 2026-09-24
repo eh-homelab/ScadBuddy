@@ -5,9 +5,12 @@ tracking) and #79 (projects), built as one dialog rather than three. Written
 2026-09-24 against the live Bambuddy **1.2.5.5**; every shape below was read off
 that instance with a `GET`, or off its `openapi.json`.
 
-ScadBuddy stores no second copy of printer, spool, preset or project state. Every
-list in the dialog is a read of Bambuddy's own objects, and the one thing ScadBuddy
-persists is provenance — which Bambuddy ids a send produced.
+ScadBuddy renders OpenSCAD and sends the result to Bambuddy. Bambuddy owns printing,
+inventory, projects and tracking. So ScadBuddy stores no second copy of printer,
+spool, preset or project state, and — the harder half of the same rule — it
+**reimplements no decision Bambuddy already makes**. Every list in the dialog is a
+read of Bambuddy's own objects, every judgement is Bambuddy's own, and the one thing
+ScadBuddy persists is provenance: which Bambuddy ids a send produced.
 
 ## 1. The state model
 
@@ -29,7 +32,7 @@ step needs the printer, and nothing but the submit needs all of them.
 
 ## 2. The single request, and how the route is chosen
 
-**`ams_mapping`, `filament_overrides` and `required_filament_types` exist only on
+**`filament_overrides` and `required_filament_types` exist only on
 `PrintQueueItemCreate`.** `PipelineRunCreateRequest` carries exactly
 `source_library_file_id` / `source_archive_id` / `copies` / `force` — no printer, no
 mapping, no options. A pipeline run's background task then creates each copy's queue
@@ -51,9 +54,10 @@ run(pipeline_id, copies, force, printer_id?, filament_plan?, options?, project_i
                                                  filament presets swapped per slot)
                                                 GET  /slice-jobs/{id} until finished
                                                 POST /queue/  with printer_id,
-                                                 ams_mapping, filament_overrides,
+                                                 filament_overrides,
                                                  required_filament_types, plate_id,
                                                  options, project_id
+                                                 (NO ams_mapping — see §4)
                                                 route="slice_queue"
 ```
 
@@ -69,7 +73,7 @@ class-targeted pipeline fans out, a queued item does not.
 
 ## 3. What each step reads
 
-One aggregation route, `GET /api/v1/print/outputs/{id}/filaments?printer_id&pipeline_id`,
+One aggregation route, `GET /api/v1/print/outputs/{id}/filaments?printer_id&plate_id`,
 so the browser makes one call and no join happens client-side:
 
 | Datum | Source |
@@ -77,62 +81,87 @@ so the browser makes one call and no join happens client-side:
 | Plate slots: index, colour, type, **grams for this print** | `GET /library/files/{file_id}/filament-requirements` (falls back to the output's own `colors` when the 3MF has not been sliced — an unsliced upload answers `used_grams: 0`, which is *unknown*, not zero) |
 | Spool inventory: material, subtype, colour name + `rgba`, brand, `label_weight`, `weight_used`, `slicer_filament`, `storage_location` | `GET /api/v1/inventory/spools` |
 | Which spool is loaded where | `GET /api/v1/inventory/assignments` → `printer_id`, `ams_id`, `tray_id` |
-| Remaining grams per loaded slot, **and the extruder that slot feeds** | `GET /api/v1/printers/{id}/inventory-remain` → `slot_materials[]` |
-| Live tray state and temperature window per loaded slot | `GET /api/v1/printers/{id}/status` → `ams[].tray[]`, `vt_tray[]` |
-| Nozzles, nozzle rack, AMS→inlet switching | the same status: `nozzles[]`, `nozzle_rack[]`, `ams_switch_inlet` |
-| The `slicer_filament` to slice a spool with, per printer model **and nozzle diameter** | `GET /api/v1/inventory/spools/{id}/filament-presets` |
+| Remaining grams per loaded slot | `GET /api/v1/printers/{id}/inventory-remain` → `slot_materials[]` |
+| The printer's name, for the "loaded elsewhere" label | `GET /api/v1/printers/{id}` |
+
+That is the whole list, and it is short on purpose. The picker does **not** read
+`/printers/{id}/status` (tray temperatures, nozzle diameters, `ams_switch_inlet`) or
+`/inventory/spools/{id}/filament-presets`: nothing here decodes any of them, because
+nothing here decides anything they would inform. A test asserts those two are never
+called, so the claim cannot rot.
 
 Remaining is `label_weight - weight_used` for a spool on the shelf, and
 `inventory-remain.slot_materials[].remaining_g` for a loaded one — that is Bambuddy's
 own reconciliation of the AMS against the inventory, and it wins where both exist.
 
-Two traps worth stating because they are easy to get backwards:
+Three traps worth stating because they are easy to get backwards:
 
-- **An AMS `id` is the printer's numbering, not a list index** (the recorded H2C
-  reports `[0, 1, 128, 2]`, the AMS-HT at `128`), and `ams_switch_inlet` keys them as
-  **strings**. `ams_mapping` is `ams_id * 4 + tray_id`, `128` for the AMS-HT, and the
-  external spool is `vt_tray`, not an AMS at all.
+- **`used_grams: 0` means unknown.** Read as a real weight, the "not enough filament"
+  warning never fires; read as "needs nothing", every spool looks sufficient.
 - **`remain: -1` means unknown, not empty.** An untagged spool reports it, and a
   "0 g left" warning built on it would fire on every third-party spool.
+- **`/inventory/assignments` covers every printer; `inventory-remain` covers one.**
+  Joining them on `(ams_id, tray_id)` alone hands a spool sitting in printer B's
+  AMS 0 slot 1 printer A's remaining weight — a different filament's.
 
-## 4. Compatibility rules — derived, never listed
+## 4. What ScadBuddy sends, and what Bambuddy decides
 
-No hand-kept material table. Every rule is a comparison of data Bambuddy already
-holds, so it stays right as filaments are added:
+**ScadBuddy sends no `ams_mapping`.** Bambuddy's scheduler computes one itself
+whenever a queue item carries none — `_compute_ams_mapping_for_printer`, read off the
+running pod — against the printer it is *actually* dispatching to. That step already
+handles the Filament Track Switch (a switcher routes any AMS slot to either extruder,
+so the per-nozzle filter must not apply; its issue #2186), the AMS-HT's own id space
+and the external `vt_tray` feeds. A second copy here would be a worse one, and it
+would drift the first time Bambuddy learns a new machine.
 
-1. **Temperature window.** Intersect `[nozzle_temp_min, nozzle_temp_max]` over the
-   spools chosen for one extruder. Empty intersection → warning. The window comes
-   from the AMS tray for a loaded spool, then the spool row, then the spool's filament
-   preset. *This is the PLA-with-PETG rule*: 190–230 against 230–260 does not
-   intersect, so the warning falls out of the data instead of out of a list.
-2. **Material mismatch** is reported as the material names behind rule 1, not judged
-   separately.
-3. **Unloaded spool** — allowed. The plan records the spool, and the dialog says
-   "load *Bambu PETG Basic — Misty Blue* into AMS 0 slot 2" using its last known
-   assignment, or "into any free slot" when it has none. It never fails silently.
-4. **Not enough filament**: `remaining_g < used_grams × copies`, only when the slice
-   has reported grams. Unknown grams say so rather than guessing.
-5. **Preset nozzle mismatch**: the pipeline's process preset names its diameter
-   ("… H2C 0.4 nozzle"); the spool's filament presets are keyed by `nozzle_diameter`;
-   the live nozzle is `status.nozzles[extruder].nozzle_diameter` (a **string** there,
-   a float on the queue route). Any disagreement → warning, naming all three.
-6. **Reachability**: a slot prints on the extruder Bambuddy reports for it
-   (`inventory-remain.slot_materials[].extruder`), and `ams_switch_inlet` says which
-   inlet each AMS is switched to. A chosen spool whose AMS is switched to the other
-   inlet is unreachable for that slot — a warning, with the AMS and inlet named. The
-   inlet→extruder correspondence is *read*, not assumed.
+What is sent instead is the pair its scheduler actually matches on, in the shape its
+own 3MF parser produces:
 
-Warnings are advisory and never disable Run; #86's `force` already exists for the
-issues Bambuddy itself raises, and these are ScadBuddy's own.
+- `filament_overrides`: `{slot_id, type, color, used_grams, force_color_match?}` per
+  slot. `force_color_match` is **opt-in** — on a class-targeted item, insisting can
+  leave the job unschedulable.
+- `required_filament_types`: the materials of the chosen spools.
 
-## 5. Auto-match, so the common case needs no clicks
+For the slice itself, a spool names its own preset (`slicer_filament`, e.g. `GFG00`),
+so that is the one used. Where the spool names none, or names one Bambuddy's preset
+catalogue cannot look up, the **pipeline's own** filament preset stays — sending an id
+Bambuddy cannot resolve fails the slice naming a preset nobody chose.
 
-Per slot, in order: exact `slicer_filament` match → colour distance within a small
-threshold on the same material → same material and subtype. Loaded spools sort first
-and win ties. A slot with no candidate is left empty and blocks Run with a reason.
+### The two warnings
 
-Filters, all client-side over the one payload: material, subtype, brand, colour
-search, loaded-only, and "enough for this print".
+There is no compatibility rules engine, and no material table. Whether two filaments
+can share a plate, whether a printer can run the job, whether a slot can reach the
+extruder it slices for — those are Bambuddy's questions, and its eligibility report
+(#86) answers them in the same dialog. ScadBuddy adds only what falls straight out of
+the data it has already fetched:
+
+1. **The spool is not loaded** — allowed, not a refusal. "Load *Bambu PETG Basic
+   Misty Blue* into the printer", naming its `storage_location` when it has one, or
+   naming the other printer when it is loaded in one.
+2. **Not enough filament**: `remaining_g < used_grams × copies`, only when the slice
+   has reported grams. Unknown grams decline to judge rather than guessing.
+
+Plus "this slot has nothing chosen", which is the one case that really is incomplete.
+All three are advisory and none disables Run.
+
+They are computed **in the browser** against the plan on screen, by the same two rules
+(`checkPlan` in `lib/filaments.ts`). The server computes them too, for its own opening
+selection — but that answer stops being true the moment a slot is changed, which is
+the entire point of a picker.
+
+## 5. The opening selection, so the common case needs no clicks
+
+Per slot: same material (when the plate declares one), then nearest colour within a
+small threshold. Loaded spools sort first and win ties, and a spool already taken by
+an earlier slot is not offered again. A slot with no candidate opens empty and says
+so.
+
+This fills the picker in; it decides nothing. Every slot stays editable, and which
+tray the print is finally drawn from is still Bambuddy's answer.
+
+Display order: loaded in *this* printer, then loaded anywhere, then the shelf; most
+remaining first within each band. Filters, all client-side over the one payload:
+material, subtype, brand, colour search, loaded-only, and "enough for this print".
 
 ## 6. Run tracking (#89)
 
