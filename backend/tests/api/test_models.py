@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import json
+import shutil
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.render.jobs import Job, JobStore
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
 from tests.api.conftest import PNG_BYTES
@@ -143,6 +151,175 @@ def test_deleting_a_model_takes_its_outputs_with_it(
     orphan.mkdir(parents=True)
     client.delete(f"/api/v1/models/{model}")
     assert not orphan.exists()
+
+
+def test_a_deleted_model_leaves_the_list(client: TestClient) -> None:
+    slug = _upload(client).json()["slug"]
+    assert [entry["slug"] for entry in client.get("/api/v1/models").json()] == [slug]
+
+    response = client.delete(f"/api/v1/models/{slug}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_deleting_an_unknown_model_is_a_problem_404(client: TestClient) -> None:
+    response = client.delete("/api/v1/models/missing")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == "no model named 'missing'"
+
+
+def test_deleting_a_model_clears_its_derived_cache(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    assert paths.model_schema_cache(model).is_file()
+    export = paths.model_revision_dir(model, "0" * 40)
+    export.mkdir(parents=True)
+
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+
+    assert not paths.model_dir(model).exists()
+    assert not paths.model_schema_cache(model).exists()
+    assert not (paths.model_revisions / model).exists()
+    # The tombstone the directory was renamed to is gone too.
+    assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
+    stale = paths.tombstones / "old-model.0123abcd"
+    (stale / "nested").mkdir(parents=True)
+    (stale / "nested" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+
+    with TestClient(app):
+        assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_failed_startup_sweep_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch.object(Catalogue, "sweep_tombstones", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not sweep tombstones" in caplog.text
+
+
+def test_a_failed_tombstone_removal_is_logged_and_retried(
+    client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    with patch("scadbuddy.library.catalogue.shutil.rmtree", side_effect=OSError("busy")):
+        assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert "could not remove a deleted model's files" in caplog.text
+    assert [entry.name.split(".")[0] for entry in paths.tombstones.iterdir()] == [model]
+
+    assert catalogue.sweep_tombstones() != []
+    assert list(paths.tombstones.iterdir()) == []
+
+
+def test_concurrent_sweeps_log_nothing_and_leave_nothing(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    for index in range(20):
+        tree = paths.tombstones / f"model-{index}.{index:032x}"
+        for depth in range(5):
+            (tree / f"d{depth}").mkdir(parents=True)
+            for leaf in range(10):
+                (tree / f"d{depth}" / f"f{leaf}").write_text("x", encoding="utf-8")
+
+    barrier = threading.Barrier(4)
+
+    def sweep() -> None:
+        barrier.wait()
+        catalogue.sweep_tombstones()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for future in [pool.submit(sweep) for _ in range(4)]:
+            future.result()
+
+    assert list(paths.tombstones.iterdir()) == []
+    assert "could not remove" not in caplog.text
+
+
+def test_losing_a_delete_race_is_a_404_not_a_500(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # Both requests pass the existence checks; the other one renames first.
+    shutil.rmtree(paths.model_dir(model))
+    with patch.object(Catalogue, "exists", return_value=True):
+        response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == f"no model named {model!r}"
+
+
+def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
+    client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    schema_cache = paths.model_schema_cache(model)
+    export = paths.model_revision_dir(model, "0" * 40)
+    export.mkdir(parents=True)
+    output = paths.outputs / model / "deadbeef"
+    output.mkdir(parents=True)
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == schema_cache:
+            raise PermissionError("read-only")
+        real_unlink(self, missing_ok=missing_ok)
+
+    with patch.object(Path, "unlink", failing_unlink):
+        response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 204
+    assert [getattr(record, "path", None) for record in caplog.records if record.exc_info] == [
+        str(schema_cache)
+    ]
+    assert schema_cache.exists()
+    assert not paths.model_dir(model).exists()
+    assert not (paths.model_revisions / model).exists()
+    assert not (paths.outputs / model).exists()
+    assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:
+    slug = _upload(client).json()["slug"]
+    assert client.delete(f"/api/v1/models/{slug}").status_code == 204
+
+    state = client.app.state.scadbuddy  # type: ignore[attr-defined]
+    revisions = state.history.log(slug)
+    assert [revision.message for revision in revisions] == [f"Delete {slug}", f"Add {slug}"]
+    # The model's revisions stay in the history, and the delete touched only it.
+    assert {change.path.split("/")[0] for change in revisions[0].files} == {slug}
+    assert {change.status for change in revisions[0].files} == {"D"}
+
+
+def test_a_model_with_a_render_in_progress_cannot_be_deleted(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The test queue starts lazily, and starting fails every unfinished job left
+    # by a "previous run" -- so start it before planting the running one.
+    assert client.delete("/api/v1/models/missing").status_code == 404
+    store = JobStore(paths)
+    job = Job(id="a" * 32, slug=model, state="running", created_at=datetime.now(UTC))
+    store.write(job)
+
+    response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert paths.model_source(model).is_file()
+
+    job.state = "done"
+    store.write(job)
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:

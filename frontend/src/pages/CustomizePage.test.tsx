@@ -66,6 +66,12 @@ async function firstRender() {
 }
 
 describe('CustomizePage', () => {
+  it('offers to delete the model, naming it', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Delete' }))
+    expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()

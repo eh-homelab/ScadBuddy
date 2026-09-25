@@ -10,7 +10,15 @@ from fastapi import APIRouter, File, Form, Header, Query, Request, Response, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.api.deps import CatalogueDep, ChecksDep, ConfigDep, HistoryDep, PathsDep, SlugPath
+from scadbuddy.api.deps import (
+    CatalogueDep,
+    ChecksDep,
+    ConfigDep,
+    HistoryDep,
+    PathsDep,
+    QueueDep,
+    SlugPath,
+)
 from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
@@ -423,9 +431,19 @@ def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> M
 
 
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
-def delete_model(slug: SlugPath, catalogue: CatalogueDep) -> Response:
-    require_model(catalogue, slug)
-    catalogue.delete(slug)
+def delete_model(slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep) -> Response:
+    require_model_exists(catalogue, slug)
+    # Best effort, not a lock: a render submitted after this check reads a model
+    # that is gone and fails as an ordinary job error, which is harmless.
+    if queue.store.has_unfinished(slug):
+        raise ApiError(
+            status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
+        )
+    try:
+        catalogue.delete(slug)
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

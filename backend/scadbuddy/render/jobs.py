@@ -114,6 +114,12 @@ class JobStore:
         ]
         return sorted(jobs, key=lambda job: job.created_at)
 
+    def has_unfinished(self, slug: str) -> bool:
+        """Is a render of ``slug`` queued or running?"""
+        return any(
+            job.slug == slug and job.state in ("pending", "running") for job in self.list_jobs()
+        )
+
     def delete(self, job_id: str) -> None:
         self.paths.job_file(job_id).unlink(missing_ok=True)
         shutil.rmtree(self.paths.job_work_dir(job_id), ignore_errors=True)

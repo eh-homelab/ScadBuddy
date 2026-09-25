@@ -50,6 +50,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.seed, seed_dir)
+    # A delete that died between its rename and its rmtree left a tombstone.
+    # Best effort, as it is after a delete: leftovers must not stop the boot.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_tombstones)
+    except OSError:
+        logger.exception("could not sweep tombstones")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
