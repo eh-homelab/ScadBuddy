@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import httpx
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.jobs import Job, JobStore
 from tests.api.conftest import PNG_BYTES
 
 SOURCE = "width = 10;\ncube(width);\n"
@@ -138,6 +140,74 @@ def test_deleting_a_model_takes_its_outputs_with_it(
     orphan.mkdir(parents=True)
     client.delete(f"/api/v1/models/{model}")
     assert not orphan.exists()
+
+
+def test_a_deleted_model_leaves_the_list(client: TestClient) -> None:
+    slug = _upload(client).json()["slug"]
+    assert [entry["slug"] for entry in client.get("/api/v1/models").json()] == [slug]
+
+    response = client.delete(f"/api/v1/models/{slug}")
+
+    assert response.status_code == 204
+    assert response.content == b""
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_deleting_an_unknown_model_is_a_problem_404(client: TestClient) -> None:
+    response = client.delete("/api/v1/models/missing")
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == "no model named 'missing'"
+
+
+def test_deleting_a_model_clears_its_derived_cache(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    assert paths.model_schema_cache(model).is_file()
+    export = paths.model_revision_dir(model, "0" * 40)
+    export.mkdir(parents=True)
+
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+
+    assert not paths.model_dir(model).exists()
+    assert not paths.model_schema_cache(model).exists()
+    assert not (paths.model_revisions / model).exists()
+    # The tombstone the directory was renamed to is gone too.
+    assert list((paths.cache / "tombstones").iterdir()) == []
+
+
+def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:
+    slug = _upload(client).json()["slug"]
+    assert client.delete(f"/api/v1/models/{slug}").status_code == 204
+
+    state = client.app.state.scadbuddy  # type: ignore[attr-defined]
+    revisions = state.history.log(slug)
+    assert [revision.message for revision in revisions] == [f"Delete {slug}", f"Add {slug}"]
+    # The model's revisions stay in the history, and the delete touched only it.
+    assert {change.path.split("/")[0] for change in revisions[0].files} == {slug}
+    assert {change.status for change in revisions[0].files} == {"D"}
+
+
+def test_a_model_with_a_render_in_progress_cannot_be_deleted(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The test queue starts lazily, and starting fails every unfinished job left
+    # by a "previous run" -- so start it before planting the running one.
+    assert client.delete("/api/v1/models/missing").status_code == 404
+    store = JobStore(paths)
+    job = Job(id="a" * 32, slug=model, state="running", created_at=datetime.now(UTC))
+    store.write(job)
+
+    response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 409
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert paths.model_source(model).is_file()
+
+    job.state = "done"
+    store.write(job)
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
 
 
 def test_unknown_model_routes_answer_with_problem_details(client: TestClient) -> None:

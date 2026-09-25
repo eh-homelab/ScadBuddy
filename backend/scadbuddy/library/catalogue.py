@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -199,9 +200,23 @@ class Catalogue:
 
     def delete(self, slug: str) -> None:
         self._require(slug)
-        shutil.rmtree(self.paths.model_dir(slug), ignore_errors=True)
-        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+        # Renamed out of `models/` first, so the model leaves the catalogue in one
+        # step: an `rmtree` that dies halfway could otherwise leave `model.scad`
+        # behind and a half-deleted model listed. The tombstone lives under
+        # `cache/` (same volume, so the rename is atomic) rather than beside the
+        # model, where it would be picked up by the listing and by `git add -A`.
+        tombstones = self.paths.cache / "tombstones"
+        tombstones.mkdir(parents=True, exist_ok=True)
+        tombstone = tombstones / f"{slug}.{uuid.uuid4().hex}"
+        self.paths.model_dir(slug).rename(tombstone)
+        # The history is the shared `models/` repository, not the model's own:
+        # a delete is one more commit, so the model's revisions stay restorable.
         self._commit(f"Delete {slug}", slug)
+        shutil.rmtree(tombstone, ignore_errors=True)
+        # Derived, and only reachable through the slug: the schema cache and any
+        # exported old revisions.
+        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+        shutil.rmtree(self.paths.model_revisions / slug, ignore_errors=True)
         # Outputs are keyed by slug and only listable through it, so they go too.
         # They are NOT in the repository: a 3MF is a build artefact, not source.
         shutil.rmtree(self.paths.outputs / slug, ignore_errors=True)
