@@ -229,3 +229,24 @@ def test_a_pipeline_that_no_longer_exists_is_not_fatal_either(client: TestClient
     )
 
     assert client.get(ROUTE).json()["printer_id"] is None
+
+
+@respx.mock
+def test_the_pipeline_about_to_run_decides_the_printer_the_scope_keys_on(
+    client: TestClient, model: str
+) -> None:
+    """#145: the picker can pick a pipeline other than the model's default, and the run
+    then keys the per-printer scope on *that* pipeline's target."""
+    client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
+    )
+    respx.get("https://bambuddy.test/api/v1/slicer-pipelines/9").mock(
+        return_value=httpx.Response(
+            200, json={**recording("slicer-pipeline.json"), "id": 9, "target_printer_id": 3}
+        )
+    )
+
+    body = client.get(ROUTE, params={"slug": model, "pipeline_id": 9}).json()
+
+    assert body["printer_id"] == 3

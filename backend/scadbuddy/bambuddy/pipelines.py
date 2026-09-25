@@ -242,6 +242,10 @@ class PrintRunResult(BaseModel):
     #: The printer the copies will actually print on, where that is knowable. On a
     #: class-targeted pipeline run it is not — Bambuddy fans out and reports per copy.
     printer_id: int | None = None
+    #: How many copies were asked for, whichever route ran (#148): the request's own
+    #: ``copies`` when it set one, else the remembered quantity, else 1. On the queue
+    #: route that is the item's ``quantity``, not ``len(queue_item_ids)``.
+    copies: int
     #: ScadBuddy's own advisories about the chosen filaments, carried through so the
     #: dialog can keep showing them after the click.
     warnings: list[FilamentWarning] = Field(default_factory=list)
@@ -618,6 +622,7 @@ async def run_for_output(
             library_file_id=library_file_id,
             route="pipeline",
             run=run,
+            copies=copies,
             project_id=project_id,
             folder_id=folder_id,
             bambuddy_url=client.config.web_url(QUEUE_PATH),
@@ -665,6 +670,7 @@ async def run_for_output(
             library_file_id,
             project_id,
             folder_id,
+            copies=copies,
             warnings=warnings,
         )
 
@@ -709,6 +715,7 @@ async def run_for_output(
         library_file_id,
         project_id,
         folder_id,
+        copies=copies,
         warnings=warnings + preset_warnings,
     )
 
@@ -737,6 +744,7 @@ def _queued(
     library_file_id: int,
     project_id: int | None,
     folder_id: int | None,
+    copies: int,
     warnings: list[FilamentWarning] | None = None,
 ) -> PrintRunResult:
     """Record the queue items against the output and report the slice-and-queue run."""
@@ -756,6 +764,7 @@ def _queued(
         sliced_library_file_id=outcome.sliced_library_file_id,
         queue_item_ids=outcome.queue_item_ids,
         printer_id=outcome.printer_id,
+        copies=copies,
         warnings=warnings or [],
         project_id=project_id,
         folder_id=folder_id,

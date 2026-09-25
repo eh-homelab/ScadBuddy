@@ -140,6 +140,76 @@ describe('PrintPicker', () => {
     expect(bodies[0]).not.toHaveProperty('copies')
   })
 
+  /** Remembers print options the way Settings does, so the GET and the run both see them. */
+  async function remember(scope: 'global' | 'printer' | 'model', options: object, key?: string) {
+    await fetch('/api/v1/settings/print-options', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ scope, key: key ?? null, options }),
+    })
+  }
+
+  it('shows the remembered quantity the run will use before Run (#145)', async () => {
+    await remember('global', { quantity: 3 })
+    const { user } = open()
+    await listed()
+
+    const box = screen.getByLabelText('Copies')
+    await waitFor(() => expect(box).toHaveAttribute('placeholder', '3'))
+    // Still unset: leaving it blank is what lets the remembered quantity through.
+    expect(box).toHaveValue(null)
+    expect(screen.getByTestId('remembered-copies')).toHaveTextContent('3 remembered')
+    // The low-filament check reckons with the copies that will actually print.
+    expect(await screen.findByTestId('filament-slot-1')).toHaveTextContent('for 3 copies')
+
+    await user.type(box, '2')
+    expect(screen.queryByTestId('remembered-copies')).not.toBeInTheDocument()
+    expect(screen.getByTestId('filament-slot-1')).toHaveTextContent('for 2 copies')
+  })
+
+  it('lets the pipeline printer\'s remembered quantity beat the global one', async () => {
+    await remember('global', { quantity: 2 })
+    await remember('printer', { quantity: 4 }, '1')
+    open()
+    await listed()
+    await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '4'))
+  })
+
+  it('lets the model\'s remembered quantity beat the printer\'s', async () => {
+    await remember('printer', { quantity: 4 }, '1')
+    await remember('model', { quantity: 5 }, 'name-keychain')
+    open()
+    await listed()
+    await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '5'))
+  })
+
+  it('asks for the options of the pipeline about to run, not the model default', async () => {
+    const reads: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'GET' && request.url.includes('/settings/print-options')) {
+        reads.push(request.url)
+      }
+    })
+    const { user } = open()
+    await listed()
+    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
+    await waitFor(() => expect(reads.some((url) => url.includes('pipeline_id=3'))).toBe(true))
+    server.events.removeAllListeners()
+    expect(reads.every((url) => url.includes('slug=name-keychain'))).toBe(true)
+  })
+
+  it('reports the copies the queue route queued (#148)', async () => {
+    await remember('global', { quantity: 3 })
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('filament-slot-1')
+
+    await user.click(screen.getByTestId('use-exact-filaments'))
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    expect(await screen.findByTestId('queued-items')).toHaveTextContent('3 copies')
+  })
+
   it('only offers force once the issues have been shown', async () => {
     const { user } = open()
     await listed()

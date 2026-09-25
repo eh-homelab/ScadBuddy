@@ -1972,6 +1972,8 @@ export interface components {
         PrintRunResult: {
             /** Bambuddy Url */
             bambuddy_url: string;
+            /** Copies */
+            copies: number;
             /** Folder Id */
             folder_id?: number | null;
             /** Library File Id */
@@ -3745,6 +3747,8 @@ export interface operations {
             query?: {
                 /** @description The model about to be printed, whose own pipeline may differ */
                 slug?: string | null;
+                /** @description The pipeline about to run, when the caller has already chosen one */
+                pipeline_id?: number | null;
             };
             header?: never;
             path?: never;

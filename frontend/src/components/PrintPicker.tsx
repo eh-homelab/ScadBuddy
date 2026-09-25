@@ -6,11 +6,13 @@ import type {
   PipelineReport,
   PipelineChoices,
   PipelineView,
+  PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
   SlotChoice,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { resolveOptions } from '../lib/printOptions'
 import { eligibilityIssues, verdictFor, type Verdict } from '../lib/problems'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { FilamentPicker } from './FilamentPicker'
@@ -87,6 +89,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
   const [copies, setCopies] = useState<number | null>(null)
+  /**
+   * #145 — the remembered options, read for the pipeline about to run so the box can say
+   * what an unset Copies will actually queue. The same GET the send bar's disclosure
+   * uses; the run resolves the same layers server-side.
+   */
+  const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
   const [asDefault, setAsDefault] = useState(false)
   const [force, setForce] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -297,6 +305,30 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
   const sendsPlan = filaments !== null && (exact || planChanged)
+
+  useEffect(() => {
+    if (!open || selected === null) return
+    let live = true
+    api
+      .getPrintOptions(slug, selected)
+      .then((view) => live && setRemembered(view))
+      // Nothing to show is the pre-#145 behaviour; the run still resolves it server-side.
+      .catch(() => live && setRemembered(null))
+    return () => {
+      live = false
+    }
+  }, [open, slug, selected])
+
+  // The per-printer scope keys on the printer the run names — only a plan names one —
+  // else the one the server resolved for this pipeline, exactly as the run does.
+  const scopePrinterId = sendsPlan ? derivedPrinterId : (remembered?.printer_id ?? null)
+  const rememberedCopies =
+    resolveOptions(
+      remembered?.global_options,
+      scopePrinterId === null ? undefined : remembered?.printers?.[String(scopePrinterId)],
+      remembered?.models?.[slug],
+    ).quantity ?? null
+  const effectiveCopies = copies ?? rememberedCopies ?? 1
   // `force` is only offered once the issues have actually been shown.
   const issuesShown = (verdict !== undefined && !verdict.ok) || runIssues.length > 0
   const printers = (choices?.printers ?? []).filter((printer) =>
@@ -452,6 +484,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
               <p>
                 Sliced and queued for{' '}
                 {filaments?.printer_name ?? 'the printer you chose'} —{' '}
+                <span className="sb-num">{result.copies}</span>{' '}
+                {result.copies === 1 ? 'copy' : 'copies'} in{' '}
                 <span className="sb-num">{(result.queue_item_ids ?? []).length}</span>{' '}
                 {(result.queue_item_ids ?? []).length === 1 ? 'item' : 'items'}.
               </p>
@@ -663,12 +697,18 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
               min={1}
               max={MAX_COPIES}
               value={copies ?? ''}
-              placeholder="1"
+              placeholder={String(rememberedCopies ?? 1)}
               onChange={(event) =>
                 setCopies(event.target.value === '' ? null : Math.max(1, Number(event.target.value)))
               }
               className="sb-field sb-num w-20 text-right"
             />
+            {copies === null && rememberedCopies !== null && (
+              <span className="text-[12px] text-muted" data-testid="remembered-copies">
+                <span className="sb-num">{rememberedCopies}</span> remembered — leave blank to
+                use it
+              </span>
+            )}
           </div>
 
           <label className="mt-3 flex cursor-pointer items-center gap-2 text-[13px]">
@@ -699,7 +739,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                 options={filaments}
                 plan={plan}
                 onChange={setPlan}
-                copies={copies ?? 1}
+                copies={effectiveCopies}
               />
               {/**
                * Off by default, and it says what it costs. Ticking it pins the printer,

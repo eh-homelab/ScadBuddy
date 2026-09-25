@@ -3286,6 +3286,10 @@
             "title": "Bambuddy Url",
             "type": "string"
           },
+          "copies": {
+            "title": "Copies",
+            "type": "integer"
+          },
           "folder_id": {
             "anyOf": [
               {
@@ -3386,6 +3390,7 @@
         "required": [
           "pipeline_id",
           "library_file_id",
+          "copies",
           "bambuddy_url"
         ],
         "title": "PrintRunResult",
@@ -6535,6 +6540,24 @@
               ],
               "description": "The model about to be printed, whose own pipeline may differ",
               "title": "Slug"
+            }
+          },
+          {
+            "description": "The pipeline about to run, when the caller has already chosen one",
+            "in": "query",
+            "name": "pipeline_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The pipeline about to run, when the caller has already chosen one",
+              "title": "Pipeline Id"
             }
           }
         ],
