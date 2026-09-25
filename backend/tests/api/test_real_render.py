@@ -82,3 +82,31 @@ def test_an_unparsable_upload_is_rejected_by_the_real_binary(client: TestClient)
     )
     assert response.status_code == 422
     assert "could not parse" in response.json()["detail"]
+
+
+def test_paste_check_and_replace_against_a_real_openscad(client: TestClient) -> None:
+    """The paste routes' parse check is OpenSCAD's own, so it is proved against the
+    real binary here rather than only against the stub the other API tests use."""
+    checked = client.post("/api/v1/models/check", json={"source": TWO_COLOUR})
+    assert checked.status_code == 200
+    assert checked.json()["ok"] is True
+    assert checked.json()["checked"] is True
+
+    broken = client.post("/api/v1/models/check", json={"source": "cube(;\n"})
+    assert broken.json()["ok"] is False
+    assert broken.json()["diagnostics"], broken.json()
+
+    created = client.post("/api/v1/models", json={"name": "Pasted", "source": TWO_COLOUR})
+    assert created.status_code == 201, created.text
+    schema = client.get("/api/v1/models/pasted/schema").json()
+    assert [parameter["name"] for parameter in schema["parameters"]] == ["size"]
+
+    refused = client.put("/api/v1/models/pasted/source", json={"source": "cube(;\n"})
+    assert refused.status_code == 422
+    replaced = client.put(
+        "/api/v1/models/pasted/source",
+        json={"source": "width = 3; // [1:1:9]\ncube(width);\n"},
+    )
+    assert replaced.status_code == 200, replaced.text
+    schema = client.get("/api/v1/models/pasted/schema").json()
+    assert [parameter["name"] for parameter in schema["parameters"]] == ["width"]

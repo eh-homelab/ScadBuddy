@@ -69,6 +69,8 @@ AUTHOR_EMAIL = "scadbuddy@localhost"
 # the global config this module refuses to read, so without it git picks its
 # compiled-in default and warns on every init.
 DEFAULT_BRANCH = "main"
+#: The commit an existing repository's boot makes of changes a failed commit left.
+RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
 
@@ -288,6 +290,10 @@ class ModelHistory:
         all -- the app has to boot either way. A models directory that already
         holds files becomes revision 1 rather than being left untracked, which is
         what makes the image's seed the first revision on a fresh volume.
+
+        On a repository that already has history, anything left to commit is a
+        catalogue action whose own commit failed, and it is committed as
+        ``RECOVERED_MESSAGE`` rather than being called the initial revision (#134).
         """
         if shutil.which(self.git) is None:
             logger.warning("git is not on PATH; model history is disabled", extra={"git": self.git})
@@ -297,11 +303,19 @@ class ModelHistory:
             with self._exclusive():
                 if not (self.root / ".git").is_dir():
                     self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
+                # No commit yet, not "no .git": a crash between `init` and the first
+                # commit leaves a repository with no history, and what the next boot
+                # commits there is still the first revision.
+                fresh = (
+                    self._run("rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode
+                    != 0
+                )
                 gitignore = self.root / GITIGNORE_NAME
                 body = _gitignore_body(self.wrapper_prefix)
                 if not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body:
                     gitignore.write_text(body, encoding="utf-8")
-                return self._commit_locked("Initial revision", ".")
+                message = "Initial revision" if fresh else RECOVERED_MESSAGE
+                return self._commit_locked(message, ".")
         except (GitError, OSError):
             # A missing binary is not the only way this fails, and the others are
             # the ones that would hurt: a models directory uid 10001 cannot write
@@ -561,6 +575,11 @@ def _parse_log(text: str) -> list[Revision]:
     return revisions
 
 
+def _is_control(character: str) -> bool:
+    """C0, DEL and C1: none of them belongs in a one-line subject."""
+    return character < " " or "\x7f" <= character <= "\x9f"
+
+
 def subject_line(message: str) -> str:
     """Flatten a commit message to one printable line.
 
@@ -573,7 +592,7 @@ def subject_line(message: str) -> str:
     one-line summary, and a commit message is not a place to smuggle bytes
     through. A blank result would make `git commit` fail, so it falls back.
     """
-    flattened = "".join(" " if character < " " else character for character in message)
+    flattened = "".join(" " if _is_control(character) else character for character in message)
     collapsed = " ".join(flattened.split())
     return collapsed[:MAX_SUBJECT] if collapsed else "(no message)"
 

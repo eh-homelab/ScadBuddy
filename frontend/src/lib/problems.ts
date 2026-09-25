@@ -1,4 +1,11 @@
-import type { EligibilityIssue, EligibilityReport, PerPrinterReport, Problem } from '../api/types'
+import type {
+  Diagnostic,
+  EligibilityIssue,
+  EligibilityReport,
+  PerPrinterReport,
+  Problem,
+  SourceCheck,
+} from '../api/types'
 
 /** One line per issue: `filament type mismatch (slot 1): expected PLA, found PETG`. */
 export function describeIssue(issue: EligibilityIssue): string {
@@ -67,5 +74,27 @@ export function verdictFor(report: EligibilityReport, printerId?: number | null)
     ok: report.ok,
     issues: [...classIssues, ...named],
     printerName: report.target_printer_name ?? undefined,
+  }
+}
+
+/**
+ * A refused save carries the parse check that refused it, as the `diagnostics` and
+ * `log_tail` problem extensions — so the editor can mark the same lines the explicit
+ * Check button would have, without asking again.
+ */
+export function refusedCheck(problem: Problem): SourceCheck | undefined {
+  const raw = problem.diagnostics
+  if (!Array.isArray(raw)) return undefined
+  const diagnostics = raw.filter(
+    (entry): entry is Diagnostic =>
+      typeof entry === 'object' && entry !== null && 'severity' in entry && 'message' in entry,
+  )
+  const log = problem.log_tail
+  return {
+    ok: false,
+    checked: true,
+    timed_out: problem.timed_out === true,
+    diagnostics,
+    log_tail: Array.isArray(log) ? log.map(String) : [],
   }
 }

@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from tests.api.conftest import wait_for_job
 
 pytestmark = pytest.mark.requires_git
@@ -236,6 +237,31 @@ def test_source_that_does_not_parse_is_rejected_and_records_nothing(
     assert client.get(f"/api/v1/models/{SLUG}/source").text == FIRST
 
 
+def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
+    client: TestClient,
+) -> None:
+    """#92's editor and #90's history meet on one PUT: the parse guard runs first,
+    `force` bypasses it, and whatever lands is one revision named by `message`."""
+    upload(client)
+
+    refused = client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": "%%FAIL%%\n", "message": "Broken"}
+    )
+    assert refused.status_code == 422
+    assert [entry["message"] for entry in versions(client)] == [f"Add {SLUG}"]
+
+    assert put_source(client, SECOND, "Widen it").status_code == 200
+    forced = client.put(
+        f"/api/v1/models/{SLUG}/source",
+        json={"source": "%%FAIL%%\n", "message": "Saved anyway", "force": True},
+    )
+    assert forced.status_code == 200, forced.text
+
+    listed = versions(client)
+    assert [entry["message"] for entry in listed] == ["Saved anyway", "Widen it", f"Add {SLUG}"]
+    assert forced.json()["version"] == listed[0]["commit"]
+
+
 def test_rendering_does_not_dirty_the_repository(client: TestClient) -> None:
     """A render derives the schema, and that write must not land in `models/`.
 
@@ -331,3 +357,49 @@ def test_deleting_a_model_records_the_deletion(client: TestClient) -> None:
     # The model is gone, so its history is only reachable through the repository --
     # which is the point of not inventing a store: the commit is still there.
     assert client.get(f"/api/v1/models/{SLUG}/versions").status_code == 404
+
+
+def _stalled(*_: object, **__: object) -> None:
+    raise GitTimeoutError("git timed out after 30s")
+
+
+@pytest.mark.parametrize(
+    ("method", "call"),
+    [
+        (
+            "show",
+            lambda client, first: client.get(f"/api/v1/models/{SLUG}/versions/{first}/source"),
+        ),
+        (
+            "export",
+            lambda client, first: client.get(f"/api/v1/models/{SLUG}/versions/{first}/schema"),
+        ),
+        (
+            "export",
+            lambda client, first: client.post(
+                f"/api/v1/models/{SLUG}/render", json={"params": {}, "version": first}
+            ),
+        ),
+        (
+            "resolve",
+            lambda client, first: client.post(
+                f"/api/v1/models/{SLUG}/render", json={"params": {}, "version": first}
+            ),
+        ),
+    ],
+    ids=["source", "schema", "render-export", "render-resolve"],
+)
+def test_a_git_failure_is_a_clean_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, call: Any
+) -> None:
+    """Every git call is bounded (#132): a stalled one must answer like its siblings do,
+    not through the catch-all handler."""
+    first = upload(client)["version"]
+    put_source(client, SECOND)
+    monkeypatch.setattr(ModelHistory, method, _stalled)
+
+    response = call(client, first)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["detail"] == "git timed out after 30s"

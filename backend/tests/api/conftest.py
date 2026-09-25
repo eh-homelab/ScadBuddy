@@ -30,10 +30,17 @@ FAIL_WIDTH = 999.0
 # so the routes that shell out are exercised where no openscad is installed.
 FAKE_OPENSCAD = """#!/usr/bin/env python3
 import json
+import os
 import pathlib
 import sys
 
 args = sys.argv[1:]
+
+# Lets a test count how many times openscad was actually run.
+log = os.environ.get("FAKE_OPENSCAD_LOG")
+if log:
+    with open(log, "a", encoding="utf-8") as handle:
+        handle.write(" ".join(args) + "\\n")
 if "--version" in args:
     print("OpenSCAD version 2099.01.01", file=sys.stderr)  # the real one uses stderr too
     raise SystemExit(0)
@@ -48,6 +55,11 @@ text = source.read_text(encoding="utf-8", errors="replace") if source.is_file() 
 if "%%FAIL%%" in text:
     print("ERROR: Parser error: syntax error", file=sys.stderr)
     raise SystemExit(1)
+
+if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
+    # Exit 0, and an export with a parameter that has no name.
+    pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
+    raise SystemExit(0)
 
 if out is not None and out.endswith(".param"):
     pathlib.Path(out).write_text(
@@ -150,7 +162,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
 
 
 @pytest.fixture
-def app(settings: Settings, paths: DataPaths) -> FastAPI:
+def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
     """The real app, with the render step replaced by a stub that writes plausible files.
 
     ``width: 999`` makes the stub fail, which is how the failed-job paths are reached.
@@ -173,7 +185,11 @@ def app(settings: Settings, paths: DataPaths) -> FastAPI:
         return queues["queue"]
 
     application.dependency_overrides[get_queue] = queue_override
-    return application
+    yield application
+    # The workers die with the TestClient's loop; the thumbnail pool is threads, so
+    # it is released here rather than left for interpreter exit.
+    for queue in queues.values():
+        queue.close_thumbnails()
 
 
 @pytest.fixture

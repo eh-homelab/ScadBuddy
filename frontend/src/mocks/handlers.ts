@@ -3,6 +3,7 @@ import type {
   AttachResult,
   BoundingBox,
   CatalogueFont,
+  Diagnostic,
   EligibilityOverview,
   FilamentOptions,
   FontFamily,
@@ -26,6 +27,7 @@ import type {
   ProjectView,
   SendResult,
   Settings,
+  SourceCheck,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { keychainGlb } from './glb'
@@ -41,6 +43,7 @@ const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
+  sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -64,6 +67,7 @@ export function resetMockState(): void {
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
+  state.sources = { 'name-keychain': fixtures.keychainSource }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -169,10 +173,86 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+function slugify(value: string): string {
+  return value
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+}
+
+function checkOf(source: string): SourceCheck {
+  const failure = fixtures.mockParseError(source)
+  if (!failure) {
+    return {
+      ok: true,
+      checked: true,
+      timed_out: false,
+      diagnostics: [],
+      log_tail: [],
+      // The real check derives the schema in the same run, so it can say how many
+      // parameters the source yields; the mock answers with the keychain's.
+      parameters: fixtures.keychainSchema.parameters?.length ?? 0,
+    }
+  }
+  const diagnostic: Diagnostic = {
+    severity: 'error',
+    message: 'Parser error: syntax error',
+    line: failure.line,
+    file: 'model.scad',
+  }
+  return {
+    ok: false,
+    checked: true,
+    timed_out: false,
+    diagnostics: [diagnostic],
+    log_tail: [`ERROR: Parser error: syntax error in file model.scad, line ${failure.line}`],
+  }
+}
+
+function refusal(check: SourceCheck) {
+  return problem(422, 'Unprocessable Content', 'OpenSCAD could not parse the source', {
+    diagnostics: check.diagnostics,
+    log_tail: check.log_tail,
+  })
+}
+
 export const handlers = [
   http.get(`${base}/models`, () => HttpResponse.json(state.models)),
 
   http.post(`${base}/models`, async ({ request }) => {
+    if ((request.headers.get('content-type') ?? '').includes('application/json')) {
+      const body = (await request.json()) as {
+        name: string
+        source: string
+        description?: string
+        tags?: string[]
+        force?: boolean
+      }
+      const pastedSlug = slugify(body.name)
+      if (!pastedSlug) return problem(422, 'Unprocessable Content', 'that name yields no slug')
+      if (state.models.some((m) => m.slug === pastedSlug)) {
+        return problem(409, 'Conflict', `a model named '${pastedSlug}' already exists`)
+      }
+      const check = checkOf(body.source)
+      if (!check.ok && !body.force) return refusal(check)
+      const pasted: ModelSummary = {
+        slug: pastedSlug,
+        name: body.name,
+        description: body.description ?? '',
+        tags: body.tags ?? [],
+        updated_at: new Date().toISOString(),
+        has_thumbnail: false,
+        has_readme: false,
+      }
+      state.models = [pasted, ...state.models]
+      // A forced save stores source OpenSCAD cannot parse, so no schema is derived —
+      // the customizer then opens onto the 422 the real backend answers.
+      if (check.ok) state.schemas[pastedSlug] = fixtures.keychainSchema
+      state.sources[pastedSlug] = body.source
+      await delay(120)
+      return HttpResponse.json(pasted, { status: 201 })
+    }
+
     const form = await request.formData()
     const file = form.get('file')
     // Not `instanceof File`: the entry's class differs between the browser worker
@@ -204,6 +284,41 @@ export const handlers = [
     return HttpResponse.json(model, { status: 201 })
   }),
 
+  http.post(`${base}/models/check`, async ({ request }) => {
+    const body = (await request.json()) as { source: string; slug?: string | null }
+    await delay(80)
+    return HttpResponse.json(checkOf(body.source))
+  }),
+
+  http.get(`${base}/models/:slug/source`, ({ params }) => {
+    const source = state.sources[String(params['slug'])]
+    return source === undefined
+      ? problem(404, 'Model not found')
+      : HttpResponse.text(source, { headers: { 'Content-Type': 'text/plain; charset=utf-8' } })
+  }),
+
+  http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Model not found')
+    const body = (await request.json()) as {
+      source: string
+      force?: boolean
+      message?: string | null
+    }
+    const check = checkOf(body.source)
+    if (!check.ok && !body.force) return refusal(check)
+    state.sources[slug] = body.source
+    if (!check.ok) delete state.schemas[slug]
+    const version = recordVersion(slug, body.message || `Edit ${slug} source`, [
+      { status: 'M', path: 'model.scad' },
+    ])
+    const updated = { ...model, version: version.commit, updated_at: version.date }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    await delay(120)
+    return HttpResponse.json(updated)
+  }),
+
   http.get(`${base}/models/:slug`, ({ params }) => {
     const model = state.models.find((m) => m.slug === params['slug'])
     return model ? HttpResponse.json(model) : problem(404, 'Model not found')
@@ -215,19 +330,6 @@ export const handlers = [
     }
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })
-  }),
-
-  http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
-    const slug = String(params['slug'])
-    const model = state.models.find((m) => m.slug === slug)
-    if (!model) return problem(404, 'Model not found')
-    const body = (await request.json()) as { source: string; message?: string | null }
-    const version = recordVersion(slug, body.message || `Edit ${slug} source`, [
-      { status: 'M', path: 'model.scad' },
-    ])
-    model.version = version.commit
-    model.updated_at = version.date
-    return HttpResponse.json(model)
   }),
 
   http.get(`${base}/models/:slug/versions`, ({ params }) => {
@@ -285,8 +387,16 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug/schema`, ({ params }) => {
-    const schema = state.schemas[String(params['slug'])]
-    return schema ? HttpResponse.json(schema) : problem(404, 'Model not found')
+    const slug = String(params['slug'])
+    const schema = state.schemas[slug]
+    if (schema) return HttpResponse.json(schema)
+    return state.models.some((model) => model.slug === slug)
+      ? problem(
+          422,
+          'Unprocessable Content',
+          "OpenSCAD could not build a customizer schema from this model's source",
+        )
+      : problem(404, 'Model not found')
   }),
 
   http.post(`${base}/models/:slug/render`, async ({ params, request }) => {

@@ -189,6 +189,12 @@ export function CustomizePage() {
             </button>
           )}
           <Link
+            to={`/m/${slug}/source`}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Edit source
+          </Link>
+          <Link
             to={`/m/${slug}/versions`}
             className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
           >
