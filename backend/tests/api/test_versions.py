@@ -8,6 +8,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from tests.api.conftest import wait_for_job
 
 pytestmark = pytest.mark.requires_git
@@ -331,3 +332,49 @@ def test_deleting_a_model_records_the_deletion(client: TestClient) -> None:
     # The model is gone, so its history is only reachable through the repository --
     # which is the point of not inventing a store: the commit is still there.
     assert client.get(f"/api/v1/models/{SLUG}/versions").status_code == 404
+
+
+def _stalled(*_: object, **__: object) -> None:
+    raise GitTimeoutError("git timed out after 30s")
+
+
+@pytest.mark.parametrize(
+    ("method", "call"),
+    [
+        (
+            "show",
+            lambda client, first: client.get(f"/api/v1/models/{SLUG}/versions/{first}/source"),
+        ),
+        (
+            "export",
+            lambda client, first: client.get(f"/api/v1/models/{SLUG}/versions/{first}/schema"),
+        ),
+        (
+            "export",
+            lambda client, first: client.post(
+                f"/api/v1/models/{SLUG}/render", json={"params": {}, "version": first}
+            ),
+        ),
+        (
+            "resolve",
+            lambda client, first: client.post(
+                f"/api/v1/models/{SLUG}/render", json={"params": {}, "version": first}
+            ),
+        ),
+    ],
+    ids=["source", "schema", "render-export", "render-resolve"],
+)
+def test_a_git_failure_is_a_clean_500(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch, method: str, call: Any
+) -> None:
+    """Every git call is bounded (#132): a stalled one must answer like its siblings do,
+    not through the catch-all handler."""
+    first = upload(client)["version"]
+    put_source(client, SECOND)
+    monkeypatch.setattr(ModelHistory, method, _stalled)
+
+    response = call(client, first)
+
+    assert response.status_code == 500
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["detail"] == "git timed out after 30s"
