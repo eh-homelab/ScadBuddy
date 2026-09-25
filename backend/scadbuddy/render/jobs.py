@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -41,6 +42,7 @@ PREVIEW_NAME = "preview.glb"
 UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
+THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
 
 
 class PartInfo(BaseModel):
@@ -168,7 +170,7 @@ async def solid_parts(
 
 
 async def plate_thumbnails(
-    parts: Sequence[ColourPart], *, config: Config
+    parts: Sequence[ColourPart], *, config: Config, executor: Executor | None = None
 ) -> tuple[PlateThumbnails | None, list[str]]:
     """The 3MF's cover images, under the same wall-clock budget as a render.
 
@@ -198,18 +200,33 @@ async def plate_thumbnails(
     `wait_for` cannot cancel the thread it abandons, so the orphan keeps its core
     until it finishes. That is acceptable here and would not be for `openscad`:
     this work is O(faces) plus O(covered pixels) with no loop that can fail to
-    terminate, whereas a `.scad` can legitimately spin forever.
+    terminate, whereas a `.scad` can legitimately spin forever. It is also why the
+    queue passes its own `executor` (#116): on the loop's default one an orphan
+    holds a slot `write_bambu_3mf` needs, so a backlog of slow covers could stall
+    jobs whose own render finished in budget. On a dedicated pool a backlog only
+    queues the next cover, which then times out like any other.
     """
+    loop = asyncio.get_running_loop()
+    faces = sum(len(part.mesh.faces) for part in parts)
     try:
         rendered = await asyncio.wait_for(
-            asyncio.to_thread(render_plate_thumbnails, parts), timeout=config.render_timeout
+            loop.run_in_executor(executor, render_plate_thumbnails, parts),
+            timeout=config.render_timeout,
         )
     except TimeoutError:
         logger.warning(
             "plate thumbnail render exceeded the budget; writing the 3MF without cover images",
-            extra={"faces": sum(len(part.mesh.faces) for part in parts)},
+            extra={"faces": faces},
         )
         return None, [THUMBNAIL_TIMEOUT_WARNING]
+    except Exception:
+        # Same degradation for a rasteriser bug (a degenerate face, an allocation
+        # failure) as for a slow one: it may cost the cover, never the model (#116).
+        logger.exception(
+            "plate thumbnail render failed; writing the 3MF without cover images",
+            extra={"faces": faces},
+        )
+        return None, [THUMBNAIL_FAILED_WARNING]
     return rendered, []
 
 
@@ -329,6 +346,7 @@ async def render_job(
     config: Config,
     paths: DataPaths,
     history: ModelHistory | None = None,
+    thumbnail_executor: Executor | None = None,
 ) -> tuple[JobResult, list[str]]:
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then
@@ -359,7 +377,9 @@ async def render_job(
     parts, warnings = await solid_parts(
         scad, schema, job.params, preview_parts, work, config=config
     )
-    thumbnails, thumbnail_warnings = await plate_thumbnails(parts, config=config)
+    thumbnails, thumbnail_warnings = await plate_thumbnails(
+        parts, config=config, executor=thumbnail_executor
+    )
     warnings += thumbnail_warnings
 
     model_path = work / MODEL_NAME
@@ -404,8 +424,18 @@ class RenderQueue:
         self.paths = paths
         self.history = history
         self.store = store or JobStore(paths)
+        # The cover rasteriser's own threads, sized like the workers that feed it.
+        self._thumbnails = ThreadPoolExecutor(
+            max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
+        )
         self._render: RenderCallable = render or (
-            lambda job: render_job(job, config=config, paths=paths, history=history)
+            lambda job: render_job(
+                job,
+                config=config,
+                paths=paths,
+                history=history,
+                thumbnail_executor=self._thumbnails,
+            )
         )
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
@@ -424,6 +454,12 @@ class RenderQueue:
             worker.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
+        self.close_thumbnails()
+
+    def close_thumbnails(self) -> None:
+        """Release the cover pool. Not waited on: an abandoned cover thread cannot be
+        interrupted, and shutdown must not pay for it. Queued covers are dropped."""
+        self._thumbnails.shutdown(wait=False, cancel_futures=True)
 
     async def submit(
         self, slug: str, params: Mapping[str, ParamValue], *, model_version: str | None = None

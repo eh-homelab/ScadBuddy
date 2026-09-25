@@ -18,6 +18,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.render import jobs
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
+    THUMBNAIL_FAILED_WARNING,
     THUMBNAIL_TIMEOUT_WARNING,
     UNCOLOURED_WARNING,
     Job,
@@ -254,6 +255,40 @@ async def test_a_thumbnail_that_blows_its_budget_costs_the_cover_not_the_job() -
 
     assert rendered is None
     assert warnings == [THUMBNAIL_TIMEOUT_WARNING]
+
+
+async def test_a_thumbnail_that_raises_costs_the_cover_not_the_job() -> None:
+    """A rasteriser bug is as non-critical as a slow rasteriser (#116)."""
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box())]
+
+    def broken(_: object) -> object:
+        raise ValueError("degenerate face")
+
+    with mock.patch.object(jobs, "render_plate_thumbnails", broken):
+        rendered, warnings = await plate_thumbnails(parts, config=CONFIG)
+
+    assert rendered is None
+    assert warnings == [THUMBNAIL_FAILED_WARNING]
+
+
+async def test_the_queue_gives_the_rasteriser_its_own_threads(paths: DataPaths) -> None:
+    """An abandoned cover thread must not hold a slot the 3MF writer needs (#116)."""
+    parts = [ColourPart(1, "Color 1", "#FF6AC1", trimesh.creation.box())]
+    ran_on: list[str] = []
+
+    def record(_: object) -> None:
+        ran_on.append(threading.current_thread().name)
+
+    queue = RenderQueue(CONFIG, paths)
+    try:
+        with mock.patch.object(jobs, "render_plate_thumbnails", record):
+            await plate_thumbnails(parts, config=CONFIG, executor=queue._thumbnails)
+    finally:
+        await queue.aclose()
+
+    assert ran_on and ran_on[0].startswith("thumbnail")
+    with pytest.raises(RuntimeError):
+        queue._thumbnails.submit(lambda: None)
 
 
 def test_a_job_written_before_the_source_hash_existed_still_loads(paths: DataPaths) -> None:

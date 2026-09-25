@@ -150,7 +150,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
 
 
 @pytest.fixture
-def app(settings: Settings, paths: DataPaths) -> FastAPI:
+def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
     """The real app, with the render step replaced by a stub that writes plausible files.
 
     ``width: 999`` makes the stub fail, which is how the failed-job paths are reached.
@@ -173,7 +173,11 @@ def app(settings: Settings, paths: DataPaths) -> FastAPI:
         return queues["queue"]
 
     application.dependency_overrides[get_queue] = queue_override
-    return application
+    yield application
+    # The workers die with the TestClient's loop; the thumbnail pool is threads, so
+    # it is released here rather than left for interpreter exit.
+    for queue in queues.values():
+        queue.close_thumbnails()
 
 
 @pytest.fixture
