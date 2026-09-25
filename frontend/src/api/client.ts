@@ -11,6 +11,7 @@ import type {
   InstalledFamily,
   Job,
   ModelSummary,
+  ModelVersion,
   Output,
   PastedSource,
   ParamValue,
@@ -38,6 +39,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  VersionDiff,
 } from './types'
 
 export const API_BASE = '/api/v1'
@@ -122,10 +124,14 @@ export const api = {
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
-  replaceSource: (slug: string, source: string, force = false) =>
+  /**
+   * Replaces the source as one revision in the model's history, named by `message`
+   * when given. Parse-checked server-side unless `force`.
+   */
+  replaceSource: (slug: string, source: string, force = false, message?: string) =>
     request<ModelSummary>(`/models/${seg(slug)}/source`, {
       method: 'PUT',
-      body: JSON.stringify({ source, force }),
+      body: JSON.stringify({ source, force, message: message ?? null }),
     }),
 
   /**
@@ -149,12 +155,32 @@ export const api = {
 
   modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
 
-  getSchema: (slug: string) => request<CustomizerSchema>(`/models/${seg(slug)}/schema`),
+  /** A `version` reads that revision's schema instead of the model's current one. */
+  getSchema: (slug: string, version?: string) =>
+    request<CustomizerSchema>(
+      version
+        ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
+        : `/models/${seg(slug)}/schema`,
+    ),
 
-  render: (slug: string, params: Record<string, ParamValue>) =>
+  listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
+
+  /** `base` omitted diffs against the revision's parent. */
+  getVersionDiff: (slug: string, version: string, base?: string) =>
+    request<VersionDiff>(
+      `/models/${seg(slug)}/versions/${seg(version)}/diff${base ? `?base=${seg(base)}` : ''}`,
+    ),
+
+  restoreVersion: (slug: string, version: string) =>
+    request<ModelVersion>(`/models/${seg(slug)}/versions/${seg(version)}/restore`, {
+      method: 'POST',
+    }),
+
+  /** `version` renders an old revision without restoring it ("Customize this version"). */
+  render: (slug: string, params: Record<string, ParamValue>, version?: string) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
-      body: JSON.stringify({ params }),
+      body: JSON.stringify({ params, version: version ?? null }),
     }),
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),

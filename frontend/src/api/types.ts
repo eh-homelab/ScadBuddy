@@ -36,6 +36,11 @@ export interface PastedSource {
   force?: boolean
 }
 
+/** #90 — one entry of a model's git history, and a patch between two of them. */
+export type ModelVersion = Schemas['ModelVersion']
+export type VersionFile = Schemas['VersionFile']
+export type VersionDiff = Schemas['VersionDiff']
+
 export type Job = Schemas['JobStatus']
 export type JobState = Job['status']
 export type BoundingBox = Schemas['BoundingBox']

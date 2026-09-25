@@ -10,7 +10,7 @@ from fastapi import APIRouter, File, Form, Header, Query, Request, Response, Upl
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.api.deps import CatalogueDep, ChecksDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, ChecksDep, ConfigDep, HistoryDep, PathsDep, SlugPath
 from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
@@ -22,6 +22,7 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
 )
+from scadbuddy.library.history import MAX_SUBJECT
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -32,6 +33,7 @@ from scadbuddy.library.scad import (
     parse_diagnostics,
 )
 from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_filename, slugify
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -59,6 +61,14 @@ def require_model(catalogue: Catalogue, slug: str) -> ModelRecord:
         return catalogue.record(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+def require_model_exists(catalogue: Catalogue, slug: str) -> None:
+    """Existence without building a record -- which costs a `git log` for the
+    model's revision. The render path runs on every debounced keystroke and only
+    needs the 404."""
+    if not catalogue.exists(slug):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
 def _parse_tags(raw: str | None) -> list[str] | None:
@@ -96,9 +106,16 @@ class PastedSource(BaseModel):
     force: bool = Field(default=False, description="Save even when the parse check fails")
 
 
-class SourceReplacement(BaseModel):
+class SourceUpdate(BaseModel):
     source: str = Field(max_length=MAX_SOURCE_CHARS, description="The replacement OpenSCAD source")
     force: bool = Field(default=False, description="Save even when the parse check fails")
+    # What the revision is called in the history. Flattened to one printable line
+    # before it reaches git -- see `history.subject_line`.
+    message: str | None = Field(
+        default=None,
+        max_length=MAX_SUBJECT,
+        description="What the revision is called in the history; a default when omitted",
+    )
 
 
 class CheckRequest(BaseModel):
@@ -337,13 +354,19 @@ async def _create(
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
     checked = await _guard_source(source, config=config, force=force, limit=limit)
     try:
-        record = catalogue.create(slug, source, meta, thumbnail=thumbnail, readme=readme)
+        # `to_thread`, because a create is a `git add` + `git commit` against the
+        # PVC and this handler is `async def` -- FastAPI only offloads plain `def`
+        # ones. On the event loop it would stall every render poll and /healthz
+        # for the length of the commit. Same at every git-touching call below.
+        record = await asyncio.to_thread(
+            catalogue.create, slug, source, meta, thumbnail=thumbnail, readme=readme
+        )
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
     if checked is not None and checked.schema is not None:
         # The check already derived it; storing it here is what stops the first
         # customizer open paying for the same subprocess again.
-        store_cached_schema(catalogue.paths.model_meta(slug), checked.schema)
+        store_cached_schema(catalogue.paths.model_schema_cache(slug), checked.schema)
     return record
 
 
@@ -411,22 +434,26 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
 @router.put(
     "/models/{slug}/source",
     response_model=ModelRecord,
-    summary="Replace the source",
+    summary="Replace a model's source as one revision",
     description=(
-        "Overwrites the source in place and re-derives the customizer schema. The "
-        "schema cache is keyed by the source's SHA-256, so the replacement invalidates "
-        "it; it is rebuilt here so the next customizer open does not pay for it."
+        "Parse-checks the replacement against the model's own directory (skipped with "
+        "`force`), then writes it as one revision in the model's history, named by "
+        "`message` when given, and re-derives the customizer schema so the next "
+        "customizer open does not pay for it."
     ),
 )
 async def put_source(
     slug: SlugPath,
-    body: SourceReplacement,
+    body: SourceUpdate,
     catalogue: CatalogueDep,
     paths: PathsDep,
     config: ConfigDep,
     checks: ChecksDep,
 ) -> ModelRecord:
-    require_model(catalogue, slug)
+    # `require_model_exists`, not `require_model`: building a record costs a
+    # `git log` for the model's revision, and this handler is `async def`. The
+    # record `write_source` returns carries the new revision anyway.
+    require_model_exists(catalogue, slug)
     checked = await _guard_source(
         body.source,
         config=config,
@@ -436,24 +463,31 @@ async def put_source(
         # checked — and has its schema derived — against the files it will really see.
         context=paths.model_dir(slug),
     )
-    await asyncio.to_thread(catalogue.replace_source, slug, body.source)
+    record = await asyncio.to_thread(
+        catalogue.write_source, slug, body.source, message=body.message
+    )
     if checked is not None and checked.schema is not None:
-        store_cached_schema(paths.model_meta(slug), checked.schema)
+        # After the write: `write_source` drops the old cache entry.
+        store_cached_schema(paths.model_schema_cache(slug), checked.schema)
     else:
-        # A forced save, or no openscad at all: nothing was derived to store. The cache
-        # is keyed by the source's SHA-256, so the stale entry is already invalid, and
-        # GET /schema is where the failure surfaces.
+        # A forced save, or no openscad at all: nothing was derived to store. GET
+        # /schema is where the failure surfaces.
         logger.warning("stored source without a schema", extra={"slug": slug})
-    return catalogue.record(slug)
+    return record
 
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")
 async def get_schema(
-    slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep, config: ConfigDep
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
+    config: ConfigDep,
 ) -> CustomizerSchema:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
+    source = await resolve_source(slug, None, paths=paths, history=history)
     try:
-        return await cached_schema(paths.model_source(slug), paths.model_meta(slug), config=config)
+        return await cached_schema(source.scad, source.schema_cache, config=config)
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"

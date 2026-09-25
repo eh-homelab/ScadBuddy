@@ -11,13 +11,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import SOURCE_NAME, DataPaths
+from scadbuddy.library.history import GitError, ModelHistory, summarise
 
 logger = logging.getLogger(__name__)
 
 THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
-SOURCE_NAME = "model.scad"
 
 
 class ModelNotFoundError(KeyError):
@@ -29,7 +29,7 @@ class ModelExistsError(ValueError):
 
 
 class ModelMeta(BaseModel):
-    """The editable half of ``model.json``. The renderer owns the ``schema`` key."""
+    """``model.json``: the model's metadata, and nothing derived."""
 
     name: str
     description: str = ""
@@ -48,13 +48,57 @@ class ModelRecord(ModelMeta):
     has_thumbnail: bool
     has_readme: bool
     updated_at: datetime
+    # The commit this model is currently at, or None when history is unavailable
+    # (no git binary). Outputs stamp this as their ``model_version``.
+    version: str | None = None
 
 
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
-    def __init__(self, paths: DataPaths) -> None:
+    def __init__(self, paths: DataPaths, history: ModelHistory | None = None) -> None:
         self.paths = paths
+        self.history = history
+
+    def _commit(self, message: str, *slugs: str) -> str | None:
+        """One commit per catalogue action. A failure never fails the action itself:
+        the files are already written, and losing the revision is the smaller harm.
+
+        ``OSError`` as well as ``GitError``, because the lock file this takes on
+        the way in is ordinary filesystem I/O -- a PVC that has gone read-only or
+        full since boot would otherwise 500 a source edit that had already been
+        written to disk, telling the client it failed when it did not.
+        """
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.commit(message, *slugs)
+        except (GitError, OSError):
+            # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
+            # attribute, and logging raises KeyError on the collision -- which
+            # would turn this whole tolerate-and-continue branch into the crash
+            # it exists to prevent.
+            logger.exception("could not record a revision", extra={"revision_message": message})
+            return None
+
+    def version(self, slug: str) -> str | None:
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            return self.history.last_commit(slug)
+        except (GitError, OSError):
+            logger.exception("could not read the revision", extra={"slug": slug})
+            return None
+
+    def versions(self) -> dict[str, str]:
+        """Every model's revision in one git call, for listing the catalogue."""
+        if self.history is None or not self.history.available:
+            return {}
+        try:
+            return self.history.last_commits()
+        except (GitError, OSError):
+            logger.exception("could not read the revisions")
+            return {}
 
     def exists(self, slug: str) -> bool:
         return self.paths.model_source(slug).is_file()
@@ -77,11 +121,18 @@ class Catalogue:
         return loaded if isinstance(loaded, dict) else {}
 
     def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
+        # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
+        # Dropping it here retires the key from volumes written before that was
+        # true, rather than leaving a cache blob in the versioned tree forever.
+        meta.pop("schema", None)
         meta_path = self.paths.model_meta(slug)
         meta_path.parent.mkdir(parents=True, exist_ok=True)
         meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
 
     def record(self, slug: str) -> ModelRecord:
+        return self._record(slug, self.version(slug))
+
+    def _record(self, slug: str, version: str | None) -> ModelRecord:
         self._require(slug)
         raw = self.read_raw_meta(slug)
         meta = ModelMeta.model_validate({"name": slug, **raw})
@@ -91,6 +142,7 @@ class Catalogue:
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(self.paths.model_source(slug).stat().st_mtime, UTC),
+            version=version,
         )
 
     def list_models(self) -> list[ModelRecord]:
@@ -99,7 +151,9 @@ class Catalogue:
         slugs = sorted(
             path.name for path in self.paths.models.iterdir() if (path / SOURCE_NAME).is_file()
         )
-        return [self.record(slug) for slug in slugs]
+        # ONE git call for the page, not one per model: see `last_commits`.
+        versions = self.versions()
+        return [self._record(slug, versions.get(slug)) for slug in slugs]
 
     def create(
         self,
@@ -120,20 +174,36 @@ class Catalogue:
             self.thumbnail_path(slug).write_bytes(thumbnail)
         if readme is not None:
             self.readme_path(slug).write_text(readme, encoding="utf-8")
+        self._commit(f"Add {slug}", slug)
         return self.record(slug)
 
-    def replace_source(self, slug: str, source: str) -> None:
-        """Swap `model.scad` for new contents without ever leaving it half-written.
+    def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
+        self._require(slug)
+        raw = self.read_raw_meta(slug)
+        raw.update(patch.model_dump(exclude_none=True))
+        self.write_raw_meta(slug, raw)
+        self._commit(f"Update {slug} metadata", slug)
+        return self.record(slug)
 
-        A render for this slug may be queued or running, and OpenSCAD opens the file by
-        path; `write_text` truncates first, so a reader landing in that window sees a
-        torn file and fails for a reason that has nothing to do with its own source.
-        `os.replace` is atomic, and a temp file in the same directory keeps it on one
-        filesystem so it stays that way.
+    def write_source(self, slug: str, source: str, *, message: str | None = None) -> ModelRecord:
+        """Replace a model's ``.scad`` as one revision.
+
+        The hook the paste/edit path (#92) calls: everything that rewrites model
+        source goes through here so it is versioned exactly once. The derived
+        schema is dropped rather than left for `cached_schema` to notice: it is
+        keyed by the source hash, so a stale one is only ever dead weight.
+
+        The swap never leaves ``model.scad`` half-written. A render for this slug
+        may be queued or running, and OpenSCAD opens the file by path;
+        `write_text` truncates first, so a reader landing in that window sees a
+        torn file and fails for a reason that has nothing to do with its own
+        source. `os.replace` is atomic, and a temp file in the same directory
+        keeps it on one filesystem so it stays that way.
         """
         self._require(slug)
-        directory = self.paths.model_dir(slug)
-        handle, staged = tempfile.mkstemp(dir=directory, prefix=".model-", suffix=".scad")
+        handle, staged = tempfile.mkstemp(
+            dir=self.paths.model_dir(slug), prefix=".model-", suffix=".scad"
+        )
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as writer:
                 writer.write(source)
@@ -141,18 +211,17 @@ class Catalogue:
         except BaseException:
             Path(staged).unlink(missing_ok=True)
             raise
-
-    def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
-        self._require(slug)
-        raw = self.read_raw_meta(slug)
-        raw.update(patch.model_dump(exclude_none=True))
-        self.write_raw_meta(slug, raw)
+        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+        self._commit(message or f"Edit {slug} source", slug)
         return self.record(slug)
 
     def delete(self, slug: str) -> None:
         self._require(slug)
         shutil.rmtree(self.paths.model_dir(slug), ignore_errors=True)
+        self.paths.model_schema_cache(slug).unlink(missing_ok=True)
+        self._commit(f"Delete {slug}", slug)
         # Outputs are keyed by slug and only listable through it, so they go too.
+        # They are NOT in the repository: a 3MF is a build artefact, not source.
         shutil.rmtree(self.paths.outputs / slug, ignore_errors=True)
 
     def seed(self, seed_dir: Path) -> list[str]:
@@ -172,4 +241,7 @@ class Catalogue:
             seeded.append(candidate.name)
         if seeded:
             logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})
+            # A re-seed on an image upgrade lands as a commit rather than a silent
+            # overwrite -- which is the whole point of #90's seed clause.
+            self._commit(f"Seed {summarise(seeded)} from the image", *seeded)
         return seeded

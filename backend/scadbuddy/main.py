@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -7,7 +8,7 @@ from contextlib import asynccontextmanager
 from fastapi import APIRouter, FastAPI
 
 from scadbuddy import __version__
-from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings
+from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings, versions
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
@@ -25,6 +26,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 def _api_router() -> APIRouter:
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(models.router)
+    router.include_router(versions.router)
     router.include_router(jobs.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
@@ -37,20 +39,27 @@ def _api_router() -> APIRouter:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     state.paths.ensure()
+    # Before the seed: an existing models directory becomes revision 1, so a
+    # re-seed on an image upgrade is a commit on top of it rather than an
+    # unversioned overwrite.
+    await asyncio.to_thread(state.history.ensure_repo)
     # Before anything shells out to openscad or fc-list: it is what points
     # fontconfig at the fonts on the data volume.
     state.fonts.prepare()
     state.openscad_version = await probe_openscad_version(state.config)
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
-        state.catalogue.seed(seed_dir)
+        await asyncio.to_thread(state.catalogue.seed, seed_dir)
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
     logger.info(
         "scadbuddy started",
         extra={
-            "version": __version__,
+            # The deploy provenance stamped into the image (what /healthz
+            # reports), not the package version, which is not bumped per deploy.
+            "version": state.settings.version,
+            "revision": state.settings.revision,
             "data_dir": str(state.paths.root),
             "openscad_version": state.openscad_version,
         },

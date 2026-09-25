@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from scadbuddy.core.config import load_config
+from scadbuddy.library.history import GIT
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -31,6 +32,12 @@ def openscad_binary() -> str | None:
     return shutil.which(load_config().openscad)
 
 
+def git_binary() -> str | None:
+    """`git` is baked into every image stage, so this skip is dead where CI runs
+    the suite -- it is a developer convenience, not a supported configuration."""
+    return shutil.which(GIT)
+
+
 def installed_font_families() -> str:
     """`fc-list` output, lowercased. Empty when fontconfig is absent — which reads as
     "the family is missing", the safe answer: a missing face is substituted silently."""
@@ -43,6 +50,12 @@ def installed_font_families() -> str:
 def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad") and openscad_binary() is None:
         pytest.skip("openscad is not on PATH")
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_git(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_git") and git_binary() is None:
+        pytest.skip("git is not on PATH")
 
 
 def write_openscad_3mf(

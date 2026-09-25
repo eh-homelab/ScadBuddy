@@ -19,7 +19,12 @@ export interface RenderState {
  * *is* the render). A newer submission supersedes an older one — its result is
  * dropped rather than shown out of order.
  */
-export function useRenderJob(slug: string | undefined, params: ParamValues | undefined): RenderState {
+export function useRenderJob(
+  slug: string | undefined,
+  params: ParamValues | undefined,
+  /** #90 — render this revision rather than the one the model is currently at. */
+  version?: string,
+): RenderState {
   const [job, setJob] = useState<Job | undefined>(undefined)
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
@@ -55,7 +60,7 @@ export function useRenderJob(slug: string | undefined, params: ParamValues | und
     }
 
     api
-      .render(slug, params)
+      .render(slug, params, version)
       .then(({ job_id }) => {
         if (isStale()) return
         void poll(job_id)
@@ -70,7 +75,7 @@ export function useRenderJob(slug: string | undefined, params: ParamValues | und
       stopped = true
       if (timer) clearTimeout(timer)
     }
-  }, [slug, params])
+  }, [slug, params, version])
 
   return { job, rendering, error }
 }

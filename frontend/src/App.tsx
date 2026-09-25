@@ -6,6 +6,7 @@ import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { VersionsPage } from './pages/VersionsPage'
 
 // Monaco is the biggest thing in the bundle and only these two routes want it, so
 // they are split out: opening the customizer never downloads an editor.
@@ -53,6 +54,7 @@ export function App() {
           }
         />
         <Route path="m/:slug/history" element={<HistoryPage />} />
+        <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

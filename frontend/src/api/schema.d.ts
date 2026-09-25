@@ -215,8 +215,8 @@ export interface paths {
         /** Raw OpenSCAD source */
         get: operations["get_source_api_v1_models__slug__source_get"];
         /**
-         * Replace the source
-         * @description Overwrites the source in place and re-derives the customizer schema. The schema cache is keyed by the source's SHA-256, so the replacement invalidates it; it is rebuilt here so the next customizer open does not pay for it.
+         * Replace a model's source as one revision
+         * @description Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.
          */
         put: operations["put_source_api_v1_models__slug__source_put"];
         post?: never;
@@ -235,6 +235,91 @@ export interface paths {
         };
         /** Model thumbnail */
         get: operations["get_thumbnail_api_v1_models__slug__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/versions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A model's revision history */
+        get: operations["list_versions_api_v1_models__slug__versions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/versions/{commit}/diff": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Diff a revision against another (its parent by default) */
+        get: operations["get_version_diff_api_v1_models__slug__versions__commit__diff_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/versions/{commit}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Restore a revision as a new commit */
+        post: operations["restore_version_api_v1_models__slug__versions__commit__restore_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/versions/{commit}/schema": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A revision's customizer schema */
+        get: operations["get_version_schema_api_v1_models__slug__versions__commit__schema_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/versions/{commit}/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A revision's OpenSCAD source */
+        get: operations["get_version_source_api_v1_models__slug__versions__commit__source_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1141,11 +1226,15 @@ export interface components {
             data_dir_writable: boolean;
             /** Openscad Version */
             openscad_version: string | null;
+            /** Revision */
+            revision: string;
             /**
              * Status
              * @enum {string}
              */
             status: "ok" | "degraded";
+            /** Version */
+            version: string;
         };
         /** InstallRequest */
         InstallRequest: {
@@ -1189,6 +1278,8 @@ export interface components {
             id: string;
             /** Log Tail */
             log_tail?: string[];
+            /** Model Version */
+            model_version?: string | null;
             /** Params */
             params?: {
                 [key: string]: boolean | number | string;
@@ -1258,6 +1349,31 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            /** Version */
+            version?: string | null;
+        };
+        /** ModelVersion */
+        ModelVersion: {
+            /** Author */
+            author: string;
+            /** Commit */
+            commit: string;
+            /**
+             * Current
+             * @default false
+             */
+            current: boolean;
+            /**
+             * Date
+             * Format: date-time
+             */
+            date: string;
+            /** Files */
+            files?: components["schemas"]["VersionFile"][];
+            /** Message */
+            message: string;
+            /** Short */
+            short: string;
         };
         /** Option */
         Option: {
@@ -1996,6 +2112,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Version */
+            version?: string | null;
         };
         /** SendRequest */
         SendRequest: {
@@ -2147,14 +2265,19 @@ export interface components {
              */
             timed_out: boolean;
         };
-        /** SourceReplacement */
-        SourceReplacement: {
+        /** SourceUpdate */
+        SourceUpdate: {
             /**
              * Force
              * @description Save even when the parse check fails
              * @default false
              */
             force: boolean;
+            /**
+             * Message
+             * @description What the revision is called in the history; a default when omitted
+             */
+            message?: string | null;
             /**
              * Source
              * @description The replacement OpenSCAD source
@@ -2200,6 +2323,29 @@ export interface components {
             msg: string;
             /** Error Type */
             type: string;
+        };
+        /** VersionDiff */
+        VersionDiff: {
+            /** Base */
+            base: string;
+            /** Files */
+            files?: components["schemas"]["VersionFile"][];
+            /** Head */
+            head: string;
+            /** Patch */
+            patch: string;
+            /** Slug */
+            slug: string;
+        };
+        /**
+         * VersionFile
+         * @description ``A``/``M``/``D`` plus the path, relative to the model's own directory.
+         */
+        VersionFile: {
+            /** Path */
+            path: string;
+            /** Status */
+            status: string;
         };
     };
     responses: never;
@@ -2745,7 +2891,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["SourceReplacement"];
+                "application/json": components["schemas"]["SourceUpdate"];
             };
         };
         responses: {
@@ -2787,6 +2933,169 @@ export interface operations {
                 };
                 content: {
                     "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_versions_api_v1_models__slug__versions_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelVersion"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_version_diff_api_v1_models__slug__versions__commit__diff_get: {
+        parameters: {
+            query?: {
+                base?: string | null;
+            };
+            header?: never;
+            path: {
+                slug: string;
+                commit: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["VersionDiff"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    restore_version_api_v1_models__slug__versions__commit__restore_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                commit: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelVersion"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_version_schema_api_v1_models__slug__versions__commit__schema_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                commit: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CustomizerSchema"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_version_source_api_v1_models__slug__versions__commit__source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                commit: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/plain": unknown;
                 };
             };
             /** @description Validation Error */

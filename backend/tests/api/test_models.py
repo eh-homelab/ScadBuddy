@@ -117,15 +117,23 @@ def test_get_patch_and_delete_a_model(client: TestClient, model: str) -> None:
     assert client.get(f"/api/v1/models/{model}").status_code == 404
 
 
-def test_patching_preserves_the_cached_schema(
+def test_the_derived_schema_is_cached_outside_the_versioned_tree(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
+    """Deriving a schema must not dirty `models/`.
+
+    It is written lazily, by a read, outside any commit -- so if it lived in
+    `model.json` the repository would sit permanently dirty and the next
+    metadata commit would carry a cache blob it has nothing to do with.
+    """
     assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
     client.patch(f"/api/v1/models/{model}", json={"description": "edited"})
 
     meta = json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
     assert meta["description"] == "edited"
-    assert meta["schema"]["parameters"][0]["name"] == "width"
+    assert "schema" not in meta
+    cached = json.loads(paths.model_schema_cache(model).read_text(encoding="utf-8"))
+    assert cached["schema"]["parameters"][0]["name"] == "width"
 
 
 def test_deleting_a_model_takes_its_outputs_with_it(
@@ -255,7 +263,7 @@ def test_replacing_the_source_rederives_the_schema(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
     assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
-    before = json.loads(paths.model_meta(model).read_text())["schema"]["source_sha256"]
+    before = json.loads(paths.model_schema_cache(model).read_text())["schema"]["source_sha256"]
 
     replacement = 'width = 42;\nlabel = "new";\ncube(width);\n'
     response = client.put(f"/api/v1/models/{model}/source", json={"source": replacement})
@@ -263,7 +271,7 @@ def test_replacing_the_source_rederives_the_schema(
     assert response.json()["slug"] == model
     assert client.get(f"/api/v1/models/{model}/source").text == replacement
 
-    after = json.loads(paths.model_meta(model).read_text())["schema"]["source_sha256"]
+    after = json.loads(paths.model_schema_cache(model).read_text())["schema"]["source_sha256"]
     assert after == source_sha256(replacement)
     assert after != before
 

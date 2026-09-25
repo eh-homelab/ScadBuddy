@@ -1027,6 +1027,10 @@
             ],
             "title": "Openscad Version"
           },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "ok",
@@ -1034,12 +1038,18 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
           }
         },
         "required": [
           "status",
           "openscad_version",
-          "data_dir_writable"
+          "data_dir_writable",
+          "revision",
+          "version"
         ],
         "title": "Health",
         "type": "object"
@@ -1167,6 +1177,17 @@
             },
             "title": "Log Tail",
             "type": "array"
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
           },
           "params": {
             "additionalProperties": {
@@ -1385,6 +1406,17 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "required": [
@@ -1395,6 +1427,52 @@
           "updated_at"
         ],
         "title": "ModelRecord",
+        "type": "object"
+      },
+      "ModelVersion": {
+        "properties": {
+          "author": {
+            "title": "Author",
+            "type": "string"
+          },
+          "commit": {
+            "title": "Commit",
+            "type": "string"
+          },
+          "current": {
+            "default": false,
+            "title": "Current",
+            "type": "boolean"
+          },
+          "date": {
+            "format": "date-time",
+            "title": "Date",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/VersionFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "short": {
+            "title": "Short",
+            "type": "string"
+          }
+        },
+        "required": [
+          "commit",
+          "short",
+          "author",
+          "date",
+          "message"
+        ],
+        "title": "ModelVersion",
         "type": "object"
       },
       "Option": {
@@ -3602,6 +3680,18 @@
             },
             "title": "Params",
             "type": "object"
+          },
+          "version": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{7,40}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Version"
           }
         },
         "title": "RenderRequest",
@@ -4095,13 +4185,26 @@
         "title": "SourceCheck",
         "type": "object"
       },
-      "SourceReplacement": {
+      "SourceUpdate": {
         "properties": {
           "force": {
             "default": false,
             "description": "Save even when the parse check fails",
             "title": "Force",
             "type": "boolean"
+          },
+          "message": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the revision is called in the history; a default when omitted",
+            "title": "Message"
           },
           "source": {
             "description": "The replacement OpenSCAD source",
@@ -4113,7 +4216,7 @@
         "required": [
           "source"
         ],
-        "title": "SourceReplacement",
+        "title": "SourceUpdate",
         "type": "object"
       },
       "SpoolOption": {
@@ -4271,6 +4374,60 @@
           "type"
         ],
         "title": "ValidationError",
+        "type": "object"
+      },
+      "VersionDiff": {
+        "properties": {
+          "base": {
+            "title": "Base",
+            "type": "string"
+          },
+          "files": {
+            "items": {
+              "$ref": "#/components/schemas/VersionFile"
+            },
+            "title": "Files",
+            "type": "array"
+          },
+          "head": {
+            "title": "Head",
+            "type": "string"
+          },
+          "patch": {
+            "title": "Patch",
+            "type": "string"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slug",
+          "base",
+          "head",
+          "patch"
+        ],
+        "title": "VersionDiff",
+        "type": "object"
+      },
+      "VersionFile": {
+        "description": "``A``/``M``/``D`` plus the path, relative to the model's own directory.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "status",
+          "path"
+        ],
+        "title": "VersionFile",
         "type": "object"
       }
     }
@@ -5052,7 +5209,7 @@
         ]
       },
       "put": {
-        "description": "Overwrites the source in place and re-derives the customizer schema. The schema cache is keyed by the source's SHA-256, so the replacement invalidates it; it is rebuilt here so the next customizer open does not pay for it.",
+        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.",
         "operationId": "put_source_api_v1_models__slug__source_put",
         "parameters": [
           {
@@ -5071,7 +5228,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/SourceReplacement"
+                "$ref": "#/components/schemas/SourceUpdate"
               }
             }
           },
@@ -5099,7 +5256,7 @@
             "description": "Validation Error"
           }
         },
-        "summary": "Replace the source",
+        "summary": "Replace a model's source as one revision",
         "tags": [
           "models"
         ]
@@ -5142,6 +5299,295 @@
         "summary": "Model thumbnail",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/versions": {
+      "get": {
+        "operationId": "list_versions_api_v1_models__slug__versions_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ModelVersion"
+                  },
+                  "title": "Response List Versions Api V1 Models  Slug  Versions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A model's revision history",
+        "tags": [
+          "versions"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/versions/{commit}/diff": {
+      "get": {
+        "operationId": "get_version_diff_api_v1_models__slug__versions__commit__diff_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "commit",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{7,40}$",
+              "title": "Commit",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "base",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Base"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VersionDiff"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Diff a revision against another (its parent by default)",
+        "tags": [
+          "versions"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/versions/{commit}/restore": {
+      "post": {
+        "operationId": "restore_version_api_v1_models__slug__versions__commit__restore_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "commit",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{7,40}$",
+              "title": "Commit",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelVersion"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Restore a revision as a new commit",
+        "tags": [
+          "versions"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/versions/{commit}/schema": {
+      "get": {
+        "operationId": "get_version_schema_api_v1_models__slug__versions__commit__schema_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "commit",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{7,40}$",
+              "title": "Commit",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CustomizerSchema"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A revision's customizer schema",
+        "tags": [
+          "versions"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/versions/{commit}/source": {
+      "get": {
+        "operationId": "get_version_source_api_v1_models__slug__versions__commit__source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "commit",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{7,40}$",
+              "title": "Commit",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/plain": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A revision's OpenSCAD source",
+        "tags": [
+          "versions"
         ]
       }
     },

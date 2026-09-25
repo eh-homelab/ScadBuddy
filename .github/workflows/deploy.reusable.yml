@@ -1,0 +1,295 @@
+---
+name: Deploy (reusable)
+
+# The one deploy mechanism, shared by deploy-main.yml and deploy-release.yml:
+# pin an already-published image digest in eh-homelab/clusters and let GitOps
+# take it from there.
+#
+#   1. Mint an eh-homelab-org-runners App token scoped to `clusters`
+#      (contents + pull_requests). Not GITHUB_TOKEN: it cannot write to another
+#      repo, and a PR authored by GITHUB_TOKEN would not trigger clusters' own
+#      CI, so the required checks that gate auto-merge would never report.
+#   2. Rewrite applications/scadbuddy/scadbuddy.yaml: the image line to
+#      `ghcr.io/eh-homelab/scadbuddy:<version>@sha256:<digest>` and the three
+#      `scadbuddy.eh-homelab.io/*` annotations that record what was deployed.
+#      Digest-pinned on purpose — nodes pull ghcr.io through a Nexus proxy that
+#      caches tag metadata for 24 h, so a tag alone can serve yesterday's image.
+#   3. Open ONE PR, "deploy(scadbuddy): <version>", on the fixed branch
+#      `deploy/scadbuddy`, and arm `gh pr merge --auto --squash`. A newer deploy
+#      supersedes an older open one: it closes that PR and replaces the branch.
+#      The clusters ruleset (CI Summary + claude-review) is the safety net; the
+#      merge is the deploy.
+#   4. On merge ArgoCD syncs the `scadbuddy` Application, and clusters'
+#      scadbuddy-verify-deploy.yml waits for /healthz to report the pinned
+#      `revision`, then reports back here (release notes or a commit comment).
+#
+# Nothing in this file talks to the cluster: GitHub-hosted runners cannot reach
+# it, and they do not need to — verification runs on a LAN runner in clusters.
+
+on:
+  workflow_call:
+    inputs:
+      digest:
+        description: "Image digest to pin, `sha256:<64 hex>`"
+        required: true
+        type: string
+      version:
+        description: "Tag label to show next to the digest (`X.Y.Z` or `sha-<short>`)"
+        required: true
+        type: string
+      revision:
+        description: "Full commit SHA the image was built from (what /healthz must report)"
+        required: true
+        type: string
+      source_url:
+        description: "Where this deploy came from (release page or commit URL)"
+        required: true
+        type: string
+      source_kind:
+        description: "`release` or `main`"
+        required: true
+        type: string
+    outputs:
+      pr_url:
+        description: "The clusters deploy PR (empty when nothing changed)"
+        value: ${{ jobs.pin.outputs.pr_url }}
+      pr_number:
+        description: "Its number (empty when nothing changed)"
+        value: ${{ jobs.pin.outputs.pr_number }}
+      unchanged:
+        description: "`true` when clusters already pins this exact digest"
+        value: ${{ jobs.pin.outputs.unchanged }}
+      armed:
+        description: "`true` when auto-merge was armed on the PR; `false` means the PR exists but needs a manual merge"
+        value: ${{ jobs.pin.outputs.armed }}
+
+permissions:
+  contents: read
+
+env:
+  CLUSTERS_REPO: eh-homelab/clusters
+  MANIFEST: applications/scadbuddy/scadbuddy.yaml
+  DEPLOY_BRANCH: deploy/scadbuddy
+  IMAGE: ghcr.io/eh-homelab/scadbuddy
+
+jobs:
+  pin:
+    name: Pin ${{ inputs.version }} in clusters
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # The one place the two callers can race: this job closes the previous
+    # deploy PR, replaces the `deploy/scadbuddy` branch and opens a new PR.
+    # Job-level, so only these few seconds serialise — deploy-release's image
+    # wait and deploy-main's digest lookup run concurrently. Never cancel: a
+    # run cut off between the push and `gh pr merge --auto` leaves an orphan.
+    #
+    # GitHub keeps ONE running and ONE pending job per group; a third request
+    # cancels the pending one (it never runs) and takes its place. So the
+    # newest request always runs, and a deploy dropped from the queue is one
+    # a newer request overtook before it started — the same outcome its own
+    # supersession logic would have produced, minus the PR. The callers
+    # report that case (`needs.deploy.result == 'cancelled'`) so it is never
+    # silent; re-running the dropped run deploys it.
+    concurrency:
+      group: scadbuddy-deploy
+      cancel-in-progress: false
+    outputs:
+      pr_url: ${{ steps.pr.outputs.pr_url }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      unchanged: ${{ steps.edit.outputs.unchanged }}
+      armed: ${{ steps.pr.outputs.armed }}
+    steps:
+      - name: Validate inputs
+        env:
+          DIGEST: ${{ inputs.digest }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ inputs.revision }}
+          KIND: ${{ inputs.source_kind }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+          [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::digest must be sha256:<64 hex>, got '$DIGEST'"; exit 1; }
+          [[ "$REVISION" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::revision must be a full SHA, got '$REVISION'"; exit 1; }
+          # A tag label: what docker/metadata-action emits for a semver tag or
+          # a short sha. Anything else would produce an unpullable image ref.
+          [[ "$VERSION" =~ ^[A-Za-z0-9._-]{1,128}$ ]] || { echo "::error::version '$VERSION' is not a valid image tag"; exit 1; }
+          [[ "$KIND" == "release" || "$KIND" == "main" ]] || { echo "::error::source_kind must be release or main"; exit 1; }
+          # A github.com URL over a conservative charset: it is interpolated
+          # into a sed replacement below, where `&`, `\` and `|` are special.
+          [[ "$SOURCE_URL" =~ ^https://github\.com/[A-Za-z0-9._/-]+$ ]] || { echo "::error::source_url must be a plain https://github.com/... URL, got '$SOURCE_URL'"; exit 1; }
+
+      # The digest must be pullable before it is pinned: a typo here would
+      # merge cleanly in clusters and then ImagePullBackOff in production.
+      - name: Confirm the image exists on GHCR
+        env:
+          DIGEST: ${{ inputs.digest }}
+        run: docker buildx imagetools inspect "${IMAGE}@${DIGEST}" > /dev/null
+
+      - name: Mint an App token for clusters
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          owner: eh-homelab
+          repositories: clusters
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Check out clusters main
+        uses: actions/checkout@v7
+        with:
+          repository: eh-homelab/clusters
+          ref: main
+          token: ${{ steps.app-token.outputs.token }}
+          fetch-depth: 1
+          path: clusters
+
+      # sed against anchored lines rather than a YAML rewrite: yq would
+      # reflow the whole document and bury the one-line change in noise. Each
+      # target must match exactly once, before and after, or the edit aborts.
+      - name: Pin the digest and record provenance
+        id: edit
+        working-directory: clusters
+        env:
+          DIGEST: ${{ inputs.digest }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ inputs.revision }}
+          SOURCE_URL: ${{ inputs.source_url }}
+        run: |
+          set -euo pipefail
+          expect_one() { # pattern description
+            local n; n=$(grep -cE "$1" "$MANIFEST" || true)
+            [ "$n" -eq 1 ] || { echo "::error file=$MANIFEST::expected exactly one $2 line, found $n"; exit 1; }
+          }
+          expect_one "^\s*image: ${IMAGE//./\\.}[^[:space:]]*$" "image"
+          expect_one '^\s*scadbuddy\.eh-homelab\.io/version: ' "version annotation"
+          expect_one '^\s*scadbuddy\.eh-homelab\.io/revision: ' "revision annotation"
+          expect_one '^\s*scadbuddy\.eh-homelab\.io/source: ' "source annotation"
+
+          # `|` as the sed delimiter: none of the substituted values (an image
+          # ref, a tag, a SHA, a github.com URL) can contain it.
+          # The `unverifiable` line is an escape hatch for a HAND-written pin
+          # of an image that cannot report its commit; this pipeline always
+          # writes a full-SHA revision, so a leftover one would make every
+          # later verify run warn about a pin that no longer exists. Drop it.
+          sed -i -E \
+            -e "s|^(\s*)image: ${IMAGE//./\\.}[^[:space:]]*\$|\1image: ${IMAGE}:${VERSION}@${DIGEST}|" \
+            -e "s|^(\s*)scadbuddy\.eh-homelab\.io/version: .*\$|\1scadbuddy.eh-homelab.io/version: \"${VERSION}\"|" \
+            -e "s|^(\s*)scadbuddy\.eh-homelab\.io/revision: .*\$|\1scadbuddy.eh-homelab.io/revision: \"${REVISION}\"|" \
+            -e "s|^(\s*)scadbuddy\.eh-homelab\.io/source: .*\$|\1scadbuddy.eh-homelab.io/source: \"${SOURCE_URL}\"|" \
+            -e '/^\s*scadbuddy\.eh-homelab\.io\/unverifiable: /d' \
+            "$MANIFEST"
+
+          # Round-trip every rewritten line, not just the image: a sed that
+          # silently matched nothing would otherwise merge stale provenance.
+          expect_one "^\s*image: ${IMAGE//./\\.}:${VERSION//./\\.}@${DIGEST}\$" "pinned image"
+          expect_one "^\s*scadbuddy\.eh-homelab\.io/version: \"${VERSION//./\\.}\"\$" "rewritten version annotation"
+          expect_one "^\s*scadbuddy\.eh-homelab\.io/revision: \"${REVISION}\"\$" "rewritten revision annotation"
+          expect_one "^\s*scadbuddy\.eh-homelab\.io/source: \"${SOURCE_URL//./\\.}\"\$" "rewritten source annotation"
+          if grep -qE '^\s*scadbuddy\.eh-homelab\.io/unverifiable: ' "$MANIFEST"; then
+            echo "::error file=$MANIFEST::an unverifiable annotation survived the rewrite; a pipeline pin must not carry one"; exit 1
+          fi
+          # Scoped to the container just pinned, not a file-wide grep: a
+          # second container with the right policy must not mask drift here.
+          policy=$(yq eval-all -N \
+            'select(.kind == "Deployment" and .metadata.name == "scadbuddy") | .spec.template.spec.containers[] | select(.name == "scadbuddy") | .imagePullPolicy // ""' \
+            "$MANIFEST")
+          [ "$policy" = "IfNotPresent" ] \
+            || { echo "::error file=$MANIFEST::the scadbuddy container's imagePullPolicy must be IfNotPresent once the image is digest-pinned (found '${policy:-<unset>}')"; exit 1; }
+
+          if git diff --quiet -- "$MANIFEST"; then
+            echo "clusters already pins ${IMAGE}:${VERSION}@${DIGEST}; nothing to deploy"
+            echo "unchanged=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "unchanged=false" >> "$GITHUB_OUTPUT"
+            git --no-pager diff -- "$MANIFEST"
+          fi
+
+      - name: Open the deploy PR and arm auto-merge
+        id: pr
+        if: steps.edit.outputs.unchanged == 'false'
+        working-directory: clusters
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_REPO: ${{ env.CLUSTERS_REPO }}
+          DIGEST: ${{ inputs.digest }}
+          VERSION: ${{ inputs.version }}
+          REVISION: ${{ inputs.revision }}
+          SOURCE_URL: ${{ inputs.source_url }}
+          KIND: ${{ inputs.source_kind }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          git config user.name "eh-homelab-org-runners[bot]"
+          git config user.email "287522375+eh-homelab-org-runners[bot]@users.noreply.github.com"
+
+          # One deploy branch, one open deploy PR. A newer deploy supersedes
+          # the older one: close it (with a pointer) and replace the branch.
+          gh pr list --head "$DEPLOY_BRANCH" --state open --json number --jq '.[].number' \
+            | while read -r old; do
+                gh pr close "$old" --comment "Superseded by a newer ScadBuddy deploy (${VERSION}, ${RUN_URL})."
+              done
+          git push origin --delete "$DEPLOY_BRANCH" 2>/dev/null || true
+
+          git checkout -B "$DEPLOY_BRANCH"
+          git add "$MANIFEST"
+          git commit -q -F - <<EOF
+          deploy(scadbuddy): ${VERSION}
+
+          Pin ${IMAGE}:${VERSION}@${DIGEST}
+          built from eh-homelab/ScadBuddy@${REVISION} (${KIND}).
+
+          Source: ${SOURCE_URL}
+          Deploy run: ${RUN_URL}
+          EOF
+          git push -u origin "$DEPLOY_BRANCH"
+
+          case "$KIND" in
+            release) report="the release notes of ${SOURCE_URL}" ;;
+            *)       report="a comment on eh-homelab/ScadBuddy@${REVISION:0:7}" ;;
+          esac
+          pr_url=$(gh pr create \
+            --title "deploy(scadbuddy): ${VERSION}" \
+            --body "$(cat <<EOF
+          Automated by eh-homelab/ScadBuddy \`deploy.reusable.yml\` — [run](${RUN_URL}).
+
+          - **Image:** \`${IMAGE}:${VERSION}@${DIGEST}\`
+          - **Built from:** ${SOURCE_URL} (\`${REVISION}\`)
+          - **Path:** ${KIND}
+
+          Auto-merge is armed; this repo's ruleset (CI Summary + claude-review) gates it. On merge ArgoCD syncs the \`scadbuddy\` Application and \`scadbuddy-verify-deploy.yml\` waits for the pod's \`/healthz\` to report revision \`${REVISION:0:7}\`, then posts the result here and on ${report}.
+          EOF
+          )")
+          echo "pr_url=$pr_url" >> "$GITHUB_OUTPUT"
+          echo "pr_number=${pr_url##*/}" >> "$GITHUB_OUTPUT"
+          # The PR exists from here on, whatever happens next: record whether
+          # auto-merge armed so a caller can say "merge it by hand" rather
+          # than "no PR was opened" when this fails.
+          if gh pr merge "$pr_url" --auto --squash; then
+            armed=true
+          else
+            armed=false
+            echo "::error::opened ${pr_url} but could not arm auto-merge; it needs a manual merge"
+          fi
+          echo "armed=$armed" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Deploy PR opened"
+            echo
+            if [ "$armed" = true ]; then
+              echo "- ${pr_url} — auto-merge armed"
+            else
+              echo "- ${pr_url} — **auto-merge could not be armed; merge it by hand**"
+            fi
+            echo "- \`${IMAGE}:${VERSION}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$armed" = true ]
+
+      - name: Note an unchanged pin
+        if: steps.edit.outputs.unchanged == 'true'
+        env:
+          DIGEST: ${{ inputs.digest }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          echo "### Nothing to deploy" >> "$GITHUB_STEP_SUMMARY"
+          echo "clusters already pins \`${IMAGE}:${VERSION}@${DIGEST}\`." >> "$GITHUB_STEP_SUMMARY"

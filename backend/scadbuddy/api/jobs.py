@@ -1,16 +1,27 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, Request, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.api.deps import CatalogueDep, ConfigDep, JobIdPath, PathsDep, QueueDep, SlugPath
-from scadbuddy.api.models import require_model
+from scadbuddy.api.deps import (
+    CatalogueDep,
+    ConfigDep,
+    HistoryDep,
+    JobIdPath,
+    PathsDep,
+    QueueDep,
+    SlugPath,
+)
+from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.versions import require_history
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue
+from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, resolve_source
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
 from scadbuddy.render.schema import ParamValue
 
@@ -21,6 +32,9 @@ GLB_MEDIA_TYPE = "model/gltf-binary"
 
 class RenderRequest(BaseModel):
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    # #90's "Customize this version": render an old revision without restoring it.
+    # Omitted means the revision the model is currently at.
+    version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
 
 
 class RenderAccepted(BaseModel):
@@ -29,9 +43,12 @@ class RenderAccepted(BaseModel):
 
 
 class JobStatus(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     slug: str
     status: JobState
+    model_version: str | None = None
     params: dict[str, ParamValue] = Field(default_factory=dict)
     created_at: datetime
     started_at: datetime | None = None
@@ -51,6 +68,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         id=job.id,
         slug=job.slug,
         status=job.state,
+        model_version=job.model_version,
         params=job.params,
         created_at=job.created_at,
         started_at=job.started_at,
@@ -63,6 +81,21 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         warnings=result.warnings if result else None,
         parts=result.parts if result else None,
     )
+
+
+async def _resolve_version(history: HistoryDep, slug: str, version: str | None) -> str | None:
+    """Validate an explicitly requested revision. ``None`` leaves the caller to fall
+    back to whatever the model is currently at."""
+    if version is None:
+        return None
+    require_history(history)
+    try:
+        # `git rev-parse` is a subprocess, and this runs from an `async def`.
+        return await asyncio.to_thread(history.resolve, version)
+    except RevisionNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {version!r}") from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
 def require_job(queue: RenderQueue, job_id: str) -> Job:
@@ -83,15 +116,26 @@ async def render_model(
     body: RenderRequest,
     request: Request,
     catalogue: CatalogueDep,
+    history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
     queue: QueueDep,
 ) -> RenderAccepted:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
+    requested = await _resolve_version(history, slug, body.version)
     try:
-        schema = await cached_schema(
-            paths.model_source(slug), paths.model_meta(slug), config=config
-        )
+        # The schema the parameters are validated against has to be the schema of
+        # the revision being rendered, not the one the model is currently at.
+        # `resolve_source` also hands back which revision that is, so the job can
+        # be stamped without asking git a second time.
+        source = await resolve_source(slug, requested, paths=paths, history=history)
+        schema = await cached_schema(source.scad, source.schema_cache, config=config)
+    except RevisionNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {body.version}"
+        ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
@@ -111,7 +155,7 @@ async def render_model(
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
-    job = await queue.submit(slug, body.params)
+    job = await queue.submit(slug, body.params, model_version=source.version)
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 

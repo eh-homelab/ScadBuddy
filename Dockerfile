@@ -68,6 +68,13 @@ FROM openscad/openscad:dev AS base
 # (fonts-dejavu 2.37-8, fonts-noto-core 20201225-2, fonts-lobster 2.0-2.1,
 # fonts-lobstertwo 2.0-2.1).
 #
+# `git` is a runtime dependency too, not tooling: the models directory on the data
+# volume IS a git repository (backend/scadbuddy/library/history.py), and every
+# upload, edit, restore and delete is a commit in it. Without the binary the app
+# still serves models, but the history API answers 503 and nothing is versioned.
+# A build-time FLOOR is asserted below — deliberately a floor and not a pin like
+# OPENSCAD_VERSION, for the opposite reason that one exists.
+#
 # TRAP, measured in this image: there is NO family called "Lobster". Debian's
 # `fonts-lobster` ships /usr/share/fonts/opentype/lobster/lobster.otf, whose
 # internal family name is "Lobster Two" (style "Bold Italic"), so `fc-list`
@@ -85,6 +92,7 @@ RUN apt-get update \
         fonts-lobster \
         fonts-lobstertwo \
         fonts-noto-core \
+        git \
         python3 \
         python3-venv \
         tini \
@@ -129,6 +137,37 @@ RUN openscad --version > /tmp/openscad-version 2>&1 \
          exit 1; \
        fi
 ENV OPENSCAD_VERSION=${OPENSCAD_VERSION}
+
+# git, unlike OpenSCAD, is asserted as a MINIMUM and not pinned to an exact
+# build. The OpenSCAD assertion exists because every structural fact the render
+# pipeline depends on was MEASURED against one nightly, so any drift has to
+# break the build. Nothing here was measured off a git build: `history.py`
+# depends on three dated, documented CLI contracts, and a floor is what actually
+# states them — while a pin would break this image on every ordinary trixie git
+# bump, which is noise rather than signal.
+#
+#   2.9     core.hooksPath          (hooks disabled on every invocation)
+#   2.28    --initial-branch        (`init.defaultBranch` lives in the global
+#                                    config this module refuses to read)
+#   2.35.2  safe.directory as PROTECTED command-line scope — the one that makes
+#           a PVC whose ownership does not match uid 10001 usable at all
+#
+# No pipes, for the same reason the OpenSCAD check above uses a temp file: every
+# pipe in a RUN trips hadolint's DL4006, and `SHELL -o pipefail` for one command
+# is the worse trade. `sort -V` reads and writes files here instead.
+ARG MIN_GIT_VERSION=2.35.2
+RUN git --version > /tmp/git-version \
+    && actual="$(sed -n 's/^git version //p' /tmp/git-version)" \
+    && actual="${actual%% *}" \
+    && printf '%s\n%s\n' "$MIN_GIT_VERSION" "$actual" > /tmp/git-versions \
+    && sort -V /tmp/git-versions > /tmp/git-sorted \
+    && lowest="$(sed -n 1p /tmp/git-sorted)" \
+    && rm -f /tmp/git-version /tmp/git-versions /tmp/git-sorted \
+    && if [ "$lowest" != "$MIN_GIT_VERSION" ]; then \
+         echo "ERROR: base image carries git '${actual}'; history.py needs >= ${MIN_GIT_VERSION}." >&2; \
+         echo "       safe.directory as command-line (protected) config lands in 2.35.2." >&2; \
+         exit 1; \
+       fi
 
 # UV_LINK_MODE=copy: the cache and the venv are on different layers, so uv's
 # default hardlink strategy warns on every package.
@@ -188,6 +227,14 @@ CMD ["uv", "run", "--frozen", "pytest"]
 
 # ── runtime: what ships ───────────────────────────────────────────────────────
 FROM app AS runtime
+
+# Build provenance, passed by build-image.yml. /healthz reports both; the
+# deploy pipeline (see README.md, "Deploying") proves a rollout by reading
+# `revision` back from the running pod, so it has to be the exact commit.
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
 
 USER 10001:10001
 EXPOSE 8080
