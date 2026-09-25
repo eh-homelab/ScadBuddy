@@ -17,6 +17,7 @@ from scadbuddy.library.history import (
     GITIGNORE_NAME,
     LOCK_NAME,
     MAX_SUBJECT,
+    RECOVERED_MESSAGE,
     GitTimeoutError,
     ModelHistory,
     RevisionNotFoundError,
@@ -67,6 +68,36 @@ def test_ensure_repo_is_idempotent(models: Path, history: ModelHistory) -> None:
 
     assert history.ensure_repo() is None
     assert history.head() == first
+
+
+def test_a_restart_names_leftover_changes_for_what_they_are(
+    models: Path, history: ModelHistory
+) -> None:
+    """A catalogue commit that failed leaves the tree dirty; the next boot commits it,
+    and must not call revision N the initial one (#134)."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+    write_model(models, "tag", "cube(5);\n")
+
+    recovered = history.ensure_repo()
+
+    assert recovered is not None
+    assert [entry.message for entry in history.log()][:2] == [
+        RECOVERED_MESSAGE,
+        "Initial revision",
+    ]
+
+
+def test_a_repository_with_no_commit_yet_still_gets_its_initial_revision(
+    models: Path, history: ModelHistory
+) -> None:
+    """A crash between `git init` and the first commit leaves `.git` with no history;
+    what the next boot commits there is the first revision, not a recovery."""
+    write_model(models, "keychain", "cube(10);\n")
+    subprocess.run(["git", "init", "--quiet", str(models)], check=True)
+
+    assert history.ensure_repo() is not None
+    assert [entry.message for entry in history.log()] == ["Initial revision"]
 
 
 def test_ensure_repo_survives_a_models_path_it_cannot_create(tmp_path: Path) -> None:
@@ -403,6 +434,8 @@ def test_a_control_byte_in_a_message_cannot_desync_the_log(
 def test_a_message_is_flattened_to_one_bounded_line() -> None:
     assert subject_line("  keep   it  tidy \n") == "keep it tidy"
     assert subject_line("\x00\x1f") == "(no message)"
+    assert subject_line("a\x7fb\x85c\x9fd") == "a b c d"
+    assert subject_line("\x7f\x80\x9f") == "(no message)"
     assert subject_line("") == "(no message)"
     assert len(subject_line("x" * (MAX_SUBJECT * 2))) == MAX_SUBJECT
 
