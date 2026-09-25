@@ -810,7 +810,8 @@
               "not-loaded",
               "low-filament",
               "no-choice",
-              "no-preset"
+              "no-preset",
+              "no-fan-out"
             ],
             "title": "Kind",
             "type": "string"
@@ -3205,14 +3206,20 @@
         "type": "object"
       },
       "PrintRunRequest": {
-        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\n``filament_plan`` is what makes this request choose its route rather than its\ncaller. A plan names one spool per plate slot, and those three queue-item fields\nexist on no other Bambuddy call \u2014 so a request carrying one is sliced and queued,\nand one without one runs the pipeline exactly as it did before (#87).",
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\nThe request does not choose its route; what it needs does. A pipeline run takes\nonly a source, ``copies`` and ``force``, so it is sliced and queued instead when\neither:\n\n- it carries a ``filament_plan``. A plan names one spool per plate slot, and those\n  queue-item fields exist on no other Bambuddy call (#87); or\n- a remembered print option applies that a run cannot carry (#124). The options\n  resolve global \u2192 per-printer \u2192 per-model \u2192 this request's ``copies``.\n\nOtherwise it runs the pipeline exactly as before.",
         "properties": {
           "copies": {
-            "default": 1,
-            "maximum": 1000.0,
-            "minimum": 1.0,
-            "title": "Copies",
-            "type": "integer"
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copies"
           },
           "filament_plan": {
             "anyOf": [

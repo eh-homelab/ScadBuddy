@@ -84,7 +84,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   const [reports, setReports] = useState<Record<number, PipelineReport>>({})
   const [selected, setSelected] = useState<number | null>(null)
   const [printerId, setPrinterId] = useState<number | null>(null)
-  const [copies, setCopies] = useState(1)
+  // null until the user sets it, so a remembered quantity is not overridden by the
+  // box's own starting value (#124).
+  const [copies, setCopies] = useState<number | null>(null)
   const [asDefault, setAsDefault] = useState(false)
   const [force, setForce] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -348,7 +350,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
       else if (!asDefault && stored === selected) await remember(null)
       const body: PrintRunRequest = {
         pipeline_id: selected,
-        copies,
+        ...(copies === null ? {} : { copies }),
         force,
         plate_id: PLATE_ID,
         project_id: projectId,
@@ -660,8 +662,11 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
               type="number"
               min={1}
               max={MAX_COPIES}
-              value={copies}
-              onChange={(event) => setCopies(Math.max(1, Number(event.target.value)))}
+              value={copies ?? ''}
+              placeholder="1"
+              onChange={(event) =>
+                setCopies(event.target.value === '' ? null : Math.max(1, Number(event.target.value)))
+              }
               className="sb-field sb-num w-20 text-right"
             />
           </div>
@@ -694,7 +699,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
                 options={filaments}
                 plan={plan}
                 onChange={setPlan}
-                copies={copies}
+                copies={copies ?? 1}
               />
               {/**
                * Off by default, and it says what it costs. Ticking it pins the printer,

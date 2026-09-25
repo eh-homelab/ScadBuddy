@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 #: opening selection; every slot stays editable and nothing is decided by it.
 COLOUR_MATCH_DISTANCE = 48.0
 
-WarningKind = Literal["not-loaded", "low-filament", "no-choice", "no-preset"]
+WarningKind = Literal["not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out"]
 
 
 class LoadedAt(BaseModel):

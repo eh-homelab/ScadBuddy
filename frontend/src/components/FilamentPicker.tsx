@@ -48,6 +48,7 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'not-loaded': 'text-muted',
   'low-filament': 'text-muted',
   'no-preset': 'text-muted',
+  'no-fan-out': 'text-muted',
 }
 
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {

@@ -321,7 +321,7 @@ def _settings_slice_request(settings: StoredSettings, meta: OutputMeta) -> Slice
     )
 
 
-def _pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest:
+def pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest:
     """Slice from the pipeline's own presets, the way a pipeline run would.
 
     This is what a send carrying print options does *instead of* running the pipeline.
@@ -360,16 +360,26 @@ def _request_scope(request: SendRequest) -> PrintOptions:
     return request.options.model_copy(update={"quantity": request.copies})
 
 
-def _resolve_options(
-    settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
+def resolve_print_options(
+    settings: StoredSettings, slug: str, printer_id: int | None, request_scope: PrintOptions
 ) -> PrintOptions:
-    """global → per-printer → per-model → per-request, least specific first."""
+    """global → per-printer → per-model → per-request, least specific first.
+
+    Shared by the send bar and the print picker (#124), so the two can never disagree
+    about which remembered option wins.
+    """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(meta.slug),
-        _request_scope(request),
+        settings.model_print_options.get(slug),
+        request_scope,
     )
+
+
+def _resolve_options(
+    settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
+) -> PrintOptions:
+    return resolve_print_options(settings, meta.slug, printer_id, _request_scope(request))
 
 
 def _needs_pipeline(settings: StoredSettings, meta: OutputMeta, request: SendRequest) -> bool:
@@ -443,7 +453,7 @@ async def _queue_send(
     if pipeline_id is not None:
         if pipeline is None:  # pragma: no cover - _needs_pipeline already fetched it
             pipeline = await client.pipeline(pipeline_id)
-        slice_request = _pipeline_slice_request(pipeline, meta)
+        slice_request = pipeline_slice_request(pipeline, meta)
         # The pipeline's own target, never ``settings.printer_id``: a ``printer_class``
         # pipeline resolves no printer id at all, and taking the configured one there
         # pinned every copy to that single printer and silently ended the fan-out the

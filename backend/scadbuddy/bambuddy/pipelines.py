@@ -30,7 +30,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import slice_and_queue, target_of
+from scadbuddy.bambuddy.dispatch import QueueOutcome, slice_and_queue, target_of
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
@@ -55,8 +55,14 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
+from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
+from scadbuddy.bambuddy.send import (
+    ensure_uploaded,
+    pipeline_slice_request,
+    resolve_print_options,
+    target_plate,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -185,16 +191,28 @@ class PrintRunRequest(BaseModel):
     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
     only offers it once the issues have been shown.
 
-    ``filament_plan`` is what makes this request choose its route rather than its
-    caller. A plan names one spool per plate slot, and those three queue-item fields
-    exist on no other Bambuddy call — so a request carrying one is sliced and queued,
-    and one without one runs the pipeline exactly as it did before (#87).
+    The request does not choose its route; what it needs does. A pipeline run takes
+    only a source, ``copies`` and ``force``, so it is sliced and queued instead when
+    either:
+
+    - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
+      queue-item fields exist on no other Bambuddy call (#87); or
+    - a remembered print option applies that a run cannot carry (#124). The options
+      resolve global → per-printer → per-model → this request's ``copies``.
+
+    Otherwise it runs the pipeline exactly as before.
     """
 
     pipeline_id: int | None = None
-    copies: int = Field(default=1, ge=1, le=1000)
+    #: Omitted means "the remembered quantity, else 1" (#124): a number here is the
+    #: caller's explicit choice for this print and wins over any remembered one.
+    copies: int | None = Field(default=None, ge=1, le=1000)
     force: bool = False
-    #: Only meaningful with a plan: it is the printer whose trays the mapping addresses.
+    #: The printer to queue on, whenever this request is sliced and queued: with a plan
+    #: it is the printer whose trays the mapping addresses, and with remembered options
+    #: that force the queue route it overrides the pipeline's own target (#124). It is
+    #: also the printer the per-printer option scope keys on, ahead of the configured
+    #: printer and the pipeline's target. A plain pipeline run ignores it.
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     plate_id: int = Field(default=1, ge=1)
@@ -539,6 +557,11 @@ async def run_for_output(
     and queued against one printer. That is a real difference in behaviour, not an
     implementation detail: a class-targeted pipeline fans out and a queue item does
     not, which is why the dialog says so before the click.
+
+    Remembered print options (#88) take the same route for the same reason (#124): the
+    run request has nowhere to put ``timelapse`` or ``bed_levelling``, so an option the
+    run cannot carry slices with the pipeline's own filament presets and queues with
+    the options set. Without one, nothing changes.
     """
     pipeline_id = request.pipeline_id or settings.pipeline_for(meta.slug)
     if pipeline_id is None:
@@ -559,12 +582,28 @@ async def run_for_output(
         client, store, meta, settings, plate=plate, folder_id=folder_id
     )
 
-    if request.filament_plan is None:
+    # The per-printer scope keys on the printer ScadBuddy believes it prints to. With
+    # none named the pipeline's own target decides; the pipeline is only read for it
+    # when some per-printer option is remembered at all.
+    pipeline: Pipeline | None = None
+    scope_printer_id = request.printer_id or settings.printer_id
+    if scope_printer_id is None and settings.printer_print_options:
+        pipeline = await _pipeline_or_conflict(client, pipeline_id)
+        scope_printer_id = pipeline.target_printer_id
+    # The picker's project is its own control (ProjectPicker, defaulting to the last
+    # one), so a remembered project_id is dropped here: left in, it would force the
+    # queue route and then lose to the picker's project anyway.
+    print_options = resolve_print_options(
+        settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
+    ).model_copy(update={"project_id": None})
+    copies = print_options.quantity or 1
+
+    if request.filament_plan is None and not print_options.beyond_pipeline():
         run = await client.run_pipeline(
             pipeline_id,
             PipelineRunRequest(
                 source_library_file_id=library_file_id,
-                copies=request.copies,
+                copies=copies,
                 force=request.force,
             ),
         )
@@ -584,12 +623,51 @@ async def run_for_output(
             bambuddy_url=client.config.web_url(QUEUE_PATH),
         )
 
-    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
     if pipeline is None:
-        raise not_configured(
-            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so the chosen "
-            "filaments cannot be sliced with it"
+        pipeline = await _pipeline_or_conflict(client, pipeline_id)
+    if request.filament_plan is None:
+        # Only the options forced this route: slice exactly what the run would have.
+        slice_request = pipeline_slice_request(pipeline, meta)
+        outcome = await slice_and_queue(
+            client,
+            library_file_id=library_file_id,
+            pipeline=pipeline,
+            printer_id=request.printer_id,
+            filament_presets=slice_request.filament_presets,
+            filament_colours=slice_request.filament_colours,
+            plate_id=request.plate_id,
+            copies=copies,
+            project_id=project_id,
+            options=print_options,
         )
+        warnings: list[FilamentWarning] = []
+        if outcome.target_model is not None:
+            # The picker says this before a filament plan pins a printer; a remembered
+            # option has no dialog moment, so it is said here, after the fact.
+            # No option names: the labels live in the frontend, and Bambuddy's field
+            # names (bed_levelling, nozzle_offset_cali) are not words for a person.
+            warnings.append(
+                FilamentWarning(
+                    kind="no-fan-out",
+                    message=(
+                        "Remembered print options cannot ride on a pipeline run, so this "
+                        f"was queued once against the {outcome.target_model} class "
+                        "instead of fanned out across its printers."
+                    ),
+                )
+            )
+        return _queued(
+            client,
+            store,
+            meta,
+            outcome,
+            pipeline_id,
+            library_file_id,
+            project_id,
+            folder_id,
+            warnings=warnings,
+        )
+
     printer_id, _ = target_of(pipeline, request.printer_id)
     # Read once and used twice. The catalogue is ~4000 presets across four tiers on the
     # live instance, which is why `preset_options` filters it server-side in the first
@@ -602,7 +680,7 @@ async def run_for_output(
         plate_id=request.plate_id,
         fallback_colours=list(meta.colors),
     )
-    warnings = check(options, request.filament_plan, copies=request.copies)
+    warnings = check(options, request.filament_plan, copies=copies)
     presets, colours, preset_warnings = slice_filament_presets(
         options,
         request.filament_plan,
@@ -618,9 +696,50 @@ async def run_for_output(
         filament_colours=colours,
         filaments=queue_filaments(options, request.filament_plan),
         plate_id=request.plate_id,
-        copies=request.copies,
+        copies=copies,
         project_id=project_id,
+        options=print_options,
     )
+    return _queued(
+        client,
+        store,
+        meta,
+        outcome,
+        pipeline_id,
+        library_file_id,
+        project_id,
+        folder_id,
+        warnings=warnings + preset_warnings,
+    )
+
+
+async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pipeline:
+    """The pipeline by id, or the same friendly 409 whichever path first needs it.
+
+    Read from the list rather than ``GET /slicer-pipelines/{id}``: a pipeline deleted
+    in Bambuddy is then this app's "not configured", not a raw upstream 404.
+    """
+    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
+    if pipeline is None:
+        raise not_configured(
+            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so ScadBuddy cannot "
+            "slice with it"
+        )
+    return pipeline
+
+
+def _queued(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    outcome: QueueOutcome,
+    pipeline_id: int,
+    library_file_id: int,
+    project_id: int | None,
+    folder_id: int | None,
+    warnings: list[FilamentWarning] | None = None,
+) -> PrintRunResult:
+    """Record the queue items against the output and report the slice-and-queue run."""
     for queue_item_id in outcome.queue_item_ids:
         store.record_send(
             meta.id,
@@ -637,7 +756,7 @@ async def run_for_output(
         sliced_library_file_id=outcome.sliced_library_file_id,
         queue_item_ids=outcome.queue_item_ids,
         printer_id=outcome.printer_id,
-        warnings=warnings + preset_warnings,
+        warnings=warnings or [],
         project_id=project_id,
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
