@@ -232,6 +232,13 @@ def test_force_saves_source_that_does_not_parse(client: TestClient) -> None:
     assert client.get("/api/v1/models/broken/source").text == "%%FAIL%%\n"
 
 
+def test_the_force_query_parameter_forces_a_json_paste(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models?force=true", json={"name": "Broken", "source": "%%FAIL%%\n"}
+    )
+    assert response.status_code == 201
+
+
 def test_pasting_over_an_existing_slug_conflicts(client: TestClient) -> None:
     assert _upload(client).status_code == 201
     response = client.post("/api/v1/models", json={"name": "name keychain", "source": SOURCE})

@@ -142,6 +142,17 @@ describe('NewModelPage', () => {
     expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
   })
 
+  it('does not offer a forced save without a name', async () => {
+    const { user } = renderNew()
+    await user.type(screen.getByLabelText('Name'), 'Half Cube')
+    await paste(user, BROKEN_SOURCE)
+    await user.click(screen.getByRole('button', { name: 'Save and customize' }))
+    expect(await screen.findByRole('button', { name: 'Save anyway' })).toBeEnabled()
+
+    await user.clear(screen.getByLabelText('Name'))
+    expect(screen.getByRole('button', { name: 'Save anyway' })).toBeDisabled()
+  })
+
   it('reports a name that yields no slug', async () => {
     const { user } = renderNew()
     await user.type(screen.getByLabelText('Name'), '***')

@@ -226,7 +226,8 @@ async def create_model(
             meta=ModelMeta(
                 name=pasted.name, description=pasted.description, tags=list(pasted.tags)
             ),
-            force=pasted.force,
+            # Either spelling forces, as the design and the OpenAPI both promise.
+            force=force or pasted.force,
         )
 
     if content_type == "text/plain":

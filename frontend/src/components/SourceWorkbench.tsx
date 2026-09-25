@@ -121,7 +121,7 @@ export function SourceWorkbench({
               {saveLabel}
             </Button>
             {refused && (
-              <Button size="sm" variant="danger" onClick={() => void save(true)} disabled={busy}>
+              <Button size="sm" variant="danger" onClick={() => void save(true)} disabled={busy || !canSave}>
                 Save anyway
               </Button>
             )}
