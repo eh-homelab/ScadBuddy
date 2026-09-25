@@ -69,6 +69,8 @@ AUTHOR_EMAIL = "scadbuddy@localhost"
 # the global config this module refuses to read, so without it git picks its
 # compiled-in default and warns on every init.
 DEFAULT_BRANCH = "main"
+#: The commit an existing repository's boot makes of changes a failed commit left.
+RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
 
@@ -564,10 +566,6 @@ def _parse_log(text: str) -> list[Revision]:
             )
         )
     return revisions
-
-
-#: The commit an existing repository's boot makes of changes a failed commit left.
-RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 
 def _is_control(character: str) -> bool:
