@@ -219,6 +219,23 @@ def test_a_class_pipeline_forced_onto_the_queue_says_it_did_not_fan_out(
     assert "timelapse" not in warning["message"]
 
 
-def _pipeline_one() -> dict[str, object]:
-    pipelines = recording("slicer-pipelines-configured.json")["pipelines"]
-    return next(row for row in pipelines if row["id"] == 1)
+@respx.mock
+def test_a_remembered_project_alone_still_runs_the_pipeline(client: TestClient, model: str) -> None:
+    """The picker's project comes from its own control, so a remembered project_id
+    must neither force the queue route nor be half-applied."""
+    configure(client)
+    remember(client, "global", {"project_id": 5})
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+    sliced = respx.post(f"{API}/library/files/41/slice")
+
+    body = client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1}).json()
+
+    assert run.called
+    assert not sliced.called
+    assert body["route"] == "pipeline"

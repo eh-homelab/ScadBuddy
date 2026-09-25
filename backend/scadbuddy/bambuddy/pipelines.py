@@ -583,16 +583,19 @@ async def run_for_output(
     )
 
     # The per-printer scope keys on the printer ScadBuddy believes it prints to. With
-    # none named the pipeline's own target decides, and reading the pipeline for it is
-    # only worth a GET when a per-printer entry could actually match.
+    # none named the pipeline's own target decides; the pipeline is only read for it
+    # when some per-printer option is remembered at all.
     pipeline: Pipeline | None = None
     scope_printer_id = request.printer_id or settings.printer_id
     if scope_printer_id is None and settings.printer_print_options:
         pipeline = await _pipeline_or_conflict(client, pipeline_id)
         scope_printer_id = pipeline.target_printer_id
+    # The picker's project is its own control (ProjectPicker, defaulting to the last
+    # one), so a remembered project_id is dropped here: left in, it would force the
+    # queue route and then lose to the picker's project anyway.
     print_options = resolve_print_options(
         settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
-    )
+    ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 
     if request.filament_plan is None and not print_options.beyond_pipeline():
