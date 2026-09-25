@@ -88,6 +88,18 @@ def test_a_restart_names_leftover_changes_for_what_they_are(
     ]
 
 
+def test_a_repository_with_no_commit_yet_still_gets_its_initial_revision(
+    models: Path, history: ModelHistory
+) -> None:
+    """A crash between `git init` and the first commit leaves `.git` with no history;
+    what the next boot commits there is the first revision, not a recovery."""
+    write_model(models, "keychain", "cube(10);\n")
+    subprocess.run(["git", "init", "--quiet", str(models)], check=True)
+
+    assert history.ensure_repo() is not None
+    assert [entry.message for entry in history.log()] == ["Initial revision"]
+
+
 def test_ensure_repo_survives_a_models_path_it_cannot_create(tmp_path: Path) -> None:
     """A git failure other than a missing binary must not take the app down.
 

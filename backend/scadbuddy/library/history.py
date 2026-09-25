@@ -290,6 +290,10 @@ class ModelHistory:
         all -- the app has to boot either way. A models directory that already
         holds files becomes revision 1 rather than being left untracked, which is
         what makes the image's seed the first revision on a fresh volume.
+
+        On a repository that already has history, anything left to commit is a
+        catalogue action whose own commit failed, and it is committed as
+        ``RECOVERED_MESSAGE`` rather than being called the initial revision (#134).
         """
         if shutil.which(self.git) is None:
             logger.warning("git is not on PATH; model history is disabled", extra={"git": self.git})
@@ -297,16 +301,19 @@ class ModelHistory:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             with self._exclusive():
-                fresh = not (self.root / ".git").is_dir()
-                if fresh:
+                if not (self.root / ".git").is_dir():
                     self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
+                # No commit yet, not "no .git": a crash between `init` and the first
+                # commit leaves a repository with no history, and what the next boot
+                # commits there is still the first revision.
+                fresh = (
+                    self._run("rev-parse", "--verify", "--quiet", "HEAD", check=False).returncode
+                    != 0
+                )
                 gitignore = self.root / GITIGNORE_NAME
                 body = _gitignore_body(self.wrapper_prefix)
                 if not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body:
                     gitignore.write_text(body, encoding="utf-8")
-                # On an existing repository anything left to commit is a catalogue
-                # action whose own commit failed (it logs and carries on), picked up
-                # at the next boot -- not the first revision, so not called one.
                 message = "Initial revision" if fresh else RECOVERED_MESSAGE
                 return self._commit_locked(message, ".")
         except (GitError, OSError):
