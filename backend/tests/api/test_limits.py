@@ -64,6 +64,35 @@ def test_a_body_too_large_is_refused_on_its_headers(client: TestClient) -> None:
     assert "reads at most" in response.json()["detail"]
 
 
+def test_a_chunked_body_is_cut_off_at_the_limit(client: TestClient) -> None:
+    """No Content-Length, so nothing to judge on the headers: the gate counts instead,
+    and stops reading at the chunk that crosses the limit."""
+
+    def chunks() -> object:
+        for _ in range(MAX_TEXT_BODY_BYTES // (1024 * 1024) + 4):
+            yield b"x" * (1024 * 1024)
+
+    response = client.post(
+        "/api/v1/models",
+        content=chunks(),
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+    )
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "most this API reads" in response.json()["detail"]
+
+
+def test_a_small_chunked_body_passes_the_gate(client: TestClient) -> None:
+    def chunks() -> object:
+        yield b'{"source": '
+        yield b'"cube(1);\\n"}'
+
+    response = client.post(
+        "/api/v1/models/check", content=chunks(), headers={"Content-Type": "application/json"}
+    )
+    assert response.status_code == 200
+
+
 def test_an_ordinary_body_passes_the_gate(client: TestClient) -> None:
     response = client.post("/api/v1/models/check", json={"source": "cube(1);\n"})
     assert response.status_code == 200

@@ -7,9 +7,9 @@ not to reject the value, it is to not read a gigabyte into the pod's memory in t
 first place. Content-Length says how much is coming, so the refusal can happen on
 the headers alone.
 
-A body sent without Content-Length (chunked) does not carry that promise, so it is
-still bounded only by the field cap — the gate closes the declared case, which is
-what every ordinary client sends.
+A body sent without Content-Length (chunked) makes no such promise, so it is counted
+as it arrives instead, and refused the moment it passes the same limit. Either way no
+more than `limit` bytes are ever buffered.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from typing import Any
 from starlette.datastructures import Headers
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
@@ -36,36 +36,87 @@ GATED_CONTENT_TYPES = frozenset({"application/json", "text/plain"})
 MAX_TEXT_BODY_BYTES = 8 * 1024 * 1024
 
 
+class _BodyTooLargeError(Exception):
+    """A streamed body passed the limit; raised out of `receive` to stop the read."""
+
+
 class BodySizeGate:
-    """Refuse a declared body larger than `limit` bytes with a 413 problem."""
+    """Refuse a gated body larger than `limit` bytes with a 413 problem.
+
+    A declared length is judged on the headers alone. An undeclared one is counted
+    chunk by chunk, and reading stops at the first chunk that crosses the limit.
+    """
 
     def __init__(self, app: ASGIApp, *, limit: int) -> None:
         self.app = app
         self.limit = limit
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http":
-            headers = Headers(scope=scope)
-            kind = headers.get("content-type", "").split(";")[0].strip().lower()
-            declared = headers.get("content-length", "")
-            if kind in GATED_CONTENT_TYPES and declared.isdigit() and int(declared) > self.limit:
-                response = JSONResponse(
-                    {
-                        "type": "about:blank",
-                        "title": "Content Too Large",
-                        "status": 413,
-                        "detail": (
-                            f"the body declares {declared} bytes and this API reads at "
-                            f"most {self.limit}"
-                        ),
-                        "instance": scope.get("path", ""),
-                    },
-                    status_code=413,
-                    media_type=PROBLEM_MEDIA_TYPE,
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        kind = headers.get("content-type", "").split(";")[0].strip().lower()
+        if kind not in GATED_CONTENT_TYPES:
+            await self.app(scope, receive, send)
+            return
+        declared = headers.get("content-length", "")
+        if declared.isdigit():
+            if int(declared) > self.limit:
+                await self._refuse(
+                    scope,
+                    receive,
+                    send,
+                    f"the body declares {declared} bytes and this API reads at most {self.limit}",
                 )
-                await response(scope, receive, send)
                 return
-        await self.app(scope, receive, send)
+            await self.app(scope, receive, send)
+            return
+
+        received = 0
+        started = False
+
+        async def counted_receive() -> Message:
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.limit:
+                    raise _BodyTooLargeError
+            return message
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal started
+            if message["type"] == "http.response.start":
+                started = True
+            await send(message)
+
+        try:
+            await self.app(scope, counted_receive, tracked_send)
+        except _BodyTooLargeError:
+            if started:  # pragma: no cover - the body is read before any response
+                raise
+            await self._refuse(
+                scope,
+                receive,
+                send,
+                f"the body passed {self.limit} bytes, which is the most this API reads",
+            )
+
+    @staticmethod
+    async def _refuse(scope: Scope, receive: Receive, send: Send, detail: str) -> None:
+        response = JSONResponse(
+            {
+                "type": "about:blank",
+                "title": "Content Too Large",
+                "status": 413,
+                "detail": detail,
+                "instance": scope.get("path", ""),
+            },
+            status_code=413,
+            media_type=PROBLEM_MEDIA_TYPE,
+        )
+        await response(scope, receive, send)
 
 
 class ClientGoneError(Exception):
