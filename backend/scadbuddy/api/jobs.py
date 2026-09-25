@@ -19,7 +19,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.history import COMMIT_ID_PATTERN, RevisionNotFoundError
+from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, resolve_source
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
@@ -94,6 +94,8 @@ async def _resolve_version(history: HistoryDep, slug: str, version: str | None) 
         return await asyncio.to_thread(history.resolve, version)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {version!r}") from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
 def require_job(queue: RenderQueue, job_id: str) -> Job:
@@ -132,6 +134,8 @@ async def render_model(
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {body.version}"
         ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
