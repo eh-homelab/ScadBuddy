@@ -93,6 +93,12 @@ class PlateGeometry:
     #: Cutouts nothing may be printed in (the X1/P1 filament cutter corner).
     exclusions: tuple[Rect, ...]
     extruders: int
+    #: The profile's ``printable_height``. Required, not defaulted: the 3MF
+    #: writer states it in ``project_settings.config``, and this whole module
+    #: exists because a wrong value in that file is not rejected — it is either
+    #: silently honoured or, in #110's case, a segfault. A default would let a
+    #: future call site write ``"printable_height": "0"`` and find out later.
+    height: float
 
     @property
     def key(self) -> str:
@@ -127,7 +133,7 @@ def _intersect(rects: list[Rect]) -> Rect:
 
 
 def _geometry(model: str) -> PlateGeometry:
-    printable, per_extruder, exclude, _height = PLATE_PROFILES[model]
+    printable, per_extruder, exclude, height = PLATE_PROFILES[model]
     bed = _bounding_rect(printable)
     areas = [_bounding_rect(polygon) for polygon in per_extruder]
     return PlateGeometry(
@@ -136,10 +142,14 @@ def _geometry(model: str) -> PlateGeometry:
         usable=_intersect(areas) if areas else bed,
         exclusions=(_bounding_rect(exclude),) if exclude else (),
         extruders=max(len(per_extruder), 1),
+        height=height,
     )
 
 
 DEFAULT_PLATE_SIZE = (256.0, 256.0)
+#: Z for the fallback plate. Nothing reads it as a constraint — it is stated in
+#: the 3MF because the loader requires the key to exist (#110).
+DEFAULT_PLATE_HEIGHT = 250.0
 #: Used when the target printer is unknown — the size every 3MF was laid out on
 #: before plate geometry followed the printer.
 DEFAULT_PLATE = PlateGeometry(
@@ -148,6 +158,7 @@ DEFAULT_PLATE = PlateGeometry(
     usable=Rect(0.0, 0.0, *DEFAULT_PLATE_SIZE),
     exclusions=(),
     extruders=1,
+    height=DEFAULT_PLATE_HEIGHT,
 )
 
 _BY_MODEL: dict[str, PlateGeometry] = {model: _geometry(model) for model in PLATE_PROFILES}

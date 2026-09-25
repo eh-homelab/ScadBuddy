@@ -17,6 +17,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
+from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.solids import render_solids
@@ -47,6 +48,13 @@ class PartInfo(BaseModel):
 class JobResult(BaseModel):
     model_3mf: str
     preview_glb: str
+    #: The model's sources as this render read them. Taken here rather than when the
+    #: output is saved: Generate persists a render that already happened, and the
+    #: files on the PVC can be edited in between.
+    #: Empty only on a job written before this field existed — job files outlive a
+    #: deploy on the PVC and the queue validates every one at startup, so a required
+    #: field here would turn an upgrade into a crash loop rather than one bad job.
+    source_version: str = ""
     parts: list[PartInfo]
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
@@ -195,6 +203,8 @@ async def plate_thumbnails(
 
 async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
     scad = paths.model_source(job.slug)
+    # Reads every file under the model directory; off the loop, like the other two.
+    version = await asyncio.to_thread(source_version, paths.model_dir(job.slug))
     schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
@@ -221,6 +231,7 @@ async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[Job
     result = JobResult(
         model_3mf=str(model_path.relative_to(paths.root)),
         preview_glb=str(preview_path.relative_to(paths.root)),
+        source_version=version,
         parts=[
             PartInfo(
                 name=part.name,

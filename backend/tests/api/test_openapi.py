@@ -18,6 +18,7 @@ EXPECTED_PATHS = {
     "/api/v1/jobs/{job_id}",
     "/api/v1/jobs/{job_id}/preview.glb",
     "/api/v1/outputs/{output_id}",
+    "/api/v1/outputs/{output_id}/edit",
     "/api/v1/outputs/{output_id}/model.3mf",
     "/api/v1/outputs/{output_id}/thumbnail",
     "/api/v1/outputs/{output_id}/send",

@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <model unit="millimeter" xml:lang="en-US" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02" xmlns:p="http://schemas.microsoft.com/3dmanufacturing/production/2015/06">
- <metadata name="Application">ScadBuddy</metadata>
+ <metadata name="Application">BambuStudio-02.07.00.00</metadata>
+ <metadata name="BambuStudio:3mfVersion">1</metadata>
+ <metadata name="Origin">ScadBuddy</metadata>
  <metadata name="Title">name-keychain</metadata>
  <resources>
   <object id="3" name="name-keychain" type="model" p:UUID="50784226-c0de-5d4b-b7cc-452fab7307ef">

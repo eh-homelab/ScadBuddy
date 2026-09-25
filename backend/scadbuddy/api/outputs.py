@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Response, UploadFile, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
@@ -47,6 +47,21 @@ class CreateOutputRequest(BaseModel):
     name: str | None = None
 
 
+class EditTarget(BaseModel):
+    """What ``/edit/{output_id}`` needs to reopen the customizer."""
+
+    # "model_version" trips pydantic's reserved "model_" prefix; see OutputMeta.
+    model_config = ConfigDict(protected_namespaces=())
+
+    output_id: str
+    slug: str
+    name: str | None
+    params: dict[str, ParamValue] = Field(default_factory=dict)
+    model_version: str | None = None
+    #: ``record`` when the output is still saved, ``3mf`` when only the file survives.
+    source: Literal["record", "3mf"]
+
+
 def _detail(store: OutputStore, meta: OutputMeta) -> OutputDetail:
     return OutputDetail(
         **meta.model_dump(),
@@ -74,6 +89,7 @@ def create_output(
     catalogue: CatalogueDep,
     outputs: OutputsDep,
     queue: QueueDep,
+    store: SettingsStoreDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
     job = require_job(queue, body.job_id)
@@ -85,7 +101,7 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    return _detail(outputs, outputs.create(job, name=body.name))
+    return _detail(outputs, outputs.create(job, name=body.name, public_url=store.load().public_url))
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
@@ -101,6 +117,52 @@ def list_outputs(
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
 def get_output(output_id: OutputIdPath, outputs: OutputsDep) -> OutputDetail:
     return _detail(outputs, require_output(outputs, output_id))
+
+
+@router.get(
+    "/outputs/{output_id}/edit",
+    response_model=EditTarget,
+    summary="Resolve an edit deep link",
+)
+def get_edit_target(
+    output_id: OutputIdPath, catalogue: CatalogueDep, outputs: OutputsDep
+) -> EditTarget:
+    """Where ``/edit/{output_id}`` should land, and with which values.
+
+    The record answers first. When it is gone — the directory restored without its
+    sidecars, or hand-pruned — the 3MF still carries the same provenance, so the
+    link keeps working from the file alone.
+    """
+    try:
+        meta = outputs.get(output_id)
+    except OutputNotFoundError:
+        stamped = outputs.provenance(output_id)
+        if stamped is None:
+            raise ApiError(
+                status.HTTP_404_NOT_FOUND,
+                f"no output with id {output_id!r}, and no 3MF left to read it from",
+            ) from None
+        require_model(catalogue, stamped.model)
+        return EditTarget(
+            output_id=output_id,
+            slug=stamped.model,
+            name=None,
+            params=stamped.params,
+            model_version=stamped.version,
+            source="3mf",
+        )
+    # Every other route through a slug asks the catalogue first. A link is allowed to
+    # outlive its output — that is the point of the 3MF fallback — but not its model:
+    # answering 200 would send the customizer somewhere it cannot load.
+    require_model(catalogue, meta.slug)
+    return EditTarget(
+        output_id=meta.id,
+        slug=meta.slug,
+        name=meta.name,
+        params=outputs.params(output_id),
+        model_version=meta.model_version,
+        source="record",
+    )
 
 
 @router.delete(

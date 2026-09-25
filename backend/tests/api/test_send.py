@@ -584,3 +584,237 @@ def test_a_failed_delete_keeps_the_recorded_library_file_id(client: TestClient, 
     assert response.status_code >= 500
     assert upload.call_count == 1, "a second copy was uploaded despite the failed delete"
     assert client.get(f"/api/v1/outputs/{output_id}").json()["library_file_id"] == 41
+
+
+# --- #80 the Edit in ScadBuddy back-link ---------------------------------------------
+
+
+def annotate_route(file_id: int = 41, notes: str | None = None) -> respx.Route:
+    """The note is a read-modify-write, so both halves are mocked."""
+    respx.get(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(
+            200, json={"id": file_id, "filename": "demo-elan.3mf", "notes": notes}
+        )
+    )
+    return respx.put(f"{API}/library/files/{file_id}").mock(
+        return_value=httpx.Response(200, json={"id": file_id, "filename": "demo-elan.3mf"})
+    )
+
+
+@respx.mock
+def test_the_edit_link_is_attached_to_the_uploaded_file(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client, public_url="https://scad.test/")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    edit_url = f"https://scad.test/edit/{output_id}"
+    assert body["edit_url"] == edit_url
+    assert annotate.called
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: {edit_url}"
+    }
+
+
+@respx.mock
+def test_nothing_is_attached_when_no_public_url_is_configured(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).json()
+
+    assert body["edit_url"] is None
+    assert not annotate.called
+
+
+def pipeline_run_route(run_id: int = 12) -> respx.Route:
+    return respx.post(f"{API}/slicer-pipelines/4/run").mock(
+        return_value=httpx.Response(
+            202,
+            json={
+                "id": run_id,
+                "pipeline_id": 4,
+                "source_library_file_id": 41,
+                "copies": 1,
+                "status": "queued",
+                "slice_job_id": None,
+                "sliced_library_file_id": None,
+                "eligibility_overridden": False,
+                "created_by": None,
+                "created_at": "2026-09-23T01:00:00Z",
+                "started_at": None,
+                "completed_at": None,
+            },
+        )
+    )
+
+
+@respx.mock
+def test_a_failed_annotation_still_queues_the_print(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The note is cosmetic; queueing the print is the point of the request."""
+    configure(client, pipeline_id=4, public_url="https://scad.test")
+    plate_routes(pipeline_id=4)
+    output_id = make_output(client, model)
+    upload_route()
+    run = pipeline_run_route()
+    annotate_route()  # the read succeeds; the write is what fails
+    annotate = respx.put(f"{API}/library/files/41").mock(
+        return_value=httpx.Response(500, json={"detail": "boom"})
+    )
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pipeline_run_id"] == 12
+    # Nothing was attached, so the result does not claim a link.
+    assert body["edit_url"] is None
+    assert annotate.called
+    assert run.called
+
+    meta = json.loads(
+        (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
+    )
+    assert meta["pipeline_run_id"] == 12
+
+
+@respx.mock
+def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
+    """A slow or broken annotate must not sit in front of the pipeline run."""
+    configure(client, pipeline_id=4, public_url="https://scad.test")
+    plate_routes(pipeline_id=4)
+    output_id = make_output(client, model)
+    upload_route()
+    pipeline_run_route()
+    annotate_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    order = [(call.request.method, call.request.url.path) for call in respx.calls]
+    assert order.index(("POST", "/api/v1/slicer-pipelines/4/run")) < order.index(
+        ("PUT", "/api/v1/library/files/41")
+    )
+
+
+@respx.mock
+def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, model: str) -> None:
+    """Bambuddy's ``update_file`` guards every assignment with ``if data.X is not
+    None``, so an omitted field is left alone — see the citation in client.py."""
+    configure(client, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route()
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
+    }
+
+
+@respx.mock
+def test_the_slice_and_queue_branch_annotates_both_files_last(
+    client: TestClient, model: str
+) -> None:
+    """The third send path reaches attach_edit_link too, and only after enqueueing.
+
+    Slicing leaves a second library entry, and it is that one the queue references —
+    so it is the one a reader opens from the queue, and it needs the link as much as
+    the 3MF ScadBuddy uploaded.
+    """
+    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    plate_routes(printer_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
+    annotate = annotate_route()
+    annotate_sliced = annotate_route(52)
+
+    body = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"}).json()
+
+    assert body["queue_item_id"] == 9
+    assert body["edit_url"] == f"https://scad.test/edit/{output_id}"
+    assert annotate.called
+    assert annotate_sliced.called
+    assert json.loads(annotate_sliced.calls.last.request.content) == {
+        "notes": f"Edit in ScadBuddy: https://scad.test/edit/{output_id}"
+    }
+
+    order = [(call.request.method, call.request.url.path) for call in respx.calls]
+    assert order.index(("POST", "/api/v1/queue/")) < order.index(
+        ("PUT", "/api/v1/library/files/41")
+    )
+    assert order.index(("POST", "/api/v1/queue/")) < order.index(
+        ("PUT", "/api/v1/library/files/52")
+    )
+
+
+@respx.mock
+def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
+    configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
+    plate_routes(printer_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        return_value=httpx.Response(202, json={"job_id": 9, "status": "pending"})
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
+    # Both library entries refuse the note; the queued print is unaffected either way.
+    annotate_route()
+    annotate_route(52)
+    respx.put(f"{API}/library/files/41").mock(return_value=httpx.Response(502))
+    respx.put(f"{API}/library/files/52").mock(return_value=httpx.Response(502))
+
+    response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+
+    assert response.status_code == 200
+    assert response.json()["queue_item_id"] == 9
+    assert response.json()["edit_url"] is None
+
+
+@respx.mock
+def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
+    client: TestClient, model: str
+) -> None:
+    """``notes`` is the file's only free-text field, so it is not ScadBuddy's to clear."""
+    configure(client, public_url="https://scad.test")
+    output_id = make_output(client, model)
+    upload_route()
+    annotate = annotate_route(
+        notes="PLA only — the black spool\nEdit in ScadBuddy: https://old/edit/x"
+    )
+
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
+
+    assert json.loads(annotate.calls.last.request.content) == {
+        "notes": (
+            f"PLA only — the black spool\nEdit in ScadBuddy: https://scad.test/edit/{output_id}"
+        )
+    }

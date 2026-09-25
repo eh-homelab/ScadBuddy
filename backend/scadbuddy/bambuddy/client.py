@@ -376,6 +376,41 @@ class BambuddyClient:
         )
         return LibraryFile.model_validate(response.json())
 
+    async def library_file(self, file_id: int) -> LibraryFile:
+        """``GET /library/files/{id}`` (``openapi/routes.txt``) — one file, notes and all."""
+        response = await self._send(
+            "GET",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"read library file {file_id}",
+        )
+        return LibraryFile.model_validate(response.json())
+
+    async def annotate_library_file(self, file_id: int, notes: str) -> LibraryFile:
+        """``PUT /library/files/{id}`` — ``notes`` is the only free-text field a
+        library file has; there is no ``url`` on one (``external_url`` lives on an
+        archive, which a send never produces).
+
+        **Sending ``notes`` alone is a partial update, not a full replace**, so it
+        cannot clear the file's folder or project. Read off Bambuddy's own source
+        rather than assumed — `update_file` guards every assignment with
+        ``if data.<field> is not None``, and `FileUpdate` defaults each field to
+        ``None``:
+        https://github.com/maziggy/bambuddy/blob/9e9c08ba2cc08bf1e746ed98bef2b46b7bedea02/backend/app/api/routes/library.py#L5103-L5136
+
+        Two details from the same lines, for whoever writes the next field: the
+        sentinel that *clears* ``folder_id``/``project_id`` is ``0``, not ``null``,
+        and an empty ``notes`` string is stored as ``NULL``.
+        """
+        response = await self._send(
+            "PUT",
+            f"/library/files/{file_id}",
+            scope=Scope.MANAGE_LIBRARY,
+            what=f"annotate library file {file_id}",
+            json={"notes": notes},
+        )
+        return LibraryFile.model_validate(response.json())
+
     async def delete_library_file(self, file_id: int) -> None:
         await self._send(
             "DELETE",

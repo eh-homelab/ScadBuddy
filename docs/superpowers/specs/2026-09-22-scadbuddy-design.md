@@ -76,6 +76,36 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   `number`, `boolean`; `// [a,b,c]` → `options`; `// [1:0.1:5]` → min/max/step;
   `// 20` on a string → `maxLength`; `/* [Group] */` → `group`; the comment line
   above a variable → `caption`.
+- **Bambu Studio reads `Metadata/project_settings.config` only from a file that
+  claims to be its own project, and then requires five options or it
+  segfaults.** Measured 2026-09-24 against
+  `ghcr.io/maziggy/bambu-studio-api:bambuddy-1.2.5.5` (BambuStudio 02.08.02.61),
+  the image the `bambuddy-slicer` sidecar runs.
+  `_load_model_from_file` (`bbs_3mf.cpp`) sets `dont_load_config` unless the
+  root model's `Application` metadata starts with `BambuStudio-`, and then skips
+  that file entirely — so every key in it, including `filament_colour`, was
+  discarded for as long as ScadBuddy wrote `Application: ScadBuddy`. Proved
+  independently of the tower: `prime_tower_width: "42"` and
+  `sparse_infill_density: "7%"` set in the 3MF came out of the slice as the
+  process preset's `60` / `15%`.
+  Making the claim is only half of it. On the BBL path `BambuStudio.cpp`
+  dereferences `printer_settings_id` and `print_settings_id` (2009-2010),
+  `filament_settings_id` and `nozzle_diameter` just after, and
+  `printable_height` through `opt_float` (2095) with **no null checks**: a file
+  that omits one does not fail validation, it segfaults before slicing starts.
+  Removing any single one of the five reproduces the crash.
+  The values need not be real — the CLI reads them into `current_*`/`old_*`
+  locals used for reporting and compatibility comparisons, while the settings
+  actually sliced with come from `--load-settings`/`--load-filaments`.
+  Placeholder ids, a deliberately wrong nozzle diameter (0.4 while slicing 0.2)
+  and 1 or 3 entries on a two-extruder printer all produce byte-identical
+  G-code. `Metadata/model_settings.config` is **not** gated this way, which is
+  why per-part extruder assignment always worked.
+  The version claimed is `02.07.00.00`: the oldest that trips none of the
+  importer's five compatibility paths (translate below 1.5.9, regenerate
+  thumbnails below 1.5.9, keep old params below 2.0.0, disable wrapping
+  detection below 2.2.0, reset `skirt_per_object` below 2.7.0), and low enough
+  that a CLI older than the one measured still accepts the file.
 - MakerWorld-only annotations (`// color`, `// font`) are **not** typed by
   OpenSCAD — they come through as plain `string`. ScadBuddy overlays them by
   scanning the source for `<name> = ...; // color` and `// font`.
@@ -327,10 +357,16 @@ Output mirrors the structure of the known-good MakerWorld file:
 - `Metadata/model_settings.config`: `<object id=…>` with `<metadata key="name">`
   and `<part>` entries each carrying `<metadata key="extruder" value="N"/>`
   (1-based, in colour order), plus `<plate>` with `plater_id=1`.
-- `Metadata/project_settings.config`: `filament_colour` array in the same order
-  and nothing else printer-specific — the slicer pipeline supplies printer,
-  process and filament presets, so we deliberately do not embed
-  `use_embedded_settings`-style presets.
+- `Metadata/project_settings.config`: the `filament_colour` array in the same
+  order, the prime-tower corner as `wipe_tower_x`/`wipe_tower_y` (#105), and the
+  five options the BambuStudio CLI dereferences without a null check —
+  `printer_settings_id`, `print_settings_id`, `filament_settings_id`,
+  `nozzle_diameter`, `printable_height` (#110, and see section 3).
+  We still do not embed real presets: the slicer pipeline supplies printer,
+  process and filament presets, and those five carry placeholders naming
+  ScadBuddy plus the plate height we do know. They are there because the file
+  cannot be read at all without them, not because we own slicer settings —
+  measured, none of their values reaches the G-code.
 - `Metadata/plate_1.png` (512x512) and `Metadata/plate_1_small.png` (128x128),
   plus `Metadata/top_1.png` and `Metadata/pick_1.png` — the plate cover images,
   named and sized exactly as Bambu Studio writes them (`bbs_3mf.hpp`). They are

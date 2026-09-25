@@ -56,7 +56,11 @@ millimetres, the values those profiles declare:
 ``bed_exclude_area``
     the front-left cutout the X1/P1 series uses to cut filament.
 ``printable_height``
-    the Z limit, carried for completeness; the 3MF writer does not use it.
+    the Z limit. The 3MF writer states it in ``project_settings.config``:
+    once a file claims BambuStudio identity the CLI dereferences that option
+    without a null check, so it is required rather than informational (#110).
+    Note this is the *plate's* height; ``extruder_printable_height`` can differ
+    per extruder and is not modelled (#122).
 
 Geometry is identical across a model's nozzle variants, so the table is keyed by
 model rather than by preset.

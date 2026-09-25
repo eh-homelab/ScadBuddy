@@ -281,6 +281,9 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: The only free-text field a library file has, and one a person may have typed
+    #: into — read before writing, never replaced wholesale.
+    notes: str | None = None
 
 
 class SliceRequest(BambuddyModel):

@@ -43,6 +43,7 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type EditTarget = Schemas['EditTarget']
 
 export type FontFamily = Schemas['FontFamily']
 export type FontCatalogue = Schemas['FontCatalogueView']
