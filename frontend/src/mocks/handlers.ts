@@ -30,6 +30,7 @@ import type {
   SourceCheck,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
 
@@ -729,7 +730,21 @@ export const handlers = [
         { type: 'https://scadbuddy.dev/problems/pipeline-ineligible', bambuddy_body: report },
       )
     }
-    const copies = body.copies ?? 1
+    // Resolved as the server does (#124): an omitted `copies` is the remembered quantity,
+    // global → the printer the run keys on → this model, else 1.
+    const scopePrinter =
+      body.printer_id ??
+      state.settings.printer_id ??
+      state.pipelines.find((p) => p.id === pipelineId)?.target_printer_id ??
+      null
+    const copies =
+      body.copies ??
+      resolveOptions(
+        state.printOptions.global_options,
+        scopePrinter === null ? undefined : state.printOptions.printers?.[String(scopePrinter)],
+        state.printOptions.models?.[output.slug],
+      ).quantity ??
+      1
     // #79 — the project's own library folder replaces the one from Settings for this
     // send, which is what puts the file on Bambuddy's project page.
     const projectId = body.project_id ?? state.lastProjectId
@@ -765,6 +780,7 @@ export const handlers = [
         slice_job_id: sliceJobId,
         sliced_library_file_id: nextNumber(),
         queue_item_ids: queueItemIds,
+        copies,
         warnings: fixtures.filamentOptions.warnings,
         project_id: projectId,
         folder_id: folderId,
@@ -777,6 +793,7 @@ export const handlers = [
       route: 'pipeline',
       pipeline_id: pipelineId,
       library_file_id: libraryFileId,
+      copies,
       run: {
         id: runId,
         pipeline_id: pipelineId,

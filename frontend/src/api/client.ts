@@ -337,11 +337,17 @@ export const api = {
   putSettings: (body: SettingsUpdate) =>
     request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /** `slug` so the server resolves the printer *this model's* pipeline aims at (#86). */
-  getPrintOptions: (slug?: string) =>
-    request<PrintOptionsState>(
-      slug ? `/settings/print-options?slug=${seg(slug)}` : '/settings/print-options',
-    ),
+  /**
+   * `slug` so the server resolves the printer *this model's* pipeline aims at (#86), and
+   * `pipelineId` when the picker has chosen a different one (#145).
+   */
+  getPrintOptions: (slug?: string, pipelineId?: number | null) => {
+    const query = new URLSearchParams()
+    if (slug) query.set('slug', slug)
+    if (pipelineId !== undefined && pipelineId !== null) query.set('pipeline_id', String(pipelineId))
+    const qs = query.toString()
+    return request<PrintOptionsState>(`/settings/print-options${qs ? `?${qs}` : ''}`)
+  },
 
   /** Replaces one scope wholesale; an all-unset `options` clears it. */
   putPrintOptions: (body: PrintOptionsUpdate) =>

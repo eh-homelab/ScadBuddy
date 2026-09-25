@@ -59,6 +59,8 @@ def test_a_remembered_option_moves_the_picker_onto_slice_and_queue(
     assert (queued["timelapse"], queued["bed_levelling"]) == (False, "off")
     # The picker's Copies box is this request's quantity.
     assert queued["quantity"] == 3
+    # #148: the queue route reports the copies it queued, not the item count.
+    assert body["copies"] == 3
     # The pipeline's own target, since the picker named no printer.
     assert queued["printer_id"] == 1
     assert body["route"] == "slice_queue"
@@ -164,11 +166,16 @@ def test_a_remembered_quantity_reaches_the_pipeline_run(client: TestClient, mode
         return_value=httpx.Response(202, json=run_body())
     )
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    remembered = client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
     assert json.loads(run.calls.last.request.read())["copies"] == 3
+    # #148: the result says how many were queued, whichever value won.
+    assert remembered.json()["copies"] == 3
 
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "copies": 2})
+    explicit = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "copies": 2}
+    )
     assert json.loads(run.calls.last.request.read())["copies"] == 2
+    assert explicit.json()["copies"] == 2
 
 
 @respx.mock
@@ -239,3 +246,24 @@ def test_a_remembered_project_alone_still_runs_the_pipeline(client: TestClient, 
     assert run.called
     assert not sliced.called
     assert body["route"] == "pipeline"
+
+
+@respx.mock
+def test_a_remembered_quantity_is_reported_on_the_queue_route(
+    client: TestClient, model: str
+) -> None:
+    """#148: with no Copies box set, the result is the only place the remembered quantity
+    that was actually queued shows up after the click."""
+    configure(client)
+    remember(client, "global", {"timelapse": False, "quantity": 4})
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    slice_route()
+    queue = queue_route()
+
+    body = client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1}).json()
+
+    assert json.loads(queue.calls.last.request.read())["quantity"] == 4
+    assert body["copies"] == 4

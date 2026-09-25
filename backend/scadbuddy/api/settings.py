@@ -143,13 +143,19 @@ async def get_print_options(
         str | None,
         Query(description="The model about to be printed, whose own pipeline may differ"),
     ] = None,
+    pipeline_id: Annotated[
+        int | None,
+        Query(description="The pipeline about to run, when the caller has already chosen one"),
+    ] = None,
 ) -> PrintOptionsState:
     settings = store.load()
     printer_id = settings.printer_id
     # ``pipeline_for``, not ``pipeline_id``: a model can have its own default pipeline
     # (#86) aimed at a different printer, and a scope saved against the global
-    # pipeline's target would then silently never apply.
-    pipeline_id = settings.pipeline_for(slug) if slug is not None else settings.pipeline_id
+    # pipeline's target would then silently never apply. The picker may choose yet
+    # another one (#145), and the run keys the scope on that pipeline's target.
+    if pipeline_id is None:
+        pipeline_id = settings.pipeline_for(slug) if slug is not None else settings.pipeline_id
     if printer_id is None and pipeline_id is not None:
         try:
             async with client_for(settings) as client:
