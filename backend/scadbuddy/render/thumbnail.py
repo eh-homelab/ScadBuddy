@@ -251,12 +251,22 @@ def _block(
 
 
 def _downsample(image: np.ndarray, size: int) -> np.ndarray:
-    """Box filter to `size`. Averaging alpha too is what feathers the silhouette."""
+    """Box filter to `size`. Averaging alpha too is what feathers the silhouette.
+
+    Colour is averaged premultiplied by alpha, then divided back out: a
+    transparent sample has no colour, so averaging its (0, 0, 0) straight in
+    would darken every edge pixel, and compositing darkens it again (#117)."""
     step = image.shape[0] // size
     if step == 1:
         return image
     blocks = image.reshape(size, step, size, step, 4).astype(np.float64)
-    return np.rint(blocks.mean(axis=(1, 3))).astype(np.uint8)
+    alpha = blocks[..., 3:4] / 255.0
+    mean_alpha = alpha.mean(axis=(1, 3))
+    mean_colour = (blocks[..., :3] * alpha).mean(axis=(1, 3))
+    colour = np.divide(
+        mean_colour, mean_alpha, out=np.zeros_like(mean_colour), where=mean_alpha > 0
+    )
+    return np.rint(np.concatenate((colour, mean_alpha * 255.0), axis=-1)).astype(np.uint8)
 
 
 def encode_png(image: np.ndarray) -> bytes:
