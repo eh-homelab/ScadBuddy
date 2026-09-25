@@ -17,6 +17,7 @@ from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import (
     PLATE_PNG_SIZE,
     PLATE_SMALL_PNG_SIZE,
+    _downsample,
     encode_png,
     render_plate_thumbnails,
 )
@@ -171,3 +172,46 @@ def test_empty_part_list_is_rejected() -> None:
 def test_the_encoder_round_trips_through_the_reader() -> None:
     image = np.arange(4 * 3 * 4, dtype=np.uint8).reshape(4, 3, 4)
     assert np.array_equal(read_png(encode_png(image)), image)
+
+
+def test_downsampling_an_edge_keeps_its_colour_and_scales_only_coverage() -> None:
+    """#117: a transparent sample carries no colour, so it must not darken the edge.
+
+    One opaque red pixel in a 2x2 block of otherwise transparent ones is a quarter
+    coverage of red: (255, 0, 0, 64). A straight box filter gives (64, 0, 0, 64),
+    a dark red that compositing darkens a second time.
+    """
+    image = np.zeros((2, 2, 4), dtype=np.uint8)
+    image[0, 0] = (255, 0, 0, 255)
+
+    assert _downsample(image, 1)[0, 0].tolist() == [255, 0, 0, 64]
+
+
+def test_downsampling_a_fully_transparent_block_stays_transparent_black() -> None:
+    image = np.zeros((2, 2, 4), dtype=np.uint8)
+
+    assert _downsample(image, 1)[0, 0].tolist() == [0, 0, 0, 0]
+
+
+def test_downsampling_two_opaque_colours_still_averages_them() -> None:
+    image = np.zeros((2, 2, 4), dtype=np.uint8)
+    image[:, 0] = (255, 0, 0, 255)
+    image[:, 1] = (0, 0, 255, 255)
+
+    assert _downsample(image, 1)[0, 0].tolist() == [128, 0, 128, 255]
+
+
+def test_downsampling_keeps_each_larger_block_to_itself() -> None:
+    """Production reduces 4x4 and larger blocks, not only 2x2: each output pixel must
+    come from its own block, premultiplied, whatever the step."""
+    image = np.zeros((8, 8, 4), dtype=np.uint8)
+    image[0, 0] = (255, 0, 0, 255)  # one sample of sixteen in the top-left block
+    image[0:4, 4:8] = (0, 0, 255, 255)  # top-right block fully blue
+    image[4:6, 4:8] = (0, 255, 0, 255)  # bottom-right block half green
+
+    reduced = _downsample(image, 2)
+
+    assert reduced[0, 0].tolist() == [255, 0, 0, 16]
+    assert reduced[0, 1].tolist() == [0, 0, 255, 255]
+    assert reduced[1, 0].tolist() == [0, 0, 0, 0]
+    assert reduced[1, 1].tolist() == [0, 255, 0, 128]

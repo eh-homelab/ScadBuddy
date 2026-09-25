@@ -159,6 +159,8 @@ def get_version_source(
         body = history.show(resolved, f"{slug}/{SOURCE_NAME}")
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no source at {commit}") from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     return Response(content=body, media_type="text/plain; charset=utf-8")
 
 
@@ -182,6 +184,8 @@ async def get_version_schema(
         source = await resolve_source(slug, resolved, paths=paths, history=history)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     try:
         return await cached_schema(source.scad, source.schema_cache, config=config)
     except FileNotFoundError:
