@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.config import load_config
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
@@ -110,3 +111,24 @@ def test_paste_check_and_replace_against_a_real_openscad(client: TestClient) -> 
     assert replaced.status_code == 200, replaced.text
     schema = client.get("/api/v1/models/pasted/schema").json()
     assert [parameter["name"] for parameter in schema["parameters"]] == ["width"]
+
+
+def test_the_check_resolves_a_sibling_include_through_the_models_slug(
+    client: TestClient, data_dir: Path
+) -> None:
+    """`POST /models/check` with a `slug` checks in that model's directory (#128), so an
+    include of a file beside the model resolves; without one, OpenSCAD cannot see it."""
+    source = "include <helper.scad>\nwidth = 3; // [1:1:9]\ncube([width, 2, helper_depth]);\n"
+    created = client.post(
+        "/api/v1/models", json={"name": "Widget", "source": source, "force": True}
+    )
+    assert created.status_code == 201, created.text
+    DataPaths(data_dir).model_dir("widget").joinpath("helper.scad").write_text(
+        "helper_depth = 4;\n", encoding="utf-8"
+    )
+
+    with_slug = client.post("/api/v1/models/check", json={"source": source, "slug": "widget"})
+    without = client.post("/api/v1/models/check", json={"source": source})
+
+    assert with_slug.json()["diagnostics"] == [], with_slug.json()
+    assert any("include" in d["message"] for d in without.json()["diagnostics"]), without.json()
