@@ -5,6 +5,7 @@ import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
 import { HistoryPage } from './pages/HistoryPage'
 import { SettingsPage } from './pages/SettingsPage'
+import { VersionsPage } from './pages/VersionsPage'
 
 export function App() {
   return (
@@ -13,6 +14,7 @@ export function App() {
         <Route index element={<CataloguePage />} />
         <Route path="m/:slug" element={<CustomizePage />} />
         <Route path="m/:slug/history" element={<HistoryPage />} />
+        <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />

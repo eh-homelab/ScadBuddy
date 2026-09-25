@@ -3,18 +3,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import shutil
+import threading
+import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from dataclasses import replace
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
@@ -62,9 +67,16 @@ class JobResult(BaseModel):
 
 
 class Job(BaseModel):
+    # `model_version` is the name #90 asks for on the wire; without this pydantic
+    # warns that it collides with its own `model_` namespace.
+    model_config = ConfigDict(protected_namespaces=())
+
     id: str
     slug: str
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    # The models-repository commit this render read. Carried onto the output it
+    # produces, so an output can always name the revision it came from (#80/#90).
+    model_version: str | None = None
     state: JobState = "pending"
     created_at: datetime
     started_at: datetime | None = None
@@ -201,11 +213,138 @@ async def plate_thumbnails(
     return rendered, []
 
 
-async def render_job(job: Job, *, config: Config, paths: DataPaths) -> tuple[JobResult, list[str]]:
-    scad = paths.model_source(job.slug)
-    # Reads every file under the model directory; off the loop, like the other two.
-    version = await asyncio.to_thread(source_version, paths.model_dir(job.slug))
-    schema = await cached_schema(scad, paths.model_meta(job.slug), config=config)
+@dataclass(frozen=True)
+class ModelSource:
+    """What a render or a schema read works from: a `.scad`, where its derived
+    schema is cached, and which revision the two belong to."""
+
+    scad: Path
+    schema_cache: Path
+    version: str | None
+
+
+async def resolve_source(
+    slug: str,
+    requested: str | None,
+    *,
+    paths: DataPaths,
+    history: ModelHistory | None,
+) -> ModelSource:
+    """Resolve a model to the source a render reads: the live one, or an export of
+    an older revision.
+
+    `last_commit` is read ONCE here, and the resolved revision comes back on the
+    result so a caller does not have to ask again to stamp `model_version`.
+
+    The export is an ordinary model directory under ``data/cache``, so the
+    renderer -- including the wrapper `render_solids` drops next to the source --
+    works on it unchanged, and nothing generated lands in the repository. Commits
+    are immutable, so a populated export is never stale.
+    """
+    current = (
+        await asyncio.to_thread(history.last_commit, slug)
+        if history is not None and history.available
+        else None
+    )
+    if requested is None or requested == current:
+        return ModelSource(
+            scad=paths.model_source(slug),
+            schema_cache=paths.model_schema_cache(slug),
+            version=current,
+        )
+    assert history is not None  # a requested revision implies a repository
+    directory = paths.model_revision_dir(slug, requested)
+    if (directory / SOURCE_NAME).is_file():
+        # Mark it used, so `prune_revision_exports` evicts by LAST USE rather
+        # than by export time and cannot take an old revision out from under a
+        # render that is still browsing it.
+        await asyncio.to_thread(_touch, directory)
+    else:
+        await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
+    return ModelSource(
+        scad=directory / SOURCE_NAME,
+        schema_cache=directory / SCHEMA_CACHE_NAME,
+        version=requested,
+    )
+
+
+def _touch(directory: Path) -> None:
+    with suppress(OSError):
+        os.utime(directory)
+
+
+def prune_revision_exports(paths: DataPaths, ttl: float, *, now: float | None = None) -> list[str]:
+    """Evict revision exports nobody has rendered from in ``ttl`` seconds.
+
+    `cache/schema/` needs none of this -- one file per slug, overwritten in
+    place -- but every distinct `{slug, commit}` anyone opens "Customize this
+    version" on writes a directory that is otherwise kept forever, on a 5 Gi
+    PVC, for a feature whose whole point is browsing arbitrary old revisions.
+    Losing one costs a `git archive`, so this mirrors the TTL sweep `jobs/`
+    already gets, on the same clock and the same two trigger points.
+    """
+    root = paths.model_revisions
+    if not root.is_dir():
+        return []
+    cutoff = (now if now is not None else time.time()) - ttl
+    removed: list[str] = []
+    for slug_dir in sorted(root.iterdir()):
+        if not slug_dir.is_dir():
+            continue
+        for export in sorted(slug_dir.iterdir()):
+            if not export.is_dir() or export.stat().st_mtime >= cutoff:
+                continue
+            shutil.rmtree(export, ignore_errors=True)
+            removed.append(f"{slug_dir.name}/{export.name}")
+        with suppress(OSError):
+            slug_dir.rmdir()  # only when it emptied
+    return removed
+
+
+def _export_atomically(history: ModelHistory, slug: str, version: str, directory: Path) -> None:
+    """Export beside the destination, then move it into place.
+
+    Renders are debounced, so two of the same revision overlap routinely, and a
+    reader that finds `model.scad` present while the other writer is still
+    extracting `model.json` would render against half a revision.
+    """
+    staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
+    shutil.rmtree(staging, ignore_errors=True)
+    try:
+        history.export(slug, version, staging)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.replace(staging, directory)
+        except OSError:
+            # Another writer got there first; its copy is just as good.
+            if not (directory / SOURCE_NAME).is_file():
+                raise
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+
+
+async def render_job(
+    job: Job,
+    *,
+    config: Config,
+    paths: DataPaths,
+    history: ModelHistory | None = None,
+) -> tuple[JobResult, list[str]]:
+    # Resolved again rather than carried on the job: the model can be edited
+    # between submit and render, and a stored "this one is live" flag would then
+    # render newer source while claiming the older revision.
+    source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+    scad = source.scad
+    # #90 stamps the model's own commit id, which `provenance.source_version` was
+    # written to accept (a free string, never a structured field). The content hash
+    # remains the answer when there is no repository to name a revision -- and it
+    # hashes what was actually rendered, which for an old revision is its export,
+    # not the live model directory. Reads every file under it; off the loop, like
+    # the other two.
+    version = source.version
+    if version is None:
+        version = await asyncio.to_thread(source_version, scad.parent)
+    schema = await cached_schema(scad, source.schema_cache, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)
 
@@ -259,12 +398,14 @@ class RenderQueue:
         *,
         store: JobStore | None = None,
         render: RenderCallable | None = None,
+        history: ModelHistory | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
+        self.history = history
         self.store = store or JobStore(paths)
         self._render: RenderCallable = render or (
-            lambda job: render_job(job, config=config, paths=paths)
+            lambda job: render_job(job, config=config, paths=paths, history=history)
         )
         self._queue: asyncio.Queue[str] = asyncio.Queue()
         self._workers: list[asyncio.Task[None]] = []
@@ -273,6 +414,7 @@ class RenderQueue:
         self.paths.ensure()
         self.store.fail_unfinished()
         self.store.prune(self.config.job_ttl)
+        prune_revision_exports(self.paths, self.config.job_ttl)
         self._workers = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
@@ -283,8 +425,16 @@ class RenderQueue:
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
 
-    async def submit(self, slug: str, params: Mapping[str, ParamValue]) -> Job:
-        job = Job(id=uuid.uuid4().hex, slug=slug, params=dict(params), created_at=_now())
+    async def submit(
+        self, slug: str, params: Mapping[str, ParamValue], *, model_version: str | None = None
+    ) -> Job:
+        job = Job(
+            id=uuid.uuid4().hex,
+            slug=slug,
+            params=dict(params),
+            model_version=model_version,
+            created_at=_now(),
+        )
         self.store.write(job)
         await self._queue.put(job.id)
         return job
@@ -321,3 +471,4 @@ class RenderQueue:
         job.finished_at = _now()
         self.store.write(job)
         self.store.prune(self.config.job_ttl)
+        prune_revision_exports(self.paths, self.config.job_ttl)

@@ -48,4 +48,7 @@ untyped_calls_exclude = ["trimesh"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-markers = ["requires_openscad: needs a real openscad binary on PATH"]
+markers = [
+    "requires_openscad: needs a real openscad binary on PATH",
+    "requires_git: needs a real git binary on PATH",
+]

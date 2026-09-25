@@ -11,6 +11,7 @@ DEFAULT_RENDER_TIMEOUT = 120.0
 DEFAULT_RENDER_CONCURRENCY = 2
 DEFAULT_JOB_TTL = 86400.0
 DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
+DEFAULT_GIT_TIMEOUT = 30.0
 
 
 @dataclass(frozen=True)
@@ -23,6 +24,8 @@ class Config:
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
     google_fonts_api_key: str | None = None
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
+    # Bounds every git call and the wait for the model repository's write lock.
+    git_timeout: float = DEFAULT_GIT_TIMEOUT
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -40,4 +43,5 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         fonts_catalogue_ttl=float(
             source.get("SCADBUDDY_FONTS_CATALOGUE_TTL") or DEFAULT_FONTS_CATALOGUE_TTL
         ),
+        git_timeout=float(source.get("SCADBUDDY_GIT_TIMEOUT") or DEFAULT_GIT_TIMEOUT),
     )

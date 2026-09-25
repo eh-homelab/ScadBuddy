@@ -37,13 +37,16 @@ class OutputNotFoundError(KeyError):
 class OutputMeta(BaseModel):
     # #80 asks for the "model version"; pydantic reserves the "model_" prefix for
     # its own methods, so its guard is turned off rather than the field renamed.
+    # `render.jobs.Job` carries the same field, and the same guard, for #90.
     model_config = ConfigDict(protected_namespaces=())
 
     id: str
     slug: str
-    #: What the model was when this was rendered — today a content hash of its
-    #: sources, a git commit id once #90 lands, so the field stays a free string.
-    #: None on records written before provenance was stamped.
+    #: What the model was when this was rendered. Since #90 that is the
+    #: models-repository commit the render read; it falls back to a content hash of
+    #: the model's sources where there is no repository to name a revision, which is
+    #: why the field is a free string rather than a structured one. None on records
+    #: written before provenance was stamped.
     model_version: str | None = None
     name: str | None = None
     job_id: str

@@ -111,6 +111,72 @@ test.describe('real backend', () => {
       contentType: 'image/png',
     })
   })
+
+  /**
+   * Issue #90's acceptance, end to end. Only the real stack can show this: the
+   * models directory is a real git repository on the data volume, so this passes
+   * only if `git` is actually present in the image, `git init` succeeded as uid
+   * 10001 against that volume, and an old revision really does render.
+   *
+   * The writes go through the API rather than the UI, because there is no
+   * upload-and-edit flow in the customizer yet (#92); the reads, the old-revision
+   * render and the restore are driven through the Versions panel.
+   */
+  test('versions a model, renders an old revision and restores it', async ({ page, request }) => {
+    test.setTimeout(240_000)
+
+    const slug = `e2e-versions-${Date.now().toString(36)}`
+    const first = `// ${slug}\nwidth = 10; // [5:40]\ncube([width, 10, 4]);\n`
+    const second = first.replace('width = 10;', 'width = 24;')
+
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from(first) },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+    const firstVersion = ((await created.json()) as { version: string }).version
+    expect(firstVersion).toMatch(/^[0-9a-f]{40}$/)
+
+    try {
+      const edited = await request.put(`/api/v1/models/${slug}/source`, {
+        data: { source: second, message: 'Widen the block' },
+      })
+      expect(edited.ok()).toBeTruthy()
+
+      await page.goto(`/m/${slug}/versions`)
+      const versions = page.getByTestId('versions')
+      await expect(versions.locator('li')).toHaveCount(2)
+      await expect(versions.locator('li').first()).toContainText('Widen the block')
+      await expect(page.getByTestId('diff')).toContainText('+width = 24;')
+
+      // "Customize this version" renders the OLD source through a real OpenSCAD,
+      // and leaves the model where it is.
+      await versions
+        .locator('li')
+        .last()
+        .getByRole('button', { name: 'Customize this version' })
+        .click()
+      await expect(page.getByTestId('version-badge')).toContainText(firstVersion.slice(0, 7))
+      await expect(page.getByTestId('bbox-readout')).toContainText('mm', { timeout: 120_000 })
+      expect(await (await request.get(`/api/v1/models/${slug}/source`)).text()).toContain(
+        'width = 24;',
+      )
+
+      await page.goto(`/m/${slug}/versions`)
+      await versions
+        .locator('li')
+        .last()
+        .getByRole('button', { name: 'Restore this version' })
+        .click()
+      await expect(versions.locator('li')).toHaveCount(3)
+      expect(await (await request.get(`/api/v1/models/${slug}/source`)).text()).toContain(
+        'width = 10;',
+      )
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
 })
 
 /**

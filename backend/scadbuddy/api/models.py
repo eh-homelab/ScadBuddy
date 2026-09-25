@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Response, UploadFile, status
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, ConfigDep, PathsDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, ConfigDep, HistoryDep, PathsDep, SlugPath
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
@@ -16,8 +18,10 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
 )
+from scadbuddy.library.history import MAX_SUBJECT
 from scadbuddy.library.scad import NotOpenSCADError, decode_source, verify_parses
 from scadbuddy.library.slugs import InvalidSlugError, slug_from_filename
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
 
@@ -31,6 +35,14 @@ def require_model(catalogue: Catalogue, slug: str) -> ModelRecord:
         return catalogue.record(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+def require_model_exists(catalogue: Catalogue, slug: str) -> None:
+    """Existence without building a record -- which costs a `git log` for the
+    model's revision. The render path runs on every debounced keystroke and only
+    needs the 404."""
+    if not catalogue.exists(slug):
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
 
 
 def _parse_tags(raw: str | None) -> list[str] | None:
@@ -113,7 +125,13 @@ async def create_model(
         tags=_parse_tags(tags) or [],
     )
     try:
-        return catalogue.create(slug, source, meta, thumbnail=thumbnail_bytes, readme=readme_text)
+        # `to_thread`, because a create is a `git add` + `git commit` against the
+        # PVC and this handler is `async def` -- FastAPI only offloads plain `def`
+        # ones. On the event loop it would stall every render poll and /healthz
+        # for the length of the commit. Same at every git-touching call below.
+        return await asyncio.to_thread(
+            catalogue.create, slug, source, meta, thumbnail=thumbnail_bytes, readme=readme_text
+        )
     except ModelExistsError:
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists") from None
 
@@ -136,6 +154,38 @@ def delete_model(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+class SourceUpdate(BaseModel):
+    source: str
+    # What the revision is called in the history. The paste/edit path (#92) passes
+    # its own; anything else gets the default. Flattened to one printable line
+    # before it reaches git -- see `history.subject_line`.
+    message: str | None = Field(default=None, max_length=MAX_SUBJECT)
+
+
+@router.put(
+    "/models/{slug}/source",
+    response_model=ModelRecord,
+    summary="Replace a model's source as one revision",
+)
+async def put_source(
+    slug: SlugPath,
+    body: SourceUpdate,
+    catalogue: CatalogueDep,
+    config: ConfigDep,
+) -> ModelRecord:
+    # `require_model_exists`, not `require_model`: building a record costs a
+    # `git log` for the model's revision, and this handler is `async def`. The
+    # record `write_source` returns carries the new revision anyway.
+    require_model_exists(catalogue, slug)
+    try:
+        await verify_parses(body.source, config=config)
+    except NotOpenSCADError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), log_tail=error.log_tail
+        ) from None
+    return await asyncio.to_thread(catalogue.write_source, slug, body.source, message=body.message)
+
+
 @router.get(
     "/models/{slug}/source",
     response_class=FileResponse,
@@ -149,11 +199,16 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")
 async def get_schema(
-    slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep, config: ConfigDep
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
+    config: ConfigDep,
 ) -> CustomizerSchema:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
+    source = await resolve_source(slug, None, paths=paths, history=history)
     try:
-        return await cached_schema(paths.model_source(slug), paths.model_meta(slug), config=config)
+        return await cached_schema(source.scad, source.schema_cache, config=config)
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"

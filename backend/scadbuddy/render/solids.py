@@ -166,7 +166,9 @@ CSS_COLOURS: dict[str, str] = {
 
 #: The wrapper has to live beside the model so its ``include <>`` resolves, which
 #: puts a transient .scad inside the directory `provenance.source_version` hashes —
-#: it skips anything with this prefix, so the two must stay in step.
+#: it skips anything with this prefix, so the two must stay in step. Since #90 that
+#: directory is also a git repository, so `library/history.py` writes this same
+#: prefix into its .gitignore: three places, one constant.
 WRAPPER_PREFIX = "_scadbuddy_solid_"
 
 # A user-defined `color` module shadows the builtin, so a wrapper that keeps only the

@@ -59,7 +59,7 @@ async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) 
     assert result.bbox_mm.size[0] == pytest.approx(60.0)
     assert result.bbox_mm.size[2] == pytest.approx(6.0)
 
-    schema = json.loads(data.model_meta(SLUG).read_text(encoding="utf-8"))["schema"]
+    schema = json.loads(data.model_schema_cache(SLUG).read_text(encoding="utf-8"))["schema"]
     assert [p["name"] for p in schema["parameters"]][:3] == ["name", "text_colour", "text_font"]
 
     scene = trimesh.load(data.root / result.model_3mf, file_type="3mf")
@@ -73,8 +73,15 @@ async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) 
 
 
 async def test_the_model_directory_is_left_as_it_was(data: DataPaths) -> None:
+    """Not one byte: `models/` is a git repository, and a render is not a commit.
+
+    The wrapper `render_solids` writes next to the source is removed again, and
+    the derived schema goes to `cache/` rather than into `model.json`.
+    """
     await _render(data, SLUG, {"name": "Reagan"})
-    assert sorted(p.name for p in data.model_dir(SLUG).iterdir()) == ["model.json", "model.scad"]
+
+    assert sorted(p.name for p in data.model_dir(SLUG).iterdir()) == ["model.scad"]
+    assert data.model_schema_cache(SLUG).is_file()
 
 
 @pytest.mark.skipif(not KEYCHAIN_MODEL.is_file(), reason="models/name-keychain is not present")

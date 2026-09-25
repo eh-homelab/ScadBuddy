@@ -144,13 +144,13 @@ async def export_schema(scad_path: Path, *, config: Config) -> CustomizerSchema:
     return build_schema(await export_param_json(scad_path, config=config), source)
 
 
-async def cached_schema(scad_path: Path, meta_path: Path, *, config: Config) -> CustomizerSchema:
+async def cached_schema(scad_path: Path, cache_path: Path, *, config: Config) -> CustomizerSchema:
     source = scad_path.read_text(encoding="utf-8")
-    cached = load_cached_schema(meta_path, source_sha256(source))
+    cached = load_cached_schema(cache_path, source_sha256(source))
     if cached is not None:
         return cached
     schema = await export_schema(scad_path, config=config)
-    store_cached_schema(meta_path, schema)
+    store_cached_schema(cache_path, schema)
     return schema
 
 

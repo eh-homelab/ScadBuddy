@@ -188,12 +188,81 @@ docs/superpowers/specs/
 Data on the PVC (`SCADBUDDY_DATA_DIR`, default `/data`):
 
 ```
+models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
-models/<slug>/model.json          name, description, tags, thumbnail, params schema cache
+models/<slug>/model.json          name, description, tags, thumbnail (NOT the schema)
 models/<slug>/thumbnail.png
 outputs/<slug>/<output-id>/       params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
+cache/schema/<slug>.json          the DERIVED customizer schema, keyed by source hash
+cache/revisions/<slug>/<commit>/  an old model revision exported out of git, derived
 ```
+
+### 4.3 Model history: git is the version store (#90)
+
+`models/` is a git repository, initialised on first start. Every catalogue action
+is exactly one commit — upload, source edit, metadata change, delete, seed,
+restore — and there is no parallel index of revisions anywhere: `git log`,
+`git show` and `git diff` are the read side. Whatever the server reports, a shell
+on the volume sees the same thing.
+
+- **Shelling out to `git`, not dulwich/pygit2.** The product surface here *is*
+  git porcelain, so a library would mean reimplementing log/diff/restore — a
+  home-grown version store in a different hat. The follow-ups want the real
+  client too: #93 vendors libraries as `git clone --depth 1` checkouts, and the
+  optional off-box push wants git's own transports. Cost: `git` in the image,
+  which is therefore a **runtime** dependency, not tooling.
+- **Hermetic invocation.** `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` are `/dev/null`
+  and hooks are disabled, so no operator's `~/.gitconfig` can reach the
+  repository; identity comes from the environment rather than a config file
+  (the container runs as uid 10001 whose HOME is not the volume); and
+  `safe.directory` is passed as command-line — *protected-scope* — config,
+  because a PVC's ownership need not match the runtime uid.
+- **Writes are serialised** by a thread lock plus an `flock`, so nothing can
+  interleave an `add`/`commit` pair.
+- **Generated files never enter the tree.** `render_solids` drops its wrapper
+  next to the model source (it has to, for `include <>` to resolve); the prefix
+  is the named `WRAPPER_PREFIX` constant and `ensure_repo` writes it into
+  `.gitignore`. The derived customizer schema used to live in `model.json` and
+  now lives under `cache/`: it is written lazily, by a *read*, outside any
+  commit, so in the tree it would leave the repository permanently dirty and
+  fold a cache blob into the next unrelated metadata commit.
+- **A commit message is flattened to one printable line** (`subject_line`).
+  `PUT /models/{slug}/source` takes a caller-supplied `message`, and the log
+  parser splits records on ASCII RS/US — bytes nothing can put in a hash, an
+  author or a date, but which a *subject* would carry straight through,
+  desyncing every later record boundary and silently dropping the malformed
+  chunks.
+- **Outputs stamp `model_version`**: the model's own last commit, not the
+  repository HEAD — a commit against another model leaves this one where it was,
+  and the id has to name an entry in *this* model's history.
+- **"Customize this version"** renders an old revision without restoring it. The
+  revision is exported to `cache/revisions/<slug>/<commit>/`, an ordinary model
+  directory, so the schema cache and the renderer work on it unchanged and
+  nothing generated lands in the repository. Commits are immutable, so a
+  populated export is never *stale* — but it is still a cache, and it is swept
+  on the same TTL and the same two trigger points as `jobs/`, by **last use**
+  rather than by export time so a sweep cannot take a revision out from under
+  someone still browsing it.
+- **Every git call is blocking**, so an `async def` handler hands it to
+  `asyncio.to_thread`. FastAPI offloads plain `def` handlers on its own; an
+  `async` one runs on the loop uvicorn shares with the render workers, and a
+  commit against the PVC there stalls every render poll and `/healthz` with it.
+- **Every git call is also bounded** by `SCADBUDDY_GIT_TIMEOUT` (default 30 s),
+  and so is the wait for the write lock. Off the event loop is not enough on
+  its own: `asyncio.to_thread` runs on the executor `/healthz` and the render
+  polls share, and this repository lives on a PVC that Velero snapshots, so an
+  `fsync` parked behind a block-storage stall would hold a slot for as long as
+  the stall lasts. A deadline makes that an ordinary `GitError` instead, which
+  the next bullet already absorbs. `fcntl.flock` takes no deadline, so the
+  non-blocking form is retried against one.
+- **A failed commit never fails the action.** The files are written first, so a
+  `GitError` *or* an `OSError` (the lock file is ordinary filesystem I/O, and a
+  PVC can go read-only after boot) is logged and swallowed: losing the revision
+  is the smaller harm, and reporting a 500 for an edit that already landed is
+  the larger one.
+- **Not done here:** pushing the repository to a remote. The seam is
+  `ModelHistory.commit`, which returns the new commit id.
 
 ## 5. The customizer (MakerWorld parity)
 
@@ -486,7 +555,13 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source (read-only) |
-| POST | `/models/{slug}/render` | body `{params}` → `{job_id}` (202) |
+| PUT | `/models/{slug}/source` | body `{source, message?}` → replaces it as one revision |
+| GET | `/models/{slug}/versions` | the model's git history: commit, date, author, message, changed files |
+| GET | `/models/{slug}/versions/{commit}/source` | that revision's `.scad` |
+| GET | `/models/{slug}/versions/{commit}/schema` | that revision's customizer schema |
+| GET | `/models/{slug}/versions/{commit}/diff` | `?base=` (default: the parent) → unified patch |
+| POST | `/models/{slug}/versions/{commit}/restore` | restores it as a NEW commit, never a rewrite |
+| POST | `/models/{slug}/render` | body `{params, version?}` → `{job_id}` (202) |
 | GET | `/jobs/{id}` | state, progress, log tail, result URLs |
 | GET | `/jobs/{id}/preview.glb` | viewer mesh |
 | POST | `/models/{slug}/outputs` | persist a finished job as an output (Generate) |

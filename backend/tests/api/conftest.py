@@ -139,7 +139,9 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
     return JobResult(
         model_3mf=str((work / "model.3mf").relative_to(paths.root)),
         preview_glb=str((work / "preview.glb").relative_to(paths.root)),
-        source_version=source_version(paths.model_dir(job.slug)),
+        # As `render_job` does: the revision the job was resolved to when there is a
+        # repository (#90), the content hash only when there is none.
+        source_version=job.model_version or source_version(paths.model_dir(job.slug)),
         parts=[PartInfo(name="Color 1", colour="#FF0000", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],

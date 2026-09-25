@@ -20,10 +20,12 @@ const NOTHING: ParamValues = Object.freeze({})
 
 export function CustomizePage() {
   const { slug = '' } = useParams()
-  const [search] = useSearchParams()
+  const [search, setSearch] = useSearchParams()
   const reopenId = search.get('from')
+  // #90 — "Customize this version": render an old revision without restoring it.
+  const version = search.get('version') ?? undefined
 
-  const schemaState = useAsync(() => api.getSchema(slug), [slug])
+  const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
@@ -79,11 +81,22 @@ export function CustomizePage() {
   if (edits.of !== seed) setEdits({ of: seed, values: null })
   const values = edits.values ?? seed ?? NOTHING
 
+  // One debounce over the pair, so the tag can never lag the values it labels.
   const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
-  const { job, rendering, error: renderError } = useRenderJob(slug, debounced)
+  // True once the debounce has caught up with the values on screen. #90: the render
+  // waits for it, because `version` flips the instant the URL does while the
+  // matching schema — and so the values seeded from it — are a fetch behind. Passing
+  // `debounced` unconditionally pairs the NEW revision id with the PREVIOUS
+  // revision's parameters for one submission: the wrong render at best, and a 422
+  // (§6.1) on a parameter the old schema had and the new one does not.
+  const settled = debounced === values
+  const {
+    job,
+    rendering,
+    error: renderError,
+  } = useRenderJob(slug, settled ? debounced : undefined, version)
 
   // A parameter change invalidates the saved output — Generate has to run again.
-  const settled = debounced === values
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const onChange = useCallback((name: string, value: ParamValue) => {
@@ -151,16 +164,45 @@ export function CustomizePage() {
               reopened from {reopened.name ?? reopened.output_id.slice(0, 8)}
             </span>
           )}
-        </div>
-        <Link
-          to={`/m/${slug}/history`}
-          className="shrink-0 rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-        >
-          History
-          {outputsState.data && outputsState.data.length > 0 && (
-            <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
+          {version && (
+            <span
+              data-testid="version-badge"
+              className="sb-num shrink-0 rounded-[6px] bg-accent/12 px-1.5 py-0.5 text-[11px] text-accent"
+            >
+              revision {version.slice(0, 7)}
+            </span>
           )}
-        </Link>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          {version && (
+            <button
+              type="button"
+              onClick={() => {
+                const next = new URLSearchParams(search)
+                next.delete('version')
+                setSearch(next, { replace: true })
+              }}
+              className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+            >
+              Back to current
+            </button>
+          )}
+          <Link
+            to={`/m/${slug}/versions`}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            Versions
+          </Link>
+          <Link
+            to={`/m/${slug}/history`}
+            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+          >
+            History
+            {outputsState.data && outputsState.data.length > 0 && (
+              <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
+            )}
+          </Link>
+        </div>
       </div>
 
       <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">
