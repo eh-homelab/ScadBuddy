@@ -1756,10 +1756,16 @@ export interface components {
          *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
          *     only offers it once the issues have been shown.
          *
-         *     ``filament_plan`` is what makes this request choose its route rather than its
-         *     caller. A plan names one spool per plate slot, and those three queue-item fields
-         *     exist on no other Bambuddy call — so a request carrying one is sliced and queued,
-         *     and one without one runs the pipeline exactly as it did before (#87).
+         *     The request does not choose its route; what it needs does. A pipeline run takes
+         *     only a source, ``copies`` and ``force``, so it is sliced and queued instead when
+         *     either:
+         *
+         *     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
+         *       queue-item fields exist on no other Bambuddy call (#87); or
+         *     - a remembered print option applies that a run cannot carry (#124). The options
+         *       resolve global → per-printer → per-model → this request's ``copies``.
+         *
+         *     Otherwise it runs the pipeline exactly as before.
          */
         PrintRunRequest: {
             /** Copies */

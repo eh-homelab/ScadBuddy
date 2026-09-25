@@ -191,10 +191,16 @@ class PrintRunRequest(BaseModel):
     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
     only offers it once the issues have been shown.
 
-    ``filament_plan`` is what makes this request choose its route rather than its
-    caller. A plan names one spool per plate slot, and those three queue-item fields
-    exist on no other Bambuddy call — so a request carrying one is sliced and queued,
-    and one without one runs the pipeline exactly as it did before (#87).
+    The request does not choose its route; what it needs does. A pipeline run takes
+    only a source, ``copies`` and ``force``, so it is sliced and queued instead when
+    either:
+
+    - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
+      queue-item fields exist on no other Bambuddy call (#87); or
+    - a remembered print option applies that a run cannot carry (#124). The options
+      resolve global → per-printer → per-model → this request's ``copies``.
+
+    Otherwise it runs the pipeline exactly as before.
     """
 
     pipeline_id: int | None = None
@@ -582,7 +588,7 @@ async def run_for_output(
     pipeline: Pipeline | None = None
     scope_printer_id = request.printer_id or settings.printer_id
     if scope_printer_id is None and settings.printer_print_options:
-        pipeline = await client.pipeline(pipeline_id)
+        pipeline = await _pipeline_or_conflict(client, pipeline_id)
         scope_printer_id = pipeline.target_printer_id
     print_options = resolve_print_options(
         settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
@@ -615,12 +621,7 @@ async def run_for_output(
         )
 
     if pipeline is None:
-        pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
-    if pipeline is None:
-        raise not_configured(
-            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so the chosen "
-            "filaments cannot be sliced with it"
-        )
+        pipeline = await _pipeline_or_conflict(client, pipeline_id)
     if request.filament_plan is None:
         # Only the options forced this route: slice exactly what the run would have.
         slice_request = pipeline_slice_request(pipeline, meta)
@@ -683,6 +684,21 @@ async def run_for_output(
         folder_id,
         warnings=warnings + preset_warnings,
     )
+
+
+async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pipeline:
+    """The pipeline by id, or the same friendly 409 whichever path first needs it.
+
+    Read from the list rather than ``GET /slicer-pipelines/{id}``: a pipeline deleted
+    in Bambuddy is then this app's "not configured", not a raw upstream 404.
+    """
+    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
+    if pipeline is None:
+        raise not_configured(
+            f"Bambuddy no longer has slicer pipeline {pipeline_id}, so ScadBuddy cannot "
+            "slice with it"
+        )
+    return pipeline
 
 
 def _queued(

@@ -174,6 +174,27 @@ def test_a_remembered_quantity_reaches_the_pipeline_run(client: TestClient, mode
     assert json.loads(run.calls.last.request.read())["copies"] == 2
 
 
+@respx.mock
+def test_a_deleted_pipeline_is_a_friendly_conflict_on_the_scope_path(
+    client: TestClient, model: str
+) -> None:
+    """A per-printer option makes the picker read the pipeline before anything else; a
+    pipeline Bambuddy no longer has must still be "not configured", not an upstream 404."""
+    configure(client)
+    remember(client, "printer", {"timelapse": False}, key="1")
+    respx.get(f"{API}/slicer-pipelines/").mock(
+        return_value=httpx.Response(200, json={"pipelines": []})
+    )
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+
+    assert response.status_code == 409
+    assert "no longer has slicer pipeline 1" in response.json()["detail"]
+
+
 def _pipeline_one() -> dict[str, object]:
     pipelines = recording("slicer-pipelines-configured.json")["pipelines"]
     return next(row for row in pipelines if row["id"] == 1)
