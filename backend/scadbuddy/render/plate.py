@@ -19,6 +19,25 @@ Every number here comes from Bambu Studio's own profiles:
   volumes, so the reservation is square at the widest width rather than guessed;
 * :data:`PRIME_TOWER_BRIM` is ``prime_tower_brim_width``'s 3 mm default, which
   sits outside the tower footprint.
+
+Two kinds of area are kept clear, and not in the same way (#122):
+
+* ``bed_exclude_area`` (the X1/P1 filament cutter) is unprintable, always, so
+  neither the object nor the tower may touch it — :attr:`PlateGeometry.exclusions`.
+* ``wrapping_exclude_area`` (the H2/P2S clumping-detection strip) is unprintable
+  only while the process option ``enable_wrapping_detection`` is on:
+  ``layered_print_cleareance_valid`` in ``src/libslic3r/Print.cpp`` then fails
+  validation with "Prime Tower is too close to clumping detection area" (and the
+  equivalent for an object), ``get_bed_shape_with_excluded_area`` in
+  ``PrintConfig.cpp`` cuts it out of the bed, and ``Brim.cpp`` keeps brims out of
+  it. With the option off it is inert, and off is the default
+  (``fdm_process_common.json``). The option is in the process preset Bambuddy
+  slices with, which ScadBuddy never sees, so it has to be assumed on — but only
+  for the tower, where avoiding it is free: :func:`_tower_corner` rejects a back
+  placement that touches it and :func:`_tower_sides` offers the other three
+  edges. Applying it to the object would refuse placements that print under the
+  default, e.g. a 295 x 315 mm single-colour model on an H2C, which cannot clear
+  a strip at y 310 and still fit — :attr:`PlateGeometry.wrapping_exclusions`.
 """
 
 from __future__ import annotations
@@ -99,6 +118,9 @@ class PlateGeometry:
     #: silently honoured or, in #110's case, a segfault. A default would let a
     #: future call site write ``"printable_height": "0"`` and find out later.
     height: float
+    #: ``wrapping_exclude_area`` — the clumping-detection strip. Screened against
+    #: the prime tower only; see the module docstring for why not the object.
+    wrapping_exclusions: tuple[Rect, ...] = ()
 
     @property
     def key(self) -> str:
@@ -133,7 +155,7 @@ def _intersect(rects: list[Rect]) -> Rect:
 
 
 def _geometry(model: str) -> PlateGeometry:
-    printable, per_extruder, exclude, height = PLATE_PROFILES[model]
+    printable, per_extruder, exclude, wrapping, height = PLATE_PROFILES[model]
     bed = _bounding_rect(printable)
     areas = [_bounding_rect(polygon) for polygon in per_extruder]
     return PlateGeometry(
@@ -143,6 +165,7 @@ def _geometry(model: str) -> PlateGeometry:
         exclusions=(_bounding_rect(exclude),) if exclude else (),
         extruders=max(len(per_extruder), 1),
         height=height,
+        wrapping_exclusions=(_bounding_rect(wrapping),) if wrapping else (),
     )
 
 
@@ -307,6 +330,8 @@ def _tower_corner(
     if footprint.overlaps(keep_clear):
         return None
     if any(footprint.overlaps(cutout) for cutout in plate.exclusions):
+        return None
+    if any(footprint.overlaps(zone) for zone in plate.wrapping_exclusions):
         return None
     # ``wipe_tower_x``/``_y`` name the tower itself; the brim sits outside it.
     return (x + PRIME_TOWER_BRIM, y + PRIME_TOWER_BRIM)

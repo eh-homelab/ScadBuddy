@@ -2,10 +2,14 @@
 """Regenerate ``scadbuddy/render/plate_profiles.py`` from Bambu Studio's own profiles.
 
 The plate a 3MF is laid out on is not a number to be recalled — it is
-``printable_area`` / ``extruder_printable_area`` / ``bed_exclude_area`` in
+``printable_area`` / ``extruder_printable_area`` / ``bed_exclude_area`` /
+``wrapping_exclude_area`` / ``printable_height`` in
 ``resources/profiles/BBL/machine/*.json`` in bambulab/BambuStudio, resolved
 through each preset's ``inherits`` chain. This script reads them and writes the
 table; nothing here is typed in by hand.
+
+``extruder_printable_height`` is read by nothing, deliberately: see the
+``printable_height`` entry in the generated module's docstring (#122).
 
 Usage::
 
@@ -55,12 +59,24 @@ millimetres, the values those profiles declare:
     is what makes a default-placed prime tower unprintable.
 ``bed_exclude_area``
     the front-left cutout the X1/P1 series uses to cut filament.
+``wrapping_exclude_area``
+    the strip the H2/P2S series probes for clumping ("wrapping") at the back of
+    the bed. It is a no-print zone *only while* the process option
+    ``enable_wrapping_detection`` is on — ``Print.cpp``'s
+    ``layered_print_cleareance_valid`` then refuses a prime tower that touches it
+    ("Prime Tower is too close to clumping detection area, and collisions will be
+    caused") — and inert otherwise. That option lives in the process preset
+    Bambuddy slices with, which ScadBuddy never sees, so the prime tower always
+    avoids it (#122).
 ``printable_height``
     the Z limit. The 3MF writer states it in ``project_settings.config``:
     once a file claims BambuStudio identity the CLI dereferences that option
     without a null check, so it is required rather than informational (#110).
-    Note this is the *plate's* height; ``extruder_printable_height`` can differ
-    per extruder and is not modelled (#122).
+    ``extruder_printable_height`` (per extruder; the H2C's are 320 and 325) is
+    deliberately not read (#122): nothing uses Z as a constraint, and the one
+    consumer writes this value back under the key ``printable_height``, where
+    the per-extruder minimum would misstate the profile. If Z ever becomes a
+    placement constraint, read the minimum across extruders then.
 
 Geometry is identical across a model's nozzle variants, so the table is keyed by
 model rather than by preset.
@@ -68,10 +84,11 @@ model rather than by preset.
 
 from __future__ import annotations
 
-#: ``printer_model`` -> (printable_area, extruder_printable_area, bed_exclude_area, height)
 Polygon = tuple[tuple[float, float], ...]
 
-PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] = {
+#: ``printer_model`` -> (printable_area, extruder_printable_area, bed_exclude_area,
+#: wrapping_exclude_area, printable_height)
+PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, Polygon, float]] = {
 '''
 
 FOOTER = """}}
@@ -147,19 +164,23 @@ def collect(root: Path) -> dict[str, tuple[Any, ...]]:
         if not model:
             continue
         exclusion = _polygon(resolved.get("bed_exclude_area"))
-        if len(exclusion) not in (0, 4):
-            # The table holds one polygon per model and the writer reduces it to a
-            # bounding rectangle, so several cutouts concatenated into one list would
-            # silently become one oversized rectangle spanning the gap between them.
-            # Every BBL profile has a single rectangle today; fail loudly if that ends.
-            raise SystemExit(
-                f"{model}: bed_exclude_area has {len(exclusion)} points, which is not one "
-                "rectangle; the table's single-polygon shape no longer holds"
-            )
+        wrapping = _polygon(resolved.get("wrapping_exclude_area"))
+        for key, polygon in (("bed_exclude_area", exclusion), ("wrapping_exclude_area", wrapping)):
+            if len(polygon) not in (0, 4):
+                # The table holds one polygon per model and the writer reduces it to
+                # a bounding rectangle, so several areas concatenated into one list
+                # would silently become one oversized rectangle spanning the gap
+                # between them. Every BBL profile has a single rectangle today; fail
+                # loudly if that ends.
+                raise SystemExit(
+                    f"{model}: {key} has {len(polygon)} points, which is not one "
+                    "rectangle; the table's single-polygon shape no longer holds"
+                )
         entry = (
             _polygon(resolved.get("printable_area")),
             tuple(_polygon([one]) for one in resolved.get("extruder_printable_area") or []),
             exclusion,
+            wrapping,
             float(resolved.get("printable_height") or 0.0),
         )
         previous = table.setdefault(model, entry)
