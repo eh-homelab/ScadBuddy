@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -41,6 +42,7 @@ PREVIEW_NAME = "preview.glb"
 UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
+THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
 
 
 class PartInfo(BaseModel):
@@ -167,6 +169,24 @@ async def solid_parts(
     return parts, solids.warnings
 
 
+#: The rasteriser's own threads (#116). A thread `wait_for` abandons keeps running,
+#: and on the loop's default executor it would hold a slot `write_bambu_3mf` needs, so
+#: a backlog of slow covers could stall jobs whose own render finished in budget.
+#: Here a backlog only queues the next cover, which then times out like any other.
+_thumbnail_executor: ThreadPoolExecutor | None = None
+_thumbnail_executor_lock = threading.Lock()
+
+
+def _thumbnail_pool(config: Config) -> ThreadPoolExecutor:
+    global _thumbnail_executor
+    with _thumbnail_executor_lock:
+        if _thumbnail_executor is None:
+            _thumbnail_executor = ThreadPoolExecutor(
+                max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
+            )
+        return _thumbnail_executor
+
+
 async def plate_thumbnails(
     parts: Sequence[ColourPart], *, config: Config
 ) -> tuple[PlateThumbnails | None, list[str]]:
@@ -200,9 +220,11 @@ async def plate_thumbnails(
     this work is O(faces) plus O(covered pixels) with no loop that can fail to
     terminate, whereas a `.scad` can legitimately spin forever.
     """
+    loop = asyncio.get_running_loop()
     try:
         rendered = await asyncio.wait_for(
-            asyncio.to_thread(render_plate_thumbnails, parts), timeout=config.render_timeout
+            loop.run_in_executor(_thumbnail_pool(config), render_plate_thumbnails, parts),
+            timeout=config.render_timeout,
         )
     except TimeoutError:
         logger.warning(
@@ -210,6 +232,11 @@ async def plate_thumbnails(
             extra={"faces": sum(len(part.mesh.faces) for part in parts)},
         )
         return None, [THUMBNAIL_TIMEOUT_WARNING]
+    except Exception:
+        # Same degradation for a rasteriser bug (a degenerate face, an allocation
+        # failure) as for a slow one: it may cost the cover, never the model (#116).
+        logger.exception("plate thumbnail render failed; writing the 3MF without cover images")
+        return None, [THUMBNAIL_FAILED_WARNING]
     return rendered, []
 
 
