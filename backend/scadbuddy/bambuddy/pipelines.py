@@ -198,7 +198,9 @@ class PrintRunRequest(BaseModel):
     """
 
     pipeline_id: int | None = None
-    copies: int = Field(default=1, ge=1, le=1000)
+    #: Omitted means "the remembered quantity, else 1" (#124): a number here is the
+    #: caller's explicit choice for this print and wins over any remembered one.
+    copies: int | None = Field(default=None, ge=1, le=1000)
     force: bool = False
     #: The printer to queue on, whenever this request is sliced and queued: with a plan
     #: it is the printer whose trays the mapping addresses, and with remembered options
@@ -585,13 +587,14 @@ async def run_for_output(
     print_options = resolve_print_options(
         settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
     )
+    copies = print_options.quantity or 1
 
     if request.filament_plan is None and not print_options.beyond_pipeline():
         run = await client.run_pipeline(
             pipeline_id,
             PipelineRunRequest(
                 source_library_file_id=library_file_id,
-                copies=request.copies,
+                copies=copies,
                 force=request.force,
             ),
         )
@@ -629,7 +632,7 @@ async def run_for_output(
             filament_presets=slice_request.filament_presets,
             filament_colours=slice_request.filament_colours,
             plate_id=request.plate_id,
-            copies=request.copies,
+            copies=copies,
             project_id=project_id,
             options=print_options,
         )
@@ -649,7 +652,7 @@ async def run_for_output(
         plate_id=request.plate_id,
         fallback_colours=list(meta.colors),
     )
-    warnings = check(options, request.filament_plan, copies=request.copies)
+    warnings = check(options, request.filament_plan, copies=copies)
     presets, colours, preset_warnings = slice_filament_presets(
         options,
         request.filament_plan,
@@ -665,7 +668,7 @@ async def run_for_output(
         filament_colours=colours,
         filaments=queue_filaments(options, request.filament_plan),
         plate_id=request.plate_id,
-        copies=request.copies,
+        copies=copies,
         project_id=project_id,
         options=print_options,
     )

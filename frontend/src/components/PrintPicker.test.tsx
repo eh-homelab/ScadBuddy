@@ -122,6 +122,24 @@ describe('PrintPicker', () => {
     expect(onRan).toHaveBeenCalledTimes(1)
   })
 
+  it('leaves copies to the remembered quantity until the box is set', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/run')) {
+        bodies.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    const { user } = open()
+    await listed()
+
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+    server.events.removeAllListeners()
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).not.toHaveProperty('copies')
+  })
+
   it('only offers force once the issues have been shown', async () => {
     const { user } = open()
     await listed()

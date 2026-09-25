@@ -153,6 +153,27 @@ def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     assert body["printer_id"] == 7
 
 
+@respx.mock
+def test_a_remembered_quantity_reaches_the_pipeline_run(client: TestClient, model: str) -> None:
+    """Quantity is the one option a pipeline run carries; an omitted `copies` lets the
+    remembered one through, and an explicit one still wins."""
+    configure(client)
+    remember(client, "global", {"quantity": 3})
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    run = respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(202, json=run_body())
+    )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    assert json.loads(run.calls.last.request.read())["copies"] == 3
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "copies": 2})
+    assert json.loads(run.calls.last.request.read())["copies"] == 2
+
+
 def _pipeline_one() -> dict[str, object]:
     pipelines = recording("slicer-pipelines-configured.json")["pipelines"]
     return next(row for row in pipelines if row["id"] == 1)

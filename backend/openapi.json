@@ -3051,11 +3051,17 @@
         "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\n``filament_plan`` is what makes this request choose its route rather than its\ncaller. A plan names one spool per plate slot, and those three queue-item fields\nexist on no other Bambuddy call \u2014 so a request carrying one is sliced and queued,\nand one without one runs the pipeline exactly as it did before (#87).",
         "properties": {
           "copies": {
-            "default": 1,
-            "maximum": 1000.0,
-            "minimum": 1.0,
-            "title": "Copies",
-            "type": "integer"
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copies"
           },
           "filament_plan": {
             "anyOf": [

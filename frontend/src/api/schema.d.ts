@@ -1762,11 +1762,8 @@ export interface components {
          *     and one without one runs the pipeline exactly as it did before (#87).
          */
         PrintRunRequest: {
-            /**
-             * Copies
-             * @default 1
-             */
-            copies: number;
+            /** Copies */
+            copies?: number | null;
             filament_plan?: components["schemas"]["FilamentPlan"] | null;
             /**
              * Force
