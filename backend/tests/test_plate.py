@@ -7,6 +7,7 @@ import pytest
 
 from scadbuddy.render.plate import (
     DEFAULT_PLATE,
+    EDGE_MARGIN,
     PRIME_TOWER_BRIM,
     PRIME_TOWER_SIDE,
     TOWER_CLEARANCE,
@@ -68,10 +69,24 @@ class TestPlateLookup:
         assert plate_for("X1C").exclusions
         assert not plate_for("H2C").exclusions
 
-    def test_h2c_carries_the_wrapping_detection_strip(self) -> None:
-        """``wrapping_exclude_area`` = 145x310 .. 251x326 in GM042 (#122)."""
-        assert plate_for("H2C").wrapping_exclusions == (Rect(145.0, 310.0, 251.0, 326.0),)
+    @pytest.mark.parametrize(
+        ("model", "strip"),
+        [
+            # Each profile's ``wrapping_exclude_area`` at BambuStudio f977235 (#122).
+            ("H2C", Rect(145.0, 310.0, 251.0, 326.0)),
+            ("H2D", Rect(145.0, 310.0, 256.0, 326.0)),
+            ("H2DP", Rect(145.0, 310.0, 256.0, 326.0)),
+            ("H2S", Rect(172.3, 302.0, 232.5, 322.0)),
+            # Listed back edge first in the profile; the table keeps its bounding box.
+            ("P2S", Rect(153.0, 235.0, 216.0, 256.0)),
+        ],
+    )
+    def test_wrapping_detection_strip_per_model(self, model: str, strip: Rect) -> None:
+        assert plate_for(model).wrapping_exclusions == (strip,)
+
+    def test_printers_without_wrapping_detection_carry_no_strip(self) -> None:
         assert not plate_for("X1C").wrapping_exclusions
+        assert not plate_for("A1").wrapping_exclusions
 
 
 class TestPlacement:
@@ -148,6 +163,29 @@ class TestPlacement:
         placement = place_on_plate(_bounds(width, depth), plate)
         footprint = self._tower_footprint(placement)
         assert not footprint.overlaps(wrapping), f"tower {footprint} is in the wrapping zone"
+
+    @pytest.mark.parametrize("model", ["H2C", "H2D", "H2DP", "H2S", "P2S"])
+    @pytest.mark.parametrize("size", ["keychain", "large"])
+    def test_every_wrapping_printer_still_finds_a_tower_edge(self, model: str, size: str) -> None:
+        """Avoiding the wrapping strip is only free if another edge is always left.
+
+        ``large`` fills 90% of the reachable width and leaves just over the
+        tower's band of depth, so the object has to move off centre and the tower
+        is placed on the moved path.
+        """
+        plate = plate_for(model)
+        band = PRIME_TOWER_SIDE + 2 * PRIME_TOWER_BRIM + TOWER_CLEARANCE + EDGE_MARGIN
+        width, depth = (
+            (60.0, 20.0)
+            if size == "keychain"
+            else (plate.usable.width * 0.9, plate.usable.depth - band - 5.0)
+        )
+        placement = place_on_plate(_bounds(width, depth), plate)
+        footprint = self._tower_footprint(placement)
+        for zone in plate.wrapping_exclusions:
+            assert not footprint.overlaps(zone), f"{model}: tower {footprint} is in {zone}"
+        assert plate.usable.min_x <= footprint.min_x and footprint.max_x <= plate.usable.max_x
+        assert plate.usable.min_y <= footprint.min_y and footprint.max_y <= plate.usable.max_y
 
     def test_a_back_tower_is_refused_in_the_wrapping_zone(self) -> None:
         """Forces the one line that keeps a tower out of the wrapping strip.

@@ -331,7 +331,7 @@ def _tower_corner(
         return None
     if any(footprint.overlaps(cutout) for cutout in plate.exclusions):
         return None
-    if any(footprint.overlaps(strip) for strip in plate.wrapping_exclusions):
+    if any(footprint.overlaps(zone) for zone in plate.wrapping_exclusions):
         return None
     # ``wipe_tower_x``/``_y`` name the tower itself; the brim sits outside it.
     return (x + PRIME_TOWER_BRIM, y + PRIME_TOWER_BRIM)
