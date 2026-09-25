@@ -1,0 +1,183 @@
+---
+name: Deploy release
+
+# Release-gated deploy: publishing a GitHub release `vX.Y.Z` deploys that
+# version. Publishing creates the tag, the tag push runs "Build Image" (which
+# publishes `X.Y.Z` and `X.Y`), and this workflow waits for that image, then
+# pins its digest in eh-homelab/clusters as `scadbuddy:X.Y.Z@sha256:…` through
+# deploy.reusable.yml. There is no human step after "Publish release": the
+# clusters PR is auto-merged once its required checks pass, ArgoCD rolls it,
+# and clusters' scadbuddy-verify-deploy.yml appends the outcome to the release
+# notes under "## Deployment".
+#
+# Independent of deploy-main.yml: disabling continuous deploy from main does
+# not affect releases, and vice versa. Pre-releases are not deployed. The
+# only shared state is the clusters deploy branch, and the `pin` job in
+# deploy.reusable.yml serialises that — not a workflow-level group here, which
+# would hold a main deploy behind the image wait below.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/eh-homelab/scadbuddy
+
+jobs:
+  resolve:
+    name: Wait for the ${{ github.event.release.tag_name }} image
+    if: ${{ !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # `gh run list` (the fail-fast check below) reads the Actions API.
+      actions: read
+    # Build Image takes ~7 min on a warm cache and up to ~40 cold (two
+    # architectures, arm64 emulated). Waiting here costs hosted minutes but is
+    # what makes the release event alone sufficient. The poll below gives up at
+    # 45 min; the job timeout sits well above it so the loop's own error is
+    # what gets reported, not an opaque job timeout.
+    timeout-minutes: 60
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      version: ${{ steps.image.outputs.version }}
+      revision: ${{ steps.rev.outputs.revision }}
+    steps:
+      - name: Resolve the tagged commit
+        id: rev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::release tag '$TAG' is not vX.Y.Z; only semver releases deploy"; exit 1; }
+          # A release may point at a lightweight or an annotated tag; peel
+          # the annotated case to the commit.
+          obj=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG}" --jq '.object')
+          type=$(jq -r .type <<<"$obj"); sha=$(jq -r .sha <<<"$obj")
+          if [ "$type" = "tag" ]; then
+            sha=$(gh api "repos/${GITHUB_REPOSITORY}/git/tags/${sha}" --jq '.object.sha')
+          fi
+          [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::could not resolve $TAG to a commit"; exit 1; }
+          echo "$TAG -> $sha"
+          echo "revision=$sha" >> "$GITHUB_OUTPUT"
+
+      # Poll for the image rather than for the workflow run: the image is the
+      # thing being deployed, and it appears exactly when the push completes.
+      # The Build Image run is still consulted so a failed build fails this
+      # quickly instead of after the full wait.
+      - name: Wait for Build Image to publish the version tag
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          ref="${IMAGE}:${version}"
+          deadline=$(( $(date +%s) + 45*60 ))
+          while :; do
+            if digest=$(docker buildx imagetools inspect "$ref" 2>/dev/null | awk '/^Digest:/ {print $2; exit}') \
+               && [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "$ref -> $digest"
+              echo "version=$version" >> "$GITHUB_OUTPUT"
+              echo "digest=$digest" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            # Any concluded Build Image run for this tag that did not succeed
+            # means the image is not coming.
+            # `|| true`: a transient API error must not abort the wait — under
+            # `set -e` a failed command substitution in a plain assignment is
+            # fatal. An empty answer just means "keep waiting".
+            bad=$(gh run list --workflow 'Build Image' --branch "$TAG" --event push \
+                    --json status,conclusion,url \
+                    --jq '[.[] | select(.status=="completed" and .conclusion!="success")] | .[0].url // empty' \
+                  || true)
+            if [ -n "$bad" ]; then
+              echo "::error::Build Image for $TAG did not succeed: $bad"; exit 1
+            fi
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::$ref did not appear within 45 min"; exit 1
+            fi
+            echo "$(date -u +%H:%M:%S) $ref not published yet; waiting"
+            sleep 30
+          done
+
+  deploy:
+    name: Deploy
+    needs: resolve
+    uses: ./.github/workflows/deploy.reusable.yml
+    with:
+      digest: ${{ needs.resolve.outputs.digest }}
+      version: ${{ needs.resolve.outputs.version }}
+      revision: ${{ needs.resolve.outputs.revision }}
+      source_url: ${{ github.event.release.html_url }}
+      source_kind: release
+    secrets: inherit
+
+  # The release page is where a human looks, so the deploy PR link goes there
+  # as soon as it exists. The verification result is appended to the same
+  # section later by clusters' scadbuddy-verify-deploy.yml.
+  record:
+    name: Record the deploy PR on the release
+    needs: [resolve, deploy]
+    if: ${{ always() && needs.resolve.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ github.event.release.tag_name }}
+      PR_URL: ${{ needs.deploy.outputs.pr_url }}
+      ARMED: ${{ needs.deploy.outputs.armed }}
+      UNCHANGED: ${{ needs.deploy.outputs.unchanged }}
+      DEPLOY_RESULT: ${{ needs.deploy.result }}
+      RESOLVE_RESULT: ${{ needs.resolve.result }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+    steps:
+      - name: Append a Deployment section to the release notes
+        run: |
+          set -euo pipefail
+          if [ "$RESOLVE_RESULT" = "cancelled" ]; then
+            line="⚠️ Not deployed: the deploy run was cancelled while waiting for the ${TAG} image ([deploy run](${RUN_URL})); re-run it to deploy this release."
+          elif [ "$RESOLVE_RESULT" != "success" ]; then
+            line="❌ The ${TAG} image never became available — see the [deploy run](${RUN_URL})."
+          elif [ "$DEPLOY_RESULT" = "cancelled" ]; then
+            # Overtaken in the deploy queue (see the `pin` job's concurrency
+            # note in deploy.reusable.yml); nothing was opened, nothing failed.
+            line="⚠️ Not deployed: a newer deploy request overtook this one before it started, so no clusters PR was opened. Re-run the [deploy run](${RUN_URL}) to pin this release."
+          elif [ -n "$PR_URL" ] && [ "$ARMED" != "true" ]; then
+            line="⚠️ Deploy PR opened but auto-merge could not be armed — **merge ${PR_URL} by hand** ([deploy run](${RUN_URL}))."
+          elif [ "$DEPLOY_RESULT" != "success" ]; then
+            line="❌ Opening the clusters deploy PR failed — see the [deploy run](${RUN_URL})."
+          elif [ "$UNCHANGED" = "true" ]; then
+            line="ℹ️ clusters already pinned this exact image; nothing to roll ([deploy run](${RUN_URL}))."
+          else
+            line="🚀 Deploy PR: ${PR_URL} (auto-merge armed; verification is appended here once the pod reports this revision)."
+          fi
+          body=$(gh release view "$TAG" --json body --jq .body)
+          body=${body//$'\r'/}
+          # Re-running this job (same run id, same RUN_URL) must not append
+          # the line a second time.
+          if grep -qF -- "$RUN_URL" <<<"$body"; then
+            echo "release $TAG already records this run; not repeating it"
+          else
+            case "$body" in
+              *"## Deployment"*) body="${body}"$'\n'"- ${line}" ;;
+              *)                 body="${body}"$'\n\n'"## Deployment"$'\n'"- ${line}" ;;
+            esac
+            printf '%s\n' "$body" > notes.md
+            gh release edit "$TAG" --notes-file notes.md
+          fi
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          # A failed deploy fails the workflow too; the release note is the
+          # human-facing copy, this is the machine-facing one. Overtaken in
+          # the queue is ordinary behaviour, not a failure — see the `pin`
+          # job's concurrency note in deploy.reusable.yml.
+          # A cancellation — of the wait or of the deploy — is not a failure.
+          case "$RESOLVE_RESULT" in success) ;; cancelled) exit 0 ;; *) exit 1 ;; esac
+          case "$DEPLOY_RESULT" in success|cancelled) ;; *) exit 1 ;; esac

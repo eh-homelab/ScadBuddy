@@ -14,6 +14,12 @@ name: Build Image
 # Not run on pull_request: a PR has no GHCR write token, and ci.yml already
 # builds the same Dockerfile (both targets) on every PR, so nothing about the
 # build is untested at merge time.
+#
+# This workflow only PUBLISHES. Deploying is a separate step so it can be
+# switched off without touching the build: deploy-main.yml (workflow_run on
+# this workflow) deploys every default-branch build, deploy-release.yml
+# (release: published) deploys tagged releases. Both call
+# deploy.reusable.yml, which pins the digest in eh-homelab/clusters.
 
 on:
   push:
@@ -39,9 +45,10 @@ jobs:
     permissions:
       contents: read
       packages: write
-    outputs:
-      digest: ${{ steps.build.outputs.digest }}
-      tags: ${{ steps.meta.outputs.tags }}
+    # No job outputs on purpose: the only downstream consumer, deploy-main.yml,
+    # is triggered by `workflow_run`, which cannot read another run's outputs.
+    # It re-derives `sha-<short>` from the run's head_sha under the 7-character
+    # contract pinned and asserted below, and reads the digest off GHCR.
     steps:
       - uses: actions/checkout@v7
         with:
@@ -67,6 +74,15 @@ jobs:
       - name: Derive tags and labels
         id: meta
         uses: docker/metadata-action@v6
+        env:
+          # The `sha-<short>` tag is the contract with the deploy pipeline:
+          # "Pick the deploy label" below and deploy-main.yml both take the
+          # first 7 characters of the commit. Pin the action's short length to
+          # the same 7 rather than inherit its default, and the step below
+          # asserts the two agree on every build. The variable is documented
+          # in docker/metadata-action's README ("Environment variables":
+          # "Specifies the length of the short commit SHA … Default is 7").
+          DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
         with:
           images: ghcr.io/eh-homelab/scadbuddy
           # `sha-<short>` is the one tag the cluster manifests should pin to —
@@ -82,6 +98,36 @@ jobs:
             org.opencontainers.image.description=Self-hosted OpenSCAD customizer for Bambuddy
             org.opencontainers.image.licenses=MIT
 
+      # The label the deploy pipeline pins, and what /healthz reports as
+      # `version`: `X.Y.Z` for a `vX.Y.Z` tag, `sha-<short>` for anything
+      # else. Not metadata-action's `version` output — that is the PRIMARY
+      # tag, which on the default branch is the constant `main`, so every
+      # continuous deploy would stamp the same value while clusters pinned
+      # `sha-<short>`, and the two could never be compared.
+      - name: Pick the deploy label
+        id: label
+        env:
+          REF: ${{ github.ref }}
+          SHA: ${{ github.sha }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" =~ ^refs/tags/v([0-9]+\.[0-9]+\.[0-9]+)$ ]]; then
+            version="${BASH_REMATCH[1]}"
+          elif [[ "$REF" == refs/tags/* ]]; then
+            # The trigger is `v*`, which also admits `v1.2.3-rc1` or `v2`.
+            # Those are not releases deploy-release.yml would accept, and
+            # labelling them `sha-<short>` would hide the mismatch — refuse.
+            echo "::error::tag '${REF#refs/tags/}' is not vX.Y.Z; only strict semver tags are built"; exit 1
+          else
+            version="sha-${SHA:0:7}"
+          fi
+          # The label must be one of the tags about to be pushed, or the
+          # deploy pipeline would look for an image that does not exist.
+          grep -qxF "ghcr.io/eh-homelab/scadbuddy:${version}" <<<"$TAGS" \
+            || { echo "::error::deploy label '$version' is not among the tags metadata-action produced:"; echo "$TAGS"; exit 1; }
+          echo "version=$version" | tee -a "$GITHUB_OUTPUT"
+
       - name: Build and push
         id: build
         uses: docker/build-push-action@v7
@@ -95,6 +141,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          # Stamped into the image and reported by /healthz: the commit, and
+          # the same label the deploy pipeline pins (see "Pick the deploy
+          # label" above).
+          build-args: |
+            SCADBUDDY_REVISION=${{ github.sha }}
+            SCADBUDDY_VERSION=${{ steps.label.outputs.version }}
           provenance: false
           # `type=gha`, viable only because this is a GitHub-hosted runner —
           # the Actions cache protocol fails outright on the eh-homelab

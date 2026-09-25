@@ -189,6 +189,14 @@ CMD ["uv", "run", "--frozen", "pytest"]
 # ── runtime: what ships ───────────────────────────────────────────────────────
 FROM app AS runtime
 
+# Build provenance, passed by build-image.yml. /healthz reports both; the
+# deploy pipeline (see README.md, "Deploying") proves a rollout by reading
+# `revision` back from the running pod, so it has to be the exact commit.
+ARG SCADBUDDY_REVISION=unknown
+ARG SCADBUDDY_VERSION=dev
+ENV SCADBUDDY_REVISION=${SCADBUDDY_REVISION} \
+    SCADBUDDY_VERSION=${SCADBUDDY_VERSION}
+
 USER 10001:10001
 EXPOSE 8080
 VOLUME ["/data"]

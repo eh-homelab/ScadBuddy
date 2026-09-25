@@ -948,6 +948,10 @@
             ],
             "title": "Openscad Version"
           },
+          "revision": {
+            "title": "Revision",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "ok",
@@ -955,12 +959,18 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "version": {
+            "title": "Version",
+            "type": "string"
           }
         },
         "required": [
           "status",
           "openscad_version",
-          "data_dir_writable"
+          "data_dir_writable",
+          "revision",
+          "version"
         ],
         "title": "Health",
         "type": "object"
