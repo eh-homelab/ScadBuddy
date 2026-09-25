@@ -14,12 +14,24 @@ millimetres, the values those profiles declare:
     is what makes a default-placed prime tower unprintable.
 ``bed_exclude_area``
     the front-left cutout the X1/P1 series uses to cut filament.
+``wrapping_exclude_area``
+    the strip the H2/P2S series probes for clumping ("wrapping") at the back of
+    the bed. It is a no-print zone *only while* the process option
+    ``enable_wrapping_detection`` is on — ``Print.cpp``'s
+    ``layered_print_cleareance_valid`` then refuses a prime tower that touches it
+    ("Prime Tower is too close to clumping detection area, and collisions will be
+    caused") — and inert otherwise. That option lives in the process preset
+    Bambuddy slices with, which ScadBuddy never sees, so the prime tower always
+    avoids it (#122).
 ``printable_height``
     the Z limit. The 3MF writer states it in ``project_settings.config``:
     once a file claims BambuStudio identity the CLI dereferences that option
     without a null check, so it is required rather than informational (#110).
-    Note this is the *plate's* height; ``extruder_printable_height`` can differ
-    per extruder and is not modelled (#122).
+    ``extruder_printable_height`` (per extruder; the H2C's are 320 and 325) is
+    deliberately not read (#122): nothing uses Z as a constraint, and the one
+    consumer writes this value back under the key ``printable_height``, where
+    the per-extruder minimum would misstate the profile. If Z ever becomes a
+    placement constraint, read the minimum across extruders then.
 
 Geometry is identical across a model's nozzle variants, so the table is keyed by
 model rather than by preset.
@@ -27,13 +39,20 @@ model rather than by preset.
 
 from __future__ import annotations
 
-#: ``printer_model`` -> (printable_area, extruder_printable_area, bed_exclude_area, height)
 Polygon = tuple[tuple[float, float], ...]
 
-PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] = {
-    "Bambu Lab A1": (((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)), (), (), 256.0),
-    "Bambu Lab A1 mini": (((0.0, 0.0), (180.0, 0.0), (180.0, 180.0), (0.0, 180.0)), (), (), 180.0),
-    "Bambu Lab A2L": (((0.0, 0.0), (330.0, 0.0), (330.0, 320.0), (0.0, 320.0)), (), (), 325.0),
+#: ``printer_model`` -> (printable_area, extruder_printable_area, bed_exclude_area,
+#: wrapping_exclude_area, printable_height)
+PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, Polygon, float]] = {
+    "Bambu Lab A1": (((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)), (), (), (), 256.0),
+    "Bambu Lab A1 mini": (
+        ((0.0, 0.0), (180.0, 0.0), (180.0, 180.0), (0.0, 180.0)),
+        (),
+        (),
+        (),
+        180.0,
+    ),
+    "Bambu Lab A2L": (((0.0, 0.0), (330.0, 0.0), (330.0, 320.0), (0.0, 320.0)), (), (), (), 325.0),
     "Bambu Lab H2C": (
         ((0.0, 0.0), (330.0, 0.0), (330.0, 320.0), (0.0, 320.0)),
         (
@@ -41,6 +60,7 @@ PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] =
             ((25.0, 0.0), (330.0, 0.0), (330.0, 320.0), (25.0, 320.0)),
         ),
         (),
+        ((145.0, 310.0), (251.0, 310.0), (251.0, 326.0), (145.0, 326.0)),
         325.0,
     ),
     "Bambu Lab H2D": (
@@ -50,6 +70,7 @@ PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] =
             ((25.0, 0.0), (350.0, 0.0), (350.0, 320.0), (25.0, 320.0)),
         ),
         (),
+        ((145.0, 310.0), (256.0, 310.0), (256.0, 326.0), (145.0, 326.0)),
         325.0,
     ),
     "Bambu Lab H2D Pro": (
@@ -59,38 +80,56 @@ PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] =
             ((25.0, 0.0), (350.0, 0.0), (350.0, 320.0), (25.0, 320.0)),
         ),
         (),
+        ((145.0, 310.0), (256.0, 310.0), (256.0, 326.0), (145.0, 326.0)),
         325.0,
     ),
-    "Bambu Lab H2S": (((0.0, 0.0), (340.0, 0.0), (340.0, 320.0), (0.0, 320.0)), (), (), 340.0),
+    "Bambu Lab H2S": (
+        ((0.0, 0.0), (340.0, 0.0), (340.0, 320.0), (0.0, 320.0)),
+        (),
+        (),
+        ((172.3, 302.0), (232.5, 302.0), (232.5, 322.0), (172.3, 322.0)),
+        340.0,
+    ),
     "Bambu Lab P1P": (
         ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
         (),
         ((0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)),
+        (),
         250.0,
     ),
     "Bambu Lab P1S": (
         ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
         (),
         ((0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)),
+        (),
         250.0,
     ),
-    "Bambu Lab P2S": (((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)), (), (), 256.0),
+    "Bambu Lab P2S": (
+        ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
+        (),
+        (),
+        ((153.0, 256.0), (216.0, 256.0), (216.0, 235.0), (153.0, 235.0)),
+        256.0,
+    ),
     "Bambu Lab X1": (
         ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
         (),
         ((0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)),
+        (),
         250.0,
     ),
     "Bambu Lab X1 Carbon": (
         ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
         (),
         ((0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)),
+        (),
         250.0,
     ),
     "Bambu Lab X1E": (
         ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
         (),
         ((0.0, 0.0), (18.0, 0.0), (18.0, 28.0), (0.0, 28.0)),
+        (),
         250.0,
     ),
     "Bambu Lab X2D": (
@@ -99,6 +138,7 @@ PLATE_PROFILES: dict[str, tuple[Polygon, tuple[Polygon, ...], Polygon, float]] =
             ((0.0, 0.0), (256.0, 0.0), (256.0, 256.0), (0.0, 256.0)),
             ((20.5, 0.0), (256.0, 0.0), (256.0, 256.0), (20.5, 256.0)),
         ),
+        (),
         (),
         261.0,
     ),
