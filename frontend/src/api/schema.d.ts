@@ -1084,11 +1084,15 @@ export interface components {
             data_dir_writable: boolean;
             /** Openscad Version */
             openscad_version: string | null;
+            /** Revision */
+            revision: string;
             /**
              * Status
              * @enum {string}
              */
             status: "ok" | "degraded";
+            /** Version */
+            version: string;
         };
         /** InstallRequest */
         InstallRequest: {

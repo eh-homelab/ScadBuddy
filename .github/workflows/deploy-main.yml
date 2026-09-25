@@ -1,0 +1,158 @@
+---
+name: Deploy main
+
+# Continuous deploy from the default branch: every successful "Build Image"
+# run for a push to main pins that build's digest in eh-homelab/clusters (via
+# deploy.reusable.yml), labelled `sha-<short>` so the manifest says which
+# commit is live.
+#
+# THIS IS THE SWITCH. To stop merges to main from deploying, disable this one
+# workflow and nothing else:
+#
+#   gh workflow disable "Deploy main"     # and `gh workflow enable` to resume
+#
+# Builds keep publishing `:main` / `sha-*` images while it is off, and tagged
+# releases keep deploying through deploy-release.yml, which does not go
+# through here. A disabled workflow simply does not run on the trigger; nothing
+# is lost, and enabling it again deploys the NEXT main build (not the ones it
+# missed — re-run the latest "Build Image" to deploy the current head).
+#
+# workflow_run, not `push`: the digest exists only once Build Image has pushed
+# it, and Build Image is the unit that can be re-run. `branches: [main]`
+# filters on the triggering run's head branch, which for a tag push is the tag
+# name — so tag builds never come through here.
+
+on:
+  workflow_run:
+    workflows: ["Build Image"]
+    types: [completed]
+    branches: [main]
+
+# No workflow-level concurrency here on purpose: the mutual exclusion with
+# deploy-release.yml lives on the `pin` job in deploy.reusable.yml, the only
+# step that touches the shared clusters branch. A workflow-level group would
+# also queue this run behind a release's image wait (up to 45 min).
+
+permissions:
+  contents: read
+
+jobs:
+  resolve:
+    name: Resolve the main build
+    # `head_branch == 'main'` repeats the trigger filter deliberately, and
+    # `event == 'push'` excludes a workflow_dispatch of Build Image, whose
+    # head_sha may be anything.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_branch == 'main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      digest: ${{ steps.image.outputs.digest }}
+      version: ${{ steps.image.outputs.version }}
+      revision: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      # The immutable `sha-<short>` tag is resolved rather than `:main`, which
+      # a second push could have moved by the time this runs. The short form
+      # is docker/metadata-action's default (7 chars), matching build-image.yml.
+      - name: Resolve the digest of the sha- tag
+        id: image
+        env:
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+          # 7 characters, the same contract build-image.yml pins with
+          # DOCKER_METADATA_SHORT_SHA_LENGTH and asserts on every build.
+          version="sha-${HEAD_SHA:0:7}"
+          ref="ghcr.io/eh-homelab/scadbuddy:${version}"
+          # Parsed from the human output: buildx ignores --format for some
+          # image shapes and prints the default block instead.
+          # `|| true`: under `set -e` a failing pipeline in a plain assignment
+          # aborts the step before the error line below can say what happened.
+          digest=$(docker buildx imagetools inspect "$ref" 2>&1 | awk '/^Digest:/ {print $2; exit}' || true)
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::could not resolve $ref (got '$digest')"; exit 1; }
+          echo "$ref -> $digest"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy
+    needs: resolve
+    uses: ./.github/workflows/deploy.reusable.yml
+    with:
+      digest: ${{ needs.resolve.outputs.digest }}
+      version: ${{ needs.resolve.outputs.version }}
+      revision: ${{ needs.resolve.outputs.revision }}
+      source_url: ${{ github.server_url }}/${{ github.repository }}/commit/${{ needs.resolve.outputs.revision }}
+      source_kind: main
+    secrets: inherit
+
+  # Success is reported by clusters' scadbuddy-verify-deploy.yml once the pod
+  # serves the revision; this job covers the ways a main deploy can end
+  # without a merge on its way — the `pin` job was overtaken in the deploy
+  # queue and cancelled before it ran, it failed before opening a PR, it
+  # opened the PR but could not arm auto-merge, or clusters already pinned
+  # this exact image so there was nothing to open — so none is silent. Posts
+  # a commit comment on the build's commit, the same place verification reports.
+  report:
+    name: Report a deploy that opened no PR
+    needs: [resolve, deploy]
+    if: ${{ always() && needs.resolve.result != 'skipped' && (needs.deploy.result != 'success' || needs.deploy.outputs.unchanged == 'true') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    # A commit comment needs contents: write. The App token below carries it
+    # on its own; this is for the GITHUB_TOKEN fallback, which otherwise could
+    # never post and would only ever reach the `::warning::`.
+    permissions:
+      contents: write
+    steps:
+      # The App token rather than GITHUB_TOKEN, which the org caps for
+      # comment writes; falls back to GITHUB_TOKEN if the App secrets go.
+      - name: Mint an App token
+        id: app-token
+        continue-on-error: true
+        uses: actions/create-github-app-token@v3
+        with:
+          client-id: ${{ secrets.RUNNER_APP_ID }}
+          private-key: ${{ secrets.RUNNER_APP_PRIVATE_KEY }}
+          owner: eh-homelab
+          repositories: ScadBuddy
+          permission-contents: write
+
+      - name: Comment on the commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          REVISION: ${{ needs.resolve.outputs.revision }}
+          RESOLVE_RESULT: ${{ needs.resolve.result }}
+          DEPLOY_RESULT: ${{ needs.deploy.result }}
+          PR_URL: ${{ needs.deploy.outputs.pr_url }}
+          ARMED: ${{ needs.deploy.outputs.armed }}
+          UNCHANGED: ${{ needs.deploy.outputs.unchanged }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          case "$RESOLVE_RESULT:$DEPLOY_RESULT" in
+            success:success)
+              # Only reachable via the job `if` when nothing changed.
+              line="ℹ️ Nothing to deploy: clusters already pins this exact image ([deploy run](${RUN_URL}))." ;;
+            success:cancelled)
+              line="⚠️ Not deployed: a newer deploy request overtook this build before its clusters PR was opened. A later main build supersedes it; re-run the [deploy run](${RUN_URL}) to deploy this commit anyway." ;;
+            success:*)
+              if [ -n "$PR_URL" ] && [ "$ARMED" != "true" ]; then
+                line="⚠️ Deploy PR opened but auto-merge could not be armed — **merge ${PR_URL} by hand** ([deploy run](${RUN_URL}))."
+              else
+                line="❌ Deploy failed before a clusters PR was opened — see the [deploy run](${RUN_URL})."
+              fi ;;
+            cancelled:*)
+              line="⚠️ Not deployed: the deploy run was cancelled before it resolved this build's image ([deploy run](${RUN_URL})); re-run it to deploy this commit." ;;
+            *)
+              line="❌ Deploy could not resolve this build's image digest — see the [deploy run](${RUN_URL})." ;;
+          esac
+          echo "$line" >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/${GITHUB_REPOSITORY}/commits/${REVISION}/comments" -f body="$line" > /dev/null \
+            || echo "::warning::could not comment on ${REVISION:0:7}"
+          # The workflow is red for anything but a cancellation — overtaken
+          # in the queue, or cancelled by hand — or an unchanged pin, neither
+          # of which is a failure.
+          [ "$DEPLOY_RESULT" = "cancelled" ] || [ "$RESOLVE_RESULT" = "cancelled" ] || [ "$UNCHANGED" = "true" ]

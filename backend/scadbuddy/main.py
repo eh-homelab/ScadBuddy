@@ -49,7 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info(
         "scadbuddy started",
         extra={
-            "version": __version__,
+            # The deploy provenance stamped into the image (what /healthz
+            # reports), not the package version, which is not bumped per deploy.
+            "version": state.settings.version,
+            "revision": state.settings.revision,
             "data_dir": str(state.paths.root),
             "openscad_version": state.openscad_version,
         },

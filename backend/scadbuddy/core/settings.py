@@ -50,6 +50,14 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    # Stamped into the image by .github/workflows/build-image.yml
+    # (SCADBUDDY_REVISION / SCADBUDDY_VERSION build args): the commit and the
+    # image tag this process was built from. /healthz reports both, and that is
+    # what eh-homelab/clusters' post-deploy check reads to prove the image it
+    # pinned is the one serving — see docs in README.md, "Deploying".
+    revision: str = "unknown"
+    version: str = "dev"
+
     def to_config(self) -> Config:
         return Config(
             openscad=self.openscad,

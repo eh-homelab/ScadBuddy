@@ -16,6 +16,8 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) ->
         "status": "ok",
         "openscad_version": "OpenSCAD version 2099.01.01",
         "data_dir_writable": True,
+        "revision": "unknown",
+        "version": "dev",
     }
 
 
@@ -77,9 +79,13 @@ def test_the_environment_overrides_every_field(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("SCADBUDDY_RENDER_CONCURRENCY", "4")
     monkeypatch.setenv("SCADBUDDY_BAMBUDDY_URL", "https://bambuddy.test")
     monkeypatch.setenv("SCADBUDDY_BAMBUDDY_API_KEY", "k")
+    monkeypatch.setenv("SCADBUDDY_REVISION", "0123456789abcdef0123456789abcdef01234567")
+    monkeypatch.setenv("SCADBUDDY_VERSION", "1.2.3")
 
     config = Settings().to_config()
     assert config.data_dir == Path("/srv/scad")
     assert config.render_timeout == 7.5
     assert config.render_concurrency == 4
     assert Settings().bambuddy_url == "https://bambuddy.test"
+    assert Settings().revision == "0123456789abcdef0123456789abcdef01234567"
+    assert Settings().version == "1.2.3"
