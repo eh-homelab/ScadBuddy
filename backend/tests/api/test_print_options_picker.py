@@ -74,9 +74,6 @@ def test_a_per_printer_option_applies_to_the_pipelines_printer(
     remember(client, "printer", {"timelapse": False}, key="1")
     pipelines_route()
     printers_route()
-    respx.get(f"{API}/slicer-pipelines/1").mock(
-        return_value=httpx.Response(200, json=_pipeline_one())
-    )
     output_id = make_output(client, model)
     upload_route()
     slice_route()
