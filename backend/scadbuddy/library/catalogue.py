@@ -19,6 +19,21 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 
 
+def _remove_tree(path: Path) -> bool:
+    """``rmtree`` that logs a failure rather than raising or hiding it."""
+    if not path.exists():
+        return False
+    try:
+        if path.is_dir() and not path.is_symlink():
+            shutil.rmtree(path)
+        else:
+            path.unlink()
+    except OSError:
+        logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
+        return False
+    return True
+
+
 class ModelNotFoundError(KeyError):
     pass
 
@@ -205,21 +220,37 @@ class Catalogue:
         # behind and a half-deleted model listed. The tombstone lives under
         # `cache/` (same volume, so the rename is atomic) rather than beside the
         # model, where it would be picked up by the listing and by `git add -A`.
-        tombstones = self.paths.cache / "tombstones"
+        tombstones = self.paths.tombstones
         tombstones.mkdir(parents=True, exist_ok=True)
-        tombstone = tombstones / f"{slug}.{uuid.uuid4().hex}"
-        self.paths.model_dir(slug).rename(tombstone)
+        self.paths.model_dir(slug).rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
         # The history is the shared `models/` repository, not the model's own:
         # a delete is one more commit, so the model's revisions stay restorable.
         self._commit(f"Delete {slug}", slug)
-        shutil.rmtree(tombstone, ignore_errors=True)
         # Derived, and only reachable through the slug: the schema cache and any
         # exported old revisions.
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
-        shutil.rmtree(self.paths.model_revisions / slug, ignore_errors=True)
+        _remove_tree(self.paths.model_revisions / slug)
         # Outputs are keyed by slug and only listable through it, so they go too.
         # They are NOT in the repository: a 3MF is a build artefact, not source.
-        shutil.rmtree(self.paths.outputs / slug, ignore_errors=True)
+        _remove_tree(self.paths.outputs / slug)
+        # This delete's tombstone, and any an earlier one failed to clear.
+        self.sweep_tombstones()
+
+    def sweep_tombstones(self) -> list[str]:
+        """Remove every tombstone left under ``cache/tombstones/``.
+
+        Runs after each delete and once at startup, so a removal that failed
+        (a busy PVC, a crash between the rename and the rmtree) is retried
+        rather than leaking a deleted model's files for good.
+        """
+        root = self.paths.tombstones
+        if not root.is_dir():
+            return []
+        removed: list[str] = []
+        for tombstone in sorted(root.iterdir()):
+            if _remove_tree(tombstone):
+                removed.append(tombstone.name)
+        return removed
 
     def seed(self, seed_dir: Path) -> list[str]:
         """Copy any bundled model whose slug is not in the catalogue yet."""

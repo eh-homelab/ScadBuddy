@@ -211,7 +211,7 @@ export const handlers = [
 
   http.delete(`${base}/models/:slug`, ({ params }) => {
     if (!state.models.some((m) => m.slug === params['slug'])) {
-      return problem(404, `no model named '${String(params['slug'])}'`)
+      return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
     }
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })

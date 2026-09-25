@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from unittest.mock import patch
 
 import httpx
+import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
@@ -174,7 +177,29 @@ def test_deleting_a_model_clears_its_derived_cache(
     assert not paths.model_schema_cache(model).exists()
     assert not (paths.model_revisions / model).exists()
     # The tombstone the directory was renamed to is gone too.
-    assert list((paths.cache / "tombstones").iterdir()) == []
+    assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
+    stale = paths.tombstones / "old-model.0123abcd"
+    (stale / "nested").mkdir(parents=True)
+    (stale / "nested" / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+
+    with TestClient(app):
+        assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_failed_tombstone_removal_is_logged_and_retried(
+    client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    with patch("scadbuddy.library.catalogue.shutil.rmtree", side_effect=OSError("busy")):
+        assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert "could not remove a deleted model's files" in caplog.text
+    assert [entry.name.split(".")[0] for entry in paths.tombstones.iterdir()] == [model]
+
+    assert catalogue.sweep_tombstones() != []
+    assert list(paths.tombstones.iterdir()) == []
 
 
 def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:

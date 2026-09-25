@@ -54,6 +54,12 @@ class DataPaths:
         return self.cache / "schema" / f"{slug}.json"
 
     @property
+    def tombstones(self) -> Path:
+        """Where a deleted model's directory waits for its ``rmtree`` -- outside
+        ``models/``, so the listing and git never see a half-deleted model."""
+        return self.cache / "tombstones"
+
+    @property
     def model_revisions(self) -> Path:
         return self.cache / "revisions"
 
