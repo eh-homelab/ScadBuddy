@@ -14,7 +14,7 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, CommitPath, ConfigDep, HistoryDep, PathsDep, SlugPath
-from scadbuddy.api.models import require_model, require_model_exists
+from scadbuddy.api.models import require_model_exists
 from scadbuddy.core.paths import SOURCE_NAME
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import (
@@ -131,7 +131,7 @@ def list_versions(
     history: HistoryDep,
     limit: Annotated[int, Query(ge=1, le=MAX_LIMIT)] = DEFAULT_LIMIT,
 ) -> list[ModelVersion]:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
     require_history(history)
     try:
         revisions = history.log(slug, limit=limit)
@@ -152,7 +152,7 @@ def list_versions(
 def get_version_source(
     slug: SlugPath, commit: CommitPath, catalogue: CatalogueDep, history: HistoryDep
 ) -> Response:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
@@ -202,7 +202,7 @@ def get_version_diff(
     history: HistoryDep,
     base: CommitQuery = None,
 ) -> VersionDiff:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
     require_history(history)
     # Both endpoints are resolved ONCE, here: the patch, the file list and the
     # base echoed back all want the same pair, and the UI asks for a diff on
@@ -232,7 +232,7 @@ def get_version_diff(
 def restore_version(
     slug: SlugPath, commit: CommitPath, catalogue: CatalogueDep, history: HistoryDep
 ) -> ModelVersion:
-    require_model(catalogue, slug)
+    require_model_exists(catalogue, slug)
     require_history(history)
     resolved = _require_revision(history, commit)
     try:

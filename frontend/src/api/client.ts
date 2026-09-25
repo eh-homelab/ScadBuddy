@@ -126,9 +126,6 @@ export const api = {
 
   listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 
-  getVersionSourceUrl: (slug: string, version: string) =>
-    `${API_BASE}/models/${seg(slug)}/versions/${seg(version)}/source`,
-
   /** `base` omitted diffs against the revision's parent. */
   getVersionDiff: (slug: string, version: string, base?: string) =>
     request<VersionDiff>(
