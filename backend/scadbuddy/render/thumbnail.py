@@ -255,7 +255,8 @@ def _downsample(image: np.ndarray, size: int) -> np.ndarray:
 
     Colour is averaged premultiplied by alpha, then divided back out: a
     transparent sample has no colour, so averaging its (0, 0, 0) straight in
-    would darken every edge pixel, and compositing darkens it again (#117)."""
+    would darken every edge pixel, and compositing darkens it again (#117).
+    """
     step = image.shape[0] // size
     if step == 1:
         return image

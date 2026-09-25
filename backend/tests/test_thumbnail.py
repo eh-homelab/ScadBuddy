@@ -199,3 +199,19 @@ def test_downsampling_two_opaque_colours_still_averages_them() -> None:
     image[:, 1] = (0, 0, 255, 255)
 
     assert _downsample(image, 1)[0, 0].tolist() == [128, 0, 128, 255]
+
+
+def test_downsampling_keeps_each_larger_block_to_itself() -> None:
+    """Production reduces 4x4 and larger blocks, not only 2x2: each output pixel must
+    come from its own block, premultiplied, whatever the step."""
+    image = np.zeros((8, 8, 4), dtype=np.uint8)
+    image[0, 0] = (255, 0, 0, 255)  # one sample of sixteen in the top-left block
+    image[0:4, 4:8] = (0, 0, 255, 255)  # top-right block fully blue
+    image[4:6, 4:8] = (0, 255, 0, 255)  # bottom-right block half green
+
+    reduced = _downsample(image, 2)
+
+    assert reduced[0, 0].tolist() == [255, 0, 0, 16]
+    assert reduced[0, 1].tolist() == [0, 0, 255, 255]
+    assert reduced[1, 0].tolist() == [0, 0, 0, 0]
+    assert reduced[1, 1].tolist() == [0, 255, 0, 128]
