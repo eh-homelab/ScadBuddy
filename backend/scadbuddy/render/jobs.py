@@ -454,8 +454,11 @@ class RenderQueue:
             worker.cancel()
         await asyncio.gather(*self._workers, return_exceptions=True)
         self._workers.clear()
-        # Not waited on: an abandoned cover thread cannot be interrupted, and
-        # shutdown must not pay for it. Queued covers are dropped.
+        self.close_thumbnails()
+
+    def close_thumbnails(self) -> None:
+        """Release the cover pool. Not waited on: an abandoned cover thread cannot be
+        interrupted, and shutdown must not pay for it. Queued covers are dropped."""
         self._thumbnails.shutdown(wait=False, cancel_futures=True)
 
     async def submit(
