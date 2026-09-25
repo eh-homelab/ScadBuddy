@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from unittest.mock import patch
 
@@ -200,6 +202,31 @@ def test_a_failed_tombstone_removal_is_logged_and_retried(
 
     assert catalogue.sweep_tombstones() != []
     assert list(paths.tombstones.iterdir()) == []
+
+
+def test_concurrent_sweeps_log_nothing_and_leave_nothing(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    for index in range(20):
+        tree = paths.tombstones / f"model-{index}.{index:032x}"
+        for depth in range(5):
+            (tree / f"d{depth}").mkdir(parents=True)
+            for leaf in range(10):
+                (tree / f"d{depth}" / f"f{leaf}").write_text("x", encoding="utf-8")
+
+    barrier = threading.Barrier(4)
+
+    def sweep() -> None:
+        barrier.wait()
+        catalogue.sweep_tombstones()
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        for future in [pool.submit(sweep) for _ in range(4)]:
+            future.result()
+
+    assert list(paths.tombstones.iterdir()) == []
+    assert "could not remove" not in caplog.text
 
 
 def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:

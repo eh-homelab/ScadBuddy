@@ -19,18 +19,29 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 
 
+def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
+    """``rmtree``'s ``onexc``: a file something else already removed is fine."""
+    if not isinstance(error, FileNotFoundError):
+        raise error
+
+
 def _remove_tree(path: Path) -> bool:
-    """``rmtree`` that logs a failure rather than raising or hiding it."""
-    if not path.exists():
-        return False
+    """``rmtree`` that logs a real failure rather than raising or hiding it.
+
+    Concurrent deletes and sweeps can race for the same tombstone, so anything
+    vanishing underneath this one counts as removed, not as a failure.
+    """
     try:
         if path.is_dir() and not path.is_symlink():
-            shutil.rmtree(path)
+            shutil.rmtree(path, onexc=_ignore_vanished)
         else:
             path.unlink()
-    except OSError:
-        logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
+    except FileNotFoundError:
         return False
+    except OSError:
+        if path.exists() or path.is_symlink():
+            logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
+            return False
     return True
 
 
