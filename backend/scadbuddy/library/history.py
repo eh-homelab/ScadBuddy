@@ -295,13 +295,18 @@ class ModelHistory:
         try:
             self.root.mkdir(parents=True, exist_ok=True)
             with self._exclusive():
-                if not (self.root / ".git").is_dir():
+                fresh = not (self.root / ".git").is_dir()
+                if fresh:
                     self._run("init", f"--initial-branch={DEFAULT_BRANCH}", ".")
                 gitignore = self.root / GITIGNORE_NAME
                 body = _gitignore_body(self.wrapper_prefix)
                 if not gitignore.is_file() or gitignore.read_text(encoding="utf-8") != body:
                     gitignore.write_text(body, encoding="utf-8")
-                return self._commit_locked("Initial revision", ".")
+                # On an existing repository anything left to commit is a catalogue
+                # action whose own commit failed (it logs and carries on), picked up
+                # at the next boot -- not the first revision, so not called one.
+                message = "Initial revision" if fresh else RECOVERED_MESSAGE
+                return self._commit_locked(message, ".")
         except (GitError, OSError):
             # A missing binary is not the only way this fails, and the others are
             # the ones that would hurt: a models directory uid 10001 cannot write
@@ -561,6 +566,15 @@ def _parse_log(text: str) -> list[Revision]:
     return revisions
 
 
+#: The commit an existing repository's boot makes of changes a failed commit left.
+RECOVERED_MESSAGE = "Recover uncommitted changes"
+
+
+def _is_control(character: str) -> bool:
+    """C0, DEL and C1: none of them belongs in a one-line subject."""
+    return character < " " or "\x7f" <= character <= "\x9f"
+
+
 def subject_line(message: str) -> str:
     """Flatten a commit message to one printable line.
 
@@ -573,7 +587,7 @@ def subject_line(message: str) -> str:
     one-line summary, and a commit message is not a place to smuggle bytes
     through. A blank result would make `git commit` fail, so it falls back.
     """
-    flattened = "".join(" " if character < " " else character for character in message)
+    flattened = "".join(" " if _is_control(character) else character for character in message)
     collapsed = " ".join(flattened.split())
     return collapsed[:MAX_SUBJECT] if collapsed else "(no message)"
 
