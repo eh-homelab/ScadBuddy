@@ -176,7 +176,16 @@ async def _guard_source(
 
     Returns what the check derived, so the caller can store the schema instead of
     running OpenSCAD a second time to rebuild it.
+
+    A NUL is refused first, and `force` does not bypass it: the multipart branch's
+    `decode_source` already rejects binary, and pasted text must not be the way a
+    binary blob gets into the models repository, where it breaks the diff route.
     """
+    if "\x00" in source:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
+        )
     if force:
         return None
     checked = await inspect_source(source, config=config, limit=limit, context=context)

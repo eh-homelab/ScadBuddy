@@ -247,6 +247,19 @@ def test_the_force_query_parameter_forces_a_json_paste(client: TestClient) -> No
     assert response.status_code == 201
 
 
+@pytest.mark.parametrize("force", [False, True])
+def test_a_nul_in_pasted_source_is_refused_even_when_forced(
+    client: TestClient, model: str, force: bool
+) -> None:
+    source = "cube(1);\x00\n"
+    created = client.post("/api/v1/models", json={"name": "Blob", "source": source, "force": force})
+    assert created.status_code == 422
+    assert "NUL" in created.json()["detail"]
+
+    replaced = client.put(f"/api/v1/models/{model}/source", json={"source": source, "force": force})
+    assert replaced.status_code == 422
+
+
 def test_pasting_over_an_existing_slug_conflicts(client: TestClient) -> None:
     assert _upload(client).status_code == 201
     response = client.post("/api/v1/models", json={"name": "name keychain", "source": SOURCE})
