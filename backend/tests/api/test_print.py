@@ -20,13 +20,24 @@ from pydantic import ValidationError
 from scadbuddy.bambuddy.models import EligibilityReport
 from scadbuddy.bambuddy.pipelines import BED_TYPES, PipelineReport
 from tests.api.conftest import wait_for_job
-from tests.api.test_send import BASE, configure, make_output, upload_route
+from tests.api.test_send import (
+    A1_02_NOZZLE,
+    BASE,
+    _uploaded_nozzle,
+    configure,
+    make_output,
+    presets_route,
+    upload_route,
+)
 from tests.bambuddy.conftest import recording
 
 API = f"{BASE}/api/v1"
 
 
 def pipelines_route(body: Any | None = None) -> respx.Route:
+    # A pipeline's printer preset is named through the catalogue, for the nozzle the
+    # uploaded 3MF states (#126).
+    presets_route()
     return respx.get(f"{API}/slicer-pipelines/").mock(
         return_value=httpx.Response(200, json=body or recording("slicer-pipelines-configured.json"))
     )
@@ -806,6 +817,47 @@ def test_running_a_pipeline_lays_the_file_out_for_that_pipeline_not_the_default(
     client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 2})
 
     assert upload.call_count == 2, "the P1S run reused a file laid out for the H2C"
+
+
+def _two_nozzles() -> dict[str, Any]:
+    """Two pipelines for the same A1 — one plate — differing only in the nozzle."""
+    base = recording("slicer-pipelines-configured.json")["pipelines"][0]
+    aimed = {**base, "target_kind": "printer_class", "target_printer_id": None}
+    return {
+        "pipelines": [
+            {**aimed, "id": 1, "target_model_class": "A1"},
+            {**aimed, "id": 2, "target_model_class": "A1", "printer_preset": A1_02_NOZZLE},
+        ]
+    }
+
+
+@respx.mock
+def test_running_a_pipeline_states_that_pipelines_nozzle_and_re_uploads_for_it(
+    client: TestClient, model: str
+) -> None:
+    """#126: a run request overriding the default pipeline gets that pipeline's nozzle —
+    and since the plate is the same, it is the nozzle alone that forces the re-upload."""
+    configure(client, pipeline_id=1)
+    pipelines_route(_two_nozzles())
+    printers_route()
+    presets_routes()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    respx.delete(f"{API}/library/files/41").mock(return_value=httpx.Response(200, json={}))
+    for pipeline_id in (1, 2):
+        respx.post(f"{API}/slicer-pipelines/{pipeline_id}/run").mock(
+            return_value=httpx.Response(202, json=run_body())
+        )
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    assert upload.call_count == 1
+    # GM041 is not in the truncated catalogue, so the default pipeline states nothing.
+    assert _uploaded_nozzle(upload) == ["0.4"]
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 2})
+
+    assert upload.call_count == 2, "the 0.2 run reused a file stating the 0.4 nozzle"
+    assert _uploaded_nozzle(upload) == ["0.2"]
 
 
 @respx.mock
