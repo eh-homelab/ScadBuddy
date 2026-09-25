@@ -15,6 +15,7 @@ from scadbuddy.render.plate import (
     PlateFitError,
     PlateGeometry,
     Rect,
+    nozzle_diameter_of,
     place_on_plate,
     plate_for,
 )
@@ -25,6 +26,26 @@ KEYCHAIN = np.array([[-88.0, -23.0, -1.5], [88.0, 23.0, 1.5]])
 
 def _bounds(width: float, depth: float, height: float = 3.0) -> np.ndarray:
     return np.array([[0.0, 0.0, 0.0], [width, depth, height]])
+
+
+class TestNozzleDiameter:
+    """#126: the nozzle a printer preset names, read off the same suffix plate_for strips."""
+
+    @pytest.mark.parametrize(
+        ("name", "diameter"),
+        [
+            ("Bambu Lab H2C 0.2 nozzle", "0.2"),
+            ("Bambu Lab A1 0.4 nozzle", "0.4"),
+            ("Bambu Lab X1 Carbon 0.6 nozzle", "0.6"),
+            ("  Bambu Lab P1S 0.8 NOZZLE ", "0.8"),
+        ],
+    )
+    def test_a_printer_preset_name_states_its_nozzle(self, name: str, diameter: str) -> None:
+        assert nozzle_diameter_of(name) == diameter
+
+    @pytest.mark.parametrize("name", [None, "", "Bambu Lab A1", "H2C"])
+    def test_a_name_without_a_nozzle_suffix_states_none(self, name: str | None) -> None:
+        assert nozzle_diameter_of(name) is None
 
 
 class TestPlateLookup:

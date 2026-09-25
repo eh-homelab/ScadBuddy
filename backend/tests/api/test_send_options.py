@@ -15,7 +15,14 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS
-from tests.api.test_send import API, PRESETS, configure, make_output, upload_route
+from tests.api.test_send import (
+    API,
+    PRESETS,
+    configure,
+    make_output,
+    presets_route,
+    upload_route,
+)
 from tests.bambuddy.conftest import recording
 
 OPTIONS_ROUTE = "/api/v1/settings/print-options"
@@ -57,7 +64,9 @@ def queue_route() -> respx.Route:
 def pipeline_route(pipeline_id: int = 4, body: dict[str, Any] | None = None) -> respx.Route:
     # The send also resolves the target printer's plate to lay the 3MF out on it
     # (#105), which reads the pipeline list and the printers. Registered here so a
-    # test that has a pipeline has the whole lookup, rather than in every caller.
+    # test that has a pipeline has the whole lookup, rather than in every caller. The
+    # pipeline's printer preset is named through the catalogue for its nozzle (#126).
+    presets_route()
     respx.get(f"{API}/slicer-pipelines/").mock(
         return_value=httpx.Response(
             200, json={"pipelines": [{**PIPELINE, **(body or {}), "id": pipeline_id}]}
@@ -218,7 +227,9 @@ def test_a_remembered_quantity_rides_a_pipeline_run_as_copies(
     remember(client, "global", {"quantity": 3})
     output_id = make_output(client, model)
     upload_route()
-    # The send resolves the pipeline's printer to lay the 3MF out on its plate (#105).
+    # The send resolves the pipeline's printer to lay the 3MF out on its plate (#105),
+    # and names its printer preset for the nozzle the 3MF states (#126).
+    presets_route()
     respx.get(f"{API}/slicer-pipelines/").mock(
         return_value=httpx.Response(200, json={"pipelines": [{**PIPELINE, "id": 4}]})
     )

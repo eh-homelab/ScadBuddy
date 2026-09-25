@@ -71,7 +71,11 @@ def upload_route(file_id: int = 41) -> respx.Route:
 
 
 def plate_routes(
-    *, pipeline_id: int | None = None, printer_id: int | None = None, model: str = "H2C"
+    *,
+    pipeline_id: int | None = None,
+    printer_id: int | None = None,
+    model: str = "H2C",
+    printer_preset: dict[str, str] | None = None,
 ) -> None:
     """Mock what the send path reads to learn which printer's plate to lay out for.
 
@@ -89,6 +93,7 @@ def plate_routes(
                         "target_kind": "printer_class",
                         "target_model_class": model,
                         "fanout_strategy": "max_parallel",
+                        "printer_preset": printer_preset,
                     }
                 ]
                 if pipeline_id is not None
@@ -490,6 +495,88 @@ def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     assert response.headers["content-type"] == "application/problem+json"
     assert "A1 mini" in response.json()["detail"]
     assert not upload.called
+
+
+# --- #126 the 3MF states the target pipeline's nozzle ------------------------------
+
+#: In the recorded catalogue: "Bambu Lab A1 0.2 nozzle".
+A1_02_NOZZLE = {"source": "cloud", "id": "GM029"}
+
+
+def presets_route(response: httpx.Response | None = None) -> respx.Route:
+    return respx.get(f"{API}/slicer/presets").mock(
+        return_value=response or httpx.Response(200, json=recording("slicer-presets.json"))
+    )
+
+
+def _uploaded_nozzle(route: respx.Route) -> list[str]:
+    with zipfile.ZipFile(io.BytesIO(_uploaded_3mf(route))) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+    nozzle: list[str] = settings["nozzle_diameter"]
+    return nozzle
+
+
+@respx.mock
+def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, model: str) -> None:
+    """A 0.2-nozzle pipeline's file must not tell someone at the printer it is 0.4."""
+    configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
+    presets_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+
+    assert _uploaded_nozzle(upload) == ["0.2"]
+
+
+@respx.mock
+def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
+    client: TestClient, model: str
+) -> None:
+    """A printer alone names no preset, so there is no nozzle to state — and no reason
+    to read the preset catalogue at all."""
+    configure(client, printer_id=1)
+    plate_routes(printer_id=1, model="A1")
+    presets = presets_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+
+    assert _uploaded_nozzle(upload) == ["0.4"]
+    assert not presets.called
+
+
+@respx.mock
+def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
+    client: TestClient, model: str
+) -> None:
+    configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4, model="A1", printer_preset={"source": "cloud", "id": "GM999"})
+    presets_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+
+    assert _uploaded_nozzle(upload) == ["0.4"]
+
+
+@respx.mock
+def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
+    client: TestClient, model: str
+) -> None:
+    """The nozzle is reported, never sliced with, so it is not worth failing a send for."""
+    configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
+    presets_route(httpx.Response(500, json={"detail": "boom"}))
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+
+    assert _uploaded_nozzle(upload) == ["0.4"]
 
 
 def _uploaded_3mf(route: respx.Route) -> bytes:

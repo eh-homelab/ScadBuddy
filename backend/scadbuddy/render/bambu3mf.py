@@ -213,7 +213,9 @@ def _cover_metadata() -> str:
 #: names that could be mistaken for real ones — it owns no slicer settings.
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
-#: measured to slice identically on a two-extruder H2C.
+#: measured to slice identically on a two-extruder H2C. The send path replaces it
+#: with the target pipeline's real nozzle when it can name one (#126): slicing never
+#: reads it, but a person deciding whether to start a print does.
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
 
 
@@ -385,7 +387,9 @@ def _object_bounds(archive: zipfile.ZipFile) -> np.ndarray:
     return np.array([np.min(lows, axis=0), np.max(highs, axis=0)])
 
 
-def replate_3mf(payload: bytes, plate: PlateGeometry) -> bytes:
+def replate_3mf(
+    payload: bytes, plate: PlateGeometry, *, nozzle_diameter: str | None = None
+) -> bytes:
     """Return ``payload`` laid out for ``plate``.
 
     A 3MF is written at render time, before anyone has chosen a printer, so the
@@ -394,6 +398,9 @@ def replate_3mf(payload: bytes, plate: PlateGeometry) -> bytes:
     Raises :class:`~scadbuddy.render.plate.PlateFitError` when the model cannot
     fit that printer — before the upload, rather than after Bambuddy's slicer has
     spent a minute finding out.
+
+    ``nozzle_diameter``, when the target names one, replaces the placeholder in
+    ``project_settings.config`` (#126); ``None`` leaves whatever the file states.
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
@@ -421,6 +428,8 @@ def replate_3mf(payload: bytes, plate: PlateGeometry) -> bytes:
             # The plate changed, so restate its Z. The other keys the BBL loader
             # needs do not vary by printer and are already in the file.
             settings["printable_height"] = _number(plate.height)
+            if nozzle_diameter is not None:
+                settings["nozzle_diameter"] = [nozzle_diameter]
             if placement.tower is not None:
                 settings["wipe_tower_x"] = [_number(placement.tower[0])]
                 settings["wipe_tower_y"] = [_number(placement.tower[1])]

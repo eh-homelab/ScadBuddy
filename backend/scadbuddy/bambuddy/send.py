@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
@@ -32,7 +33,7 @@ from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, downl
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
-from scadbuddy.render.plate import PlateFitError, PlateGeometry, plate_for
+from scadbuddy.render.plate import PlateFitError, PlateGeometry, nozzle_diameter_of, plate_for
 
 logger = logging.getLogger(__name__)
 
@@ -102,15 +103,37 @@ def _read_3mf(store: OutputStore, meta: OutputMeta) -> bytes:
     return path.read_bytes()
 
 
-async def target_printer_model(
+@dataclass(frozen=True)
+class Target:
+    """What the 3MF is laid out for: the target's plate and, when known, its nozzle."""
+
+    plate: PlateGeometry
+    #: Read off the pipeline's printer preset name (#126). ``None`` — no pipeline, no
+    #: printer preset, or a name that states no nozzle — keeps the placeholder.
+    nozzle_diameter: str | None = None
+
+    @property
+    def key(self) -> str:
+        """Recorded as ``library_file_plate``: a reused upload has to match both halves.
+
+        Without a nozzle this is the plate's own key, so a file recorded before #126 is
+        still reused for the same plate.
+        """
+        if self.nozzle_diameter is None:
+            return self.plate.key
+        return f"{self.plate.key}@{self.nozzle_diameter}"
+
+
+async def _target_model_and_preset(
     client: BambuddyClient, settings: StoredSettings, slug: str, *, pipeline_id: int | None = None
-) -> str | None:
-    """Which printer model this output is heading for, as Bambuddy names it.
+) -> tuple[str | None, PresetRef | None]:
+    """Which printer model this output is heading for, as Bambuddy names it, and the
+    printer preset of the pipeline in play.
 
     The pipeline wins over the globally configured printer, the same precedence
     :meth:`StoredSettings.pipeline_for` gives the print itself. A pipeline aimed
     at a printer *class* names the model directly; one aimed at a specific
-    printer has to be resolved through the printer list. ``None`` — no pipeline,
+    printer has to be resolved through the printer list. A ``None`` model — no pipeline,
     no printer, or a printer Bambuddy reports without a model — is not an error;
     it means the default plate. ``pipeline_id`` names the pipeline actually in play
     when the caller has already chosen one that is not the slug's default — a run
@@ -120,50 +143,79 @@ async def target_printer_model(
     pipeline_id = pipeline_id if pipeline_id is not None else settings.pipeline_for(slug)
     if pipeline_id is None and settings.printer_id is None:
         # Nothing to resolve against, so do not spend two round trips finding out.
-        return None
+        return None, None
     printers: list[Printer] | None = None
+    printer_preset: PresetRef | None = None
     if pipeline_id is not None:
         pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
         if pipeline is not None:
+            printer_preset = pipeline.printer_preset
             if pipeline.target_model_class:
-                return pipeline.target_model_class
+                return pipeline.target_model_class, printer_preset
             if pipeline.target_printer_id is not None:
                 printers = await client.printers()
                 target = next(
                     (row for row in printers if row.id == pipeline.target_printer_id), None
                 )
                 if target is not None and target.model:
-                    return target.model
+                    return target.model, printer_preset
     if settings.printer_id is not None:
         printers = printers if printers is not None else await client.printers()
         target = next((row for row in printers if row.id == settings.printer_id), None)
         if target is not None and target.model:
-            return target.model
+            return target.model, printer_preset
+    return None, printer_preset
+
+
+async def _nozzle_diameter(client: BambuddyClient, preset: PresetRef | None) -> str | None:
+    """The nozzle ``preset``'s name states, from ``/slicer/presets`` (#126).
+
+    Bambuddy has no preset-by-id route, and a :class:`PresetRef` carries no name, so
+    this reads the catalogue. The value is only *reported* — Bambuddy slices with the
+    pipeline's presets, never this field — so a catalogue that cannot be read degrades
+    to the placeholder rather than failing the send.
+    """
+    if preset is None:
+        return None
+    try:
+        catalogue = await client.presets()
+    except ApiError:
+        logger.warning(
+            "could not read the preset catalogue; the 3MF keeps the placeholder nozzle",
+            extra={"preset_source": preset.source, "preset_id": preset.id},
+        )
+        return None
+    for tier in (catalogue.cloud, catalogue.standard, catalogue.local, catalogue.orca_cloud):
+        for row in tier.printer:
+            if row.source == preset.source and row.id == preset.id:
+                return nozzle_diameter_of(row.name)
     return None
 
 
-async def target_plate(
+async def target_for(
     client: BambuddyClient, settings: StoredSettings, slug: str, *, pipeline_id: int | None = None
-) -> PlateGeometry:
-    model = await target_printer_model(client, settings, slug, pipeline_id=pipeline_id)
+) -> Target:
+    model, printer_preset = await _target_model_and_preset(
+        client, settings, slug, pipeline_id=pipeline_id
+    )
     plate = plate_for(model)
     if model and plate is FALLBACK_PLATE:
         logger.info(
             "no plate geometry for this printer model; using the default plate",
             extra={"printer_model": model},
         )
-    return plate
+    return Target(plate, await _nozzle_diameter(client, printer_preset))
 
 
-def _laid_out_for(payload: bytes, plate: PlateGeometry) -> bytes:
-    """Re-place the 3MF for ``plate``, refusing here rather than at the slicer.
+def _laid_out_for(payload: bytes, target: Target) -> bytes:
+    """Re-place the 3MF for ``target``, refusing here rather than at the slicer.
 
     The 3MF was written at render time, when no printer was chosen, so the plate
     it carries is the fallback. Moving it now is what puts the object — and the
     prime tower a multi-colour print needs — where every extruder can reach them.
     """
     try:
-        return replate_3mf(payload, plate)
+        return replate_3mf(payload, target.plate, nozzle_diameter=target.nozzle_diameter)
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
 
@@ -174,7 +226,7 @@ async def upload_output(
     meta: OutputMeta,
     settings: StoredSettings,
     *,
-    plate: PlateGeometry | None = None,
+    target: Target | None = None,
     folder_id: int | None = None,
 ) -> tuple[OutputMeta, str]:
     """Upload ``model.3mf``, replacing a file a previous send left behind.
@@ -194,8 +246,8 @@ async def upload_output(
     cannot leave ``library_file_id`` pointing at a file that is gone, and a delete that
     *fails* leaves the id in place to be retried rather than orphaning the file.
     """
-    plate = plate if plate is not None else await target_plate(client, settings, meta.slug)
-    payload = _laid_out_for(_read_3mf(store, meta), plate)
+    target = target if target is not None else await target_for(client, settings, meta.slug)
+    payload = _laid_out_for(_read_3mf(store, meta), target)
     filename = download_filename(meta)
 
     if meta.library_file_id is not None:
@@ -220,7 +272,9 @@ async def upload_output(
         payload,
         folder_id=folder_id if folder_id is not None else settings.library_folder_id,
     )
-    recorded = store.record_send(meta.id, library_file_id=uploaded.id, library_file_plate=plate.key)
+    recorded = store.record_send(
+        meta.id, library_file_id=uploaded.id, library_file_plate=target.key
+    )
     return recorded, uploaded.filename
 
 
@@ -230,7 +284,7 @@ async def ensure_uploaded(
     meta: OutputMeta,
     settings: StoredSettings,
     *,
-    plate: PlateGeometry | None = None,
+    target: Target | None = None,
     folder_id: int | None = None,
 ) -> tuple[OutputMeta, int]:
     """The library file id to slice, judge or print, uploading the 3MF if there is none.
@@ -242,19 +296,20 @@ async def ensure_uploaded(
 
     The *placement* is not immutable, though: it is chosen from the printer this send
     is aimed at (#105), and the printer can change between sends. So the id is only
-    reused while it was laid out for the plate now in play; otherwise this re-uploads,
+    reused while it was laid out for the plate now in play — and states the nozzle now
+    in play (#126); otherwise this re-uploads,
     or the second send would hand Bambuddy a file centred on the previous printer's bed
     with the prime tower somewhere the new one's extruders cannot reach.
     """
-    plate = plate if plate is not None else await target_plate(client, settings, meta.slug)
-    if meta.library_file_id is not None and meta.library_file_plate == plate.key:
+    target = target if target is not None else await target_for(client, settings, meta.slug)
+    if meta.library_file_id is not None and meta.library_file_plate == target.key:
         if folder_id is not None:
             # The file was uploaded before this project was chosen, so it is sitting in
             # whatever folder that send used. Bambuddy has a move route, and a caller
             # that reports `folder_id` must not report one the file is not in.
             await client.move_library_files([meta.library_file_id], folder_id)
         return meta, meta.library_file_id
-    meta, _ = await upload_output(client, store, meta, settings, plate=plate, folder_id=folder_id)
+    meta, _ = await upload_output(client, store, meta, settings, target=target, folder_id=folder_id)
     if meta.library_file_id is None:  # pragma: no cover - upload_output always records one
         raise ApiError(status.HTTP_502_BAD_GATEWAY, "the upload did not return a library file id")
     return meta, meta.library_file_id

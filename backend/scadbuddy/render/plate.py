@@ -62,7 +62,7 @@ TOWER_CLEARANCE = 5.0
 EDGE_MARGIN = 2.0
 
 #: A printer preset names its nozzle: "Bambu Lab H2C 0.4 nozzle".
-_NOZZLE_SUFFIX = re.compile(r"\s+\d+(?:\.\d+)?\s+nozzle$", re.IGNORECASE)
+_NOZZLE_SUFFIX = re.compile(r"\s+(\d+(?:\.\d+)?)\s+nozzle$", re.IGNORECASE)
 _LAB_PREFIX = "bambu lab "
 
 
@@ -207,6 +207,16 @@ def plate_for(model: str | None) -> PlateGeometry:
         return DEFAULT_PLATE
     key = _NOZZLE_SUFFIX.sub("", model.strip()).lower()
     return _BY_ALIAS.get(key, DEFAULT_PLATE)
+
+
+def nozzle_diameter_of(preset_name: str | None) -> str | None:
+    """The nozzle a printer preset names — ``"0.2"`` for ``"Bambu Lab H2C 0.2 nozzle"``.
+
+    The same suffix :func:`plate_for` strips, read rather than discarded. ``None`` for
+    a name that states no nozzle, which leaves the 3MF's placeholder in place (#126).
+    """
+    match = _NOZZLE_SUFFIX.search(preset_name.strip()) if preset_name else None
+    return match.group(1) if match else None
 
 
 def _clear_of_exclusions(

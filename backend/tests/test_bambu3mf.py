@@ -13,6 +13,7 @@ import trimesh
 
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
+    PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
@@ -184,6 +185,20 @@ class TestReplate:
     def test_replating_is_idempotent(self, written: Path) -> None:
         once = replate_3mf(written.read_bytes(), plate_for("H2C"))
         assert replate_3mf(once, plate_for("H2C")) == once
+
+    def test_replating_states_the_target_nozzle_diameter(self, written: Path) -> None:
+        """#126: the send path knows the pipeline's nozzle, so the file says so."""
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"), nozzle_diameter="0.2")
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        # Same one-entry arity as the placeholder it replaces.
+        assert settings["nozzle_diameter"] == ["0.2"]
+
+    def test_replating_without_a_nozzle_keeps_the_placeholder(self, written: Path) -> None:
+        moved = replate_3mf(written.read_bytes(), plate_for("H2C"))
+        with zipfile.ZipFile(io.BytesIO(moved)) as archive:
+            settings = json.loads(archive.read("Metadata/project_settings.config"))
+        assert settings["nozzle_diameter"] == PLACEHOLDER_NOZZLE_DIAMETER
 
     def test_a_model_too_big_for_the_printer_is_refused(self, tmp_path: Path) -> None:
         big = tmp_path / "big.3mf"

@@ -61,7 +61,7 @@ from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
     resolve_print_options,
-    target_plate,
+    target_for,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
@@ -468,8 +468,8 @@ async def check_pipelines(
     # to be. Uploading once is the point of this endpoint — the picker opens on it.
     # If that enum ever grows a geometry issue, this has to become one upload per
     # distinct target instead.
-    plate = await target_plate(client, settings, meta.slug)
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, plate=plate)
+    target = await target_for(client, settings, meta.slug)
+    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, target=target)
     if pipeline_ids is None:
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
@@ -571,7 +571,7 @@ async def run_for_output(
         )
     # Placed for the pipeline being run, which ``request.pipeline_id`` may have
     # overridden — not for whatever the settings would have defaulted to.
-    plate = await target_plate(client, settings, meta.slug, pipeline_id=pipeline_id)
+    target = await target_for(client, settings, meta.slug, pipeline_id=pipeline_id)
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # `ensure_uploaded` only uploads once and a file already in the wrong folder stays
@@ -579,7 +579,7 @@ async def run_for_output(
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     meta, library_file_id = await ensure_uploaded(
-        client, store, meta, settings, plate=plate, folder_id=folder_id
+        client, store, meta, settings, target=target, folder_id=folder_id
     )
 
     # The per-printer scope keys on the printer ScadBuddy believes it prints to. With
