@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
+from pathlib import Path
 from unittest.mock import patch
 
 import httpx
@@ -12,6 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.render.jobs import Job, JobStore
 from tests.api.conftest import PNG_BYTES
 
@@ -227,6 +230,49 @@ def test_concurrent_sweeps_log_nothing_and_leave_nothing(
 
     assert list(paths.tombstones.iterdir()) == []
     assert "could not remove" not in caplog.text
+
+
+def test_losing_a_delete_race_is_a_404_not_a_500(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # Both requests pass the existence checks; the other one renames first.
+    shutil.rmtree(paths.model_dir(model))
+    with patch.object(Catalogue, "exists", return_value=True):
+        response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == f"no model named {model!r}"
+
+
+def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
+    client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    schema_cache = paths.model_schema_cache(model)
+    export = paths.model_revision_dir(model, "0" * 40)
+    export.mkdir(parents=True)
+    output = paths.outputs / model / "deadbeef"
+    output.mkdir(parents=True)
+    real_unlink = Path.unlink
+
+    def failing_unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == schema_cache:
+            raise PermissionError("read-only")
+        real_unlink(self, missing_ok=missing_ok)
+
+    with patch.object(Path, "unlink", failing_unlink):
+        response = client.delete(f"/api/v1/models/{model}")
+
+    assert response.status_code == 204
+    assert [getattr(record, "path", None) for record in caplog.records if record.exc_info] == [
+        str(schema_cache)
+    ]
+    assert schema_cache.exists()
+    assert not paths.model_dir(model).exists()
+    assert not (paths.model_revisions / model).exists()
+    assert not (paths.outputs / model).exists()
+    assert list(paths.tombstones.iterdir()) == []
 
 
 def test_a_delete_is_a_revision_of_the_shared_history(client: TestClient) -> None:

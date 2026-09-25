@@ -156,7 +156,11 @@ def delete_model(slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep) -> Re
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
-    catalogue.delete(slug)
+    try:
+        catalogue.delete(slug)
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
