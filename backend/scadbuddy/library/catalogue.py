@@ -152,9 +152,15 @@ class Catalogue:
         # Dropping it here retires the key from volumes written before that was
         # true, rather than leaving a cache blob in the versioned tree forever.
         meta.pop("schema", None)
-        meta_path = self.paths.model_meta(slug)
-        meta_path.parent.mkdir(parents=True, exist_ok=True)
-        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+        # No `mkdir`: the model directory must already exist (`create` makes it).
+        # A write racing a delete then fails instead of recreating a directory
+        # holding only `model.json` -- unlisted, and never swept as a tombstone.
+        try:
+            self.paths.model_meta(slug).write_text(
+                json.dumps(meta, indent=2) + "\n", encoding="utf-8"
+            )
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
         return self._record(slug, self.version(slug))
@@ -163,12 +169,17 @@ class Catalogue:
         self._require(slug)
         raw = self.read_raw_meta(slug)
         meta = ModelMeta.model_validate({"name": slug, **raw})
+        try:
+            modified = self.paths.model_source(slug).stat().st_mtime
+        except FileNotFoundError:
+            # Deleted since `_require`.
+            raise ModelNotFoundError(slug) from None
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
-            updated_at=datetime.fromtimestamp(self.paths.model_source(slug).stat().st_mtime, UTC),
+            updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
         )
 
@@ -228,13 +239,22 @@ class Catalogue:
         keeps it on one filesystem so it stays that way.
         """
         self._require(slug)
-        handle, staged = tempfile.mkstemp(
-            dir=self.paths.model_dir(slug), prefix=".model-", suffix=".scad"
-        )
+        # A delete can rename the directory away at any point in here; staging
+        # and swapping inside it then fail rather than recreate it, and the
+        # failure is the same 404 the delete itself would give.
+        try:
+            handle, staged = tempfile.mkstemp(
+                dir=self.paths.model_dir(slug), prefix=".model-", suffix=".scad"
+            )
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
         try:
             with os.fdopen(handle, "w", encoding="utf-8") as writer:
                 writer.write(source)
             os.replace(staged, self.paths.model_source(slug))
+        except FileNotFoundError:
+            Path(staged).unlink(missing_ok=True)
+            raise ModelNotFoundError(slug) from None
         except BaseException:
             Path(staged).unlink(missing_ok=True)
             raise

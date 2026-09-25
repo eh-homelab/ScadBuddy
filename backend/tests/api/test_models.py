@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -257,6 +258,77 @@ def test_losing_a_delete_race_is_a_404_not_a_500(
     assert response.status_code == 404
     assert response.headers["content-type"].startswith("application/problem+json")
     assert response.json()["detail"] == f"no model named {model!r}"
+
+
+def test_a_metadata_edit_that_loses_a_delete_race_is_a_404_and_resurrects_nothing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The PATCH passes its existence checks; a DELETE renames the model away first.
+    shutil.rmtree(paths.model_dir(model))
+    with patch.object(Catalogue, "exists", return_value=True):
+        response = client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"})
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == f"no model named {model!r}"
+    assert not paths.model_dir(model).exists()
+
+
+def test_a_metadata_write_racing_a_delete_does_not_recreate_the_model_dir(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The delete lands after the PATCH has read the metadata, before it writes it.
+    real_read = Catalogue.read_raw_meta
+
+    def read_then_lose_the_race(self: Catalogue, slug: str) -> dict[str, object]:
+        meta = real_read(self, slug)
+        if slug == model and paths.model_dir(slug).exists():
+            self.delete(slug)
+        return meta
+
+    with patch.object(Catalogue, "read_raw_meta", read_then_lose_the_race):
+        response = client.patch(f"/api/v1/models/{model}", json={"name": "Renamed"})
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"no model named {model!r}"
+    assert not paths.model_dir(model).exists()
+    assert list(paths.tombstones.iterdir()) == []
+
+
+def test_a_source_edit_that_loses_a_delete_race_is_a_404_and_resurrects_nothing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    shutil.rmtree(paths.model_dir(model))
+    with patch.object(Catalogue, "exists", return_value=True):
+        response = client.put(
+            f"/api/v1/models/{model}/source", json={"source": "width = 7;\n", "force": True}
+        )
+
+    assert response.status_code == 404
+    assert response.headers["content-type"].startswith("application/problem+json")
+    assert response.json()["detail"] == f"no model named {model!r}"
+    assert not paths.model_dir(model).exists()
+
+
+def test_a_source_swap_racing_a_delete_is_a_404_and_resurrects_nothing(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    # The delete renames the model away between staging the new source and swapping it in.
+    real_replace = os.replace
+
+    def lose_the_race_then_replace(src: str, dst: object) -> None:
+        paths.model_dir(model).rename(paths.tombstones / f"{model}.racing")
+        real_replace(src, dst)  # type: ignore[arg-type]
+
+    paths.tombstones.mkdir(parents=True, exist_ok=True)
+    with patch("scadbuddy.library.catalogue.os.replace", lose_the_race_then_replace):
+        response = client.put(
+            f"/api/v1/models/{model}/source", json={"source": "width = 7;\n", "force": True}
+        )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"no model named {model!r}"
+    assert not paths.model_dir(model).exists()
 
 
 def test_a_failed_cleanup_step_does_not_fail_a_completed_delete(
