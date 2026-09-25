@@ -427,7 +427,11 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
 def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
     require_model(catalogue, slug)
-    return catalogue.update(slug, patch)
+    try:
+        return catalogue.update(slug, patch)
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
 
 
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
@@ -490,9 +494,13 @@ async def put_source(
         # checked — and has its schema derived — against the files it will really see.
         context=paths.model_dir(slug),
     )
-    record = await asyncio.to_thread(
-        catalogue.write_source, slug, body.source, message=body.message
-    )
+    try:
+        record = await asyncio.to_thread(
+            catalogue.write_source, slug, body.source, message=body.message
+        )
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if checked is not None and checked.schema is not None:
         # After the write: `write_source` drops the old cache entry.
         store_cached_schema(paths.model_schema_cache(slug), checked.schema)
