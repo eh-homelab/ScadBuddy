@@ -55,9 +55,14 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
-from scadbuddy.bambuddy.options import PrintOptions, resolve
+from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import ensure_uploaded, pipeline_slice_request, target_plate
+from scadbuddy.bambuddy.send import (
+    ensure_uploaded,
+    pipeline_slice_request,
+    resolve_print_options,
+    target_plate,
+)
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -195,7 +200,11 @@ class PrintRunRequest(BaseModel):
     pipeline_id: int | None = None
     copies: int = Field(default=1, ge=1, le=1000)
     force: bool = False
-    #: Only meaningful with a plan: it is the printer whose trays the mapping addresses.
+    #: The printer to queue on, whenever this request is sliced and queued: with a plan
+    #: it is the printer whose trays the mapping addresses, and with remembered options
+    #: that force the queue route it overrides the pipeline's own target (#124). It is
+    #: also the printer the per-printer option scope keys on, ahead of the configured
+    #: printer and the pipeline's target. A plain pipeline run ignores it.
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     plate_id: int = Field(default=1, ge=1)
@@ -573,13 +582,8 @@ async def run_for_output(
     if scope_printer_id is None and settings.printer_print_options:
         pipeline = await client.pipeline(pipeline_id)
         scope_printer_id = pipeline.target_printer_id
-    print_options = resolve(
-        settings.print_options,
-        settings.printer_print_options.get(str(scope_printer_id))
-        if scope_printer_id is not None
-        else None,
-        settings.model_print_options.get(meta.slug),
-        PrintOptions(quantity=request.copies),
+    print_options = resolve_print_options(
+        settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
     )
 
     if request.filament_plan is None and not print_options.beyond_pipeline():

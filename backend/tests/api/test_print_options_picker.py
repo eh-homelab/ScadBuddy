@@ -108,6 +108,51 @@ def test_no_remembered_option_still_runs_the_pipeline(client: TestClient, model:
     assert body["route"] == "pipeline"
 
 
+@respx.mock
+def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str) -> None:
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "model", {"timelapse": False}, key=model)
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    slice_route()
+    queue = queue_route()
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+
+    # The model's own choice beats the global one.
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is False
+
+
+@respx.mock
+def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    remember(client, "printer", {"timelapse": False}, key="7")
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    run = respx.post(f"{API}/slicer-pipelines/1/run")
+    slice_route()
+    queue = queue_route()
+
+    body = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "printer_id": 7}
+    ).json()
+
+    assert not run.called
+    queued = json.loads(queue.calls.last.request.read())
+    # Printer 7's remembered option applies, and the item goes to printer 7 rather
+    # than the pipeline's own target (printer 1).
+    assert queued["timelapse"] is False
+    assert queued["printer_id"] == 7
+    assert body["printer_id"] == 7
+
+
 def _pipeline_one() -> dict[str, object]:
     pipelines = recording("slicer-pipelines-configured.json")["pipelines"]
     return next(row for row in pipelines if row["id"] == 1)

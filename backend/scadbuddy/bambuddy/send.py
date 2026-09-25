@@ -360,16 +360,26 @@ def _request_scope(request: SendRequest) -> PrintOptions:
     return request.options.model_copy(update={"quantity": request.copies})
 
 
-def _resolve_options(
-    settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
+def resolve_print_options(
+    settings: StoredSettings, slug: str, printer_id: int | None, request_scope: PrintOptions
 ) -> PrintOptions:
-    """global → per-printer → per-model → per-request, least specific first."""
+    """global → per-printer → per-model → per-request, least specific first.
+
+    Shared by the send bar and the print picker (#124), so the two can never disagree
+    about which remembered option wins.
+    """
     return resolve(
         settings.print_options,
         settings.printer_print_options.get(str(printer_id)) if printer_id is not None else None,
-        settings.model_print_options.get(meta.slug),
-        _request_scope(request),
+        settings.model_print_options.get(slug),
+        request_scope,
     )
+
+
+def _resolve_options(
+    settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
+) -> PrintOptions:
+    return resolve_print_options(settings, meta.slug, printer_id, _request_scope(request))
 
 
 def _needs_pipeline(settings: StoredSettings, meta: OutputMeta, request: SendRequest) -> bool:
