@@ -321,7 +321,7 @@ def _settings_slice_request(settings: StoredSettings, meta: OutputMeta) -> Slice
     )
 
 
-def _pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest:
+def pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest:
     """Slice from the pipeline's own presets, the way a pipeline run would.
 
     This is what a send carrying print options does *instead of* running the pipeline.
@@ -443,7 +443,7 @@ async def _queue_send(
     if pipeline_id is not None:
         if pipeline is None:  # pragma: no cover - _needs_pipeline already fetched it
             pipeline = await client.pipeline(pipeline_id)
-        slice_request = _pipeline_slice_request(pipeline, meta)
+        slice_request = pipeline_slice_request(pipeline, meta)
         # The pipeline's own target, never ``settings.printer_id``: a ``printer_class``
         # pipeline resolves no printer id at all, and taking the configured one there
         # pinned every copy to that single printer and silently ended the fan-out the

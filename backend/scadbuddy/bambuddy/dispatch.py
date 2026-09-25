@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.filaments import QueueFilaments
 from scadbuddy.bambuddy.models import Pipeline, PresetRef, QueueItemCreate, SliceRequest
+from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.core.problems import ApiError
 
 logger = logging.getLogger(__name__)
@@ -71,12 +72,17 @@ async def slice_and_queue(
     plate_id: int = 1,
     copies: int = 1,
     project_id: int | None = None,
+    options: PrintOptions | None = None,
 ) -> QueueOutcome:
     """Slice with the pipeline's presets, wait for it, then queue the result once.
 
     ``quantity`` rather than one queue item per copy: Bambuddy's queue models repeats
     itself, and N identical items would show up as N rows the user has to cancel one at
     a time.
+
+    ``options`` are the resolved print options (#88); ``copies`` and ``project_id``
+    still win over the quantity and project they carry, because those two are what
+    the caller asked for on this request.
     """
     if pipeline.printer_preset is None or pipeline.process_preset is None:
         raise ApiError(
@@ -115,8 +121,12 @@ async def slice_and_queue(
         )
 
     printer, target_model = target_of(pipeline, printer_id)
+    remembered = options.queue_fields() if options is not None else {}
+    remembered.pop("quantity", None)
+    remembered.pop("project_id", None)
     item = await client.enqueue(
         QueueItemCreate(
+            **remembered,
             printer_id=printer,
             target_model=target_model,
             library_file_id=sliced,

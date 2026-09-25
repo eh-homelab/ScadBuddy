@@ -30,7 +30,7 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.dispatch import slice_and_queue, target_of
+from scadbuddy.bambuddy.dispatch import QueueOutcome, slice_and_queue, target_of
 from scadbuddy.bambuddy.errors import not_configured
 from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
@@ -55,8 +55,9 @@ from scadbuddy.bambuddy.models import (
     Printer,
     TargetKind,
 )
+from scadbuddy.bambuddy.options import PrintOptions, resolve
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.send import ensure_uploaded, target_plate
+from scadbuddy.bambuddy.send import ensure_uploaded, pipeline_slice_request, target_plate
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -539,6 +540,11 @@ async def run_for_output(
     and queued against one printer. That is a real difference in behaviour, not an
     implementation detail: a class-targeted pipeline fans out and a queue item does
     not, which is why the dialog says so before the click.
+
+    Remembered print options (#88) take the same route for the same reason (#124): the
+    run request has nowhere to put ``timelapse`` or ``bed_levelling``, so an option the
+    run cannot carry slices with the pipeline's own filament presets and queues with
+    the options set. Without one, nothing changes.
     """
     pipeline_id = request.pipeline_id or settings.pipeline_for(meta.slug)
     if pipeline_id is None:
@@ -559,7 +565,24 @@ async def run_for_output(
         client, store, meta, settings, plate=plate, folder_id=folder_id
     )
 
-    if request.filament_plan is None:
+    # The per-printer scope keys on the printer ScadBuddy believes it prints to. With
+    # none named the pipeline's own target decides, and reading the pipeline for it is
+    # only worth a GET when a per-printer entry could actually match.
+    pipeline: Pipeline | None = None
+    scope_printer_id = request.printer_id or settings.printer_id
+    if scope_printer_id is None and settings.printer_print_options:
+        pipeline = await client.pipeline(pipeline_id)
+        scope_printer_id = pipeline.target_printer_id
+    print_options = resolve(
+        settings.print_options,
+        settings.printer_print_options.get(str(scope_printer_id))
+        if scope_printer_id is not None
+        else None,
+        settings.model_print_options.get(meta.slug),
+        PrintOptions(quantity=request.copies),
+    )
+
+    if request.filament_plan is None and not print_options.beyond_pipeline():
         run = await client.run_pipeline(
             pipeline_id,
             PipelineRunRequest(
@@ -584,12 +607,32 @@ async def run_for_output(
             bambuddy_url=client.config.web_url(QUEUE_PATH),
         )
 
-    pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
+    if pipeline is None:
+        pipeline = next((row for row in await client.pipelines() if row.id == pipeline_id), None)
     if pipeline is None:
         raise not_configured(
             f"Bambuddy no longer has slicer pipeline {pipeline_id}, so the chosen "
             "filaments cannot be sliced with it"
         )
+    if request.filament_plan is None:
+        # Only the options forced this route: slice exactly what the run would have.
+        slice_request = pipeline_slice_request(pipeline, meta)
+        outcome = await slice_and_queue(
+            client,
+            library_file_id=library_file_id,
+            pipeline=pipeline,
+            printer_id=request.printer_id,
+            filament_presets=slice_request.filament_presets,
+            filament_colours=slice_request.filament_colours,
+            plate_id=request.plate_id,
+            copies=request.copies,
+            project_id=project_id,
+            options=print_options,
+        )
+        return _queued(
+            client, store, meta, outcome, pipeline_id, library_file_id, project_id, folder_id
+        )
+
     printer_id, _ = target_of(pipeline, request.printer_id)
     # Read once and used twice. The catalogue is ~4000 presets across four tiers on the
     # live instance, which is why `preset_options` filters it server-side in the first
@@ -620,7 +663,33 @@ async def run_for_output(
         plate_id=request.plate_id,
         copies=request.copies,
         project_id=project_id,
+        options=print_options,
     )
+    return _queued(
+        client,
+        store,
+        meta,
+        outcome,
+        pipeline_id,
+        library_file_id,
+        project_id,
+        folder_id,
+        warnings=warnings + preset_warnings,
+    )
+
+
+def _queued(
+    client: BambuddyClient,
+    store: OutputStore,
+    meta: OutputMeta,
+    outcome: QueueOutcome,
+    pipeline_id: int,
+    library_file_id: int,
+    project_id: int | None,
+    folder_id: int | None,
+    warnings: list[FilamentWarning] | None = None,
+) -> PrintRunResult:
+    """Record the queue items against the output and report the slice-and-queue run."""
     for queue_item_id in outcome.queue_item_ids:
         store.record_send(
             meta.id,
@@ -637,7 +706,7 @@ async def run_for_output(
         sliced_library_file_id=outcome.sliced_library_file_id,
         queue_item_ids=outcome.queue_item_ids,
         printer_id=outcome.printer_id,
-        warnings=warnings + preset_warnings,
+        warnings=warnings or [],
         project_id=project_id,
         folder_id=folder_id,
         bambuddy_url=client.config.web_url(QUEUE_PATH),
