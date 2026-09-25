@@ -215,7 +215,8 @@ def test_a_class_pipeline_forced_onto_the_queue_says_it_did_not_fan_out(
     assert queued.get("printer_id") is None
     [warning] = result["warnings"]
     assert warning["kind"] == "no-fan-out"
-    assert "timelapse" in warning["message"]
+    assert "H2C" in warning["message"]
+    assert "timelapse" not in warning["message"]
 
 
 def _pipeline_one() -> dict[str, object]:

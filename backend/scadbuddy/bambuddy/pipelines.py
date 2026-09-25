@@ -641,14 +641,15 @@ async def run_for_output(
         if outcome.target_model is not None:
             # The picker says this before a filament plan pins a printer; a remembered
             # option has no dialog moment, so it is said here, after the fact.
-            names = ", ".join(print_options.beyond_pipeline())
+            # No option names: the labels live in the frontend, and Bambuddy's field
+            # names (bed_levelling, nozzle_offset_cali) are not words for a person.
             warnings.append(
                 FilamentWarning(
                     kind="no-fan-out",
                     message=(
-                        f"Remembered print options ({names}) cannot ride on a pipeline "
-                        f"run, so this was queued once against the {outcome.target_model} "
-                        "class instead of fanned out across its printers."
+                        "Remembered print options cannot ride on a pipeline run, so this "
+                        f"was queued once against the {outcome.target_model} class "
+                        "instead of fanned out across its printers."
                     ),
                 )
             )
