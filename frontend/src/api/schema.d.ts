@@ -994,7 +994,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset";
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out";
             /** Message */
             message: string;
             /** Slot Id */

@@ -637,8 +637,31 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
+        warnings: list[FilamentWarning] = []
+        if outcome.target_model is not None:
+            # The picker says this before a filament plan pins a printer; a remembered
+            # option has no dialog moment, so it is said here, after the fact.
+            names = ", ".join(print_options.beyond_pipeline())
+            warnings.append(
+                FilamentWarning(
+                    kind="no-fan-out",
+                    message=(
+                        f"Remembered print options ({names}) cannot ride on a pipeline "
+                        f"run, so this was queued once against the {outcome.target_model} "
+                        "class instead of fanned out across its printers."
+                    ),
+                )
+            )
         return _queued(
-            client, store, meta, outcome, pipeline_id, library_file_id, project_id, folder_id
+            client,
+            store,
+            meta,
+            outcome,
+            pipeline_id,
+            library_file_id,
+            project_id,
+            folder_id,
+            warnings=warnings,
         )
 
     printer_id, _ = target_of(pipeline, request.printer_id)

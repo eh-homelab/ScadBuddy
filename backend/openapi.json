@@ -731,7 +731,8 @@
               "not-loaded",
               "low-filament",
               "no-choice",
-              "no-preset"
+              "no-preset",
+              "no-fan-out"
             ],
             "title": "Kind",
             "type": "string"

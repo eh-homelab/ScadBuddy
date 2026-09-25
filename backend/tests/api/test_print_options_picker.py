@@ -195,6 +195,32 @@ def test_a_deleted_pipeline_is_a_friendly_conflict_on_the_scope_path(
     assert "no longer has slicer pipeline 1" in response.json()["detail"]
 
 
+@respx.mock
+def test_a_class_pipeline_forced_onto_the_queue_says_it_did_not_fan_out(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    remember(client, "global", {"timelapse": False})
+    body = recording("slicer-pipelines-configured.json")
+    for row in body["pipelines"]:
+        row.update(target_kind="printer_class", target_printer_id=None, target_model_class="H2C")
+    pipelines_route(body)
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    slice_route()
+    queue = queue_route()
+
+    result = client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1}).json()
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert queued["target_model"] == "H2C"
+    assert queued.get("printer_id") is None
+    [warning] = result["warnings"]
+    assert warning["kind"] == "no-fan-out"
+    assert "timelapse" in warning["message"]
+
+
 def _pipeline_one() -> dict[str, object]:
     pipelines = recording("slicer-pipelines-configured.json")["pipelines"]
     return next(row for row in pipelines if row["id"] == 1)
