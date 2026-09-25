@@ -27,6 +27,14 @@ class Config:
     # Bounds every git call and the wait for the model repository's write lock.
     git_timeout: float = DEFAULT_GIT_TIMEOUT
 
+    def __post_init__(self) -> None:
+        # Sizes the worker pool and the thumbnail executor, neither of which can be
+        # empty; said here, by name, rather than as a ThreadPoolExecutor ValueError.
+        if self.render_concurrency < 1:
+            raise ValueError(
+                f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
+            )
+
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     source: Mapping[str, str] = os.environ if env is None else env
