@@ -197,6 +197,17 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
         assert list(paths.tombstones.iterdir()) == []
 
 
+def test_a_failed_startup_sweep_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch.object(Catalogue, "sweep_tombstones", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not sweep tombstones" in caplog.text
+
+
 def test_a_failed_tombstone_removal_is_logged_and_retried(
     client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
