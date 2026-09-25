@@ -579,6 +579,29 @@ def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
     assert _uploaded_nozzle(upload) == ["0.4"]
 
 
+@pytest.mark.parametrize(
+    "response",
+    [
+        httpx.Response(200, text="<html>not json</html>"),
+        httpx.Response(200, json={"cloud": "not a tier"}),
+    ],
+    ids=["not-json", "wrong-shape"],
+)
+@respx.mock
+def test_a_malformed_preset_catalogue_does_not_fail_the_send(
+    client: TestClient, model: str, response: httpx.Response
+) -> None:
+    configure(client, pipeline_id=4)
+    plate_routes(pipeline_id=4, model="A1", printer_preset=A1_02_NOZZLE)
+    presets_route(response)
+    output_id = make_output(client, model)
+    upload = upload_route()
+
+    assert client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"}).is_success
+
+    assert _uploaded_nozzle(upload) == ["0.4"]
+
+
 def _uploaded_3mf(route: respx.Route) -> bytes:
     """The ``file`` part of the multipart upload Bambuddy received."""
     request = route.calls.last.request

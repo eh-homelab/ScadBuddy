@@ -179,7 +179,9 @@ async def _nozzle_diameter(client: BambuddyClient, preset: PresetRef | None) -> 
         return None
     try:
         catalogue = await client.presets()
-    except ApiError:
+    # ValueError covers a 200 whose body is not JSON or not a catalogue (both
+    # JSONDecodeError and pydantic's ValidationError subclass it).
+    except (ApiError, ValueError):
         logger.warning(
             "could not read the preset catalogue; the 3MF keeps the placeholder nozzle",
             extra={"preset_source": preset.source, "preset_id": preset.id},
