@@ -99,8 +99,31 @@ export interface paths {
         /** List models */
         get: operations["list_models_api_v1_models_get"];
         put?: never;
-        /** Upload a model */
+        /**
+         * Add a model
+         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail and README); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
+         */
         post: operations["create_model_api_v1_models_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Parse-check OpenSCAD source
+         * @description Runs OpenSCAD's customizer-parameter export — the same one the schema is built from, so a source that passes here is one the customizer can open — and returns its diagnostics with line numbers. No geometry is rendered and nothing is saved. `checked` is false when no openscad binary is available, in which case `ok` says nothing.
+         */
+        post: operations["check_model_source_api_v1_models_check_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -191,7 +214,10 @@ export interface paths {
         };
         /** Raw OpenSCAD source */
         get: operations["get_source_api_v1_models__slug__source_get"];
-        /** Replace a model's source as one revision */
+        /**
+         * Replace a model's source as one revision
+         * @description Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.
+         */
         put: operations["put_source_api_v1_models__slug__source_put"];
         post?: never;
         delete?: never;
@@ -824,7 +850,7 @@ export interface components {
              * File
              * @description The .scad source
              */
-            file: string;
+            file?: string | null;
             /** Name */
             name?: string | null;
             /**
@@ -891,6 +917,19 @@ export interface components {
             /** Variants */
             variants?: components["schemas"]["FontVariant"][];
         };
+        /** CheckRequest */
+        CheckRequest: {
+            /**
+             * Slug
+             * @description An existing model whose directory the source is checked against, so its `include`/`use` of sibling files resolve as they will on render
+             */
+            slug?: string | null;
+            /**
+             * Source
+             * @description The OpenSCAD source to parse-check
+             */
+            source: string;
+        };
         /** ConnectionTest */
         ConnectionTest: {
             /** Detail */
@@ -946,6 +985,23 @@ export interface components {
             source_sha256: string;
             /** Title */
             title?: string | null;
+        };
+        /**
+         * Diagnostic
+         * @description One OpenSCAD message, with the line it points at when it names one.
+         */
+        Diagnostic: {
+            /** File */
+            file?: string | null;
+            /** Line */
+            line?: number | null;
+            /** Message */
+            message: string;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "error" | "warning" | "trace";
         };
         /**
          * EditTarget
@@ -2184,11 +2240,48 @@ export interface components {
             /** Used Grams */
             used_grams?: number | null;
         };
+        /** SourceCheck */
+        SourceCheck: {
+            /**
+             * Checked
+             * @description False when no openscad binary was available to ask
+             */
+            checked: boolean;
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Log Tail */
+            log_tail?: string[];
+            /** Ok */
+            ok: boolean;
+            /**
+             * Parameters
+             * @description Customizer parameters derived, when the source got that far
+             */
+            parameters?: number | null;
+            /**
+             * Timed Out
+             * @description True when OpenSCAD was killed on the render timeout
+             * @default false
+             */
+            timed_out: boolean;
+        };
         /** SourceUpdate */
         SourceUpdate: {
-            /** Message */
+            /**
+             * Force
+             * @description Save even when the parse check fails
+             * @default false
+             */
+            force: boolean;
+            /**
+             * Message
+             * @description What the revision is called in the history; a default when omitted
+             */
             message?: string | null;
-            /** Source */
+            /**
+             * Source
+             * @description The replacement OpenSCAD source
+             */
             source: string;
         };
         /**
@@ -2433,14 +2526,46 @@ export interface operations {
     };
     create_model_api_v1_models_post: {
         parameters: {
-            query?: never;
-            header?: never;
+            query?: {
+                /** @description Save even when the parse check fails */
+                force?: boolean;
+            };
+            header?: {
+                /** @description Name for a text/plain paste */
+                "X-Model-Name"?: string | null;
+            };
             path?: never;
             cookie?: never;
         };
-        requestBody: {
+        requestBody?: {
             content: {
+                "application/json": {
+                    /**
+                     * Description
+                     * @default
+                     */
+                    description?: string;
+                    /**
+                     * Force
+                     * @description Save even when the parse check fails
+                     * @default false
+                     */
+                    force?: boolean;
+                    /**
+                     * Name
+                     * @description Display name; its slug is derived from it
+                     */
+                    name: string;
+                    /**
+                     * Source
+                     * @description The OpenSCAD source
+                     */
+                    source: string;
+                    /** Tags */
+                    tags?: string[];
+                };
                 "multipart/form-data": components["schemas"]["Body_create_model_api_v1_models_post"];
+                "text/plain": string;
             };
         };
         responses: {
@@ -2451,6 +2576,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    check_model_source_api_v1_models_check_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SourceCheck"];
                 };
             };
             /** @description Validation Error */

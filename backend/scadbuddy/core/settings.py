@@ -6,6 +6,7 @@ from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
+    DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
@@ -31,6 +32,7 @@ class Settings(BaseSettings):
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
@@ -64,6 +66,7 @@ class Settings(BaseSettings):
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
+            check_concurrency=self.check_concurrency,
             job_ttl=self.job_ttl,
             google_fonts_api_key=self.google_fonts_api_key,
             fonts_catalogue_ttl=self.fonts_catalogue_ttl,

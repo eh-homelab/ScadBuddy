@@ -38,6 +38,11 @@ class AppState:
     settings_store: SettingsStore
     fonts: FontService
     queue: RenderQueue
+    #: Caps the openscad runs that do NOT go through the render queue — the editor's
+    #: parse check and the schema derivation behind it. Its own budget, not the render
+    #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
+    #: the pod's worst case is render_concurrency + check_concurrency.
+    checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -59,6 +64,7 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         queue=RenderQueue(config, paths, history=history),
+        checks=asyncio.Semaphore(config.check_concurrency),
     )
 
 
@@ -123,6 +129,10 @@ def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
 
+def get_checks(state: StateDep) -> asyncio.Semaphore:
+    return state.checks
+
+
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
@@ -131,6 +141,7 @@ OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
+ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 
 SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]

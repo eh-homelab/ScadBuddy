@@ -237,6 +237,31 @@ def test_source_that_does_not_parse_is_rejected_and_records_nothing(
     assert client.get(f"/api/v1/models/{SLUG}/source").text == FIRST
 
 
+def test_a_messaged_edit_is_parse_guarded_and_names_its_revision(
+    client: TestClient,
+) -> None:
+    """#92's editor and #90's history meet on one PUT: the parse guard runs first,
+    `force` bypasses it, and whatever lands is one revision named by `message`."""
+    upload(client)
+
+    refused = client.put(
+        f"/api/v1/models/{SLUG}/source", json={"source": "%%FAIL%%\n", "message": "Broken"}
+    )
+    assert refused.status_code == 422
+    assert [entry["message"] for entry in versions(client)] == [f"Add {SLUG}"]
+
+    assert put_source(client, SECOND, "Widen it").status_code == 200
+    forced = client.put(
+        f"/api/v1/models/{SLUG}/source",
+        json={"source": "%%FAIL%%\n", "message": "Saved anyway", "force": True},
+    )
+    assert forced.status_code == 200, forced.text
+
+    listed = versions(client)
+    assert [entry["message"] for entry in listed] == ["Saved anyway", "Widen it", f"Add {SLUG}"]
+    assert forced.json()["version"] == listed[0]["commit"]
+
+
 def test_rendering_does_not_dirty_the_repository(client: TestClient) -> None:
     """A render derives the schema, and that write must not land in `models/`.
 

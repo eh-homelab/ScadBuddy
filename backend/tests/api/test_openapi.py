@@ -8,6 +8,7 @@ from scadbuddy.tools.export_openapi import DEFAULT_OUTPUT, export
 EXPECTED_PATHS = {
     "/healthz",
     "/api/v1/models",
+    "/api/v1/models/check",
     "/api/v1/models/{slug}",
     "/api/v1/models/{slug}/source",
     "/api/v1/models/{slug}/schema",

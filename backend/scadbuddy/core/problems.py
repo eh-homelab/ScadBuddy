@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 _TITLES = {
     400: "Bad Request",
+    413: "Content Too Large",
     404: "Not Found",
     405: "Method Not Allowed",
     409: "Conflict",

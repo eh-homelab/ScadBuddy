@@ -24,9 +24,12 @@ export function CataloguePage() {
               Pick a model to set its parameters and generate a multi-colour 3MF.
             </p>
           </div>
-          <Button variant="primary" onClick={() => setUploadOpen(true)}>
-            Add model
-          </Button>
+          <div className="flex shrink-0 items-center gap-2">
+            <Button onClick={() => void navigate('/new')}>Paste source</Button>
+            <Button variant="primary" onClick={() => setUploadOpen(true)}>
+              Add model
+            </Button>
+          </div>
         </div>
 
         {loading && (

@@ -13,6 +13,7 @@ import type {
   ModelSummary,
   ModelVersion,
   Output,
+  PastedSource,
   ParamValue,
   PipelineChoices,
   PipelineCreate,
@@ -37,6 +38,7 @@ import type {
   Settings,
   SettingsUpdate,
   SidebarLink,
+  SourceCheck,
   VersionDiff,
 } from './types'
 
@@ -48,7 +50,9 @@ export class ApiError extends Error {
   readonly problem: Problem
 
   constructor(problem: Problem) {
-    super(problem.title)
+    // The detail is the sentence written for a person ("OpenSCAD could not build a
+    // customizer schema from this model's source"); the title is the status name.
+    super(problem.detail ?? problem.title)
     this.name = 'ApiError'
     this.status = problem.status
     this.detail = problem.detail ?? problem.title
@@ -75,6 +79,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     return undefined as T
   }
   return (await response.json()) as T
+}
+
+/** `GET /models/{slug}/source` answers text/plain, not JSON. */
+async function requestText(path: string): Promise<string> {
+  const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
+  if (!response.ok) {
+    throw new ApiError(await readProblem(response))
+  }
+  return await response.text()
 }
 
 async function readProblem(response: Response): Promise<Problem> {
@@ -105,6 +118,39 @@ export const api = {
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
 
+  /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
+  createModelFromSource: (body: PastedSource) =>
+    request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+
+  getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
+
+  /**
+   * Replaces the source as one revision in the model's history, named by `message`
+   * when given. Parse-checked server-side unless `force`.
+   */
+  replaceSource: (slug: string, source: string, force = false, message?: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/source`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, force, message: message ?? null }),
+    }),
+
+  /**
+   * Parse-only: runs OpenSCAD over the source and saves nothing. `slug` names the
+   * model the source belongs to, so its `include` of a sibling file resolves against
+   * that model's directory instead of an empty one.
+   *
+   * `signal` matters here: the server runs these checks under its own small
+   * concurrency budget, so a superseded keystroke's check must be abandoned on the
+   * wire rather than merely ignored on arrival — otherwise it holds a permit the
+   * check the user is waiting for needs.
+   */
+  checkSource: (source: string, slug?: string, signal?: AbortSignal) =>
+    request<SourceCheck>('/models/check', {
+      method: 'POST',
+      body: JSON.stringify({ source, slug: slug ?? null }),
+      signal,
+    }),
+
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
   modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
@@ -116,13 +162,6 @@ export const api = {
         ? `/models/${seg(slug)}/versions/${seg(version)}/schema`
         : `/models/${seg(slug)}/schema`,
     ),
-
-  /** #90 — replaces the source as one revision. The hook the paste/edit path calls. */
-  putSource: (slug: string, source: string, message?: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/source`, {
-      method: 'PUT',
-      body: JSON.stringify({ source, message: message ?? null }),
-    }),
 
   listVersions: (slug: string) => request<ModelVersion[]>(`/models/${seg(slug)}/versions`),
 

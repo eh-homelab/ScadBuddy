@@ -7,3 +7,10 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/**
+ * Monaco's contributions are plain ESM with no type declarations beside them — they
+ * are imported for their side effects (each registers an editor feature), never for
+ * anything they export.
+ */
+declare module 'monaco-editor/editor/contrib/*'

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -190,9 +192,25 @@ class Catalogue:
         source goes through here so it is versioned exactly once. The derived
         schema is dropped rather than left for `cached_schema` to notice: it is
         keyed by the source hash, so a stale one is only ever dead weight.
+
+        The swap never leaves ``model.scad`` half-written. A render for this slug
+        may be queued or running, and OpenSCAD opens the file by path;
+        `write_text` truncates first, so a reader landing in that window sees a
+        torn file and fails for a reason that has nothing to do with its own
+        source. `os.replace` is atomic, and a temp file in the same directory
+        keeps it on one filesystem so it stays that way.
         """
         self._require(slug)
-        self.paths.model_source(slug).write_text(source, encoding="utf-8")
+        handle, staged = tempfile.mkstemp(
+            dir=self.paths.model_dir(slug), prefix=".model-", suffix=".scad"
+        )
+        try:
+            with os.fdopen(handle, "w", encoding="utf-8") as writer:
+                writer.write(source)
+            os.replace(staged, self.paths.model_source(slug))
+        except BaseException:
+            Path(staged).unlink(missing_ok=True)
+            raise
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
         self._commit(message or f"Edit {slug} source", slug)
         return self.record(slug)
