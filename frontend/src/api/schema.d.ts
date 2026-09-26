@@ -130,6 +130,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import a model from a URL
+         * @description Fetches the source on the server -- https only, at most 8388608 bytes, within 30 seconds -- then creates the model exactly as a paste does, recording the URL as `origin_url`. A direct link to the file works; a MakerWorld model page is refused with a 422, because MakerWorld only serves files to a signed-in account. An unreachable URL is a 502, or a 504 when it ran out of time.
+         */
+        post: operations["import_model_api_v1_models_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}": {
         parameters: {
             query?: never;
@@ -1338,6 +1358,8 @@ export interface components {
             has_thumbnail: boolean;
             /** Name */
             name: string;
+            /** Origin Url */
+            origin_url?: string | null;
             /** Slug */
             slug: string;
             /** Source */
@@ -2316,6 +2338,25 @@ export interface components {
             /** Subtype */
             subtype?: string | null;
         };
+        /** UrlImport */
+        UrlImport: {
+            /**
+             * Force
+             * @description Save even when the parse check fails
+             * @default false
+             */
+            force: boolean;
+            /**
+             * Name
+             * @description Display name; taken from the URL's file name when omitted
+             */
+            name?: string | null;
+            /**
+             * Url
+             * @description An https URL to the model's source
+             */
+            url: string;
+        };
         /** ValidationError */
         ValidationError: {
             /** Context */
@@ -2614,6 +2655,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceCheck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_model_api_v1_models_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UrlImport"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
                 };
             };
             /** @description Validation Error */

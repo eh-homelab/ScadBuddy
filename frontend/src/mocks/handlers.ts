@@ -285,6 +285,51 @@ export const handlers = [
     return HttpResponse.json(model, { status: 201 })
   }),
 
+  // Mirrors the backend's resolvers (#153): https only, MakerWorld refused, anything
+  // else taken as the file itself and named after it.
+  http.post(`${base}/models/import`, async ({ request }) => {
+    const body = (await request.json()) as { url: string; name?: string | null }
+    await delay(120)
+    let url: URL
+    try {
+      url = new URL(body.url.trim())
+    } catch {
+      return problem(422, 'Unprocessable Content', `'${body.url}' is not a URL`)
+    }
+    if (url.protocol !== 'https:') {
+      return problem(422, 'Unprocessable Content', 'only https URLs can be imported')
+    }
+    if (url.hostname === 'makerworld.com' || url.hostname.endsWith('.makerworld.com')) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        "MakerWorld only serves a model's files to a signed-in account, so ScadBuddy cannot " +
+          'fetch them. Download the .scad from the model page and use Upload, or paste a ' +
+          'link to the raw file instead.',
+      )
+    }
+    const file = decodeURIComponent(url.pathname.split('/').pop() ?? '').replace(/\.scad$/i, '')
+    const name = body.name || file || url.hostname
+    const slug = slugify(name)
+    if (state.models.some((m) => m.slug === slug)) {
+      return problem(409, 'Conflict', `a model named '${slug}' already exists`)
+    }
+    const imported: ModelSummary = {
+      slug,
+      name,
+      description: '',
+      tags: [],
+      origin_url: body.url,
+      updated_at: new Date().toISOString(),
+      has_thumbnail: false,
+      has_readme: false,
+    }
+    state.models = [imported, ...state.models]
+    state.schemas[slug] = fixtures.keychainSchema
+    state.sources[slug] = 'width = 10;\ncube(width);\n'
+    return HttpResponse.json(imported, { status: 201 })
+  }),
+
   http.post(`${base}/models/check`, async ({ request }) => {
     const body = (await request.json()) as { source: string; slug?: string | null }
     await delay(80)

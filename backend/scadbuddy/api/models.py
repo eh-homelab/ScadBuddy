@@ -19,7 +19,7 @@ from scadbuddy.api.deps import (
     QueueDep,
     SlugPath,
 )
-from scadbuddy.api.limits import ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
@@ -41,6 +41,12 @@ from scadbuddy.library.scad import (
     parse_diagnostics,
 )
 from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_filename, slugify
+from scadbuddy.library.url_import import (
+    IMPORT_TIMEOUT,
+    ImportRefusedError,
+    SourceUnreachableError,
+    fetch_model,
+)
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
@@ -276,12 +282,7 @@ async def create_model(
             raise _rejected(error) from None
         # This branch never reaches `PastedSource`, so the cap the other two get from
         # pydantic has to be applied here by hand.
-        if len(pasted_text) > MAX_SOURCE_CHARS:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"the paste is too large: {len(pasted_text)} characters, "
-                f"and this route reads at most {MAX_SOURCE_CHARS}",
-            )
+        _require_within_cap(pasted_text, "the paste")
         return await _create(
             catalogue,
             config,
@@ -345,6 +346,15 @@ async def create_model(
     )
 
 
+def _require_within_cap(source: str, what: str) -> None:
+    if len(source) > MAX_SOURCE_CHARS:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{what} is too large: {len(source)} characters, "
+            f"and this route reads at most {MAX_SOURCE_CHARS}",
+        )
+
+
 def _slug_from_name(name: str) -> str:
     try:
         return slugify(name)
@@ -385,6 +395,56 @@ async def _create(
         # customizer open paying for the same subprocess again.
         store_cached_schema(catalogue.paths.model_schema_cache(slug), checked.schema)
     return record
+
+
+class UrlImport(BaseModel):
+    url: str = Field(max_length=2048, description="An https URL to the model's source")
+    name: str | None = Field(
+        default=None, description="Display name; taken from the URL's file name when omitted"
+    )
+    force: bool = Field(default=False, description="Save even when the parse check fails")
+
+
+@router.post(
+    "/models/import",
+    response_model=ModelRecord,
+    status_code=status.HTTP_201_CREATED,
+    summary="Import a model from a URL",
+    description=(
+        "Fetches the source on the server -- https only, at most "
+        f"{MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds -- then "
+        "creates the model exactly as a paste does, recording the URL as `origin_url`. "
+        "A direct link to the file works; a MakerWorld model page is refused with a 422, "
+        "because MakerWorld only serves files to a signed-in account. An unreachable URL "
+        "is a 502, or a 504 when it ran out of time."
+    ),
+)
+async def import_model(
+    body: UrlImport,
+    catalogue: CatalogueDep,
+    config: ConfigDep,
+    checks: ChecksDep,
+) -> ModelRecord:
+    try:
+        imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
+    except ImportRefusedError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except SourceUnreachableError as error:
+        raise ApiError(
+            status.HTTP_504_GATEWAY_TIMEOUT if error.timed_out else status.HTTP_502_BAD_GATEWAY,
+            str(error),
+        ) from None
+    _require_within_cap(imported.source, "the imported file")
+    name = body.name or imported.name
+    return await _create(
+        catalogue,
+        config,
+        checks,
+        slug=_slug_from_name(name),
+        source=imported.source,
+        meta=ModelMeta(name=name, origin_url=imported.origin_url),
+        force=body.force,
+    )
 
 
 @router.post(

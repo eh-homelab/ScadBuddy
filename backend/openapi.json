@@ -1381,6 +1381,17 @@
             "title": "Name",
             "type": "string"
           },
+          "origin_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Origin Url"
+          },
           "slug": {
             "title": "Slug",
             "type": "string"
@@ -4348,6 +4359,39 @@
         "title": "SpoolOption",
         "type": "object"
       },
+      "UrlImport": {
+        "properties": {
+          "force": {
+            "default": false,
+            "description": "Save even when the parse check fails",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Display name; taken from the URL's file name when omitted",
+            "title": "Name"
+          },
+          "url": {
+            "description": "An https URL to the model's source",
+            "maxLength": 2048,
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "title": "UrlImport",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -4846,6 +4890,48 @@
           }
         },
         "summary": "Parse-check OpenSCAD source",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/import": {
+      "post": {
+        "description": "Fetches the source on the server -- https only, at most 8388608 bytes, within 30 seconds -- then creates the model exactly as a paste does, recording the URL as `origin_url`. A direct link to the file works; a MakerWorld model page is refused with a 422, because MakerWorld only serves files to a signed-in account. An unreachable URL is a 502, or a 504 when it ran out of time.",
+        "operationId": "import_model_api_v1_models_import_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UrlImport"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Import a model from a URL",
         "tags": [
           "models"
         ]
