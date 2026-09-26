@@ -63,6 +63,7 @@ from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
+    request_scope,
     resolve_print_options,
     scope_printer,
     target_for,
@@ -625,12 +626,7 @@ async def run_for_output(
     # one), so a remembered project_id is dropped here: left in, it would force the
     # queue route and then lose to the picker's project anyway.
     print_options = resolve_print_options(
-        settings,
-        meta.slug,
-        scope_printer_id,
-        request.options
-        if request.copies is None
-        else request.options.model_copy(update={"quantity": request.copies}),
+        settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 

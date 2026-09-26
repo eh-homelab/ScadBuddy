@@ -564,3 +564,11 @@ def test_a_pipeline_nozzle_the_printer_has_not_mounted_is_said_before_the_click(
 def test_nothing_to_compare_is_no_warning(nozzles: list[NozzleInfo], diameter: str | None) -> None:
     """A preset name that states no nozzle, or a printer reporting none, is not a mismatch."""
     assert nozzle_warnings(nozzles, diameter, printer_name="H2C") == []
+
+
+def test_a_diameter_that_is_not_a_number_is_skipped_rather_than_failing_the_panel() -> None:
+    """Live status is firmware's to spell; a garbled value must not 500 the filaments step."""
+    assert nozzle_warnings(h2c_nozzles("?"), "0.2", printer_name="H2C") == []
+    [warning] = nozzle_warnings(h2c_nozzles("n/a", "0.4"), "0.2", printer_name="H2C")
+    assert "n/a" not in warning.message
+    assert "0.4 mm" in warning.message

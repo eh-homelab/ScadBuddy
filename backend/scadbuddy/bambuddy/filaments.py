@@ -440,12 +440,18 @@ def nozzle_warnings(
     Any extruder's nozzle counts: which extruder prints which slot is Bambuddy's mapping,
     not ScadBuddy's. Compared as numbers, since ``"0.40"`` and ``"0.4"`` are one nozzle.
     Nothing to compare — a preset name that states no nozzle, or a printer reporting
-    none — is not a mismatch.
+    none — is not a mismatch. Neither is a diameter that is not a number: live status is
+    the firmware's to spell, and one garbled value must not fail the whole filament step.
     """
-    mounted = [nozzle.nozzle_diameter for nozzle in nozzles if nozzle.nozzle_diameter]
-    if diameter is None or not mounted:
+    wanted = _millimetres(diameter)
+    mounted = [
+        nozzle.nozzle_diameter
+        for nozzle in nozzles
+        if _millimetres(nozzle.nozzle_diameter) is not None
+    ]
+    if wanted is None or not mounted:
         return []
-    if any(float(each) == float(diameter) for each in mounted):
+    if any(_millimetres(each) == wanted for each in mounted):
         return []
     return [
         FilamentWarning(
@@ -457,6 +463,14 @@ def nozzle_warnings(
             ),
         )
     ]
+
+
+def _millimetres(raw: str | None) -> float | None:
+    """``"0.4"`` → ``0.4``; empty or not a number → ``None``."""
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def _label(option: SpoolOption) -> str:
