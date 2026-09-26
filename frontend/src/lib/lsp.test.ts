@@ -1,3 +1,4 @@
+import { CompletionItemKind } from 'monaco-editor/editor/common/standalone/standaloneEnums.js'
 import { describe, expect, it } from 'vitest'
 import {
   directoryOf,
@@ -81,6 +82,24 @@ describe('toCompletion', () => {
   it('keeps plain-string documentation as it is', () => {
     expect(toCompletion({ label: 'x', documentation: 'plain' }, WORD).documentation).toBe('plain')
   })
+})
+
+describe('the completion kind table', () => {
+  // LSP's `CompletionItemKind`, in its own order (1-based). Monaco's enum names the same
+  // kinds in a different order, and its values are what the editor reads.
+  const LSP_KINDS = [
+    'Text', 'Method', 'Function', 'Constructor', 'Field', 'Variable', 'Class', 'Interface',
+    'Module', 'Property', 'Unit', 'Value', 'Enum', 'Keyword', 'Snippet', 'Color', 'File',
+    'Reference', 'Folder', 'EnumMember', 'Constant', 'Struct', 'Event', 'Operator',
+    'TypeParameter',
+  ] as const
+
+  it.each(LSP_KINDS.map((name, index) => [index + 1, name] as const))(
+    'maps LSP kind %i (%s) to the installed Monaco enum',
+    (kind, name) => {
+      expect(toCompletion({ label: 'x', kind }, WORD).kind).toBe(CompletionItemKind[name])
+    },
+  )
 })
 
 describe('toHover', () => {

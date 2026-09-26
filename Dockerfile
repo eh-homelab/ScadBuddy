@@ -153,8 +153,6 @@ RUN case "$TARGETARCH" in \
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
 
-COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
-
 # `--version` goes to STDERR, not stdout — `$(openscad --version)` captures an
 # empty string, which is how a version check silently passes against nothing.
 #
@@ -247,6 +245,12 @@ COPY models/ /app/models/
 COPY --from=frontend /src/frontend/dist /app/frontend/dist
 
 RUN chown -R scadbuddy:scadbuddy /app /opt/venv /opt/uv-cache
+
+# Last of the app layers, after the dependency sync and the chown: bumping the
+# openscad-lsp ARGs then rebuilds this one copy and nothing above it. Outside
+# /app, so the chown has nothing to do with it; `test` and `runtime` both
+# inherit it from here.
+COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
 
 ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \

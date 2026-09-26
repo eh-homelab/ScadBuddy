@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import anyio
+from starlette import status
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
 
 _CONTENT_LENGTH = b"content-length"
@@ -108,7 +109,15 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 text = await websocket.receive_text()
             except WebSocketDisconnect:
                 return
-            message = json.loads(text)
+            try:
+                message = json.loads(text)
+            except json.JSONDecodeError:
+                message = None
+            # Every JSON-RPC message is an object; the socket has no auth, so anything
+            # else is refused by code rather than raised out of the bridge.
+            if not isinstance(message, dict):
+                await websocket.close(code=status.WS_1007_INVALID_FRAME_PAYLOAD_DATA)
+                return
             if roots is None and message.get("method") == "initialize":
                 params = message.setdefault("params", {})
                 client_root = params.get("rootUri")
@@ -145,5 +154,8 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             if process.returncode is None:
                 process.kill()
             await process.wait()
-            if websocket.client_state == WebSocketState.CONNECTED:
+            if (
+                websocket.client_state == WebSocketState.CONNECTED
+                and websocket.application_state == WebSocketState.CONNECTED
+            ):
                 await websocket.close()

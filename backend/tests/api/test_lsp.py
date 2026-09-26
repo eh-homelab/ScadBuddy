@@ -205,6 +205,23 @@ def test_a_server_that_exits_closes_the_socket(client: TestClient, model: str) -
             session.receive_json()
 
 
+@pytest.mark.parametrize("frame", ["[1, 2]", '"text"', "null", "not json"])
+def test_a_frame_that_is_not_a_json_object_closes_the_session(
+    client: TestClient, model: str, pid_file: Path, frame: str
+) -> None:
+    """Every JSON-RPC message is an object; anything else is refused by code, not
+    by an exception out of the bridge."""
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        pid = int(pid_file.read_text())
+        session.send_text(frame)
+        with pytest.raises(WebSocketDisconnect) as closed:
+            session.receive_json()
+
+    assert closed.value.code == 1007
+    assert _wait_until(lambda: _gone(pid))
+
+
 def test_an_unknown_model_is_refused(client: TestClient) -> None:
     with (
         pytest.raises(WebSocketDisconnect) as refused,
