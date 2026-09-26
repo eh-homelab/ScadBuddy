@@ -243,6 +243,32 @@ def test_the_models_printer_and_spools_are_remembered_beside_its_pipeline(
 
 
 @respx.mock
+def test_a_built_ins_pipeline_and_choices_are_its_own(client: TestClient) -> None:
+    """A built-in prints too (#155); it is remembered under its id, apart from a
+    template of mine with the same slug."""
+    configure(client, pipeline_id=1)
+    pipelines_route()
+    printers_route()
+    presets_routes()
+    choices = {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
+
+    assert client.put(
+        "/api/v1/print/models/builtin:keychain/pipeline", json={"pipeline_id": 9}
+    ).json()["slug"] == ("builtin:keychain")
+    assert client.put("/api/v1/print/models/builtin:keychain/choices", json=choices).json() == (
+        choices
+    )
+
+    body = client.get("/api/v1/print/models/builtin:keychain/pipelines").json()
+    assert (body["model_pipeline_id"], body["model_choices"]) == (9, choices)
+    mine = client.get("/api/v1/print/models/keychain/pipelines").json()
+    assert (mine["model_pipeline_id"], mine["model_choices"]) == (
+        None,
+        {"printer_id": None, "filament_plan": []},
+    )
+
+
+@respx.mock
 def test_remembering_nothing_forgets_the_models_choices(client: TestClient, model: str) -> None:
     configure(client, pipeline_id=1)
     pipelines_route()
