@@ -10,6 +10,7 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  ModelPrintChoices,
   ModelSummary,
   ModelVersion,
   Output,
@@ -242,6 +243,13 @@ export const api = {
     request<PipelineDefault>(`/print/models/${seg(slug)}/pipeline`, {
       method: 'PUT',
       body: JSON.stringify({ pipeline_id: pipelineId }),
+    }),
+
+  /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
+  putModelChoices: (slug: string, body: ModelPrintChoices) =>
+    request<ModelPrintChoices>(`/print/models/${seg(slug)}/choices`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
     }),
 
   /** Uploads the 3MF if Bambuddy has not got it yet, then asks each pipeline. */

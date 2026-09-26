@@ -33,6 +33,7 @@ EXPECTED_PATHS = {
     "/api/v1/print/pipelines",
     "/api/v1/print/models/{slug}/pipelines",
     "/api/v1/print/models/{slug}/pipeline",
+    "/api/v1/print/models/{slug}/choices",
     "/api/v1/print/outputs/{output_id}/eligibility",
     "/api/v1/print/outputs/{output_id}/filaments",
     "/api/v1/print/outputs/{output_id}/progress",

@@ -987,4 +987,11 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
+  // #78 — the H2C's two extruders, as `printers/{id}/status` reports them. The 0.4 one is
+  // what pipeline 1's printer preset names, so nothing is mismatched here.
+  nozzles: [
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+    { nozzle_type: 'HS01', nozzle_diameter: '0.4' },
+  ],
+  pipeline_nozzle_diameter: '0.4',
 }

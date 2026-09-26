@@ -220,3 +220,19 @@ export function checkPlan(
 
   return found
 }
+
+/**
+ * The picker's opening selection (#78): the spools this model last printed with, slot by
+ * slot, and the server's auto-match wherever nothing is remembered or the remembered
+ * spool is no longer in the inventory.
+ */
+export function seedPlan(options: FilamentOptions, remembered: SlotChoice[]): SlotChoice[] {
+  const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
+  return (options.slots ?? []).flatMap((slot) => {
+    const kept = remembered.find(
+      (choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id),
+    )
+    const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
+    return choice ? [{ ...choice }] : []
+  })
+}

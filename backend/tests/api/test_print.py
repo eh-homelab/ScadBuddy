@@ -221,6 +221,42 @@ def test_clearing_the_model_default_falls_back_to_the_global_one(
     assert (body["model_pipeline_id"], body["default_pipeline_id"]) == (None, 1)
 
 
+@respx.mock
+def test_the_models_printer_and_spools_are_remembered_beside_its_pipeline(
+    client: TestClient, model: str
+) -> None:
+    """#78 — the picker reopens on the class printer and spools it last printed with."""
+    configure(client, pipeline_id=1)
+    pipelines_route()
+    printers_route()
+    presets_routes()
+    choices = {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
+
+    assert client.put(f"/api/v1/print/models/{model}/choices", json=choices).json() == choices
+
+    body = client.get(f"/api/v1/print/models/{model}/pipelines").json()
+    assert body["model_choices"] == choices
+    other = client.get("/api/v1/print/models/some-other-model/pipelines").json()
+    assert other["model_choices"] == {"printer_id": None, "filament_plan": []}
+
+
+@respx.mock
+def test_remembering_nothing_forgets_the_models_choices(client: TestClient, model: str) -> None:
+    configure(client, pipeline_id=1)
+    pipelines_route()
+    printers_route()
+    presets_routes()
+    client.put(
+        f"/api/v1/print/models/{model}/choices",
+        json={"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]},
+    )
+
+    client.put(f"/api/v1/print/models/{model}/choices", json={})
+
+    body = client.get(f"/api/v1/print/models/{model}/pipelines").json()
+    assert body["model_choices"] == {"printer_id": None, "filament_plan": []}
+
+
 # --- presets ------------------------------------------------------------------------
 
 

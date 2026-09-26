@@ -127,6 +127,14 @@ class NozzleRackSlot(NozzleInfo):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
 
+class SlotChoice(BaseModel):
+    """One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)
+    and what it remembers per model (#78)."""
+
+    slot_id: int
+    spool_id: int
+
+
 class AmsTray(BambuddyModel):
     """One AMS slot. ``remain`` is ``-1`` when the spool is not RFID-tagged, and the
     external spool arrives through ``PrinterStatus.vt_tray`` rather than an AMS."""

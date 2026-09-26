@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     check,
     gather_options,
+    nozzle_warnings,
     queue_filaments,
     slice_filament_presets,
     spool_preset_alternatives,
@@ -68,7 +69,8 @@ from scadbuddy.bambuddy.send import (
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.render.plate import nozzle_diameter_of
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +151,8 @@ class PipelineChoices(BaseModel):
     model_pipeline_id: int | None = None
     global_pipeline_id: int | None = None
     default_pipeline_id: int | None = None
+    #: The printer and spools this model last printed with (#78).
+    model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
 
 
 class PipelineDefault(BaseModel):
@@ -201,7 +205,8 @@ class PrintRunRequest(BaseModel):
     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
       queue-item fields exist on no other Bambuddy call (#87); or
     - a remembered print option applies that a run cannot carry (#124). The options
-      resolve global → per-printer → per-model → this request's ``copies``.
+      resolve global → per-printer → per-model → this request's ``options`` and
+      ``copies``.
 
     Otherwise it runs the pipeline exactly as before.
     """
@@ -223,6 +228,10 @@ class PrintRunRequest(BaseModel):
     #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
     #: be — a print with no project is simply one nobody filed.
     project_id: int | None = None
+    #: Per-print overrides from the dialog's options disclosure (#78), the most specific
+    #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
+    #: a ``quantity`` sent alongside it.
+    options: PrintOptions = Field(default_factory=PrintOptions)
 
 
 class PrintRunResult(BaseModel):
@@ -420,6 +429,7 @@ async def describe_pipelines(
         model_pipeline_id=settings.model_pipelines.get(slug),
         global_pipeline_id=settings.pipeline_id,
         default_pipeline_id=settings.pipeline_for(slug),
+        model_choices=settings.model_print_choices.get(slug, ModelPrintChoices()),
     )
 
 
@@ -525,6 +535,7 @@ async def filament_options_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
+    pipeline_id: int | None = None,
     plate_id: int = 1,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
@@ -533,15 +544,33 @@ async def filament_options_for_output(
     check does: the plate's slots are read out of a *library file*, so there is no
     answer before one exists. An output is immutable, so this uploads once.
 
+    With a printer it also carries that printer's mounted nozzles, and with a pipeline
+    too the nozzle its process preset names, so a mismatch is shown before the click
+    (#78). A class target with no printer chosen yet has no nozzles to read.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
-    return await gather_options(
+    options = await gather_options(
         client,
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_id=plate_id,
         fallback_colours=list(meta.colors),
     )
+    if printer_id is None:
+        return options
+    options.nozzles = (await client.printer_status(printer_id)).nozzles
+    if pipeline_id is not None:
+        process = (await client.pipeline(pipeline_id)).process_preset
+        name = _names((await _catalogue(client)).names(), process)
+        options.pipeline_nozzle_diameter = nozzle_diameter_of(name)
+        options.warnings.extend(
+            nozzle_warnings(
+                options.nozzles,
+                options.pipeline_nozzle_diameter,
+                printer_name=options.printer_name,
+            )
+        )
+    return options
 
 
 async def run_for_output(
@@ -596,7 +625,12 @@ async def run_for_output(
     # one), so a remembered project_id is dropped here: left in, it would force the
     # queue route and then lose to the picker's project anyway.
     print_options = resolve_print_options(
-        settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
+        settings,
+        meta.slug,
+        scope_printer_id,
+        request.options
+        if request.copies is None
+        else request.options.model_copy(update={"quantity": request.copies}),
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 

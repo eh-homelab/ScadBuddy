@@ -5,7 +5,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.models import PresetRef
+from scadbuddy.bambuddy.models import PresetRef, SlotChoice
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.settings import Settings
 
@@ -29,6 +29,19 @@ class BambuddyIds(BaseModel):
     printer_id: int | None = None
 
 
+class ModelPrintChoices(BaseModel):
+    """What the print picker last chose for one model, beyond its pipeline (#78).
+
+    ``printer_id`` is only the printer picked for a class-targeted pipeline, which is the
+    one case the picker asks. ``filament_plan`` is only a plan the user moved off the
+    auto-match: a spool no longer in the inventory is dropped by the picker, which then
+    falls back to the auto-match for that slot.
+    """
+
+    printer_id: int | None = None
+    filament_plan: list[SlotChoice] = Field(default_factory=list)
+
+
 class StoredSettings(BambuddyIds):
     """Bambuddy connection details. The API key never leaves the server."""
 
@@ -50,6 +63,9 @@ class StoredSettings(BambuddyIds):
     #: replaces a whole value, while a per-model default has to be settable one model
     #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
+    #: Model slug -> the rest of what the picker chose, set one model at a time for the
+    #: same reason (:meth:`SettingsStore.set_model_choices`).
+    model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
 
     #: The Bambuddy project the last send went to (#79), and nothing more. A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
@@ -158,6 +174,16 @@ class SettingsStore:
         else:
             pipelines[slug] = pipeline_id
         return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
+
+    def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
+        """Remember one model's printer and spools; an empty ``choices`` forgets them."""
+        settings = self.load()
+        remembered = dict(settings.model_print_choices)
+        if choices.printer_id is None and not choices.filament_plan:
+            remembered.pop(slug, None)
+        else:
+            remembered[slug] = choices
+        return self._write(settings.model_copy(update={"model_print_choices": remembered}))
 
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""

@@ -273,7 +273,7 @@ describe('PrintPicker', () => {
   function watchDefaultWrites(): { pipeline_id: number | null }[] {
     const writes: { pipeline_id: number | null }[] = []
     server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'PUT' && request.url.includes('/print/models/')) {
+      if (request.method === 'PUT' && request.url.endsWith('/pipeline')) {
         writes.push((await request.clone().json()) as { pipeline_id: number | null })
       }
     })
@@ -644,6 +644,145 @@ describe('PrintPicker · Filaments', () => {
     )
     // The pipeline still runs; the picker is an addition to #86, not a gate on it.
     expect(screen.getByTestId('run-pipeline')).toBeEnabled()
+  })
+})
+
+describe('PrintPicker · Nozzles', () => {
+  beforeEach(() => resetMockState())
+
+  it('shows the chosen printer’s mounted nozzles beside the pipeline’s', async () => {
+    open()
+    await listed()
+
+    const nozzles = await screen.findByTestId('nozzles')
+    expect(nozzles).toHaveTextContent('3DP-31B-598 has 0.2 mm (HS00) and 0.4 mm (HS01) mounted')
+    expect(nozzles).toHaveTextContent('this pipeline slices for 0.4 mm')
+    expect(screen.queryByTestId('nozzle-warnings')).not.toBeInTheDocument()
+  })
+
+  it('warns before Run when the pipeline’s nozzle is not mounted, without blocking it', async () => {
+    const message = 'This pipeline slices for a 0.4 mm nozzle, but 3DP-31B-598 has 0.2 mm mounted.'
+    server.use(
+      http.get('/api/v1/print/outputs/:id/filaments', () =>
+        HttpResponse.json({
+          ...fixtures.filamentOptions,
+          nozzles: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }],
+          warnings: [{ kind: 'nozzle-mismatch', slot_id: null, message }],
+        }),
+      ),
+    )
+    open()
+    await listed()
+
+    expect(await screen.findByTestId('nozzle-warnings')).toHaveTextContent(message)
+    expect(screen.getByTestId('run-pipeline')).toBeEnabled()
+  })
+
+  it('shows no nozzles for a printer class until a printer is chosen', async () => {
+    const { user } = open()
+    await listed()
+    await screen.findByTestId('nozzles')
+
+    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
+    await waitFor(() => expect(screen.queryByTestId('nozzles')).not.toBeInTheDocument())
+
+    await user.selectOptions(await screen.findByLabelText('Printer'), '1')
+    expect(await screen.findByTestId('nozzles')).toBeInTheDocument()
+  })
+})
+
+describe('PrintPicker · Remembered choices', () => {
+  beforeEach(() => resetMockState())
+
+  async function put(path: string, body: object) {
+    await fetch(`/api/v1/print/models/name-keychain/${path}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  }
+
+  it('reopens on the printer and spools this model last printed with', async () => {
+    await put('pipeline', { pipeline_id: 3 })
+    await put('choices', { printer_id: 2, filament_plan: [{ slot_id: 2, spool_id: 22 }] })
+    open()
+
+    expect(await screen.findByRole('radio', { name: ANY_H2C })).toBeChecked()
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
+    const slot = await screen.findByTestId('filament-slot-2')
+    expect(within(slot).getByTestId('spool-22')).toBeChecked()
+    // A slot with nothing remembered still opens on the auto-match.
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId('spool-21')).toBeChecked()
+  })
+
+  it('falls back to the auto-match for a remembered spool no longer in the inventory', async () => {
+    await put('choices', { printer_id: null, filament_plan: [{ slot_id: 2, spool_id: 999 }] })
+    open()
+    await listed()
+
+    const slot = await screen.findByTestId('filament-slot-2')
+    expect(within(slot).getByTestId('spool-27')).toBeChecked()
+  })
+
+  it('remembers the class printer and the spools it printed with', async () => {
+    const saved: unknown[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'PUT' && request.url.endsWith('/choices')) {
+        saved.push(await request.clone().json())
+      }
+    })
+    const { user } = open()
+    await listed()
+    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
+    await user.selectOptions(await screen.findByLabelText('Printer'), '2')
+    const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('spool-22'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+    server.events.removeAllListeners()
+
+    expect(saved).toEqual([
+      {
+        printer_id: 2,
+        filament_plan: expect.arrayContaining([
+          { slot_id: 1, spool_id: 21 },
+          { slot_id: 2, spool_id: 22 },
+        ]),
+      },
+    ])
+  })
+})
+
+describe('PrintPicker · Options', () => {
+  beforeEach(() => resetMockState())
+
+  it('offers the print options and sends this print’s overrides with the run', async () => {
+    const runs: Record<string, unknown>[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/run')) {
+        runs.push((await request.clone().json()) as Record<string, unknown>)
+      }
+    })
+    const { user } = open()
+    await listed()
+
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
+    await user.click(screen.getByTestId('run-pipeline'))
+    await waitFor(() => expect(runs).toHaveLength(1))
+    server.events.removeAllListeners()
+
+    expect(runs[0]).toMatchObject({ options: { timelapse: true } })
+    expect(runs[0]).not.toHaveProperty('copies')
+  })
+
+  it('keeps the Copies box and the Quantity row one value', async () => {
+    const { user } = open()
+    await listed()
+
+    await user.type(screen.getByLabelText('Copies'), '3')
+    await user.click(screen.getByText('Options'))
+    expect(await screen.findByLabelText('Quantity')).toHaveValue(3)
   })
 })
 

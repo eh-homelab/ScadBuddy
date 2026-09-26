@@ -44,6 +44,7 @@ from scadbuddy.bambuddy.projects import (
     ensure_project,
 )
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.settings_store import ModelPrintChoices
 
 router = APIRouter(prefix="/print", tags=["print"])
 
@@ -144,6 +145,23 @@ def put_model_pipeline(
     )
 
 
+@router.put(
+    "/models/{slug}/choices",
+    response_model=ModelPrintChoices,
+    summary="Remember this model's printer and spools",
+)
+def put_model_choices(
+    slug: SlugPath, body: ModelPrintChoices, store: SettingsStoreDep
+) -> ModelPrintChoices:
+    """The rest of what the picker chose, beside the model's pipeline (#78).
+
+    Replaces this model's entry whole; an empty body forgets it, so the picker opens on
+    the auto-match again. Needs no Bambuddy, like the pipeline default.
+    """
+    settings = store.set_model_choices(slug, body)
+    return settings.model_print_choices.get(slug, ModelPrintChoices())
+
+
 @router.post(
     "/outputs/{output_id}/eligibility",
     response_model=EligibilityOverview,
@@ -212,6 +230,7 @@ async def get_filaments(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
+    pipeline_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
@@ -223,7 +242,8 @@ async def get_filaments(
 
     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
     this printer": without one the spools are still listed, with their last known
-    assignment, but the reconciled remaining weights are not.
+    assignment, but the reconciled remaining weights are not. It is also what reads the
+    mounted nozzles, which ``pipeline_id`` is compared against (#78).
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -234,6 +254,7 @@ async def get_filaments(
             meta,
             settings,
             printer_id=printer_id,
+            pipeline_id=pipeline_id,
             plate_id=plate_id,
         )
 
