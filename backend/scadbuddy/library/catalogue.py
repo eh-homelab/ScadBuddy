@@ -361,8 +361,9 @@ class Catalogue:
     def _clear_derived(self, slug: str) -> None:
         """Remove what an earlier model of this slug left behind, before it is reused.
 
-        The orphan sweep normally has, but one that failed would otherwise hand
-        a new model the old one's outputs and cached schema.
+        The orphan sweep usually removes these already. When it failed, they are
+        still here, and without this the new model would inherit the old one's
+        outputs and cached schema.
         """
         for path in (
             self.paths.model_schema_cache(slug),
