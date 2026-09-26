@@ -231,7 +231,13 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
-          <ModelLibrariesButton slug={slug} name={schema.title ?? slug} />
+          <ModelLibrariesButton
+            slug={slug}
+            name={schema.title ?? slug}
+            // The library path changes what the source resolves to: re-read the
+            // schema, which re-seeds the values and so re-renders the preview.
+            onSaved={schemaState.reload}
+          />
           <DeleteModelButton slug={slug} name={schema.title ?? slug} />
         </div>
       </div>

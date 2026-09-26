@@ -9,13 +9,15 @@ import { Spinner } from './ui/Spinner'
 interface Props {
   slug: string
   name: string
+  /** Called once a new declaration is saved — the model now renders differently. */
+  onSaved?: () => void
 }
 
 /**
  * #93 — which pinned libraries this model renders with. Only these go on its
  * OPENSCADPATH, so a `use <BOSL2/std.scad>` resolves once BOSL2 is ticked here.
  */
-export function ModelLibrariesButton({ slug, name }: Props) {
+export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   const [declared, setDeclared] = useState<string[]>([])
   const [open, setOpen] = useState(false)
   const [available, setAvailable] = useState<LibraryEntry[] | null>(null)
@@ -68,6 +70,7 @@ export function ModelLibrariesButton({ slug, name }: Props) {
       setDeclared(model.libraries ?? [])
       setOpen(false)
       setAvailable(null)
+      onSaved?.()
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : String(caught))
     } finally {
