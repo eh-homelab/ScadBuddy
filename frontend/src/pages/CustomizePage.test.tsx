@@ -83,6 +83,13 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
+  it('offers to edit the model details (#179)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(dialog).findByLabelText('Name')).toHaveValue('Name Keychain')
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()

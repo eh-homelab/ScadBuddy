@@ -151,6 +151,7 @@ export const models: ModelSummary[] = [
     tags: ['keychain', 'two-colour', 'text'],
     updated_at: '2026-09-21T18:04:00Z',
     has_thumbnail: true,
+    thumbnail_source: 'model',
     has_readme: true,
   },
   {
@@ -789,6 +790,12 @@ export const OPENSCAD_LOG_TAIL = [
 ]
 
 /** What `GET /models/{slug}/source` serves, and what the editor opens prefilled. */
+/** #179 — the README `name-keychain` has, since its fixture says `has_readme`. */
+export const keychainReadme = `# Name Keychain
+
+A name in raised letters on a base plate, with a keyring hole.
+`
+
 export const keychainSource = `/* [Text] */
 // Name on the tag
 name = "Reagan";

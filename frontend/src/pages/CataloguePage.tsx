@@ -76,7 +76,7 @@ function ModelCard({ model }: { model: ModelSummary }) {
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
       <Link to={`/m/${model.slug}`} className="block p-3 focus-visible:rounded-[6px]">
         <ModelThumbnail
-          src={model.has_thumbnail ? api.modelThumbnailUrl(model.slug) : undefined}
+          src={model.has_thumbnail ? api.modelThumbnailUrl(model.slug, model.version) : undefined}
           alt={model.name}
         />
 

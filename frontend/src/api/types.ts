@@ -20,6 +20,7 @@ export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
 
 export type ModelSummary = Schemas['ModelRecord']
+export type ModelPatch = Schemas['ModelPatch']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
 

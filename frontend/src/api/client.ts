@@ -10,6 +10,7 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  ModelPatch,
   ModelSummary,
   ModelVersion,
   Output,
@@ -46,6 +47,16 @@ import type {
 } from './types'
 
 export const API_BASE = '/api/v1'
+
+/** The optional parts of a model upload besides its source (#179). */
+export interface UploadExtras {
+  /** What the source is called on the wire, which is where the slug comes from. */
+  filename?: string
+  /** A bundled model's `model.json`. */
+  meta?: File
+  thumbnail?: File
+  readme?: File
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -115,11 +126,59 @@ export const api = {
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
-  uploadModel: (file: File) => {
+  /**
+   * `extras` are the other files of a bundled model's directory (#179). `filename`
+   * renames the source on the wire, because the server takes the slug from it: a
+   * dropped `models/<slug>/` sends `model.scad`, which would otherwise become `model`.
+   */
+  uploadModel: (file: File, extras: UploadExtras = {}) => {
     const body = new FormData()
-    body.append('file', file)
+    body.append('file', file, extras.filename ?? file.name)
+    if (extras.meta) body.append('meta', extras.meta)
+    if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
+    if (extras.readme) body.append('readme', extras.readme)
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
+
+  /** Name, description and tags; each change is one revision in the model's history. */
+  updateModel: (slug: string, patch: ModelPatch) =>
+    request<ModelSummary>(`/models/${seg(slug)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  /** Multipart with a `file` part, like the output thumbnail PUT. */
+  setThumbnail: (slug: string, png: Blob) => {
+    const body = new FormData()
+    body.append('file', png, 'thumbnail.png')
+    return request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * Removes the model's own thumbnail. The record that comes back may still have one:
+   * a generated model falls back to its first output's plate image.
+   */
+  removeThumbnail: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+
+  /** The README's Markdown, or null when the model has none. */
+  getReadme: async (slug: string): Promise<string | null> => {
+    try {
+      return await requestText(`/models/${seg(slug)}/readme`)
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 404) return null
+      throw caught
+    }
+  },
+
+  setReadme: (slug: string, content: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/readme`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+
+  removeReadme: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
@@ -156,7 +215,12 @@ export const api = {
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
-  modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
+  /**
+   * `version` (the model's revision) is only there to change the URL when the
+   * thumbnail does: an `<img>` already on the page does not refetch the same URL.
+   */
+  modelThumbnailUrl: (slug: string, version?: string | null) =>
+    `${API_BASE}/models/${seg(slug)}/thumbnail${version ? `?v=${seg(version)}` : ''}`,
 
   /** A `version` reads that revision's schema instead of the model's current one. */
   getSchema: (slug: string, version?: string) =>

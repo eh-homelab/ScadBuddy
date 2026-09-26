@@ -8,6 +8,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  ModelPatch,
   ModelSummary,
   ModelVersion,
   Output,
@@ -47,6 +48,8 @@ const state = {
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
   sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
+  /** #179 — README text per model; a model's `has_readme` follows it. */
+  readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -71,6 +74,7 @@ export function resetMockState(): void {
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
   state.sources = { 'name-keychain': fixtures.keychainSource }
+  state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -89,6 +93,24 @@ export function resetMockState(): void {
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+/**
+ * #179 — one details change: records its revision and replaces the model's record,
+ * the way every catalogue change lands as a commit on the real backend.
+ */
+function reviseModel(
+  slug: string,
+  message: string,
+  files: ModelVersion['files'],
+  change: Partial<ModelSummary>,
+): ModelSummary | null {
+  const model = state.models.find((m) => m.slug === slug)
+  if (!model) return null
+  const version = recordVersion(slug, message, files)
+  const updated = { ...model, ...change, version: version.commit }
+  state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+  return updated
 }
 
 /** Adds a revision to the head of a model's history and returns it. */
@@ -267,6 +289,16 @@ export const handlers = [
 
     const form = await request.formData()
     const file = form.get('file')
+    const part = (name: string) => {
+      const value = form.get(name)
+      return value !== null && typeof value !== 'string' ? (value as File) : null
+    }
+    const meta = part('meta')
+    const thumbnailPart = part('thumbnail')
+    const readmePart = part('readme')
+    const metaFields = meta
+      ? (JSON.parse(await meta.text()) as { name?: string; description?: string; tags?: string[] })
+      : null
     // Not `instanceof File`: the entry's class differs between the browser worker
     // and the Node interceptor, so it is duck-typed instead.
     const filename = typeof file === 'string' || file === null ? '' : ((file as File).name ?? '')
@@ -283,13 +315,15 @@ export const handlers = [
       .replace(/(^-|-$)/g, '')
     const model: ModelSummary = {
       slug,
-      name: slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-      description: 'Uploaded just now. Open it to see its parameters.',
-      tags: ['uploaded'],
+      name: metaFields?.name ?? slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      description: metaFields?.description ?? 'Uploaded just now. Open it to see its parameters.',
+      tags: metaFields?.tags ?? ['uploaded'],
       updated_at: new Date().toISOString(),
-      has_thumbnail: false,
-      has_readme: false,
+      has_thumbnail: thumbnailPart !== null,
+      thumbnail_source: thumbnailPart ? 'model' : null,
+      has_readme: readmePart !== null,
     }
+    if (readmePart) state.readmes[slug] = await readmePart.text()
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
     state.schemas[slug] = fixtures.keychainSchema
     await delay(150)
@@ -328,6 +362,80 @@ export const handlers = [
     const updated = { ...model, version: version.commit, updated_at: version.date }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     await delay(120)
+    return HttpResponse.json(updated)
+  }),
+
+  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const patch = (await request.json()) as ModelPatch
+    const change = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
+    ) as Partial<ModelSummary>
+    const updated = reviseModel(slug, `Update ${slug} metadata`, [
+      { status: 'M', path: 'model.json' },
+    ], change)
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  // Multipart with a `file` part, like the output thumbnail PUT.
+  http.put(`${base}/models/:slug/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
+    const updated = reviseModel(
+      slug,
+      `Set ${slug} thumbnail`,
+      [{ status: had ? 'M' : 'A', path: 'thumbnail.png' }],
+      { has_thumbnail: true, thumbnail_source: 'model' },
+    )
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  http.delete(`${base}/models/:slug/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Model not found')
+    if (model.thumbnail_source !== 'model') {
+      return problem(404, 'Not Found', `'${slug}' has no thumbnail of its own to remove`)
+    }
+    // The fixtures' generated models fall back to their first output's plate image.
+    const generated = state.outputs.some((o) => o.slug === slug)
+    const updated = reviseModel(slug, `Remove ${slug} thumbnail`, [
+      { status: 'D', path: 'thumbnail.png' },
+    ], { has_thumbnail: generated, thumbnail_source: generated ? 'output' : null })
+    return HttpResponse.json(updated)
+  }),
+
+  http.get(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const readme = state.readmes[slug]
+    return readme === undefined
+      ? problem(404, 'Not Found', `'${slug}' has no README`)
+      : HttpResponse.text(readme, { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } })
+  }),
+
+  http.put(`${base}/models/:slug/readme`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const { content } = (await request.json()) as { content: string }
+    const had = state.readmes[slug] !== undefined
+    const updated = reviseModel(slug, `Set ${slug} README`, [
+      { status: had ? 'M' : 'A', path: 'README.md' },
+    ], { has_readme: true })
+    if (!updated) return problem(404, 'Model not found')
+    state.readmes[slug] = content
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (state.readmes[slug] === undefined) {
+      return problem(404, 'Not Found', `'${slug}' has no README to remove`)
+    }
+    delete state.readmes[slug]
+    const updated = reviseModel(slug, `Remove ${slug} README`, [
+      { status: 'D', path: 'README.md' },
+    ], { has_readme: false })
     return HttpResponse.json(updated)
   }),
 

@@ -1,0 +1,188 @@
+import { screen, waitFor, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
+import { keychainReadme } from '../mocks/fixtures'
+import { server } from '../mocks/server'
+import { renderPage } from '../test/utils'
+import { EditDetailsButton } from './EditDetailsButton'
+
+interface Sent {
+  method: string
+  path: string
+  body: unknown
+}
+
+/** Every write the form makes, in order. */
+function recordWrites(): Sent[] {
+  const sent: Sent[] = []
+  server.events.on('request:start', ({ request }) => {
+    if (request.method === 'GET') return
+    const entry: Sent = { method: request.method, path: new URL(request.url).pathname, body: null }
+    sent.push(entry)
+    // The client labels every non-multipart request JSON, bodiless DELETEs included.
+    if (request.headers.get('content-type')?.includes('application/json')) {
+      void request
+        .clone()
+        .text()
+        .then((text) => {
+          entry.body = text ? (JSON.parse(text) as unknown) : null
+        })
+    }
+  })
+  return sent
+}
+
+async function open(slug = 'name-keychain') {
+  const onSaved = vi.fn()
+  const view = renderPage(<EditDetailsButton slug={slug} onSaved={onSaved} />, {
+    userEventOptions: { applyAccept: false },
+  })
+  await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+  const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+  await within(dialog).findByLabelText('Name')
+  return { ...view, dialog, onSaved }
+}
+
+afterEach(() => {
+  vi.restoreAllMocks()
+  server.events.removeAllListeners()
+})
+
+describe('EditDetailsButton', () => {
+  it('opens on the model as it is, README included', async () => {
+    const { dialog } = await open()
+
+    expect(within(dialog).getByLabelText('Name')).toHaveValue('Name Keychain')
+    expect(within(dialog).getByLabelText('Tags')).toHaveValue('keychain, two-colour, text')
+    expect(within(dialog).getByLabelText('README')).toHaveValue(keychainReadme)
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
+  })
+
+  it('sends only what changed, one revision each', async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open()
+
+    await user.clear(within(dialog).getByLabelText('Name'))
+    await user.type(within(dialog).getByLabelText('Name'), 'Keyring')
+    await user.clear(within(dialog).getByLabelText('Tags'))
+    await user.type(within(dialog).getByLabelText('Tags'), 'keychain, gift')
+    await user.type(within(dialog).getByLabelText('README'), 'Prints flat.\n')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      'PATCH /api/v1/models/name-keychain',
+      'PUT /api/v1/models/name-keychain/readme',
+    ])
+    expect(sent[0]?.body).toEqual({ name: 'Keyring', tags: ['keychain', 'gift'] })
+    expect(sent[1]?.body).toEqual({ content: `${keychainReadme}Prints flat.\n` })
+    expect(await api.getReadme('name-keychain')).toBe(`${keychainReadme}Prints flat.\n`)
+    expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ name: 'Keyring', has_readme: true })
+  })
+
+  it('saves nothing when nothing changed', async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(sent).toEqual([])
+  })
+
+  it('removes an emptied README rather than saving an empty one', async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open()
+
+    await user.clear(within(dialog).getByLabelText('README'))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      'DELETE /api/v1/models/name-keychain/readme',
+    ])
+    expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ has_readme: false })
+  })
+
+  it('sets a new thumbnail from a chosen PNG', async () => {
+    // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
+    const setThumbnail = vi
+      .spyOn(api, 'setThumbnail')
+      .mockImplementation(async (slug) => ({ ...(await api.getModel(slug)), version: 'next' }))
+    const { dialog, user, onSaved } = await open('gridfinity-bin')
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('None set')
+
+    const png = new File(['png'], 'cover.png', { type: 'image/png' })
+    await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), png)
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('cover.png')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(setThumbnail).toHaveBeenCalledWith('gridfinity-bin', png)
+  })
+
+  it('refuses a thumbnail that is not a PNG', async () => {
+    const { dialog, user } = await open()
+
+    await user.upload(
+      within(dialog).getByLabelText('Thumbnail (PNG)'),
+      new File(['gif'], 'cover.gif', { type: 'image/gif' }),
+    )
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('must be a PNG')
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
+  })
+
+  it('removes the thumbnail set on the model', async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove thumbnail' }))
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Removed on save')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      'DELETE /api/v1/models/name-keychain/thumbnail',
+    ])
+    // The keychain has been generated, so its first plate image takes over.
+    expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ thumbnail_source: 'output' })
+  })
+
+  it('stays open and says why when a step is refused, without resending what landed', async () => {
+    const sent = recordWrites()
+    server.use(
+      http.put('/api/v1/models/:slug/readme', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Unprocessable', status: 422, detail: 'the README is bad' },
+          { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { dialog, user, onSaved } = await open()
+
+    await user.type(within(dialog).getByLabelText('Description'), ' Now with more.')
+    await user.type(within(dialog).getByLabelText('README'), 'More.')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('the README is bad')
+    expect(onSaved).not.toHaveBeenCalled()
+
+    server.resetHandlers()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(sent.map(({ method, path }) => `${method} ${path}`)).toEqual([
+      'PATCH /api/v1/models/name-keychain',
+      'PUT /api/v1/models/name-keychain/readme',
+      'PUT /api/v1/models/name-keychain/readme',
+    ])
+  })
+
+  it('will not save a model without a name', async () => {
+    const { dialog, user } = await open()
+    await user.clear(within(dialog).getByLabelText('Name'))
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+})
