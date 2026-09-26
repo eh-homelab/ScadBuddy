@@ -64,6 +64,12 @@ data/models/_builtin/<slug>/     built-ins, mirrored from the image
 `_builtin/` is never mistaken for a template of mine; slugs are `[a-z0-9-]`, so it
 cannot collide either.
 
+Derived per-template storage outside the repository — `cache/schema/`,
+`cache/revisions/`, `outputs/` — names a template by ONE path component:
+`<slug>` for mine (unchanged), `_builtin-<slug>` for a built-in. Those trees are
+two levels deep by construction (the output lookup globs `*/<output-id>`), and a
+flat key keeps them so (#155).
+
 A template's id is `<slug>` for mine and `builtin:<slug>` for a built-in. `:` is
 not a slug character, so the two namespaces cannot collide, and every existing id
 (outputs, `model_version` stamps, "Edit in ScadBuddy" links) keeps meaning what it
@@ -116,9 +122,9 @@ place as today. Every template's menu has **Duplicate**.
 
 A duplicate has an **update available** when its upstream's current revision
 differs from both `base` and `dismissed`. The library computes this in the same
-single history walk as `last_commits()`, extended to key `_builtin/<slug>/…` paths
-by their second component (today it keys by the first, which would fold every
-built-in into one `_builtin` entry).
+single history walk as `last_commits()`, which keys `_builtin/<slug>/…` paths by
+the built-in's id, `builtin:<slug>` (#155; keying by the first component would
+fold every built-in into one `_builtin` entry).
 
 `GET /models/{slug}/upstream` returns the state and, when an update exists, a
 merge preview:

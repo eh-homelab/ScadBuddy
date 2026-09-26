@@ -40,7 +40,15 @@ from scadbuddy.library.scad import (
     inspect_source,
     parse_diagnostics,
 )
-from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_filename, slugify
+from scadbuddy.library.slugs import (
+    BUILTIN_PREFIX,
+    MAX_SLUG_LENGTH,
+    MODEL_ID_PATTERN,
+    InvalidSlugError,
+    is_builtin,
+    slug_from_filename,
+    slugify,
+)
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
@@ -77,6 +85,16 @@ def require_model_exists(catalogue: Catalogue, slug: str) -> None:
     needs the 404."""
     if not catalogue.exists(slug):
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}")
+
+
+def require_mine(slug: str) -> None:
+    """A built-in is read-only: the image is its source of truth, and the next boot's
+    sync would overwrite any edit. Refused before the existence check, since the
+    answer does not depend on it."""
+    if is_builtin(slug):
+        raise ApiError(
+            status.HTTP_403_FORBIDDEN, f"{slug!r} is a built-in template and cannot be changed"
+        )
 
 
 def _parse_tags(raw: str | None) -> list[str] | None:
@@ -132,8 +150,8 @@ class CheckRequest(BaseModel):
     )
     slug: str | None = Field(
         default=None,
-        pattern=SLUG_PATTERN,
-        max_length=100,
+        pattern=MODEL_ID_PATTERN,
+        max_length=len(BUILTIN_PREFIX) + MAX_SLUG_LENGTH,
         description=(
             "An existing model whose directory the source is checked against, so its "
             "`include`/`use` of sibling files resolve as they will on render"
@@ -426,6 +444,7 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
 def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
+    require_mine(slug)
     require_model(catalogue, slug)
     try:
         return catalogue.update(slug, patch)
@@ -436,6 +455,7 @@ def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> M
 
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
 def delete_model(slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep) -> Response:
+    require_mine(slug)
     require_model_exists(catalogue, slug)
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
@@ -484,6 +504,7 @@ async def put_source(
     # `require_model_exists`, not `require_model`: building a record costs a
     # `git log` for the model's revision, and this handler is `async def`. The
     # record `write_source` returns carries the new revision anyway.
+    require_mine(slug)
     require_model_exists(catalogue, slug)
     checked = await _guard_source(
         body.source,

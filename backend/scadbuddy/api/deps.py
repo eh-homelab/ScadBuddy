@@ -16,7 +16,7 @@ from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
-from scadbuddy.library.slugs import SLUG_PATTERN
+from scadbuddy.library.slugs import BUILTIN_PREFIX, MAX_SLUG_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -143,7 +143,11 @@ FontsDep = Annotated[FontService, Depends(get_fonts)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 
-SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
+# A template id, mine or built-in (`library.slugs.MODEL_ID_PATTERN`). The write
+# routes refuse a built-in themselves, with a 403 rather than this 422.
+SlugPath = Annotated[
+    str, Path(pattern=MODEL_ID_PATTERN, max_length=len(BUILTIN_PREFIX) + MAX_SLUG_LENGTH)
+]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers

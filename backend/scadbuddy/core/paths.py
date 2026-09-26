@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from scadbuddy.core.fontconfig import fonts_dir
+from scadbuddy.library.slugs import bare_slug, is_builtin
 
 SOURCE_NAME = "model.scad"
 #: The model's own metadata. Since #90 it is NOT the schema cache -- see below.
@@ -13,6 +14,26 @@ MODEL_META_NAME = "model.json"
 # so keeping it in the versioned tree would leave the repository permanently
 # dirty and fold a cache blob into the next unrelated metadata commit.
 SCHEMA_CACHE_NAME = "schema.json"
+#: Where built-ins are mirrored inside the models repository. Slugs never start
+#: with ``_``, so it cannot be mistaken for, or collide with, a template of mine.
+BUILTIN_DIR = "_builtin"
+
+
+def model_repo_path(model_id: str) -> str:
+    """A template's directory relative to the models repository: ``<slug>`` for
+    mine, ``_builtin/<slug>`` for a built-in. It is what every git pathspec is."""
+    return f"{BUILTIN_DIR}/{bare_slug(model_id)}" if is_builtin(model_id) else model_id
+
+
+def model_cache_key(model_id: str) -> str:
+    """ONE path component naming a template under ``cache/`` and ``outputs/``.
+
+    ``_builtin-<slug>`` for a built-in rather than nesting it as the repository
+    does: those trees are ``<key>/<entry>``, two levels deep by construction (the
+    output lookup globs ``*/<id>``, the export sweep walks two levels), and a flat
+    key keeps them so. Mine is the bare slug, exactly as before built-ins existed.
+    """
+    return f"{BUILTIN_DIR}-{bare_slug(model_id)}" if is_builtin(model_id) else model_id
 
 
 @dataclass(frozen=True)
@@ -40,7 +61,7 @@ class DataPaths:
         return fonts_dir(self.root)
 
     def model_dir(self, slug: str) -> Path:
-        return self.models / slug
+        return self.models / model_repo_path(slug)
 
     def model_source(self, slug: str) -> Path:
         return self.model_dir(slug) / SOURCE_NAME
@@ -51,7 +72,7 @@ class DataPaths:
     def model_schema_cache(self, slug: str) -> Path:
         """Where the live model's derived schema is cached -- under ``cache/``,
         for the reason on :data:`SCHEMA_CACHE_NAME`."""
-        return self.cache / "schema" / f"{slug}.json"
+        return self.cache / "schema" / f"{model_cache_key(slug)}.json"
 
     @property
     def tombstones(self) -> Path:
@@ -71,10 +92,13 @@ class DataPaths:
         renderer work on it unchanged. Commits are immutable, so once populated an
         entry never needs invalidating.
         """
-        return self.model_revisions / slug / commit
+        return self.model_revisions / model_cache_key(slug) / commit
+
+    def model_outputs(self, slug: str) -> Path:
+        return self.outputs / model_cache_key(slug)
 
     def output_dir(self, slug: str, output_id: str) -> Path:
-        return self.outputs / slug / output_id
+        return self.model_outputs(slug) / output_id
 
     def job_file(self, job_id: str) -> Path:
         return self.jobs / f"{job_id}.json"

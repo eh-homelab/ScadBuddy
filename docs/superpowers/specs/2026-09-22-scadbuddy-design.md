@@ -209,7 +209,7 @@ cache/revisions/<slug>/<commit>/  an old model revision exported out of git, der
 ### 4.3 Model history: git is the version store (#90)
 
 `models/` is a git repository, initialised on first start. Every catalogue action
-is exactly one commit — upload, source edit, metadata change, delete, seed,
+is exactly one commit — upload, source edit, metadata change, delete, built-in sync,
 restore — and there is no parallel index of revisions anywhere: `git log`,
 `git show` and `git diff` are the read side. Whatever the server reports, a shell
 on the volume sees the same thing.

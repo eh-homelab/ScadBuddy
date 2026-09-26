@@ -5,6 +5,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -22,9 +23,8 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
     subject_line,
-    summarise,
 )
-from scadbuddy.render.jobs import prune_revision_exports
+from scadbuddy.render.jobs import prune_revision_exports, resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 pytestmark = pytest.mark.requires_git
@@ -197,6 +197,24 @@ def test_last_commits_ignores_files_at_the_repository_root(
     history.ensure_repo()
 
     assert set(history.last_commits()) == {"keychain"}
+
+
+def test_last_commits_keys_each_builtin_by_its_id(models: Path, history: ModelHistory) -> None:
+    """Not by its first component, which would fold every built-in into `_builtin`."""
+    write_model(models, "keychain", "cube(10);\n")
+    write_model(models / "_builtin", "keychain", "cube(1);\n")
+    history.ensure_repo()
+    write_model(models / "_builtin", "plate", "sphere(5);\n")
+    history.commit("Sync built-in templates from the image", "_builtin")
+
+    newest = history.last_commits()
+
+    assert newest == {
+        "keychain": history.last_commit("keychain"),
+        "builtin:keychain": history.last_commit("_builtin/keychain"),
+        "builtin:plate": history.last_commit("_builtin/plate"),
+    }
+    assert newest["builtin:plate"] != newest["builtin:keychain"]
 
 
 def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
@@ -440,12 +458,6 @@ def test_a_message_is_flattened_to_one_bounded_line() -> None:
     assert len(subject_line("x" * (MAX_SUBJECT * 2))) == MAX_SUBJECT
 
 
-def test_summarise_reads_as_a_sentence() -> None:
-    assert summarise(["a"]) == "a"
-    assert summarise(["a", "b"]) == "a and b"
-    assert summarise(["a", "b", "c"]) == "a, b and c"
-
-
 # ── the catalogue's side of it ────────────────────────────────────────────────
 
 
@@ -521,17 +533,128 @@ def test_deleting_an_unversioned_model_still_succeeds(catalogue: Catalogue) -> N
     assert not directory.exists()
 
 
-def test_seeding_records_the_seed_as_a_commit(catalogue: Catalogue, tmp_path: Path) -> None:
+def bundle(image: Path, slug: str, source: str, **files: str) -> None:
+    directory = image / slug
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.scad").write_text(source, encoding="utf-8")
+    for name, body in files.items():
+        (directory / name).write_text(body, encoding="utf-8")
+
+
+def test_syncing_mirrors_the_image_into_builtin_as_one_commit(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
     assert catalogue.history is not None
-    seed = tmp_path / "seed"
-    (seed / "keychain").mkdir(parents=True)
-    (seed / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n")
+    bundle(image, "plate", "sphere(5);\n")
+    head = catalogue.history.head()
 
-    assert catalogue.seed(seed) == ["keychain"]
+    assert catalogue.sync_builtins(image) is not None
 
-    assert catalogue.history.log("keychain")[0].message == "Seed keychain from the image"
-    # A re-seed skips what is already there, so it produces no second commit.
-    assert catalogue.seed(seed) == []
+    models = catalogue.paths.models
+    assert (models / "_builtin" / "keychain" / "model.scad").read_text(encoding="utf-8") == (
+        "cube(10);\n"
+    )
+    # Built-ins only: a fresh install no longer gets a copy of its own.
+    assert not (models / "keychain").exists()
+    revisions = catalogue.history.log()
+    assert [revision.message for revision in revisions[:2]] == [
+        "Sync built-in templates from the image",
+        "Initial revision",
+    ]
+    assert revisions[1].commit == head
+    assert catalogue.version("builtin:keychain") == revisions[0].commit
+
+
+def test_an_unchanged_image_syncs_to_no_commit(catalogue: Catalogue, tmp_path: Path) -> None:
+    assert catalogue.history is not None
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n")
+    first = catalogue.sync_builtins(image)
+
+    assert catalogue.sync_builtins(image) is None
+    assert catalogue.history.head() == first
+
+
+def test_a_newer_image_overwrites_and_prunes_the_mirror(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n", **{"README.md": "old\n"})
+    bundle(image, "plate", "sphere(5);\n")
+    catalogue.sync_builtins(image)
+
+    (image / "keychain" / "README.md").unlink()
+    bundle(image, "keychain", "cube(20);\n")
+    shutil.rmtree(image / "plate")
+    commit = catalogue.sync_builtins(image)
+
+    builtin = catalogue.paths.models / "_builtin"
+    assert (builtin / "keychain" / "model.scad").read_text(encoding="utf-8") == "cube(20);\n"
+    assert not (builtin / "keychain" / "README.md").exists()
+    assert not (builtin / "plate").exists()
+    assert commit is not None
+    assert catalogue.history.head() == commit
+    syncs = [r for r in catalogue.history.log() if r.message.startswith("Sync built-in")]
+    assert len(syncs) == 2
+
+
+def test_syncing_leaves_templates_of_mine_alone(catalogue: Catalogue, tmp_path: Path) -> None:
+    catalogue.create("keychain", "// mine\n", ModelMeta(name="Mine"))
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n", **{".gitignore": "ignored\n"})
+    bundle(image, ".hidden", "cube(1);\n")
+    (image / "notes.txt").write_text("not a model\n", encoding="utf-8")
+
+    catalogue.sync_builtins(image)
+
+    assert catalogue.paths.model_source("keychain").read_text(encoding="utf-8") == "// mine\n"
+    builtin = catalogue.paths.models / "_builtin"
+    # Dotfiles are repo furniture, not model content.
+    assert not (builtin / "keychain" / ".gitignore").exists()
+    assert sorted(path.name for path in builtin.iterdir()) == ["keychain"]
+
+
+def test_the_listing_carries_both_origins(catalogue: Catalogue, tmp_path: Path) -> None:
+    catalogue.create("tag", "cube(1);\n", ModelMeta(name="Tag"))
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n")
+    catalogue.sync_builtins(image)
+
+    listed = catalogue.list_models()
+
+    assert [(record.slug, record.origin) for record in listed] == [
+        ("tag", "mine"),
+        ("builtin:keychain", "builtin"),
+    ]
+    # The bare slug names it when model.json does not, never the prefixed id.
+    assert listed[1].name == "keychain"
+    assert listed[1].version == catalogue.version("builtin:keychain")
+    assert listed[0].version != listed[1].version
+
+
+async def test_an_old_builtin_revision_is_exported_outside_the_mirror(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    image = tmp_path / "image"
+    bundle(image, "keychain", "cube(10);\n")
+    first = catalogue.sync_builtins(image)
+    bundle(image, "keychain", "cube(20);\n")
+    catalogue.sync_builtins(image)
+    assert first is not None
+
+    source = await resolve_source(
+        "builtin:keychain", first, paths=catalogue.paths, history=catalogue.history
+    )
+
+    assert source.scad == catalogue.paths.model_revision_dir("builtin:keychain", first) / (
+        "model.scad"
+    )
+    assert source.scad.parent.parent.name == "_builtin-keychain"
+    assert source.scad.read_text(encoding="utf-8") == "cube(10);\n"
+    assert source.version == first
 
 
 def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:

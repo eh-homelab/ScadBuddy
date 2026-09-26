@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.deeplink import edit_url
-from scadbuddy.library.slugs import InvalidSlugError, slugify
+from scadbuddy.library.slugs import InvalidSlugError, bare_slug, slugify
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
@@ -108,7 +108,7 @@ class OutputStore:
         return loaded
 
     def list_for(self, slug: str) -> list[OutputMeta]:
-        directory = self.paths.outputs / slug
+        directory = self.paths.model_outputs(slug)
         if not directory.is_dir():
             return []
         metas = [
@@ -234,4 +234,4 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = slugify(meta.name) if meta.name else meta.id
     except InvalidSlugError:
         suffix = meta.id
-    return f"{meta.slug}-{suffix}.3mf"
+    return f"{bare_slug(meta.slug)}-{suffix}.3mf"

@@ -3,22 +3,42 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.core.paths import SOURCE_NAME, DataPaths
-from scadbuddy.library.history import GitError, ModelHistory, summarise
+from scadbuddy.core.paths import (
+    BUILTIN_DIR,
+    SOURCE_NAME,
+    DataPaths,
+    model_cache_key,
+    model_repo_path,
+)
+from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.slugs import SLUG_PATTERN, bare_slug, builtin_id, is_builtin
 
 logger = logging.getLogger(__name__)
 
 THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
+SYNC_MESSAGE = "Sync built-in templates from the image"
+
+Origin = Literal["builtin", "mine"]
+
+_SLUG_RE = re.compile(SLUG_PATTERN)
+
+
+def _templates_in(directory: Path) -> list[str]:
+    """The slugs under ``directory`` that are templates: a ``model.scad`` at the top."""
+    if not directory.is_dir():
+        return []
+    return [path.name for path in directory.iterdir() if (path / SOURCE_NAME).is_file()]
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -71,7 +91,9 @@ class ModelPatch(BaseModel):
 
 
 class ModelRecord(ModelMeta):
+    #: The template's id: ``<slug>`` for mine, ``builtin:<slug>`` for a built-in.
     slug: str
+    origin: Origin
     has_thumbnail: bool
     has_readme: bool
     updated_at: datetime
@@ -88,6 +110,9 @@ class Catalogue:
         self.history = history
 
     def _commit(self, message: str, *slugs: str) -> str | None:
+        return self._commit_paths(message, *(model_repo_path(slug) for slug in slugs))
+
+    def _commit_paths(self, message: str, *paths: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
         the files are already written, and losing the revision is the smaller harm.
 
@@ -99,7 +124,7 @@ class Catalogue:
         if self.history is None or not self.history.available:
             return None
         try:
-            return self.history.commit(message, *slugs)
+            return self.history.commit(message, *paths)
         except (GitError, OSError):
             # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
             # attribute, and logging raises KeyError on the collision -- which
@@ -112,7 +137,7 @@ class Catalogue:
         if self.history is None or not self.history.available:
             return None
         try:
-            return self.history.last_commit(slug)
+            return self.history.last_commit(model_repo_path(slug))
         except (GitError, OSError):
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
@@ -168,7 +193,7 @@ class Catalogue:
     def _record(self, slug: str, version: str | None) -> ModelRecord:
         self._require(slug)
         raw = self.read_raw_meta(slug)
-        meta = ModelMeta.model_validate({"name": slug, **raw})
+        meta = ModelMeta.model_validate({"name": bare_slug(slug), **raw})
         try:
             modified = self.paths.model_source(slug).stat().st_mtime
         except FileNotFoundError:
@@ -177,6 +202,7 @@ class Catalogue:
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
+            origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
@@ -184,11 +210,15 @@ class Catalogue:
         )
 
     def list_models(self) -> list[ModelRecord]:
+        """Mine, then the built-ins. Only a directory with a ``model.scad`` at its
+        top is a template, which is what keeps ``_builtin/`` itself out."""
         if not self.paths.models.is_dir():
             return []
-        slugs = sorted(
-            path.name for path in self.paths.models.iterdir() if (path / SOURCE_NAME).is_file()
-        )
+        builtins = self.paths.models / BUILTIN_DIR
+        slugs = [
+            *sorted(_templates_in(self.paths.models)),
+            *(builtin_id(slug) for slug in sorted(_templates_in(builtins))),
+        ]
         # ONE git call for the page, not one per model: see `last_commits`.
         versions = self.versions()
         return [self._record(slug, versions.get(slug)) for slug in slugs]
@@ -285,10 +315,10 @@ class Catalogue:
         # Derived, and only reachable through the slug: the schema cache and any
         # exported old revisions.
         _remove_tree(self.paths.model_schema_cache(slug))
-        _remove_tree(self.paths.model_revisions / slug)
+        _remove_tree(self.paths.model_revisions / model_cache_key(slug))
         # Outputs are keyed by slug and only listable through it, so they go too.
         # They are NOT in the repository: a 3MF is a build artefact, not source.
-        _remove_tree(self.paths.outputs / slug)
+        _remove_tree(self.paths.model_outputs(slug))
         # This delete's tombstone, and any an earlier one failed to clear.
         try:
             self.sweep_tombstones()
@@ -311,24 +341,36 @@ class Catalogue:
                 removed.append(tombstone.name)
         return removed
 
-    def seed(self, seed_dir: Path) -> list[str]:
-        """Copy any bundled model whose slug is not in the catalogue yet."""
-        if not seed_dir.is_dir():
-            return []
-        seeded: list[str] = []
-        for candidate in sorted(seed_dir.iterdir()):
-            if not (candidate / SOURCE_NAME).is_file() or self.exists(candidate.name):
-                continue
-            shutil.copytree(
-                candidate,
-                self.paths.model_dir(candidate.name),
-                ignore=shutil.ignore_patterns(".*"),
-                dirs_exist_ok=True,
-            )
-            seeded.append(candidate.name)
-        if seeded:
-            logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})
-            # A re-seed on an image upgrade lands as a commit rather than a silent
-            # overwrite -- which is the whole point of #90's seed clause.
-            self._commit(f"Seed {summarise(seeded)} from the image", *seeded)
-        return seeded
+    def sync_builtins(self, image_dir: Path) -> str | None:
+        """Mirror the image's bundled models into ``_builtin/``, as one commit.
+
+        Overwriting, not copy-if-absent: the image is the source of truth for a
+        built-in, so a newer image's fix reaches an existing install, and one it no
+        longer ships leaves the mirror. Nothing else writes ``_builtin/``, so its
+        history is each built-in's version history. ``None`` when nothing changed,
+        or when there is no repository to record it in.
+        """
+        root = self.paths.models / BUILTIN_DIR
+        bundled = (
+            {
+                candidate.name: candidate
+                for candidate in image_dir.iterdir()
+                if _SLUG_RE.match(candidate.name) and (candidate / SOURCE_NAME).is_file()
+            }
+            if image_dir.is_dir()
+            else {}
+        )
+        if root.is_dir():
+            for stale in root.iterdir():
+                if stale.name not in bundled:
+                    _remove_tree(stale)
+        for slug, candidate in sorted(bundled.items()):
+            destination = root / slug
+            if destination.exists():
+                shutil.rmtree(destination)
+            # `copy2`, shutil's default: the image's mtimes survive, so a boot that
+            # changes nothing does not move every built-in's `updated_at`.
+            shutil.copytree(candidate, destination, ignore=shutil.ignore_patterns(".*"))
+        if bundled:
+            logger.info("synced built-in templates", extra={"slugs": sorted(bundled)})
+        return self._commit_paths(SYNC_MESSAGE, BUILTIN_DIR)

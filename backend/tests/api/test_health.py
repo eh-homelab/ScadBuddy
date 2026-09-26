@@ -35,7 +35,9 @@ def test_healthz_is_degraded_without_openscad(data_dir: Path, seed_dir: Path) ->
     assert body["data_dir_writable"] is True
 
 
-def test_startup_seeds_bundled_models(settings: Settings, seed_dir: Path, data_dir: Path) -> None:
+def test_startup_lists_bundled_models_as_builtins(
+    settings: Settings, seed_dir: Path, data_dir: Path
+) -> None:
     bundled = seed_dir / "seeded-model"
     bundled.mkdir()
     (bundled / "model.scad").write_text("cube(1);\n", encoding="utf-8")
@@ -45,13 +47,15 @@ def test_startup_seeds_bundled_models(settings: Settings, seed_dir: Path, data_d
     with TestClient(create_app(settings)) as client:
         body = client.get("/api/v1/models").json()
 
-    assert [row["slug"] for row in body] == ["seeded-model"]
+    assert [(row["slug"], row["origin"]) for row in body] == [("builtin:seeded-model", "builtin")]
     assert body[0]["name"] == "Seeded"
+    # A fresh install no longer gets a copy of its own.
+    assert not (data_dir / "models" / "seeded-model").exists()
     # Dotfiles are repo furniture, not model content.
-    assert not (data_dir / "models" / "seeded-model" / ".gitignore").exists()
+    assert not (data_dir / "models" / "_builtin" / "seeded-model" / ".gitignore").exists()
 
 
-def test_seeding_never_overwrites_an_existing_model(
+def test_startup_never_overwrites_a_model_of_mine(
     settings: Settings, seed_dir: Path, model: str, data_dir: Path
 ) -> None:
     bundled = seed_dir / model
@@ -64,6 +68,32 @@ def test_seeding_never_overwrites_an_existing_model(
     assert "from the seed dir" not in (data_dir / "models" / model / "model.scad").read_text(
         encoding="utf-8"
     )
+
+
+@pytest.mark.requires_git
+def test_a_newer_image_lands_as_one_sync_commit(
+    settings: Settings, seed_dir: Path, data_dir: Path
+) -> None:
+    bundled = seed_dir / "seeded-model"
+    bundled.mkdir()
+    (bundled / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    with TestClient(create_app(settings)):
+        pass
+
+    (bundled / "model.scad").write_text("cube(2);\n", encoding="utf-8")
+    with TestClient(create_app(settings)) as client:
+        source = client.get("/api/v1/models/builtin:seeded-model/source").text
+        versions = client.get("/api/v1/models/builtin:seeded-model/versions").json()
+
+    assert source == "cube(2);\n"
+    assert [entry["message"] for entry in versions] == [
+        "Sync built-in templates from the image",
+        "Sync built-in templates from the image",
+    ]
+    # A restart with nothing new makes no commit at all.
+    with TestClient(create_app(settings)) as client:
+        again = client.get("/api/v1/models/builtin:seeded-model/versions").json()
+    assert again == versions
 
 
 def test_an_explicit_directory_must_exist_to_be_used(tmp_path: Path) -> None:

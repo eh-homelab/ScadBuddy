@@ -1,6 +1,6 @@
 """Model history: ``data/models`` is a git repository, and git is the version store.
 
-Every catalogue action — create, source edit, metadata change, delete, seed,
+Every catalogue action — create, source edit, metadata change, delete, built-in sync,
 restore — is exactly one commit. Nothing here keeps a parallel index of
 revisions: ``git log``, ``git show`` and ``git diff`` are the read side, so an
 operator with a shell on the volume sees precisely what the API serves.
@@ -42,11 +42,14 @@ import subprocess
 import tarfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from scadbuddy.core.paths import BUILTIN_DIR
+from scadbuddy.library.slugs import builtin_id
 
 logger = logging.getLogger(__name__)
 
@@ -288,8 +291,7 @@ class ModelHistory:
         Returns the commit id when this call created one, and ``None`` when there
         was nothing to commit OR when the repository could not be initialised at
         all -- the app has to boot either way. A models directory that already
-        holds files becomes revision 1 rather than being left untracked, which is
-        what makes the image's seed the first revision on a fresh volume.
+        holds files becomes revision 1 rather than being left untracked.
 
         On a repository that already has history, anything left to commit is a
         catalogue action whose own commit failed, and it is committed as
@@ -430,6 +432,10 @@ class ModelHistory:
         per model grows with every OTHER model's commits too. One `git log` with
         `--name-only`, newest first, answers the whole page: the first time a
         slug appears is by definition its newest commit.
+
+        Keyed by template id: ``_builtin/<slug>/…`` is ``builtin:<slug>``, so each
+        built-in gets its own revision rather than all of them folding into one
+        ``_builtin`` entry.
         """
         completed = self._run("log", "--format=%x1e%H", "--name-only", check=False)
         assert isinstance(completed.stdout, str)
@@ -441,9 +447,12 @@ class ModelHistory:
             if not commit:
                 continue
             for path in paths.splitlines():
-                slug = path.split("/", 1)[0]
-                if slug and "/" in path:
-                    newest.setdefault(slug, commit)
+                parts = path.split("/")
+                if parts[0] == BUILTIN_DIR:
+                    if len(parts) > 2:
+                        newest.setdefault(builtin_id(parts[1]), commit)
+                elif parts[0] and len(parts) > 1:
+                    newest.setdefault(parts[0], commit)
         return newest
 
     def log(self, slug: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT) -> list[Revision]:
@@ -595,11 +604,3 @@ def subject_line(message: str) -> str:
     flattened = "".join(" " if _is_control(character) else character for character in message)
     collapsed = " ".join(flattened.split())
     return collapsed[:MAX_SUBJECT] if collapsed else "(no message)"
-
-
-def summarise(slugs: Sequence[str]) -> str:
-    """``a, b and c`` — for a seed commit's message."""
-    names = list(slugs)
-    if len(names) == 1:
-        return names[0]
-    return f"{', '.join(names[:-1])} and {names[-1]}"
