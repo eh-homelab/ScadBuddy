@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,7 @@ SOURCE = "width = 10;\ncube(width);\n"
 
 # respx only intercepts real transports, so the TestClient's own requests to the app
 # pass straight through while the app's outbound fetch is mocked.
+pytestmark = pytest.mark.usefixtures("fake_dns")
 
 
 @respx.mock
@@ -91,22 +93,37 @@ def test_a_makerworld_url_is_a_problem_422_that_says_what_to_do(client: TestClie
 
 
 @respx.mock
-def test_an_unreachable_url_is_a_502(client: TestClient) -> None:
+def test_a_public_server_error_status_is_a_422_that_names_it(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(404))
 
     response = client.post("/api/v1/models/import", json={"url": RAW_URL})
 
-    assert response.status_code == 502
+    assert response.status_code == 422
     assert "404" in response.json()["detail"]
 
 
-@respx.mock
-def test_a_url_that_times_out_is_a_504(client: TestClient) -> None:
-    respx.get(RAW_URL).mock(side_effect=httpx.ConnectTimeout("slow"))
+def test_a_cluster_address_reads_exactly_like_one_that_did_not_answer(
+    client: TestClient, fake_dns: dict[str, list[str]]
+) -> None:
+    fake_dns["bambuddy.bambuddy.svc.cluster.local"] = ["10.43.0.12"]
+    fake_dns["slow.example.com"] = ["93.184.215.15"]
 
-    response = client.post("/api/v1/models/import", json={"url": RAW_URL})
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.get("https://slow.example.com/x").mock(
+            side_effect=httpx.ConnectTimeout("slow")
+        )
+        internal = client.post(
+            "/api/v1/models/import", json={"url": "https://bambuddy.bambuddy.svc.cluster.local/x"}
+        )
+        slow = client.post("/api/v1/models/import", json={"url": "https://slow.example.com/x"})
 
-    assert response.status_code == 504
+    assert internal.status_code == slow.status_code == 422
+    assert internal.json()["detail"] == slow.json()["detail"].replace(
+        "slow.example.com", "bambuddy.bambuddy.svc.cluster.local"
+    )
+    # The internal name has no route, so reaching respx at all would have raised.
+    assert route.call_count == 1
+    assert client.get("/api/v1/models").json() == []
 
 
 @respx.mock

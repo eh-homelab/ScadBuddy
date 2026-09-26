@@ -21,9 +21,7 @@ _TITLES = {
     415: "Unsupported Media Type",
     422: "Unprocessable Content",
     500: "Internal Server Error",
-    502: "Bad Gateway",
     503: "Service Unavailable",
-    504: "Gateway Timeout",
 }
 
 

@@ -44,7 +44,6 @@ from scadbuddy.library.slugs import SLUG_PATTERN, InvalidSlugError, slug_from_fi
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
-    SourceUnreachableError,
     fetch_model,
 )
 from scadbuddy.render.jobs import resolve_source
@@ -411,12 +410,13 @@ class UrlImport(BaseModel):
     status_code=status.HTTP_201_CREATED,
     summary="Import a model from a URL",
     description=(
-        "Fetches the source on the server -- https only, at most "
-        f"{MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds -- then "
-        "creates the model exactly as a paste does, recording the URL as `origin_url`. "
-        "A direct link to the file works; a MakerWorld model page is refused with a 422, "
-        "because MakerWorld only serves files to a signed-in account. An unreachable URL "
-        "is a 502, or a 504 when it ran out of time."
+        "Fetches the source on the server -- https only, from public internet addresses "
+        f"only, at most {MAX_TEXT_BODY_BYTES} bytes, within {IMPORT_TIMEOUT:.0f} seconds "
+        "-- then creates the model exactly as a paste does, recording the URL as "
+        "`origin_url`. A direct link to the file works; a MakerWorld model page is "
+        "refused, because MakerWorld only serves files to a signed-in account. Every "
+        "refusal is a 422, and an address that is not public reads the same as one that "
+        "did not answer."
     ),
 )
 async def import_model(
@@ -429,11 +429,6 @@ async def import_model(
         imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
     except ImportRefusedError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    except SourceUnreachableError as error:
-        raise ApiError(
-            status.HTTP_504_GATEWAY_TIMEOUT if error.timed_out else status.HTTP_502_BAD_GATEWAY,
-            str(error),
-        ) from None
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(

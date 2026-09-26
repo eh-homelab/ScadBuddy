@@ -1,18 +1,47 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
+
+import httpcore
 import httpx
 import pytest
 import respx
 
+from scadbuddy.library import url_import
 from scadbuddy.library.url_import import (
     ImportRefusedError,
-    SourceUnreachableError,
+    PublicOnlyBackend,
     fetch_model,
+    is_public,
+    unreachable,
 )
+from tests.conftest import PUBLIC_ADDRESS
+
+pytestmark = pytest.mark.usefixtures("fake_dns")
 
 RAW_URL = "https://raw.githubusercontent.com/someone/models/main/Gridfinity%20Bin.scad"
 SOURCE = "width = 10;\ncube(width);\n"
 LIMIT = 1024
+
+NOT_PUBLIC = [
+    "127.0.0.1",
+    "10.1.2.3",
+    "172.16.0.1",
+    "192.168.1.10",
+    "169.254.169.254",
+    "100.64.0.1",
+    "0.0.0.0",
+    "224.0.0.1",
+    "240.0.0.1",
+    "::1",
+    "::",
+    "fd00::1",
+    "fe80::1",
+    "ff0e::1",
+    "::ffff:127.0.0.1",
+    "::ffff:10.0.0.1",
+    "64:ff9b::a00:1",
+]
 
 
 @respx.mock
@@ -111,34 +140,176 @@ async def test_a_binary_body_is_refused() -> None:
 
 
 @respx.mock
-async def test_an_upstream_error_status_is_unreachable_not_refused() -> None:
+async def test_a_public_server_error_status_is_reported() -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(404))
 
-    with pytest.raises(SourceUnreachableError) as caught:
+    with pytest.raises(ImportRefusedError) as caught:
         await fetch_model(RAW_URL, limit=LIMIT)
 
     assert "404" in str(caught.value)
-    assert not caught.value.timed_out
+
+
+@pytest.mark.parametrize(
+    "failure", [httpx.ConnectError("refused"), httpx.ReadTimeout("slow")], ids=["refused", "slow"]
+)
+@respx.mock
+async def test_no_answer_reads_the_same_as_an_address_that_is_not_public(
+    failure: Exception,
+) -> None:
+    respx.get(RAW_URL).mock(side_effect=failure)
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model(RAW_URL, limit=LIMIT)
+
+    assert str(caught.value) == str(unreachable("raw.githubusercontent.com"))
+
+
+@pytest.mark.parametrize("address", NOT_PUBLIC)
+def test_addresses_that_are_not_globally_routable_are_not_public(address: str) -> None:
+    assert not is_public(address)
+
+
+@pytest.mark.parametrize("address", [PUBLIC_ADDRESS, "2606:4700::1111", "::ffff:8.8.8.8"])
+def test_globally_routable_addresses_are_public(address: str) -> None:
+    assert is_public(address)
+
+
+@pytest.mark.parametrize(
+    "host", ["127.0.0.1", "10.0.0.5", "169.254.169.254", "[fd00::1]", "[::ffff:127.0.0.1]"]
+)
+async def test_an_address_literal_that_is_not_public_is_refused_before_a_request(
+    host: str,
+) -> None:
+    with respx.mock(assert_all_called=False) as mock, pytest.raises(ImportRefusedError) as caught:
+        await fetch_model(f"https://{host}/model.scad", limit=LIMIT)
+
+    assert "not a public internet address" in str(caught.value)
+    assert not mock.calls
+
+
+async def test_a_name_that_resolves_into_the_cluster_is_refused(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["bambuddy.bambuddy.svc.cluster.local"] = ["10.43.0.12"]
+
+    with respx.mock(assert_all_called=False) as mock, pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://bambuddy.bambuddy.svc.cluster.local/api", limit=LIMIT)
+
+    # Word for word what a name that does not answer at all gets.
+    assert str(caught.value) == str(unreachable("bambuddy.bambuddy.svc.cluster.local"))
+    assert not mock.calls
+
+
+async def test_a_name_with_any_private_address_is_refused(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["mixed.example.com"] = [PUBLIC_ADDRESS, "192.168.1.1"]
+
+    with respx.mock(assert_all_called=False) as mock, pytest.raises(ImportRefusedError):
+        await fetch_model("https://mixed.example.com/model.scad", limit=LIMIT)
+
+    assert not mock.calls
+
+
+async def test_a_name_that_does_not_resolve_reads_as_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail(host: str, port: int) -> list[str]:
+        raise OSError("Name or service not known")
+
+    monkeypatch.setattr(url_import, "resolve_host", fail)
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://nowhere.example/model.scad", limit=LIMIT)
+
+    assert str(caught.value) == str(unreachable("nowhere.example"))
 
 
 @respx.mock
-async def test_a_connection_failure_is_unreachable() -> None:
-    respx.get(RAW_URL).mock(side_effect=httpx.ConnectError("refused"))
+async def test_a_redirect_into_the_cluster_is_not_followed(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["internal.example.com"] = ["10.0.0.7"]
+    respx.get("https://example.com/model.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://internal.example.com/x"})
+    )
+    internal = respx.get("https://internal.example.com/x")
+    metadata = respx.get("https://169.254.169.254/latest/meta-data/")
 
-    with pytest.raises(SourceUnreachableError) as caught:
-        await fetch_model(RAW_URL, limit=LIMIT)
+    with pytest.raises(ImportRefusedError):
+        await fetch_model("https://example.com/model.scad", limit=LIMIT)
+    respx.get("https://example.com/other.scad").mock(
+        return_value=httpx.Response(
+            302, headers={"Location": "https://169.254.169.254/latest/meta-data/"}
+        )
+    )
+    with pytest.raises(ImportRefusedError):
+        await fetch_model("https://example.com/other.scad", limit=LIMIT)
 
-    assert not caught.value.timed_out
+    assert not internal.called
+    assert not metadata.called
 
 
-@respx.mock
-async def test_a_timeout_says_it_was_one() -> None:
-    respx.get(RAW_URL).mock(side_effect=httpx.ReadTimeout("slow"))
+class _RecordingBackend(httpcore.AsyncNetworkBackend):
+    """Stands in for the socket layer: records where it was asked to connect."""
 
-    with pytest.raises(SourceUnreachableError) as caught:
-        await fetch_model(RAW_URL, limit=LIMIT)
+    def __init__(self) -> None:
+        self.connected: list[tuple[str, int]] = []
 
-    assert caught.value.timed_out
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        self.connected.append((host, port))
+        raise httpcore.ConnectError("recorded, not connected")
+
+
+async def test_the_backend_connects_to_the_address_it_vetted_not_the_name() -> None:
+    inner = _RecordingBackend()
+
+    with pytest.raises(httpcore.ConnectError):
+        await PublicOnlyBackend(inner).connect_tcp("example.com", 443)
+
+    assert inner.connected == [(PUBLIC_ADDRESS, 443)]
+
+
+async def test_the_backend_refuses_a_private_address_without_connecting(
+    fake_dns: dict[str, list[str]],
+) -> None:
+    fake_dns["internal.example.com"] = ["10.0.0.7"]
+    inner = _RecordingBackend()
+
+    with pytest.raises(ImportRefusedError):
+        await PublicOnlyBackend(inner).connect_tcp("internal.example.com", 443)
+
+    assert inner.connected == []
+
+
+async def test_a_name_that_rebinds_after_the_first_check_is_refused_at_connect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No respx here: the request goes through the real transport, so this is also
+    what proves the backend is still wired into the pool httpx builds."""
+    answers = [[PUBLIC_ADDRESS], ["127.0.0.1"]]
+    asked: list[str] = []
+
+    async def rebinding(host: str, port: int) -> list[str]:
+        asked.append(host)
+        return answers[len(asked) - 1]
+
+    monkeypatch.setattr(url_import, "resolve_host", rebinding)
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://rebind.invalid/model.scad", limit=LIMIT)
+
+    assert str(caught.value) == str(unreachable("rebind.invalid"))
+    # Once by the hook, once by the backend: an unwired backend would have let the
+    # socket layer resolve the name itself, and failed the same way for another reason.
+    assert asked == ["rebind.invalid", "rebind.invalid"]
 
 
 @pytest.mark.parametrize(
