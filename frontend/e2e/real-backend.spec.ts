@@ -90,7 +90,8 @@ test.describe('real backend', () => {
     test.setTimeout(240_000)
     test.skip(process.env.E2E_OFFLINE === '1', 'no outbound network to Google Fonts')
 
-    await page.goto('/m/name-keychain')
+    // The bundled keychain is a built-in template (#155).
+    await page.goto('/m/builtin:name-keychain')
     const bbox = page.getByTestId('bbox-readout')
     await expect(bbox).toContainText('mm', { timeout: 120_000 })
     const beforeBbox = await bbox.textContent()

@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
+#: A template of mine (a bare slug) or a built-in (`builtin:<slug>`).
+MODEL_ID_PATTERN = r"^(builtin:)?[a-z0-9][a-z0-9-]*$"
 
 _SLUG_RE = re.compile(SLUG_PATTERN)
 _SEPARATORS = re.compile(r"[^a-z0-9]+")
@@ -11,6 +13,8 @@ _SEPARATORS = re.compile(r"[^a-z0-9]+")
 #: kept well inside the 255-byte limit on a file name: past it, creating the model
 #: fails with an OSError instead of a clear refusal.
 MAX_SLUG_LENGTH = 100
+#: A built-in's id is its slug behind `builtin:`, so a legal slug is a legal id.
+MAX_MODEL_ID_LENGTH = len("builtin:") + MAX_SLUG_LENGTH
 
 
 class InvalidSlugError(ValueError):

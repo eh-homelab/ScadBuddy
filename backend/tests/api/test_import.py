@@ -151,3 +151,14 @@ def test_a_model_created_any_other_way_has_no_origin(client: TestClient) -> None
     response = client.post("/api/v1/models", json={"name": "Pasted", "source": SOURCE})
 
     assert response.json()["origin_url"] is None
+
+
+@respx.mock
+def test_an_import_never_targets_a_built_in(client: TestClient) -> None:
+    """The name is slugified like any create's, so `builtin:` cannot survive into the id."""
+    respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
+
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "name": "builtin:bin"})
+
+    assert response.status_code == 201
+    assert (response.json()["slug"], response.json()["origin"]) == ("builtin-bin", "mine")

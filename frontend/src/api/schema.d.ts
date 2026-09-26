@@ -1458,6 +1458,11 @@ export interface components {
             has_thumbnail: boolean;
             /** Name */
             name: string;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "builtin" | "mine";
             /** Origin Url */
             origin_url?: string | null;
             /** Slug */

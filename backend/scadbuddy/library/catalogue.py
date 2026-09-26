@@ -8,17 +8,25 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.core.paths import SOURCE_NAME, DataPaths
-from scadbuddy.library.history import GitError, ModelHistory, summarise
+from scadbuddy.core.paths import (
+    BUILTIN_DIR,
+    BUILTIN_PREFIX,
+    SOURCE_NAME,
+    DataPaths,
+    is_builtin,
+    model_path,
+)
+from scadbuddy.library.history import GitError, ModelHistory
 
 logger = logging.getLogger(__name__)
 
 THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
+SYNC_MESSAGE = "Sync built-in templates from the image"
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -83,7 +91,9 @@ class ModelPatch(BaseModel):
 
 
 class ModelRecord(ModelMeta):
+    # The template's id: a bare slug for mine, `builtin:<slug>` for a built-in.
     slug: str
+    origin: Literal["builtin", "mine"]
     has_thumbnail: bool
     has_readme: bool
     updated_at: datetime
@@ -124,7 +134,7 @@ class Catalogue:
         if self.history is None or not self.history.available:
             return None
         try:
-            return self.history.last_commit(slug)
+            return self.history.last_commit(model_path(slug))
         except (GitError, OSError):
             logger.exception("could not read the revision", extra={"slug": slug})
             return None
@@ -180,7 +190,7 @@ class Catalogue:
     def _record(self, slug: str, version: str | None) -> ModelRecord:
         self._require(slug)
         raw = self.read_raw_meta(slug)
-        meta = ModelMeta.model_validate({"name": slug, **raw})
+        meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
         try:
             modified = self.paths.model_source(slug).stat().st_mtime
         except FileNotFoundError:
@@ -189,6 +199,7 @@ class Catalogue:
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
+            origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=self.thumbnail_path(slug).is_file(),
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
@@ -196,11 +207,11 @@ class Catalogue:
         )
 
     def list_models(self) -> list[ModelRecord]:
-        if not self.paths.models.is_dir():
-            return []
-        slugs = sorted(
-            path.name for path in self.paths.models.iterdir() if (path / SOURCE_NAME).is_file()
-        )
+        """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
+        is a template, so the ``_builtin`` mirror itself is never listed as one."""
+        slugs = _templates_in(self.paths.models) + [
+            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
+        ]
         # ONE git call for the page, not one per model: see `last_commits`.
         versions = self.versions()
         return [self._record(slug, versions.get(slug)) for slug in slugs]
@@ -332,7 +343,7 @@ class Catalogue:
         this they would leak -- or be inherited by a later model of that name.
 
         A slug counts as live while its directory exists, not only once
-        ``model.scad`` does: `create` and `seed` make the directory first, and a
+        ``model.scad`` does: `create` and the built-in sync make the directory first, and a
         model mid-creation must not lose anything. A live slug is never touched,
         so this is safe beside a running render.
 
@@ -378,25 +389,39 @@ class Catalogue:
         ):
             _remove_tree(path)
 
-    def seed(self, seed_dir: Path) -> list[str]:
-        """Copy any bundled model whose slug is not in the catalogue yet."""
-        if not seed_dir.is_dir():
-            return []
-        seeded: list[str] = []
-        for candidate in sorted(seed_dir.iterdir()):
-            if not (candidate / SOURCE_NAME).is_file() or self.exists(candidate.name):
-                continue
+    def sync_builtins(self, bundled: Path) -> str | None:
+        """Mirror the image's bundled models into ``_builtin/`` as one commit.
+
+        The image is the source of truth for a built-in, so each one is replaced
+        whole and one the image no longer has is removed. Nothing else writes the
+        mirror, so its history is each built-in's version history. The commit
+        decides whether anything changed: an unchanged image stages nothing, which
+        is why the copy keeps the image's mtimes (`copytree`'s `copy2`).
+
+        Runs at boot, before the render queue starts, so nothing reads a
+        built-in while it is being replaced.
+        """
+        wanted = _templates_in(bundled)
+        mirror = self.paths.builtins
+        mirror.mkdir(parents=True, exist_ok=True)
+        for present in sorted(mirror.iterdir()):
+            if present.name not in wanted:
+                _remove_tree(present)
+        for slug in wanted:
+            _remove_tree(mirror / slug)
             shutil.copytree(
-                candidate,
-                self.paths.model_dir(candidate.name),
+                bundled / slug,
+                mirror / slug,
                 ignore=shutil.ignore_patterns(".*"),
                 dirs_exist_ok=True,
             )
-            self._clear_derived(candidate.name)
-            seeded.append(candidate.name)
-        if seeded:
-            logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})
-            # A re-seed on an image upgrade lands as a commit rather than a silent
-            # overwrite -- which is the whole point of #90's seed clause.
-            self._commit(f"Seed {summarise(seeded)} from the image", *seeded)
-        return seeded
+        commit = self._commit(SYNC_MESSAGE, BUILTIN_DIR)
+        if commit is not None:
+            logger.info("synced built-in templates", extra={"slugs": wanted, "from": str(bundled)})
+        return commit
+
+
+def _templates_in(directory: Path) -> list[str]:
+    if not directory.is_dir():
+        return []
+    return sorted(path.name for path in directory.iterdir() if (path / SOURCE_NAME).is_file())

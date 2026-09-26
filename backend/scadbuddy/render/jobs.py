@@ -19,7 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
+from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths, model_path
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
@@ -306,7 +306,7 @@ async def resolve_source(
     are immutable, so a populated export is never stale.
     """
     current = (
-        await asyncio.to_thread(history.last_commit, slug)
+        await asyncio.to_thread(history.last_commit, model_path(slug))
         if history is not None and history.available
         else None
     )
@@ -375,7 +375,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
     staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        history.export(slug, version, staging)
+        history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.replace(staging, directory)

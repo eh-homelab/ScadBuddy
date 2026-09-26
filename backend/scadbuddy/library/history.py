@@ -1,7 +1,7 @@
 """Model history: ``data/models`` is a git repository, and git is the version store.
 
-Every catalogue action — create, source edit, metadata change, delete, seed,
-restore — is exactly one commit. Nothing here keeps a parallel index of
+Every catalogue action — create, source edit, metadata change, delete, built-in
+sync, restore — is exactly one commit. Nothing here keeps a parallel index of
 revisions: ``git log``, ``git show`` and ``git diff`` are the read side, so an
 operator with a shell on the volume sees precisely what the API serves.
 
@@ -42,11 +42,13 @@ import subprocess
 import tarfile
 import threading
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -289,7 +291,7 @@ class ModelHistory:
         was nothing to commit OR when the repository could not be initialised at
         all -- the app has to boot either way. A models directory that already
         holds files becomes revision 1 rather than being left untracked, which is
-        what makes the image's seed the first revision on a fresh volume.
+        what makes the first built-in sync land on top of revision 1 on a fresh volume.
 
         On a repository that already has history, anything left to commit is a
         catalogue action whose own commit failed, and it is committed as
@@ -441,9 +443,9 @@ class ModelHistory:
             if not commit:
                 continue
             for path in paths.splitlines():
-                slug = path.split("/", 1)[0]
-                if slug and "/" in path:
-                    newest.setdefault(slug, commit)
+                model_id = _model_id(path)
+                if model_id:
+                    newest.setdefault(model_id, commit)
         return newest
 
     def log(self, slug: str | None = None, *, limit: int = DEFAULT_LOG_LIMIT) -> list[Revision]:
@@ -537,6 +539,15 @@ class ModelHistory:
         return [line for line in self._out("ls-files", "--", slug).splitlines() if line]
 
 
+def _model_id(path: str) -> str | None:
+    """The template a repository path belongs to: its first component, or
+    ``builtin:<second>`` under the mirror. ``None`` for a file at the root."""
+    parts = path.split("/")
+    if parts[0] == BUILTIN_DIR:
+        return f"{BUILTIN_PREFIX}{parts[1]}" if len(parts) > 2 else None
+    return parts[0] if len(parts) > 1 else None
+
+
 def _reparent(member: tarfile.TarInfo, prefix: str) -> tarfile.TarInfo:
     member = member.replace(name=member.name[len(prefix) :], deep=False)
     return member
@@ -595,11 +606,3 @@ def subject_line(message: str) -> str:
     flattened = "".join(" " if _is_control(character) else character for character in message)
     collapsed = " ".join(flattened.split())
     return collapsed[:MAX_SUBJECT] if collapsed else "(no message)"
-
-
-def summarise(slugs: Sequence[str]) -> str:
-    """``a, b and c`` — for a seed commit's message."""
-    names = list(slugs)
-    if len(names) == 1:
-        return names[0]
-    return f"{', '.join(names[:-1])} and {names[-1]}"
