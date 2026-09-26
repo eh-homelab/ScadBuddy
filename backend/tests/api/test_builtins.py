@@ -122,6 +122,17 @@ def test_a_built_ins_history_is_its_own(client: TestClient, model: str) -> None:
     }
 
 
+def test_a_built_ins_diff_never_names_the_mirror(client: TestClient) -> None:
+    commit = _versions(client, BUILTIN)[0]["commit"]
+
+    patch = client.get(f"/api/v1/models/{BUILTIN}/versions/{commit}/diff").json()["patch"]
+
+    assert "_builtin/" not in patch
+    # The headers a template of mine with the same slug would show.
+    assert "diff --git a/keychain/model.scad b/keychain/model.scad" in patch
+    assert "+++ b/keychain/model.scad" in patch
+
+
 @pytest.mark.parametrize(
     ("method", "suffix", "body"),
     [

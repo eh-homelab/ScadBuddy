@@ -493,8 +493,15 @@ class ModelHistory:
         return RevisionRange(resolved_base, resolved_head)
 
     def diff(self, revisions: RevisionRange, slug: str | None = None) -> str:
-        """A unified patch across ``revisions``, optionally scoped to one model."""
-        args = ["diff", "--no-color", revisions.base, revisions.head]
+        """A unified patch across ``revisions``, optionally scoped to one model.
+
+        A built-in's headers name ``<slug>/...``, as a template of mine's do: the
+        ``_builtin/`` mirror is where it is stored, not a path the API reports.
+        """
+        args = ["diff", "--no-color"]
+        if slug is not None and slug.startswith(f"{BUILTIN_DIR}/"):
+            args.append(f"--relative={BUILTIN_DIR}/")
+        args += [revisions.base, revisions.head]
         if slug is not None:
             args += ["--", slug]
         return self._out(*args)
