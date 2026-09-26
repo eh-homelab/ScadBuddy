@@ -127,8 +127,12 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                     params["rootUri"] = server_root
             if roots is not None:
                 message = roots.inbound(message)
-            stdin.write(frame(json.dumps(message).encode()))
-            await stdin.drain()
+            try:
+                stdin.write(frame(json.dumps(message).encode()))
+                await stdin.drain()
+            except (BrokenPipeError, ConnectionResetError):
+                # The server went away mid-session; ending here closes the socket.
+                return
 
     async def to_client() -> None:
         while (body := await read_message(stdout)) is not None:

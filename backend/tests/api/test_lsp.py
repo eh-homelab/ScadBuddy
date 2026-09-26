@@ -30,6 +30,7 @@ import json
 import os
 import pathlib
 import sys
+import time
 
 pid_file = os.environ.get("FAKE_LSP_PID")
 if pid_file:
@@ -60,6 +61,11 @@ while True:
     method = message.get("method")
     if method == "exit":
         raise SystemExit(0)
+    if method == "closeStdin":
+        # Stops reading but keeps its stdout open: the next write to it breaks the pipe.
+        os.close(0)
+        send({"jsonrpc": "2.0", "id": message["id"], "result": None})
+        time.sleep(60)
     if "id" not in message:
         continue
     cwd = pathlib.Path.cwd()
@@ -203,6 +209,21 @@ def test_a_server_that_exits_closes_the_socket(client: TestClient, model: str) -
         session.send_json({"jsonrpc": "2.0", "method": "exit"})
         with pytest.raises(WebSocketDisconnect):
             session.receive_json()
+
+
+def test_a_server_that_stops_reading_closes_the_socket(
+    client: TestClient, model: str, pid_file: Path
+) -> None:
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        pid = int(pid_file.read_text())
+        session.send_json({"jsonrpc": "2.0", "id": 2, "method": "closeStdin"})
+        session.receive_json()
+        session.send_json({"jsonrpc": "2.0", "method": "initialized", "params": {}})
+        with pytest.raises(WebSocketDisconnect):
+            session.receive_json()
+
+    assert _wait_until(lambda: _gone(pid))
 
 
 @pytest.mark.parametrize("frame", ["[1, 2]", '"text"', "null", "not json"])
