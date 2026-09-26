@@ -56,6 +56,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.catalogue.sweep_tombstones)
     except OSError:
         logger.exception("could not sweep tombstones")
+    # Derived files a failed or raced delete left keyed to a slug that is gone.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_orphans)
+    except OSError:
+        logger.exception("could not sweep orphaned files")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()

@@ -198,6 +198,63 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
         assert list(paths.tombstones.iterdir()) == []
 
 
+def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
+    orphan = paths.outputs / "gone" / "deadbeef"
+    orphan.mkdir(parents=True)
+    (orphan / "model.3mf").write_bytes(b"3mf")
+
+    with TestClient(app):
+        assert list(paths.outputs.iterdir()) == []
+
+
+def test_an_orphaned_schema_cache_and_revision_are_swept_at_startup(
+    app: FastAPI, paths: DataPaths
+) -> None:
+    # What a source PUT that lost a race with the delete leaves behind (#152).
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
+
+    with TestClient(app):
+        assert not paths.model_schema_cache("gone").exists()
+        assert list(paths.model_revisions.iterdir()) == []
+
+
+def test_a_delete_sweeps_other_models_orphans(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    orphan = paths.outputs / "gone" / "deadbeef"
+    orphan.mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+
+    assert not (paths.outputs / "gone").exists()
+    assert not paths.model_schema_cache("gone").exists()
+
+
+def test_the_orphan_sweep_never_touches_a_live_model(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    # A model mid-creation: its directory exists, `model.scad` not yet.
+    creating = "creating"
+    paths.model_dir(creating).mkdir()
+    derived: list[Path] = []
+    for slug in (model, creating):
+        output = paths.output_dir(slug, "deadbeef")
+        output.mkdir(parents=True)
+        export = paths.model_revision_dir(slug, "0" * 40)
+        export.mkdir(parents=True)
+        paths.schema_cache.mkdir(parents=True, exist_ok=True)
+        paths.model_schema_cache(slug).write_text("{}\n", encoding="utf-8")
+        derived += [output, export, paths.model_schema_cache(slug)]
+
+    assert catalogue.sweep_orphans() == []
+    assert all(path.exists() for path in derived)
+
+
 def test_a_failed_startup_sweep_does_not_stop_the_boot(
     app: FastAPI, caplog: pytest.LogCaptureFixture
 ) -> None:

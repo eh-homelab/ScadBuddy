@@ -282,18 +282,18 @@ class Catalogue:
         # The model is deleted once the rename and commit are done. Everything
         # below is best-effort cleanup: each step logs its own failure and the
         # rest still run, so a completed delete never reports an error.
-        # Derived, and only reachable through the slug: the schema cache and any
-        # exported old revisions.
-        _remove_tree(self.paths.model_schema_cache(slug))
-        _remove_tree(self.paths.model_revisions / slug)
-        # Outputs are keyed by slug and only listable through it, so they go too.
-        # They are NOT in the repository: a 3MF is a build artefact, not source.
-        _remove_tree(self.paths.outputs / slug)
         # This delete's tombstone, and any an earlier one failed to clear.
         try:
             self.sweep_tombstones()
         except OSError:
             logger.exception("could not sweep tombstones", extra={"path": str(tombstones)})
+        # Its derived files -- the schema cache, exported old revisions and its
+        # outputs (NOT in the repository: a 3MF is a build artefact, not source)
+        # -- and any an earlier delete failed to clear or a race wrote since.
+        try:
+            self.sweep_orphans()
+        except OSError:
+            logger.exception("could not sweep orphaned files")
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -309,6 +309,35 @@ class Catalogue:
         for tombstone in sorted(root.iterdir()):
             if _remove_tree(tombstone):
                 removed.append(tombstone.name)
+        return removed
+
+    def sweep_orphans(self) -> list[str]:
+        """Remove the slug-keyed derived files of every model that is gone.
+
+        A delete's own cleanup can fail (a busy PVC, a crash after the commit),
+        and a source PUT or a render racing a delete can write the schema cache
+        or an output after it ran. Nothing lists these but the slug, so without
+        this they would leak -- or be inherited by a later model of that name.
+
+        A slug counts as live while its directory exists, not only once
+        ``model.scad`` does: `create` and `seed` make the directory first, and a
+        model mid-creation must not lose anything. A live slug is never touched,
+        so this is safe beside a running render.
+        """
+        candidates: list[tuple[str, Path]] = []
+        for root in (self.paths.outputs, self.paths.model_revisions):
+            if root.is_dir():
+                candidates.extend((entry.name, entry) for entry in root.iterdir())
+        if self.paths.schema_cache.is_dir():
+            candidates.extend(
+                (entry.stem, entry) for entry in self.paths.schema_cache.glob("*.json")
+            )
+        removed: list[str] = []
+        for slug, path in sorted(candidates):
+            if self.paths.model_dir(slug).exists():
+                continue
+            if _remove_tree(path):
+                removed.append(str(path.relative_to(self.paths.root)))
         return removed
 
     def seed(self, seed_dir: Path) -> list[str]:
