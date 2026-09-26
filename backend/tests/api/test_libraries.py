@@ -6,6 +6,7 @@ The upstream is a local bare repository, so the clone is real and offline.
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -164,10 +165,43 @@ def test_a_name_with_a_path_in_it_is_a_422(lib_client: TestClient) -> None:
     assert response.status_code == 422
 
 
-def test_a_ref_that_does_not_exist_upstream_is_a_502(lib_client: TestClient) -> None:
-    response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "v9"})
+def test_a_ref_that_does_not_exist_upstream_is_a_502(
+    lib_client: TestClient, caplog: pytest.LogCaptureFixture
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.libraries"):
+        response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "v9"})
+
     assert response.status_code == 502
-    assert "v9" in response.json()["detail"]
+    detail = response.json()["detail"]
+    assert "v9" in detail
+    # git's own words go to the log, never to the client.
+    (logged,) = [record for record in caplog.records if record.message == "git failed"]
+    stderr: str = logged.git_stderr  # type: ignore[attr-defined]
+    assert "upstream origin" in stderr
+    assert stderr not in detail
+    assert "fatal" not in detail
+
+
+def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    fake_dns: dict[str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_dns["git.internal.example"] = ["10.0.0.7"]
+    store = libraries_app.dependency_overrides[get_libraries]()
+    monkeypatch.setattr(store, "protocols", ("https",))
+    monkeypatch.setattr(store, "_git", lambda *args: pytest.fail(f"git ran: {args}"))
+
+    response = lib_client.post(
+        "/api/v1/libraries",
+        json={"name": "mylib", "url": "https://git.internal.example/o/r.git", "ref": "v1"},
+    )
+
+    assert response.status_code == 422
+    assert "public" in response.json()["detail"]
+    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
 def test_a_model_can_declare_only_a_library_that_is_pinned(lib_client: TestClient) -> None:

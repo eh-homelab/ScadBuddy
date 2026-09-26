@@ -19,10 +19,19 @@ Clones use the same hermetic git as the history (:func:`git_env`), with
 ``GIT_ALLOW_PROTOCOL`` narrowing the transports to the ones this store was built
 with -- ``https`` in production, so a user-added URL cannot name a local path or
 one of git's command-running transports.
+
+A URL that is not the catalogue's is vetted like the URL import's
+(:func:`~scadbuddy.library.url_import.public_addresses`): refused unless every
+address its host resolves to is public, so a client cannot aim a clone at the
+cluster's own network. The clone is then held to those addresses
+(``http.curloptResolve``) and never follows a redirect, so neither a second
+lookup nor a ``Location`` can move it somewhere that was not vetted.
 """
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import json
 import logging
 import os
@@ -47,6 +56,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     git_env,
 )
+from scadbuddy.library.url_import import ImportRefusedError, public_addresses
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +71,7 @@ REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
 # is large; a stalled one still has to give its executor slot back.
 CLONE_TIMEOUT = 300.0
 STAGING_PREFIX = ".staging-"
+DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class CatalogueLibrary(BaseModel):
@@ -370,22 +381,71 @@ class LibraryStore:
         scheme = urlsplit(url).scheme.lower()
         if scheme not in self.protocols:
             raise LibraryError(f"{url!r} is not a {' or '.join(self.protocols)} URL")
+        # The catalogue's own URLs are trusted as they are; anything a client named
+        # -- now or when it first bound the name -- is vetted on every clone.
+        pinned = self._vet(url) if known is None else ()
 
-        commit = self._clone(name, url, ref)
+        commit = self._clone(name, url, ref, pinned)
         pin = LibraryPin(url=url, ref=ref, commit=commit)
         self._record(name, pin)
         return pin
 
-    def _clone(self, name: str, url: str, ref: str) -> str:
+    def _vet(self, url: str) -> tuple[str, ...]:
+        """Refuse ``url`` unless its host resolves only to public addresses, and
+        return the git config that holds the clone to exactly those addresses.
+
+        ``file`` has no host to vet; it is only ever allowed in tests.
+        """
+        parts = urlsplit(url)
+        scheme = parts.scheme.lower()
+        if scheme == "file":
+            return ()
+        try:
+            host, port = parts.hostname, parts.port
+        except ValueError:
+            host = port = None
+        if not host:
+            raise LibraryError(f"{url!r} does not name a host")
+        port = port or DEFAULT_PORTS.get(scheme, 443)
+        try:
+            # `install` runs off the loop (the route hands it to a thread), so the
+            # import's async lookup gets a loop of its own here.
+            addresses = asyncio.run(public_addresses(host, port))
+        except ImportRefusedError as error:
+            raise LibraryError(str(error)) from None
+        try:
+            ipaddress.ip_address(host)
+        except ValueError:
+            resolved = ",".join(
+                f"[{address}]" if ":" in address else address
+                for address in dict.fromkeys(addresses)
+            )
+            return ("-c", f"http.curloptResolve={host}:{port}:{resolved}")
+        # An address literal: there is no second lookup to pin.
+        return ()
+
+    def _clone(self, name: str, url: str, ref: str, pinned: Sequence[str] = ()) -> str:
         """Clone into a staging directory beside the checkouts, then move it into
         place under the commit it resolved to. Nothing half-cloned is ever at a
         path a render could read."""
         self.paths.libraries.mkdir(parents=True, exist_ok=True)
         staging = self.paths.libraries / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
         try:
-            self._git(
-                "clone", "--quiet", "--depth", "1", "--branch", ref, "--", url, str(staging / name)
-            )
+            try:
+                self._git(
+                    *pinned,
+                    "clone",
+                    "--quiet",
+                    "--depth",
+                    "1",
+                    "--branch",
+                    ref,
+                    "--",
+                    url,
+                    str(staging / name),
+                )
+            except LibraryFetchError as error:
+                raise LibraryFetchError(f"could not clone {ref!r} from {url}: {error}") from error
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
             destination = self.paths.libraries / name / commit
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -405,8 +465,17 @@ class LibraryStore:
         try:
             # A fixed argv with no shell; the URL and ref are validated above and
             # the URL follows `--`.
+            # No redirects: a vetted host must not hand the clone on to one that
+            # was not.
             completed = subprocess.run(
-                [self.git, "-c", "core.hooksPath=/dev/null", *args],
+                [
+                    self.git,
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    "-c",
+                    "http.followRedirects=false",
+                    *args,
+                ],
                 env=env,
                 capture_output=True,
                 text=True,
@@ -414,11 +483,16 @@ class LibraryStore:
                 timeout=self.timeout,
             )
         except subprocess.TimeoutExpired as error:
-            raise LibraryFetchError(f"git {args[0]} timed out after {self.timeout:g}s") from error
+            raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
         except OSError as error:
             raise LibraryFetchError(f"could not run {self.git!r}: {error}") from error
         if completed.returncode != 0:
-            raise LibraryFetchError(f"git {args[0]} failed: {completed.stderr.strip()}")
+            # git's stderr stays in the log: it describes what the fetch reached,
+            # or failed to, which is no business of the client's.
+            logger.warning(
+                "git failed", extra={"git_args": args, "git_stderr": completed.stderr.strip()}
+            )
+            raise LibraryFetchError("no such ref, or the repository could not be reached")
         return completed.stdout.strip()
 
     def _record(self, name: str, pin: LibraryPin) -> None:

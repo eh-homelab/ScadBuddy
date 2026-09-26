@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,7 @@ from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     CatalogueLibrary,
     LibraryError,
+    LibraryFetchError,
     LibraryNotFoundError,
     LibraryNotInstalledError,
     LibraryStore,
@@ -31,7 +32,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import make_library_upstream
+from tests.conftest import PUBLIC_ADDRESS, make_library_upstream
 
 pytestmark = pytest.mark.requires_git
 
@@ -257,12 +258,12 @@ def _hold_the_first_clone(
     clone = store._clone
     calls: list[str] = []
 
-    def slow_clone(name: str, url: str, ref: str) -> str:
+    def slow_clone(name: str, url: str, ref: str, pinned: Sequence[str] = ()) -> str:
         calls.append(name)
         if len(calls) == 1:
             started.set()
             assert release.wait(10)
-        return clone(name, url, ref)
+        return clone(name, url, ref, pinned)
 
     monkeypatch.setattr(store, "_clone", slow_clone)
     return started, release
@@ -359,6 +360,96 @@ def test_only_the_allowed_transports_are_cloned(
     with pytest.raises(LibraryError, match="https"):
         https_only.install("mylib", url=url, ref="v1")
     assert not (paths.models / LOCKFILE_NAME).exists()
+
+
+def _recording_git(store: LibraryStore, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
+    """Every git call the store makes, each failing as an unreachable fetch would."""
+    calls: list[tuple[str, ...]] = []
+
+    def git(*args: str) -> str:
+        calls.append(args)
+        raise LibraryFetchError("unreachable")
+
+    monkeypatch.setattr(store, "_git", git)
+    return calls
+
+
+@pytest.mark.parametrize(
+    "addresses", [["127.0.0.1"], ["10.1.2.3"], ["::1"], [PUBLIC_ADDRESS, "169.254.169.254"]]
+)
+def test_a_url_whose_host_is_not_public_is_refused_without_running_git(
+    paths: DataPaths,
+    history: ModelHistory,
+    fake_dns: dict[str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    addresses: list[str],
+) -> None:
+    fake_dns["git.internal.example"] = addresses
+    https_only = LibraryStore(paths, history, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryError, match="public"):
+        https_only.install("mylib", url="https://git.internal.example/o/r.git", ref="v1")
+
+    assert calls == []
+    assert not (paths.models / LOCKFILE_NAME).exists()
+
+
+@pytest.mark.usefixtures("fake_dns")
+def test_an_address_literal_that_is_not_public_is_refused(
+    paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    https_only = LibraryStore(paths, history, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryError, match="public"):
+        https_only.install("mylib", url="https://[::1]:8443/o/r.git", ref="v1")
+    assert calls == []
+
+
+@pytest.mark.usefixtures("fake_dns")
+def test_a_public_url_is_cloned_from_only_the_addresses_it_was_vetted_at(
+    paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    https_only = LibraryStore(paths, history, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryFetchError):
+        https_only.install("mylib", url="https://git.example/o/r.git", ref="v1")
+
+    (clone,) = calls
+    assert clone[:2] == ("-c", f"http.curloptResolve=git.example:443:{PUBLIC_ADDRESS}")
+    assert "clone" in clone
+
+
+def test_a_catalogue_url_is_trusted_as_it_is(
+    paths: DataPaths,
+    history: ModelHistory,
+    fake_dns: dict[str, list[str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_dns["git.internal.example"] = ["10.1.2.3"]
+    curated = LibraryStore(
+        paths,
+        history,
+        catalogue=(
+            CatalogueLibrary(
+                name="BOSL2",
+                url="https://git.internal.example/o/BOSL2.git",
+                ref="v1",
+                licence="BSD-2-Clause",
+                homepage="https://example.invalid/bosl2",
+            ),
+        ),
+    )
+    calls = _recording_git(curated, monkeypatch)
+
+    with pytest.raises(LibraryFetchError):
+        curated.install("BOSL2", url="https://GIT.internal.example/o/BOSL2/")
+
+    (clone,) = calls
+    assert "https://git.internal.example/o/BOSL2.git" in clone
+    assert not any(arg.startswith("http.curloptResolve") for arg in clone)
 
 
 @pytest.mark.parametrize("name", ["../escape", ".hidden", "a/b", ""])
