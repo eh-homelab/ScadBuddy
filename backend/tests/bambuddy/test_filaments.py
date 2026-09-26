@@ -31,6 +31,7 @@ from scadbuddy.bambuddy.filaments import (
     normalise_colour,
     queue_filaments,
     slice_filament_presets,
+    spool_preset_alternatives,
 )
 from scadbuddy.bambuddy.models import (
     PresetRef,
@@ -337,6 +338,67 @@ def test_a_preset_id_the_catalogue_does_not_hold_keeps_the_pipelines_own() -> No
     )
     assert presets_out[0] == PresetRef(source="cloud", id="GFA00")
     assert any("no slicer preset" in warning.message for warning in warnings)
+
+
+def test_a_spools_default_preset_for_another_nozzle_gives_way_to_its_own_that_fits() -> None:
+    """#161: spool 17's ``slicer_filament`` was its 0.4 preset, and a 0.2 pipeline was
+    sliced with it — 12 mm³/s through a 0.2 nozzle."""
+    built = options()
+    default = PresetRef(source="local", id="31")
+    fitting = PresetRef(source="local", id="60")
+    spool = next(row for row in built.spools if row.spool_id == 5)
+    built.spools[built.spools.index(spool)] = spool.model_copy(update={"slicer_filament": "31"})
+    presets_out, _, warnings = slice_filament_presets(
+        built,
+        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
+        pipeline_presets=[PresetRef(source="cloud", id="GFA00")],
+        resolve={"31": default, "60": fitting},
+        compatible={"60"},
+        alternatives={5: ["31", "60", "38"]},
+    )
+    assert presets_out[0] == fitting
+    assert warnings == []
+
+
+def test_a_spool_with_no_preset_for_the_pipelines_nozzle_keeps_the_pipelines_own() -> None:
+    built = options()
+    pipeline_preset = PresetRef(source="cloud", id="GFA00")
+    presets_out, _, warnings = slice_filament_presets(
+        built,
+        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=5)]),
+        pipeline_presets=[pipeline_preset],
+        resolve={"GFA05": PresetRef(source="cloud", id="GFA05")},
+        compatible={"GFA00"},
+        alternatives={5: []},
+    )
+    assert presets_out[0] == pipeline_preset
+    assert any("printer and nozzle" in warning.message for warning in warnings)
+
+
+@respx.mock
+async def test_per_nozzle_presets_are_read_only_for_a_spool_whose_default_does_not_fit(
+    bambuddy: BambuddyClient,
+) -> None:
+    built = options()
+    plan = FilamentPlan(
+        slots=[SlotChoice(slot_id=1, spool_id=5), SlotChoice(slot_id=2, spool_id=3)]
+    )
+    route = respx.get(f"{API}/inventory/spools/5/filament-presets").mock(
+        return_value=httpx.Response(
+            200,
+            json=[
+                {
+                    "printer_model": "H2C",
+                    "nozzle_diameter": "0.2",
+                    "slicer_filament": "60",
+                    "slicer_filament_name": "Frosty @H2C 0.2n",
+                }
+            ],
+        )
+    )
+    alternatives = await spool_preset_alternatives(bambuddy, built, plan, {"GFA00", "60"})
+    assert alternatives == {5: ["60"]}
+    assert route.call_count == 1
 
 
 # --- reading it all off a live-shaped Bambuddy --------------------------------
