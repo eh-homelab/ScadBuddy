@@ -256,6 +256,38 @@ def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
     assert "could not list for orphans" in caplog.text
 
 
+def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    for slug in ("gone", "unknown"):
+        (paths.outputs / slug / "deadbeef").mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    exists, is_dir = Path.exists, Path.is_dir
+
+    def stalled_exists(self: Path, **kwargs: bool) -> bool:
+        if self == paths.model_dir("unknown"):
+            raise OSError("ESTALE")
+        return exists(self, **kwargs)
+
+    def stalled_is_dir(self: Path, **kwargs: bool) -> bool:
+        if self == paths.model_revisions:
+            raise OSError("EIO")
+        return is_dir(self, **kwargs)
+
+    with (
+        patch.object(Path, "exists", stalled_exists),
+        patch.object(Path, "is_dir", stalled_is_dir),
+    ):
+        removed = catalogue.sweep_orphans()
+
+    assert removed == ["cache/schema/gone.json", "outputs/gone"]
+    assert (paths.outputs / "unknown").exists()
+    assert "could not check a model for orphans" in caplog.text
+    assert "could not list for orphans" in caplog.text
+
+
 def test_the_orphan_sweep_never_touches_a_live_model(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:

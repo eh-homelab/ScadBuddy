@@ -41,10 +41,18 @@ def _remove_tree(path: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError:
-        if path.exists() or path.is_symlink():
+        if _still_there(path):
             logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
             return False
     return True
+
+
+def _still_there(path: Path) -> bool:
+    """Whether ``path`` is still present; one that cannot even be checked counts as present."""
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return True
 
 
 class ModelNotFoundError(KeyError):
@@ -324,14 +332,15 @@ class Catalogue:
         model mid-creation must not lose anything. A live slug is never touched,
         so this is safe beside a running render.
 
-        Each root is listed on its own: one that cannot be read is logged and
-        skipped, and the others are still swept.
+        Each root and each slug is checked on its own: one that cannot be read
+        is logged and skipped -- a slug whose liveness is unknown is kept -- and
+        the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
         for root in (self.paths.outputs, self.paths.model_revisions, self.paths.schema_cache):
-            if not root.is_dir():
-                continue
             try:
+                if not root.is_dir():
+                    continue
                 for entry in root.iterdir():
                     if root != self.paths.schema_cache:
                         candidates.append((entry.name, entry))
@@ -341,7 +350,11 @@ class Catalogue:
                 logger.exception("could not list for orphans", extra={"path": str(root)})
         removed: list[str] = []
         for slug, path in sorted(candidates):
-            if self.paths.model_dir(slug).exists():
+            try:
+                if self.paths.model_dir(slug).exists():
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
