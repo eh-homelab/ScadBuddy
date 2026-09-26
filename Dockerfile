@@ -111,8 +111,49 @@ RUN groupadd --gid 10001 scadbuddy \
 # `fc-list` (the font dropdown in the customizer) answers immediately.
 RUN fc-cache --force --system-only
 
+# ── openscad-lsp: the editor's language server ────────────────────────────────
+# Completion, hover and go-to-definition in the source editor (#95), bridged to
+# the browser by backend/scadbuddy/library/lsp.py. Upstream publishes prebuilt
+# linux-gnu binaries for both architectures build-image.yml targets, so nothing
+# is compiled here. The checksums are pinned in this file rather than read off
+# the release, so a replaced asset fails the build instead of shipping; bump all
+# three ARGs together.
+#
+# Its own stage, off `base`, so xz-utils (to unpack the .tar.xz) never reaches
+# the runtime, and so `--version` below runs against the same glibc the runtime
+# has — a binary linked against a newer one fails HERE, not on the first editor.
+FROM base AS openscad-lsp
+
+ARG TARGETARCH
+ARG OPENSCAD_LSP_VERSION=2.0.1
+ARG OPENSCAD_LSP_SHA256_AMD64=e51b7f84180d93a65387d3bbd00bb47ea1953af27d637c3698800f1b671005ea
+ARG OPENSCAD_LSP_SHA256_ARM64=6e5f572bbbd193a5a1b7f538b4fea0ef5f082a9cafb3f8e978dd86905e3bfb9d
+
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /tmp/openscad-lsp
+# The checksum goes through a file, not `echo | sha256sum`, for the same DL4006
+# reason the version checks further down avoid pipes.
+RUN case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_AMD64" ;; \
+      arm64) triple=aarch64-unknown-linux-gnu; sha="$OPENSCAD_LSP_SHA256_ARM64" ;; \
+      *) echo "ERROR: openscad-lsp publishes no build for '${TARGETARCH}'." >&2; exit 1 ;; \
+    esac \
+    && curl --fail --silent --show-error --location --output openscad-lsp.tar.xz \
+         "https://github.com/Leathong/openscad-LSP/releases/download/v${OPENSCAD_LSP_VERSION}/openscad-lsp-${triple}.tar.xz" \
+    && printf '%s  openscad-lsp.tar.xz\n' "$sha" > openscad-lsp.sha256 \
+    && sha256sum --check --strict openscad-lsp.sha256 \
+    && tar -xJf openscad-lsp.tar.xz --strip-components=1 \
+    && install -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
+    && openscad-lsp --version
+
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
+
+COPY --from=openscad-lsp /usr/local/bin/openscad-lsp /usr/local/bin/openscad-lsp
 
 # `--version` goes to STDERR, not stdout — `$(openscad --version)` captures an
 # empty string, which is how a version check silently passes against nothing.

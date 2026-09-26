@@ -43,6 +43,8 @@ class AppState:
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``).
+    language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -65,6 +67,7 @@ def build_state(settings: Settings) -> AppState:
         ),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
+        language_servers=asyncio.Semaphore(config.lsp_sessions),
     )
 
 
