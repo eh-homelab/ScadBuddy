@@ -14,6 +14,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
+from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import SLUG_PATTERN
@@ -37,6 +38,7 @@ class AppState:
     outputs: OutputStore
     settings_store: SettingsStore
     fonts: FontService
+    libraries: LibraryStore
     queue: RenderQueue
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
@@ -63,6 +65,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
+        libraries=LibraryStore(paths, history),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
     )
@@ -125,6 +128,10 @@ def get_fonts(state: StateDep) -> FontService:
     return state.fonts
 
 
+def get_libraries(state: StateDep) -> LibraryStore:
+    return state.libraries
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
@@ -140,6 +147,7 @@ HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
+LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 

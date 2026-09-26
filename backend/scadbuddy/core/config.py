@@ -32,6 +32,11 @@ class Config:
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
     # Bounds every git call and the wait for the model repository's write lock.
     git_timeout: float = DEFAULT_GIT_TIMEOUT
+    # Per model, never per process (#93): the checkouts of the libraries ONE model
+    # declares, and so the whole of OPENSCADPATH. Empty here; whoever resolved a
+    # model's source sets it with `dataclasses.replace`, which carries it through
+    # every openscad call for that model -- schema, render and solids alike.
+    library_path: tuple[Path, ...] = ()
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
