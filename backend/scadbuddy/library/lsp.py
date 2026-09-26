@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import signal
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,8 @@ from typing import Any
 import anyio
 from starlette import status
 from starlette.websockets import WebSocket, WebSocketDisconnect, WebSocketState
+
+logger = logging.getLogger(__name__)
 
 _CONTENT_LENGTH = b"content-length"
 
@@ -158,6 +162,10 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
             if process.returncode is None:
                 process.kill()
             await process.wait()
+            # Anything but our own kill means it went on its own: say so, or a server
+            # that crashes on every session is invisible.
+            if process.returncode not in (0, -signal.SIGKILL):
+                logger.warning("openscad-lsp exited with status %d", process.returncode)
             if (
                 websocket.client_state == WebSocketState.CONNECTED
                 and websocket.application_state == WebSocketState.CONNECTED

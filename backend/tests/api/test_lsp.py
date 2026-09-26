@@ -61,6 +61,8 @@ while True:
     method = message.get("method")
     if method == "exit":
         raise SystemExit(0)
+    if method == "crash":
+        raise SystemExit(3)
     if method == "closeStdin":
         # Stops reading but keeps its stdout open: the next write to it breaks the pipe.
         os.close(0)
@@ -224,6 +226,18 @@ def test_a_server_that_stops_reading_closes_the_socket(
             session.receive_json()
 
     assert _wait_until(lambda: _gone(pid))
+
+
+def test_a_server_that_crashes_is_logged(
+    client: TestClient, model: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        session.send_json({"jsonrpc": "2.0", "method": "crash"})
+        with pytest.raises(WebSocketDisconnect):
+            session.receive_json()
+
+    assert "openscad-lsp exited with status 3" in caplog.text
 
 
 @pytest.mark.parametrize("frame", ["[1, 2]", '"text"', "null", "not json"])
