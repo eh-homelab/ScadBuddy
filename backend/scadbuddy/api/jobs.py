@@ -129,7 +129,9 @@ async def render_model(
         # `resolve_source` also hands back which revision that is, so the job can
         # be stamped without asking git a second time.
         source = await resolve_source(slug, requested, paths=paths, history=history)
-        schema = await cached_schema(source.scad, source.schema_cache, config=config)
+        schema = await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(config)
+        )
     except RevisionNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {body.version}"

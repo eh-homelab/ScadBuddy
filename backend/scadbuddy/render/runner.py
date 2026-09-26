@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import tempfile
 import time
 from collections import deque
@@ -104,13 +105,20 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
+    env = env_for(config.data_dir)
+    # Set or removed, never inherited: a model sees exactly the libraries it
+    # declares (#93), so one that forgot to declare BOSL2 fails here the same way
+    # it would on a fresh install, instead of working by accident.
+    env.pop("OPENSCADPATH", None)
+    if config.library_path:
+        env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
     process = await asyncio.create_subprocess_exec(
         config.openscad,
         *args,
         cwd=cwd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
-        env=env_for(config.data_dir),
+        env=env,
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     assert process.stdout is not None

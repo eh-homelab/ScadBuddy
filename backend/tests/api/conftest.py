@@ -41,6 +41,11 @@ log = os.environ.get("FAKE_OPENSCAD_LOG")
 if log:
     with open(log, "a", encoding="utf-8") as handle:
         handle.write(" ".join(args) + "\\n")
+# And what OPENSCADPATH it was given (#93).
+path_log = os.environ.get("FAKE_OPENSCAD_PATH_LOG")
+if path_log:
+    with open(path_log, "a", encoding="utf-8") as handle:
+        handle.write(os.environ.get("OPENSCADPATH", "") + "\\n")
 if "--version" in args:
     print("OpenSCAD version 2099.01.01", file=sys.stderr)  # the real one uses stderr too
     raise SystemExit(0)

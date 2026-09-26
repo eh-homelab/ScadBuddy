@@ -56,6 +56,12 @@ export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
 export type InstalledFamily = Schemas['InstalledFamily']
 
+/** #93 — third-party OpenSCAD libraries, pinned in the models repository's lockfile. */
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryPin = Schemas['LibraryPin']
+export type LibraryAdd = Schemas['LibraryAdd']
+export type ModelPatch = Schemas['ModelPatch']
+
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']
 export type ConnectionTest = Schemas['ConnectionTest']

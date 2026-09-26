@@ -1285,6 +1285,132 @@
         "title": "JobStatus",
         "type": "object"
       },
+      "LibraryAdd": {
+        "properties": {
+          "name": {
+            "description": "The directory `use <NAME/...>` names",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A tag or branch to pin; the catalogue's default when omitted",
+            "title": "Ref"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An https git URL; the catalogue's when omitted",
+            "title": "Url"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "LibraryAdd",
+        "type": "object"
+      },
+      "LibraryEntry": {
+        "description": "The catalogue and the lockfile, joined: what can be added, and what is.",
+        "properties": {
+          "curated": {
+            "title": "Curated",
+            "type": "boolean"
+          },
+          "homepage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Homepage"
+          },
+          "licence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Licence"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LibraryPin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "ref",
+          "curated"
+        ],
+        "title": "LibraryEntry",
+        "type": "object"
+      },
+      "LibraryPin": {
+        "description": "One entry of ``libraries.lock``: where it came from, what was asked for, what\nthat resolved to.",
+        "properties": {
+          "commit": {
+            "title": "Commit",
+            "type": "string"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "ref",
+          "commit"
+        ],
+        "title": "LibraryPin",
+        "type": "object"
+      },
       "LoadedAt": {
         "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.\n\nPurely a label. It is not an address: nothing here turns it into a tray number.",
         "properties": {
@@ -1333,6 +1459,20 @@
             ],
             "title": "Description"
           },
+          "libraries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Libraries"
+          },
           "name": {
             "anyOf": [
               {
@@ -1376,6 +1516,13 @@
           "has_thumbnail": {
             "title": "Has Thumbnail",
             "type": "boolean"
+          },
+          "libraries": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Libraries",
+            "type": "array"
           },
           "name": {
             "title": "Name",
@@ -4663,6 +4810,71 @@
         "summary": "Render job preview mesh",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/libraries": {
+      "get": {
+        "operationId": "list_libraries_api_v1_libraries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LibraryEntry"
+                  },
+                  "title": "Response List Libraries Api V1 Libraries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Libraries and their pins",
+        "tags": [
+          "libraries"
+        ]
+      },
+      "post": {
+        "description": "Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.",
+        "operationId": "add_library_api_v1_libraries_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryAdd"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add a library, or pin it to another ref",
+        "tags": [
+          "libraries"
         ]
       }
     },

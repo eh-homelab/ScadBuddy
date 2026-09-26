@@ -21,6 +21,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.libraries import (
+    declared_libraries,
+    model_search_path,
+    pins_at,
+    search_path,
+)
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
@@ -244,6 +250,13 @@ class ModelSource:
     scad: Path
     schema_cache: Path
     version: str | None
+    #: The checkouts of the libraries this revision declares, at the pins it goes
+    #: with (#93): its whole OPENSCADPATH.
+    library_path: tuple[Path, ...] = ()
+
+    def configure(self, config: Config) -> Config:
+        """``config`` for every openscad call made on this source."""
+        return replace(config, library_path=self.library_path)
 
 
 async def resolve_source(
@@ -274,6 +287,7 @@ async def resolve_source(
             scad=paths.model_source(slug),
             schema_cache=paths.model_schema_cache(slug),
             version=current,
+            library_path=model_search_path(paths, slug),
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
@@ -284,10 +298,14 @@ async def resolve_source(
         await asyncio.to_thread(_touch, directory)
     else:
         await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
+    # The lockfile as it was at that revision, not as it is now: an old revision
+    # renders against the library versions it was written with.
+    pins = await asyncio.to_thread(pins_at, history, requested)
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
+        library_path=search_path(paths, declared_libraries(directory), pins),
     )
 
 
@@ -368,6 +386,7 @@ async def render_job(
     version = source.version
     if version is None:
         version = await asyncio.to_thread(source_version, scad.parent)
+    config = source.configure(config)
     schema = await cached_schema(scad, source.schema_cache, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)

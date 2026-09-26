@@ -62,12 +62,16 @@ class ModelMeta(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     source: str | None = None
+    # The third-party libraries (#93) this model renders with: the only ones on
+    # its OPENSCADPATH, each at the commit `libraries.lock` pins.
+    libraries: list[str] = Field(default_factory=list)
 
 
 class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    libraries: list[str] | None = None
 
 
 class ModelRecord(ModelMeta):
@@ -220,6 +224,9 @@ class Catalogue:
         raw = self.read_raw_meta(slug)
         raw.update(patch.model_dump(exclude_none=True))
         self.write_raw_meta(slug, raw)
+        if patch.libraries is not None:
+            # Derived with the old OPENSCADPATH, and keyed only by the source hash.
+            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
         self._commit(f"Update {slug} metadata", slug)
         return self.record(slug)
 

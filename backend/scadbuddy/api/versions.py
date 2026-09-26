@@ -26,6 +26,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     RevisionRange,
 )
+from scadbuddy.library.libraries import restore_pins
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
@@ -187,7 +188,9 @@ async def get_version_schema(
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     try:
-        return await cached_schema(source.scad, source.schema_cache, config=config)
+        return await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(config)
+        )
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
@@ -234,18 +237,26 @@ def get_version_diff(
     summary="Restore a revision as a new commit",
 )
 def restore_version(
-    slug: SlugPath, commit: CommitPath, catalogue: CatalogueDep, history: HistoryDep
+    slug: SlugPath,
+    commit: CommitPath,
+    catalogue: CatalogueDep,
+    history: HistoryDep,
+    paths: PathsDep,
 ) -> ModelVersion:
     require_model_exists(catalogue, slug)
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
-        created = history.restore(slug, resolved)
+        # The pins the revision rendered with come back in the same commit (#93).
+        history.restore(slug, resolved, also=lambda at: restore_pins(history, paths, slug, at))
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    # The model's own latest revision, not the commit the restore made: when only
+    # the pins differed, that commit touches `libraries.lock` alone and the model
+    # stays at the revision it was restored to.
     revisions = history.log(slug, limit=1)
-    if not revisions or revisions[0].commit != created:  # pragma: no cover - defensive
+    if not revisions:  # pragma: no cover - defensive
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, "the restore left no revision")
     return _version(revisions[0], slug, current=True)
