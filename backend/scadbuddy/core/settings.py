@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
+    # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
+    # preview draws while no printer has been chosen (#81).
+    default_plate: str | None = None
 
     log_level: str = Field(default="INFO")
 

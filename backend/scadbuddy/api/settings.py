@@ -32,6 +32,7 @@ class SettingsView(BaseModel):
     process_preset: PresetRef | None = None
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
+    default_plate: str | None = None
 
 
 class PrintOptionsView(BaseModel):
@@ -110,6 +111,7 @@ def _view(settings: StoredSettings) -> SettingsView:
         process_preset=settings.process_preset,
         filament_presets=settings.filament_presets,
         bed_type=settings.bed_type,
+        default_plate=settings.default_plate,
     )
 
 

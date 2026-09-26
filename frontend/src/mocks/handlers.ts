@@ -15,6 +15,8 @@ import type {
   PipelineChoices,
   PipelineCreate,
   PipelineView,
+  Plate,
+  PlateFit,
   PresetOptions,
   PresetRef,
   PrintProgress,
@@ -156,6 +158,15 @@ function bboxOf(params: Record<string, ParamValue>): BoundingBox {
     round(textSize * 1.8 + padding * 2),
     round(thickness + depth),
   )
+}
+
+function plateFor(model: string | null): Plate | undefined {
+  if (!model) return undefined
+  const key = model.toLowerCase()
+  return Object.entries(fixtures.plates).find(
+    ([code, plate]) =>
+      code.toLowerCase() === key || plate.name.toLowerCase() === key || plate.model?.toLowerCase() === key,
+  )?.[1]
 }
 
 function round(value: number): number {
@@ -986,6 +997,45 @@ export const handlers = [
     await delay(120)
     return HttpResponse.json(state.settings)
   }),
+
+  // #81 — the server resolves Bambuddy's code or the profile name, else the default.
+  http.get(`${base}/plate`, ({ request }) =>
+    HttpResponse.json(
+      plateFor(new URL(request.url).searchParams.get('model')) ??
+        plateFor(state.settings.default_plate ?? null) ??
+        fixtures.defaultPlate,
+    ),
+  ),
+
+  // The axes only: the real route also runs the send's placement, which a test that
+  // needs a prime-tower refusal overrides this handler to answer with.
+  http.get(`${base}/plate/fit`, ({ request }) => {
+    const search = new URL(request.url).searchParams
+    const plate =
+      plateFor(search.get('model')) ??
+      plateFor(state.settings.default_plate ?? null) ??
+      fixtures.defaultPlate
+    const { usable } = plate
+    const limits = [
+      ['X', Number(search.get('x')), usable.max_x - usable.min_x],
+      ['Y', Number(search.get('y')), usable.max_y - usable.min_y],
+      ['Z', Number(search.get('z')), plate.height],
+    ] as const
+    return HttpResponse.json({
+      plate,
+      overshoots: limits
+        .filter(([, size, limit]) => size > limit)
+        .map(([axis, size, limit]) => ({ axis, size, limit })),
+      problem: null,
+    } satisfies PlateFit)
+  }),
+
+  http.get(`${base}/plates`, () =>
+    HttpResponse.json({
+      default: plateFor(state.settings.default_plate ?? null) ?? fixtures.defaultPlate,
+      plates: Object.values(fixtures.plates),
+    }),
+  ),
 
   // Takes no body: the server tests what it has stored.
   http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),

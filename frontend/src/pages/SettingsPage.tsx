@@ -23,6 +23,7 @@ export function SettingsPage() {
   const [folderId, setFolderId] = useState('')
   const [pipelineId, setPipelineId] = useState('')
   const [printerId, setPrinterId] = useState('')
+  const [defaultPlate, setDefaultPlate] = useState('')
 
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
@@ -34,6 +35,9 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const connected = Boolean(settings?.bambuddy_url)
+  // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
+  const platesState = useAsync(() => api.listPlates(), [])
+  const plateNames = (platesState.data?.plates ?? []).map((plate) => plate.name)
 
   // The pickers need a live Bambuddy, so they are only fetched once one is configured.
   const targetsState = useAsync(
@@ -48,6 +52,7 @@ export function SettingsPage() {
     setFolderId(idValue(settings.library_folder_id))
     setPipelineId(idValue(settings.pipeline_id))
     setPrinterId(idValue(settings.printer_id))
+    setDefaultPlate(settings.default_plate ?? '')
   }, [settings])
 
   function draft(): SettingsUpdate {
@@ -57,6 +62,7 @@ export function SettingsPage() {
       library_folder_id: asId(folderId),
       pipeline_id: asId(pipelineId),
       printer_id: asId(printerId),
+      default_plate: defaultPlate || null,
     }
     // Omitted entirely, so an unchanged field leaves the stored key alone.
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
@@ -243,6 +249,38 @@ export function SettingsPage() {
                   </option>
                 ))}
               </select>
+            </div>
+          </div>
+        </section>
+
+        <section className="mt-4 rounded-[6px] border border-line bg-surface">
+          <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Preview</h2>
+          <div className="space-y-4 p-4">
+            <div>
+              <label htmlFor="default-plate" className="block text-[13px]">
+                Default plate
+              </label>
+              <select
+                id="default-plate"
+                value={defaultPlate}
+                onChange={(event) => setDefaultPlate(event.target.value)}
+                className="sb-field mt-1.5 cursor-pointer"
+              >
+                <option value="">256 × 256 mm</option>
+                {/* A value set through SCADBUDDY_DEFAULT_PLATE may be a code ("A1M"). */}
+                {defaultPlate && !plateNames.includes(defaultPlate) && (
+                  <option value={defaultPlate}>{defaultPlate}</option>
+                )}
+                {(platesState.data?.plates ?? []).map((plate) => (
+                  <option key={plate.name} value={plate.name}>
+                    {plate.name} ({plate.size[0]} × {plate.size[1]} mm)
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1.5 text-[12px] text-muted">
+                The plate the customizer draws and checks the model against until a printer
+                is chosen in the print picker.
+              </p>
             </div>
           </div>
         </section>

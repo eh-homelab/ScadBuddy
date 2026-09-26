@@ -77,9 +77,11 @@ interface Props {
   output: Output | undefined
   onClose: () => void
   onRan: (result: PrintRunResult) => void
+  /** #81 — the model of the printer in view, so the preview can draw its plate. */
+  onPrinterModel?: (model: string | null) => void
 }
 
-export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
+export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
   const [choices, setChoices] = useState<PipelineChoices | null>(null)
   // Keyed by pipeline id, and holding the whole row: a pipeline Bambuddy could not judge
   // arrives with `error` set and no `report`, which is neither ready nor blocked.
@@ -242,6 +244,20 @@ export function PrintPicker({ open, slug, output, onClose, onRan }: Props) {
   )
   const derivedPrinterId = asksForPrinter ? printerId : (current?.printer_ids?.[0] ?? null)
   const verdict: Verdict | undefined = report ? verdictFor(report, derivedPrinterId) : undefined
+
+  /**
+   * #81 — the chosen printer's model, else the class a class-targeted pipeline names
+   * (every printer in it shares the plate). Reported only once a pipeline is in view, so
+   * the panel loading does not snap the preview back to the default plate.
+   */
+  const printerModel = current
+    ? ((choices?.printers ?? []).find((printer) => printer.id === derivedPrinterId)?.model ??
+      current.target_model_class ??
+      null)
+    : undefined
+  useEffect(() => {
+    if (printerModel !== undefined) onPrinterModel?.(printerModel)
+  }, [printerModel, onPrinterModel])
 
   /**
    * #87 — the inventory, read once a pipeline and (for a class target) a printer are

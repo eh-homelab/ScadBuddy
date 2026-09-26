@@ -19,6 +19,9 @@ import type {
   PipelineCreate,
   PipelineDefault,
   PipelineView,
+  Plate,
+  PlateCatalogue,
+  PlateFit,
   PresetOptions,
   PresetRef,
   PrintProgress,
@@ -331,6 +334,28 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),
+
+  /** #81 — an absent or unknown model answers with the configured default plate. */
+  getPlate: (model: string | null) =>
+    request<Plate>(model ? `/plate?${new URLSearchParams({ model })}` : '/plate'),
+
+  /**
+   * #81 — whether a model of `size` can be sent to `model`'s printer, judged by the same
+   * placement the send runs. `colours` above one needs a prime tower, as it does there.
+   */
+  getPlateFit: (model: string | null, size: number[], colours: number) => {
+    const [x = 0, y = 0, z = 0] = size
+    const search = new URLSearchParams({
+      x: String(x),
+      y: String(y),
+      z: String(z),
+      colours: String(Math.max(colours, 1)),
+    })
+    if (model) search.set('model', model)
+    return request<PlateFit>(`/plate/fit?${search}`)
+  },
+
+  listPlates: () => request<PlateCatalogue>('/plates'),
 
   getSettings: () => request<Settings>('/settings'),
 

@@ -100,6 +100,21 @@ describe('SettingsPage', () => {
     expect(screen.getByText(/Saved at/)).toBeInTheDocument()
   })
 
+  it('saves the plate the preview falls back to (#81)', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const select = screen.getByLabelText('Default plate')
+    await waitFor(() => expect(screen.getByRole('option', { name: /A1 mini/ })).toBeInTheDocument())
+    await user.selectOptions(select, 'A1 mini')
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
+    expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
+    put.mockRestore()
+  })
+
   it('registers the Bambuddy sidebar entry', async () => {
     const { user } = renderPage(<SettingsPage />)
     await seeded()
