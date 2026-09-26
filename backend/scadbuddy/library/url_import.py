@@ -210,7 +210,8 @@ class Resolver(Protocol):
 
 class MakerWorldResolver:
     def handles(self, url: httpx.URL) -> bool:
-        return url.host == "makerworld.com" or url.host.endswith(".makerworld.com")
+        host = url.host.rstrip(".")  # a fully qualified "makerworld.com." is the same host
+        return host == "makerworld.com" or host.endswith(".makerworld.com")
 
     async def resolve(
         self, url: httpx.URL, client: httpx.AsyncClient, *, limit: int

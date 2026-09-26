@@ -504,6 +504,7 @@ async def test_a_name_that_rebinds_after_the_first_check_is_refused_at_connect(
     [
         "https://makerworld.com/en/models/1398039-parametric-customizable-keychain-openscad",
         "https://www.makerworld.com/models/1398039",
+        "https://makerworld.com./models/1398039",
     ],
 )
 async def test_a_makerworld_model_page_is_refused_with_the_way_round_it(url: str) -> None:
