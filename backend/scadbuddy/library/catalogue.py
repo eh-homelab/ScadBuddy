@@ -80,7 +80,7 @@ class ModelMeta(BaseModel):
     tags: list[str] = Field(default_factory=list)
     source: str | None = None
     #: Where the model was imported from (#153), for the link back; None for anything
-    #: uploaded, pasted or seeded. Not in `ModelPatch`: it records a fact, not a choice.
+    #: uploaded, pasted or built in. Not in `ModelPatch`: it records a fact, not a choice.
     origin_url: str | None = None
 
 
