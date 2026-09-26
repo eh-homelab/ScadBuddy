@@ -7,6 +7,72 @@ image built on `openscad/openscad:dev` with a Python backend and a React
 frontend layered on. The design and the measured OpenSCAD behaviour it rests
 on are in [`docs/superpowers/specs/2026-09-22-scadbuddy-design.md`](docs/superpowers/specs/2026-09-22-scadbuddy-design.md).
 
+It uses the same parameter syntax as MakerWorld's Parametric Model Maker, so a
+`.scad` file that works there works here unchanged. Its output is a Bambu-style
+3MF with one object per colour, each assigned to its own extruder, so the colours
+are mapped to filaments without any painting in the slicer.
+
+![The customizer rendering the bundled name keychain](docs/images/customizer.png)
+
+**The [user guide](docs/user-guide.md)** covers the parameter syntax, the
+multi-colour rules, connecting Bambuddy and each feature.
+
+## Features
+
+- **MakerWorld-parity customizer**: tabs from `/* [Group] */`, sliders, dropdowns,
+  toggles, text limits, and `// color` / `// font` pickers.
+- **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
+  change and shows per-colour parts and the bounding box.
+- **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
+  plate cover images and a layout sized for the target printer's plate.
+- **Send to Bambuddy**: upload to a library folder, or slice and queue it.
+- **Print picker**: run one of Bambuddy's slicer pipelines, or create a new one. It
+  shows eligibility per pipeline, and lets you set copies, a project, filaments per
+  colour from spool inventory, and print options.
+- **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
+  demand.
+- **Paste source / upload**: add models from a `.scad` file or pasted source,
+  parse-checked by OpenSCAD before they are saved; edit the source in the browser.
+- **History and versions**: every output keeps its parameters. Every model change is
+  a git commit, so revisions can be diffed, customized or restored.
+- **Delete**: remove a model and its outputs; the source stays in the git history.
+- **Inside Bambuddy**: one click adds ScadBuddy to Bambuddy's sidebar as an External
+  Link that opens inside Bambuddy.
+
+| | |
+|---|---|
+| ![Catalogue](docs/images/catalogue.png) | ![Print picker](docs/images/print-picker.png) |
+
+## Running it
+
+```bash
+docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
+  ghcr.io/eh-homelab/scadbuddy:main
+```
+
+Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
+[Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
+**Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
+for the project picker).
+
+- **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
+  secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
+  `main` (latest `main`), `sha-<short>`, and `X.Y.Z` / `X.Y` for releases.
+- **LAN only.** ScadBuddy has **no authentication**. Anyone who can reach it can
+  add, edit and delete models, and send prints using the stored Bambuddy key.
+  Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
+  expose it to the internet.
+- **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
+  outputs, settings, downloaded fonts and caches. Back up the volume.
+- **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
+  `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
+  for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
+  (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
+  `SCADBUDDY_CHECK_CONCURRENCY` (1). Each concurrent render or check is its own
+  `openscad` process, so size CPU and memory for their sum.
+- `GET /healthz` reports the OpenSCAD version, whether the data directory is
+  writable, and the build revision.
+
 ## Deploying
 
 ScadBuddy runs on the homelab cluster from
