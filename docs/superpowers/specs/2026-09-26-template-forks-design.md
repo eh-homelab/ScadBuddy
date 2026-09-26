@@ -1,4 +1,4 @@
-# Templates and forks
+# Templates and duplicates
 
 Status: draft, 2026-09-26
 
@@ -7,151 +7,169 @@ Status: draft, 2026-09-26
 Bundled models are *seeded*: `Catalogue.seed` copies each one into `data/models/`
 once, if its slug is absent, and from then on it is an ordinary user model. So:
 
-- a user edit to a seeded model *is* an edit to "the template" — there is no
-  pristine original to start another copy from;
-- a newer image never reaches an existing install (copy-if-absent), so template
-  fixes are stranded;
-- there is no way to say "this model of mine started as that one".
+- a user edit to a seeded model *is* an edit to the original — there is no
+  pristine copy to start another one from;
+- a newer image never reaches an existing install (copy-if-absent), so fixes to
+  bundled models are stranded;
+- there is no way to say "this model started as that one", nor to take that
+  one's later improvements.
 
 ## 2. The model
 
-Two tiers:
+Everything in the library is a **template** — something you customize, print, or
+duplicate. A template has one of two origins:
 
-- **Templates** — read-only. The image's bundled models (`/app/models`), mirrored
-  into the data repository on every boot. Later, other sources (a git URL) can
-  feed the same tier.
-- **Models** — the user's own, as today. A model may be a **fork** of a template:
-  a copy that records where it came from and can take the template's later
-  changes.
+| Origin | Comes from | Editable | Deletable | Duplicable |
+|---|---|---|---|---|
+| **Built-in** | the image (`/app/models`) | no | no | yes |
+| **Mine** | upload, paste, or duplicate | yes | yes | yes |
 
-Customizing a template's *parameters* is not a fork. Rendering a template
-directly already produces an output stamped with `(slug, commit, params)`; a fork
-is only needed to change the `.scad` source.
+**Duplicating** any template makes a new *mine* template that records its
+**upstream** — the template it was copied from, and the upstream revision it
+currently includes. When the upstream changes, the duplicate offers to take the
+changes (§7). The upstream may be built-in or mine; a duplicate of a duplicate
+tracks its immediate parent.
 
-## 3. Why not a git branch per fork
+Customizing *parameters* never needs a duplicate: rendering any template, built-in
+included, produces an output stamped with `(template, commit, params)`, as today.
+A duplicate is only needed to change a built-in's source, or to branch a variant
+of your own.
 
-Git is the right store for fork lineage, but a branch is the wrong unit:
+## 3. Why not a git branch per duplicate
 
-- a repository has one working tree, and the server renders many models at once,
-  so every fork would need its own `git worktree` or an export per render;
-- listing the catalogue would mean walking branches instead of directories;
+Git is the right store for lineage, but a branch is the wrong unit:
+
+- a repository has one working tree, and the server renders many templates at
+  once, so every duplicate would need its own `git worktree` or an export per
+  render;
+- listing the library would mean walking branches instead of directories;
 - the only thing a branch buys here is a known **merge base**, and that is one
   commit id we can record ourselves.
 
-So a fork is a directory, like every other model, plus a pointer to the template
-commit it was taken from. The three-way merge then works exactly as it would
+So a duplicate is a directory, like every other template, plus a pointer to the
+upstream commit it includes. The three-way merge then works exactly as it would
 between branches.
 
-## 4. Storage
+## 4. Storage and identity
 
-One repository, as today (§4.3 of the main spec). Templates live in a subtree the
-catalogue cannot mistake for a model — slugs are `[a-z0-9-]`, so `_templates`
-cannot collide, and `list_models` only takes directories with a `model.scad` at
-their top:
+One repository, as today (§4.3 of the main spec):
 
 ```
-data/models/                          the git repository
-data/models/<slug>/                   user models, forks included (unchanged)
-data/models/_templates/<slug>/        templates, mirrored from the image
+data/models/                     the git repository
+data/models/<slug>/              mine (uploads, pastes, duplicates) — unchanged
+data/models/_builtin/<slug>/     built-ins, mirrored from the image
 ```
 
-A fork's `model.json` gains:
+`list_models` only takes directories with a `model.scad` at their top, so
+`_builtin/` is never mistaken for a template of mine; slugs are `[a-z0-9-]`, so it
+cannot collide either.
+
+A template's id is `<slug>` for mine and `builtin:<slug>` for a built-in. `:` is
+not a slug character, so the two namespaces cannot collide, and every existing id
+(outputs, `model_version` stamps, "Edit in ScadBuddy" links) keeps meaning what it
+means now. Every route that takes a slug accepts either form; write routes refuse
+`builtin:` with 403.
+
+A duplicate's `model.json` gains:
 
 ```json
-"forked_from": {
-  "template": "name-keychain",
-  "base": "<commit>",          // the template revision this fork currently includes
-  "path": "_templates/name-keychain",
-  "dismissed": "<commit>|null" // a template revision the user chose not to take
+"upstream": {
+  "id": "builtin:name-keychain",
+  "path": "_builtin/name-keychain",
+  "base": "<commit>",          // the upstream revision this template currently includes
+  "dismissed": "<commit>|null" // an upstream revision the user chose not to take
 }
 ```
 
-`path` is stored rather than derived so migrated models (§8) can point their
-base at a commit where the source lived somewhere else.
+`path` is stored, not derived, so a merge base can name a commit where the source
+lived somewhere else (the migration in §8 relies on this).
 
-## 5. Template sync (replaces `seed`)
+## 5. Built-in sync (replaces `seed`)
 
 On boot, after `ensure_repo`:
 
-1. Mirror every bundled model into `_templates/<slug>/`, overwriting — the image
-   is the source of truth for a template. Templates no longer in the image are
+1. Mirror every bundled model into `_builtin/<slug>/`, overwriting — the image is
+   the source of truth for a built-in. Built-ins no longer in the image are
    removed from the mirror.
-2. If anything changed, commit once: `Sync templates from the image`.
+2. If anything changed, commit once: `Sync built-in templates from the image`.
 
-Templates are never written any other way; the API has no write route for them.
-Git history of `_templates/` is therefore the template's version history, and
-old bases stay resolvable forever.
+Nothing else ever writes `_builtin/`, so its git history is each built-in's
+version history and old bases stay resolvable for good.
 
-A template removed from the image leaves its forks working; they just have no
-upstream (`GET` reports `upstream: "gone"`).
+## 6. Upload and duplicate
 
-## 6. Forking
+**Upload / paste** — unchanged: `POST /models` creates a template of mine with no
+upstream.
 
-`POST /templates/{slug}/fork` with `{name}` (slug derived as for create):
+**Duplicate** — `POST /models/{id}/duplicate` with `{name}` (slug derived as for
+create):
 
-- copy `_templates/<slug>/` to `<new-slug>/`, set `forked_from` with
-  `base = last_commit("_templates/<slug>")`;
-- one commit: `Fork <new-slug> from template <slug>`.
+- copy the template's directory to `<new-slug>/`, set `upstream` with
+  `base = last_commit(<path>)`;
+- one commit: `Duplicate <id> as <new-slug>`.
 
-UI: the library shows templates and my models as two sections. Customizing a
-template renders it directly. Opening its source editor offers **Make my copy**
-instead of an editable buffer — that is the fork.
+UI: the library shows built-in and mine together, built-ins badged. A built-in's
+source editor is read-only with a **Duplicate to edit** action; mine are edited in
+place as today. Every template's menu has **Duplicate**.
 
-## 7. Taking template updates
+## 7. Taking upstream updates
 
-A fork has an **update available** when the template's current revision differs
-from both `base` and `dismissed`. Listing computes this in the same single
-history walk as `last_commits()`, extended to key `_templates/<slug>/…` paths by
-their second component (today it keys by the first, which would fold every
-template into one `_templates` entry).
+A duplicate has an **update available** when its upstream's current revision
+differs from both `base` and `dismissed`. The library computes this in the same
+single history walk as `last_commits()`, extended to key `_builtin/<slug>/…` paths
+by their second component (today it keys by the first, which would fold every
+built-in into one `_builtin` entry).
 
 `GET /models/{slug}/upstream` returns the state and, when an update exists, a
 merge preview:
 
-- `ours` — the fork's `model.scad`
+- `ours` — this template's `model.scad`
 - `base` — `git show <base>:<path>/model.scad`
-- `theirs` — the template's current `model.scad`
+- `theirs` — the upstream's current `model.scad`
 - result of `git merge-file -p --diff3 ours base theirs`: clean, or with
   conflict markers
 
 `POST /models/{slug}/upstream/merge`:
 
-- **clean** — write the merged source, set `base` to the template's revision,
-  clear `dismissed`; one commit: `Merge template <t> into <slug>`.
+- **clean** — write the merged source, set `base` to the upstream's revision,
+  clear `dismissed`; one commit: `Merge <upstream id> into <slug>`.
 - **conflicted** — refuse with 409 and the marked-up source. The UI opens it in
   the existing Monaco editor; saving via `PUT /models/{slug}/source` with
   `?merge_base=<commit>` writes the resolution *and* advances `base` in the same
   commit. The source is parse-checked as on any edit, so a leftover marker cannot
   be saved.
 
-`POST /models/{slug}/upstream/dismiss` sets `dismissed` to the template's current
-revision; the badge returns only when the template moves again.
+`POST /models/{slug}/upstream/dismiss` sets `dismissed` to the upstream's current
+revision; the badge returns only when the upstream moves again.
 
-Only `model.scad` is merged. Other files in the template (included `.scad`,
-README, thumbnail) are taken from the template when the fork has not changed
-them since `base`, and otherwise kept as the fork's with the conflict listed.
-`model.json` metadata is always the fork's. The thumbnail regenerates on the next
-render as today.
+Only `model.scad` is merged. Other files (included `.scad`, README, thumbnail)
+are taken from the upstream when this template has not changed them since
+`base`, and otherwise kept with the conflict listed. `model.json` metadata is
+always this template's own. The thumbnail regenerates on the next render.
+
+**Upstream gone.** A built-in dropped from the image, or a template of mine that
+is deleted, leaves its duplicates working; they report `upstream: "gone"` and
+offer **Detach**, which clears `upstream`. Deleting a template of mine that has
+duplicates says how many first.
 
 ## 8. Migration of existing installs
 
-Existing seeded models are user models whose history begins at a
+Existing seeded models are templates of mine whose history begins at a
 `Seed … from the image` commit. On the first boot with this feature:
 
-- the template sync (§5) runs, creating `_templates/`;
-- every model whose slug matches a template and has no `forked_from` becomes a
-  fork of it, with `base` = its own seed commit and `path` = `<slug>`. Its
-  original seeded source is the true merge base, so an unedited model merges
-  cleanly to the new template and an edited one keeps its edits;
-- one commit: `Link seeded models to their templates`.
+- the built-in sync (§5) runs, creating `_builtin/`;
+- every template of mine whose slug matches a built-in and has no `upstream`
+  becomes a duplicate of it, with `base` = its own seed commit and
+  `path` = `<slug>`. The originally seeded source is the true merge base, so an
+  unedited one merges cleanly to the current built-in and an edited one keeps its
+  edits;
+- one commit: `Link seeded templates to their built-ins`.
 
-Slugs, outputs, `model_version` stamps and "Edit in ScadBuddy" links are
-unchanged: the user's model keeps its slug, and templates are addressed under
-`/templates/{slug}`, a separate namespace.
+Nothing is renamed, so outputs, `model_version` stamps and deep links are
+untouched.
 
 ## 9. Out of scope
 
-- Templates from external git repositories (a later source for the same tier;
-  that one *may* be a clone plus branch, behind the same `forked_from` field).
-- Publishing a user model as a template.
-- Forking a fork (a fork's upstream is always a template).
+- Built-ins from external git repositories (a later source for the same origin;
+  that one *may* be a clone plus branch, behind the same `upstream` field).
+- Pushing a duplicate's changes back to its upstream.
