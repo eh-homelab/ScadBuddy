@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.render.jobs import Job, JobStore
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
@@ -196,6 +197,133 @@ def test_a_stale_tombstone_is_swept_at_startup(app: FastAPI, paths: DataPaths) -
 
     with TestClient(app):
         assert list(paths.tombstones.iterdir()) == []
+
+
+def test_an_orphaned_output_is_swept_at_startup(app: FastAPI, paths: DataPaths) -> None:
+    orphan = paths.outputs / "gone" / "deadbeef"
+    orphan.mkdir(parents=True)
+    (orphan / "model.3mf").write_bytes(b"3mf")
+
+    with TestClient(app):
+        assert list(paths.outputs.iterdir()) == []
+
+
+def test_an_orphaned_schema_cache_and_revision_are_swept_at_startup(
+    app: FastAPI, paths: DataPaths
+) -> None:
+    # What a source PUT that lost a race with the delete leaves behind (#152).
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    paths.model_revision_dir("gone", "0" * 40).mkdir(parents=True)
+
+    with TestClient(app):
+        assert not paths.model_schema_cache("gone").exists()
+        assert list(paths.model_revisions.iterdir()) == []
+
+
+def test_a_delete_sweeps_other_models_orphans(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    orphan = paths.outputs / "gone" / "deadbeef"
+    orphan.mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+
+    assert not (paths.outputs / "gone").exists()
+    assert not paths.model_schema_cache("gone").exists()
+
+
+def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    iterdir = Path.iterdir
+
+    def stalled(self: Path) -> Iterator[Path]:
+        if self == paths.outputs:
+            raise OSError("EIO")
+        return iterdir(self)
+
+    with patch.object(Path, "iterdir", stalled):
+        removed = catalogue.sweep_orphans()
+
+    assert removed == ["cache/schema/gone.json"]
+    assert "could not list for orphans" in caplog.text
+
+
+def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    for slug in ("gone", "unknown"):
+        (paths.outputs / slug / "deadbeef").mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    exists, is_dir = Path.exists, Path.is_dir
+
+    def stalled_exists(self: Path, **kwargs: bool) -> bool:
+        if self == paths.model_dir("unknown"):
+            raise OSError("ESTALE")
+        return exists(self, **kwargs)
+
+    def stalled_is_dir(self: Path, **kwargs: bool) -> bool:
+        if self == paths.model_revisions:
+            raise OSError("EIO")
+        return is_dir(self, **kwargs)
+
+    with (
+        patch.object(Path, "exists", stalled_exists),
+        patch.object(Path, "is_dir", stalled_is_dir),
+    ):
+        removed = catalogue.sweep_orphans()
+
+    assert removed == ["cache/schema/gone.json", "outputs/gone"]
+    assert (paths.outputs / "unknown").exists()
+    assert "could not check a model for orphans" in caplog.text
+    assert "could not list for orphans" in caplog.text
+
+
+def test_a_new_model_does_not_inherit_a_gone_models_leftovers(
+    client: TestClient, paths: DataPaths
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    # What a delete whose sweep failed leaves behind for the next model of the name.
+    (paths.outputs / "reused" / "deadbeef").mkdir(parents=True)
+    paths.model_revision_dir("reused", "0" * 40).mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("reused").write_text("{}\n", encoding="utf-8")
+
+    catalogue.create("reused", "cube(1);\n", ModelMeta(name="Reused"))
+
+    assert not (paths.outputs / "reused").exists()
+    assert not (paths.model_revisions / "reused").exists()
+    assert not paths.model_schema_cache("reused").exists()
+
+
+def test_the_orphan_sweep_never_touches_a_live_model(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    # A model mid-creation: its directory exists, `model.scad` not yet.
+    creating = "creating"
+    paths.model_dir(creating).mkdir()
+    derived: list[Path] = []
+    for slug in (model, creating):
+        output = paths.output_dir(slug, "deadbeef")
+        output.mkdir(parents=True)
+        export = paths.model_revision_dir(slug, "0" * 40)
+        export.mkdir(parents=True)
+        paths.schema_cache.mkdir(parents=True, exist_ok=True)
+        paths.model_schema_cache(slug).write_text("{}\n", encoding="utf-8")
+        derived += [output, export, paths.model_schema_cache(slug)]
+
+    assert catalogue.sweep_orphans() == []
+    assert all(path.exists() for path in derived)
 
 
 def test_a_failed_startup_sweep_does_not_stop_the_boot(

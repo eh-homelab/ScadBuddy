@@ -30,8 +30,9 @@ def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
 def _remove_tree(path: Path) -> bool:
     """``rmtree`` that logs a real failure rather than raising or hiding it.
 
-    Concurrent deletes and sweeps can race for the same tombstone, so anything
-    vanishing underneath this one counts as removed, not as a failure.
+    Concurrent deletes and sweeps can race for the same tombstone or orphan, and
+    a reused slug may have nothing left to clear, so a path that is already gone,
+    or vanishes underneath this one, is not a failure.
     """
     try:
         if path.is_dir() and not path.is_symlink():
@@ -41,10 +42,18 @@ def _remove_tree(path: Path) -> bool:
     except FileNotFoundError:
         return False
     except OSError:
-        if path.exists() or path.is_symlink():
+        if _still_there(path):
             logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
             return False
     return True
+
+
+def _still_there(path: Path) -> bool:
+    """Whether ``path`` is still present; one that cannot even be checked counts as present."""
+    try:
+        return path.exists() or path.is_symlink()
+    except OSError:
+        return True
 
 
 class ModelNotFoundError(KeyError):
@@ -206,6 +215,9 @@ class Catalogue:
             raise ModelExistsError(slug)
         directory = self.paths.model_dir(slug)
         directory.mkdir(parents=True, exist_ok=True)
+        # After the mkdir, so the window between `exists` and claiming the slug
+        # is no wider than it was.
+        self._clear_derived(slug)
         self.paths.model_source(slug).write_text(source, encoding="utf-8")
         self.write_raw_meta(slug, meta.model_dump())
         if thumbnail is not None:
@@ -282,18 +294,15 @@ class Catalogue:
         # The model is deleted once the rename and commit are done. Everything
         # below is best-effort cleanup: each step logs its own failure and the
         # rest still run, so a completed delete never reports an error.
-        # Derived, and only reachable through the slug: the schema cache and any
-        # exported old revisions.
-        _remove_tree(self.paths.model_schema_cache(slug))
-        _remove_tree(self.paths.model_revisions / slug)
-        # Outputs are keyed by slug and only listable through it, so they go too.
-        # They are NOT in the repository: a 3MF is a build artefact, not source.
-        _remove_tree(self.paths.outputs / slug)
         # This delete's tombstone, and any an earlier one failed to clear.
         try:
             self.sweep_tombstones()
         except OSError:
             logger.exception("could not sweep tombstones", extra={"path": str(tombstones)})
+        # Its derived files -- the schema cache, exported old revisions and its
+        # outputs (NOT in the repository: a 3MF is a build artefact, not source)
+        # -- and any an earlier delete failed to clear or a race wrote since.
+        self.sweep_orphans()
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -311,6 +320,61 @@ class Catalogue:
                 removed.append(tombstone.name)
         return removed
 
+    def sweep_orphans(self) -> list[str]:
+        """Remove the slug-keyed derived files of every model that is gone.
+
+        A delete's own cleanup can fail (a busy PVC, a crash after the commit),
+        and a source PUT or a render racing a delete can write the schema cache
+        or an output after it ran. Nothing lists these but the slug, so without
+        this they would leak -- or be inherited by a later model of that name.
+
+        A slug counts as live while its directory exists, not only once
+        ``model.scad`` does: `create` and `seed` make the directory first, and a
+        model mid-creation must not lose anything. A live slug is never touched,
+        so this is safe beside a running render.
+
+        Each root and each slug is checked on its own: one that cannot be read
+        is logged and skipped -- a slug whose liveness is unknown is kept -- and
+        the rest are still swept.
+        """
+        candidates: list[tuple[str, Path]] = []
+        for root in (self.paths.outputs, self.paths.model_revisions, self.paths.schema_cache):
+            try:
+                if not root.is_dir():
+                    continue
+                for entry in root.iterdir():
+                    if root != self.paths.schema_cache:
+                        candidates.append((entry.name, entry))
+                    elif entry.suffix == ".json":
+                        candidates.append((entry.stem, entry))
+            except OSError:
+                logger.exception("could not list for orphans", extra={"path": str(root)})
+        removed: list[str] = []
+        for slug, path in sorted(candidates):
+            try:
+                if self.paths.model_dir(slug).exists():
+                    continue
+            except OSError:
+                logger.exception("could not check a model for orphans", extra={"slug": slug})
+                continue
+            if _remove_tree(path):
+                removed.append(str(path.relative_to(self.paths.root)))
+        return removed
+
+    def _clear_derived(self, slug: str) -> None:
+        """Remove what an earlier model of this slug left behind, before it is reused.
+
+        The orphan sweep usually removes these already. When it failed, they are
+        still here, and without this the new model would inherit the old one's
+        outputs and cached schema.
+        """
+        for path in (
+            self.paths.model_schema_cache(slug),
+            self.paths.model_revisions / slug,
+            self.paths.outputs / slug,
+        ):
+            _remove_tree(path)
+
     def seed(self, seed_dir: Path) -> list[str]:
         """Copy any bundled model whose slug is not in the catalogue yet."""
         if not seed_dir.is_dir():
@@ -325,6 +389,7 @@ class Catalogue:
                 ignore=shutil.ignore_patterns(".*"),
                 dirs_exist_ok=True,
             )
+            self._clear_derived(candidate.name)
             seeded.append(candidate.name)
         if seeded:
             logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})

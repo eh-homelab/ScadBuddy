@@ -48,10 +48,14 @@ class DataPaths:
     def model_meta(self, slug: str) -> Path:
         return self.model_dir(slug) / MODEL_META_NAME
 
+    @property
+    def schema_cache(self) -> Path:
+        return self.cache / "schema"
+
     def model_schema_cache(self, slug: str) -> Path:
         """Where the live model's derived schema is cached -- under ``cache/``,
         for the reason on :data:`SCHEMA_CACHE_NAME`."""
-        return self.cache / "schema" / f"{slug}.json"
+        return self.schema_cache / f"{slug}.json"
 
     @property
     def tombstones(self) -> Path:
