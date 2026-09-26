@@ -66,6 +66,10 @@ class StoredSettings(BambuddyIds):
     #: Model slug -> the rest of what the picker chose, set one model at a time for the
     #: same reason (:meth:`SettingsStore.set_model_choices`).
     model_print_choices: dict[str, ModelPrintChoices] = Field(default_factory=dict)
+    #: Stringified Bambuddy printer id -> the plate type last printed on it (#83). Per
+    #: printer, not per model: the plate is a property of the machine. Set one printer at
+    #: a time (:meth:`SettingsStore.set_printer_bed_type`).
+    printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
     #: The Bambuddy project the last send went to (#79), and nothing more. A project
     #: is Bambuddy's grouping, not a second one kept here, so ScadBuddy remembers only
@@ -184,6 +188,16 @@ class SettingsStore:
         else:
             remembered[slug] = choices
         return self._write(settings.model_copy(update={"model_print_choices": remembered}))
+
+    def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
+        """Remember the plate on one printer; ``None`` forgets it."""
+        settings = self.load()
+        remembered = dict(settings.printer_bed_types)
+        if bed_type is None:
+            remembered.pop(str(printer_id), None)
+        else:
+            remembered[str(printer_id)] = bed_type
+        return self._write(settings.model_copy(update={"printer_bed_types": remembered}))
 
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""

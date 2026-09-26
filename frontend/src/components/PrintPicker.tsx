@@ -3,6 +3,7 @@ import { api, ApiError } from '../api/client'
 import type {
   FilamentOptions,
   Output,
+  OutputPlate,
   PipelineReport,
   PipelineChoices,
   PipelineView,
@@ -46,16 +47,13 @@ import { Spinner } from './ui/Spinner'
  * On top of that it carries the spools per slot (#87), the rest of `PrintQueueItemCreate`
  * as the options disclosure (#88), and follows the run to completion (#89). It opens on
  * what this model last printed with — pipeline, class printer and spools (#78).
+ *
+ * The plate is chosen here too (#83): its type, from those the printer's Bambu Studio
+ * profile takes, remembered per printer; and, for a 3MF with more than one, which plate.
+ * Neither rides on a pipeline run, so either one slices and queues.
  */
 
 const MAX_COPIES = 50
-
-/**
- * Choosing a plate is #83. Until then every print is plate 1, which is also the
- * server's own default — so sending it explicitly changes nothing about what runs and
- * keeps the request shape the same whichever route it takes.
- */
-const PLATE_ID = 1
 
 function targetLabel(pipeline: PipelineView): string {
   if (pipeline.target_kind === 'specific_printer') {
@@ -120,6 +118,14 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
    * create and the per-model memory.
    */
   const [projectId, setProjectId] = useState<number | null>(null)
+  /**
+   * #83 — the plate type to slice for, `null` for the pipeline's own when it names none;
+   * and the output's plates with the one (or all) to print. ScadBuddy's own renders are
+   * one plate, so the plate question is only asked of a 3MF that has more.
+   */
+  const [bedType, setBedType] = useState<string | null>(null)
+  const [plates, setPlates] = useState<OutputPlate[]>([])
+  const [plate, setPlate] = useState<number | 'all'>(1)
 
   const [loading, setLoading] = useState(false)
   const [checking, setChecking] = useState(false)
@@ -232,7 +238,21 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   useEffect(() => {
     setReports({})
     setOptions({})
+    setPlate(1)
   }, [outputId])
+
+  useEffect(() => {
+    if (!open || !outputId) return
+    let live = true
+    api
+      .getOutputPlates(outputId)
+      .then((next) => live && setPlates(next))
+      // One plate is what every ScadBuddy render is, so an unreadable list asks nothing.
+      .catch(() => live && setPlates([]))
+    return () => {
+      live = false
+    }
+  }, [open, outputId])
 
   /**
    * The "make this the default" tick follows the selection: it means "the pipeline in view
@@ -289,6 +309,25 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   }, [printerModel, onPrinterModel])
 
   /**
+   * #83 — the plate this printer last printed on, while its profile still takes it; else
+   * the pipeline's own. Bambuddy's printer status reports no plate type, so ScadBuddy's
+   * memory is the only "detected" plate there is.
+   */
+  const pipelineBed = current?.bed_type ?? null
+  const rememberedBed =
+    derivedPrinterId === null
+      ? null
+      : (choices?.printer_bed_types?.[String(derivedPrinterId)] ?? null)
+  useEffect(() => {
+    const takes = (current?.bed_types ?? []).some((entry) => entry.value === rememberedBed)
+    setBedType(rememberedBed !== null && takes ? rememberedBed : (current?.bed_type ?? null))
+  }, [current, rememberedBed])
+  const bedTypes = current?.bed_types ?? []
+  const sendsBedType = bedType !== pipelineBed
+  const bedTypeTaken = bedType === null || bedTypes.some((entry) => entry.value === bedType)
+  const chosenPlate = plate === 'all' ? 1 : plate
+
+  /**
    * #87 — the inventory, read once a pipeline and (for a class target) a printer are
    * settled. It needs the printer: `loaded` means "loaded in *this* machine", and a
    * spool's reachability is a property of that printer's filament switcher, so asking
@@ -319,7 +358,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         const next = await api.getFilaments(outputId, {
           printerId: derivedPrinterId,
           nozzleDiameter: pipelineNozzle,
-          plateId: PLATE_ID,
+          plateId: chosenPlate,
         })
         if (token !== filamentAttempt.current) return
         setFilaments(next)
@@ -339,7 +378,16 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         )
       }
     })()
-  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter, rememberedPlan, pipelineNozzle])
+  }, [
+    open,
+    outputId,
+    selected,
+    derivedPrinterId,
+    awaitingPrinter,
+    rememberedPlan,
+    pipelineNozzle,
+    chosenPlate,
+  ])
 
   /**
    * Whether the user has moved a slot off the server's suggestion. That is what makes
@@ -432,6 +480,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     void api.putModelChoices(slug, next).catch(() => undefined)
   }
 
+  /** #83 — the plate this printer now has on it, written the same best-effort way. */
+  function rememberBedType() {
+    if (derivedPrinterId === null || bedType === null || bedType === rememberedBed) return
+    void api.putPrinterBedType(derivedPrinterId, bedType).catch(() => undefined)
+  }
+
   async function run() {
     if (!outputId || selected === null) return
     setRunning(true)
@@ -458,7 +512,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         pipeline_id: selected,
         ...(copies === null ? {} : { copies }),
         force,
-        plate_id: PLATE_ID,
+        plate_id: chosenPlate,
+        all_plates: plate === 'all',
         project_id: projectId,
         options,
       }
@@ -473,10 +528,19 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         body.printer_id = derivedPrinterId
         body.filament_plan = { slots: plan, force_colour_match: false }
       }
+      /**
+       * #83 — a plate type other than the pipeline's is one the printer has on it, so it
+       * names that printer, the same escalation a plan makes.
+       */
+      if (sendsBedType) {
+        body.printer_id = derivedPrinterId
+        body.bed_type = bedType
+      }
       const ran = await api.runPipeline(outputId, body)
       setResult(ran)
       onRan(ran)
       rememberChoices()
+      rememberBedType()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
       // A 409 carries Bambuddy's report verbatim; list what blocked it so Run anyway is
@@ -760,6 +824,94 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               Printing on <span className="text-ink">{verdict.printerName}</span>, from the
               pipeline&rsquo;s target.
             </p>
+          )}
+
+          {current && (
+            <div className="mt-4">
+              <label htmlFor="print-bed-type" className="block text-[13px]">
+                Plate type
+              </label>
+              <select
+                id="print-bed-type"
+                value={bedType ?? ''}
+                onChange={(event) => setBedType(event.target.value || null)}
+                className="sb-field mt-1.5 cursor-pointer"
+              >
+                {pipelineBed === null && <option value="">As the process preset sets it</option>}
+                {pipelineBed !== null && !bedTypes.some((entry) => entry.value === pipelineBed) && (
+                  <option value={pipelineBed}>{pipelineBed}</option>
+                )}
+                {bedTypes.map((entry) => (
+                  <option key={entry.value} value={entry.value}>
+                    {entry.label}
+                  </option>
+                ))}
+              </select>
+              {!bedTypeTaken && (
+                <p className="mt-1.5 text-[12px] text-warn" data-testid="bed-type-warning">
+                  {bedType} is not a plate the {printerModel ?? 'printer'} takes, according to its
+                  Bambu Studio profile.
+                </p>
+              )}
+              {sendsBedType && (
+                <p className="mt-1.5 text-[12px] text-faint" data-testid="bed-type-route">
+                  Not the pipeline&rsquo;s own plate, so this print will be sliced and queued for{' '}
+                  {verdict?.printerName ?? filaments?.printer_name ?? 'the chosen printer'}.
+                </p>
+              )}
+            </div>
+          )}
+
+          {plates.length > 1 && outputId && (
+            <fieldset className="mt-4" data-testid="plate-choice">
+              <legend className="text-[13px]">Plate</legend>
+              <div className="mt-1.5 flex flex-wrap gap-2">
+                {plates.map((entry) => (
+                  <label
+                    key={entry.index}
+                    className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+                      plate === entry.index ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="print-plate"
+                      checked={plate === entry.index}
+                      onChange={() => setPlate(entry.index)}
+                      className="accent-[var(--sb-accent)]"
+                    />
+                    {entry.has_thumbnail && (
+                      <img
+                        src={api.outputPlateThumbnailUrl(outputId, entry.index)}
+                        alt={`Plate ${entry.index}`}
+                        className="h-12 w-12 rounded-[4px] object-contain"
+                      />
+                    )}
+                    Plate <span className="sb-num">{entry.index}</span>
+                  </label>
+                ))}
+                <label
+                  className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+                    plate === 'all' ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="print-plate"
+                    checked={plate === 'all'}
+                    onChange={() => setPlate('all')}
+                    className="accent-[var(--sb-accent)]"
+                  />
+                  All plates
+                </label>
+              </div>
+              {plate !== 1 && (
+                <p className="mt-1.5 text-[12px] text-faint">
+                  A pipeline run prints plate 1 only, so this will be sliced and queued
+                  {plate === 'all' ? ', one queue item per plate' : ''}.
+                </p>
+              )}
+            </fieldset>
           )}
 
           <div className="mt-4 flex items-center gap-3">

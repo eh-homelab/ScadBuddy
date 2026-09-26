@@ -69,9 +69,11 @@ from scadbuddy.bambuddy.send import (
     target_for,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
-from scadbuddy.render.plate import nozzle_diameter_of
+from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.plate import bed_types_for, nozzle_diameter_of
+from scadbuddy.render.plate_profiles import BED_TYPE_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +121,14 @@ class PresetOptions(BaseModel):
     printer_preset: PresetRef | None = None
 
 
+class BedTypeChoice(BaseModel):
+    """One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``
+    carries, ``label`` what Bambu Studio's own bed picker calls it."""
+
+    value: str
+    label: str
+
+
 class PipelineView(BaseModel):
     """A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and
     the printers its target comes out as."""
@@ -147,6 +157,10 @@ class PipelineView(BaseModel):
     #: The target as printer ids: one for ``specific_printer``, every active printer of
     #: the class for ``printer_class``. More than one means the picker must ask.
     printer_ids: list[int] = Field(default_factory=list)
+    #: The plate types the target's printer model takes, from its Bambu Studio profile
+    #: (#83). Every type where the model is not one ScadBuddy knows. Bambuddy's printer
+    #: status reports no plate type, so this is what a choice is checked against.
+    bed_types: list[BedTypeChoice] = Field(default_factory=list)
 
 
 class PipelineChoices(BaseModel):
@@ -158,6 +172,8 @@ class PipelineChoices(BaseModel):
     default_pipeline_id: int | None = None
     #: The printer and spools this model last printed with (#78).
     model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
+    #: Stringified printer id -> the plate type last printed on that printer (#83).
+    printer_bed_types: dict[str, str] = Field(default_factory=dict)
 
 
 class PipelineDefault(BaseModel):
@@ -211,7 +227,9 @@ class PrintRunRequest(BaseModel):
       queue-item fields exist on no other Bambuddy call (#87); or
     - a remembered print option applies that a run cannot carry (#124). The options
       resolve global → per-printer → per-model → this request's ``options`` and
-      ``copies``.
+      ``copies``; or
+    - it names a plate type, or any plate but the first (#83). A run slices plate 1
+      with the pipeline's own bed type.
 
     Otherwise it runs the pipeline exactly as before.
     """
@@ -229,6 +247,12 @@ class PrintRunRequest(BaseModel):
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
     plate_id: int = Field(default=1, ge=1)
+    #: Every plate of the output, each sliced and queued as an item of its own, in place
+    #: of ``plate_id`` alone (#83).
+    all_plates: bool = False
+    #: The plate type to slice for, in place of the pipeline's own (#83). Omitted means
+    #: the pipeline's. Bambuddy's own limit on ``SliceRequest.bed_type``.
+    bed_type: str | None = Field(default=None, max_length=64)
     #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
     #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
     #: be — a print with no project is simply one nobody filed.
@@ -399,6 +423,7 @@ def _view(
 ) -> PipelineView:
     by_id = {printer.id: printer for printer in printers}
     target = by_id.get(pipeline.target_printer_id) if pipeline.target_printer_id else None
+    model = target.model if target else pipeline.target_model_class
     return PipelineView(
         id=pipeline.id,
         name=pipeline.name,
@@ -417,6 +442,10 @@ def _view(
         filament_preset_names=[_names(preset_names, ref) for ref in pipeline.filament_presets],
         nozzle_diameter=nozzle_diameter_of(_names(preset_names, pipeline.process_preset)),
         printer_ids=_target_printer_ids(pipeline, printers),
+        bed_types=[
+            BedTypeChoice(value=value, label=BED_TYPE_LABELS[value])
+            for value in bed_types_for(model)
+        ],
     )
 
 
@@ -436,6 +465,7 @@ async def describe_pipelines(
         global_pipeline_id=settings.pipeline_id,
         default_pipeline_id=settings.pipeline_for(slug),
         model_choices=settings.model_print_choices.get(slug, ModelPrintChoices()),
+        printer_bed_types=dict(settings.printer_bed_types),
     )
 
 
@@ -628,8 +658,14 @@ async def run_for_output(
         settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
+    plate_ids = (
+        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
+        if request.all_plates
+        else [request.plate_id]
+    )
+    plate_chosen = request.bed_type is not None or plate_ids != [1]
 
-    if request.filament_plan is None and not print_options.beyond_pipeline():
+    if request.filament_plan is None and not plate_chosen and not print_options.beyond_pipeline():
         run = await client.run_pipeline(
             pipeline_id,
             PipelineRunRequest(
@@ -658,33 +694,39 @@ async def run_for_output(
     if pipeline is None:
         pipeline = await _pipeline_or_conflict(client, pipeline_id)
     if request.filament_plan is None:
-        # Only the options forced this route: slice exactly what the run would have.
+        # Only the options or the plate forced this route: slice what the run would have.
         slice_request = pipeline_slice_request(pipeline, meta)
-        outcome = await slice_and_queue(
-            client,
-            library_file_id=library_file_id,
-            pipeline=pipeline,
-            printer_id=request.printer_id,
-            filament_presets=slice_request.filament_presets,
-            filament_colours=slice_request.filament_colours,
-            plate_id=request.plate_id,
-            copies=copies,
-            project_id=project_id,
-            options=print_options,
-        )
+        outcomes = [
+            await slice_and_queue(
+                client,
+                library_file_id=library_file_id,
+                pipeline=pipeline,
+                printer_id=request.printer_id,
+                filament_presets=slice_request.filament_presets,
+                filament_colours=slice_request.filament_colours,
+                plate_id=plate_id,
+                bed_type=request.bed_type,
+                copies=copies,
+                project_id=project_id,
+                options=print_options,
+            )
+            for plate_id in plate_ids
+        ]
         warnings: list[FilamentWarning] = []
-        if outcome.target_model is not None:
+        target_model = outcomes[0].target_model
+        if target_model is not None:
             # The picker says this before a filament plan pins a printer; a remembered
             # option has no dialog moment, so it is said here, after the fact.
             # No option names: the labels live in the frontend, and Bambuddy's field
             # names (bed_levelling, nozzle_offset_cali) are not words for a person.
+            why = "The chosen plate" if plate_chosen else "Remembered print options"
             warnings.append(
                 FilamentWarning(
                     kind="no-fan-out",
                     message=(
-                        "Remembered print options cannot ride on a pipeline run, so this "
-                        f"was queued once against the {outcome.target_model} class "
-                        "instead of fanned out across its printers."
+                        f"{why} cannot ride on a pipeline run, so this was queued once "
+                        f"against the {target_model} class instead of fanned out across "
+                        "its printers."
                     ),
                 )
             )
@@ -692,7 +734,7 @@ async def run_for_output(
             client,
             store,
             meta,
-            outcome,
+            outcomes,
             pipeline_id,
             library_file_id,
             project_id,
@@ -706,14 +748,6 @@ async def run_for_output(
     # live instance, which is why `preset_options` filters it server-side in the first
     # place; asking for it a second time in the same request is the same cost again.
     catalogue = await _catalogue(client)
-    options = await gather_options(
-        client,
-        library_file_id=library_file_id,
-        printer_id=printer_id,
-        plate_id=request.plate_id,
-        fallback_colours=list(meta.colors),
-    )
-    warnings = check(options, request.filament_plan, copies=copies)
     printer_preset = pipeline.printer_preset
     printer_preset_name = (
         catalogue.names().get((printer_preset.source, printer_preset.id))
@@ -725,40 +759,58 @@ async def run_for_output(
         if printer_preset_name is not None
         else None
     )
-    presets, colours, preset_warnings = slice_filament_presets(
-        options,
-        request.filament_plan,
-        pipeline_presets=list(pipeline.filament_presets),
-        resolve=filament_preset_index(catalogue),
-        compatible=compatible,
-        alternatives=await spool_preset_alternatives(
-            client, options, request.filament_plan, compatible
-        ),
-    )
-    outcome = await slice_and_queue(
-        client,
-        library_file_id=library_file_id,
-        pipeline=pipeline,
-        printer_id=request.printer_id,
-        filament_presets=presets,
-        filament_colours=colours,
-        filaments=queue_filaments(options, request.filament_plan),
-        plate_id=request.plate_id,
-        copies=copies,
-        project_id=project_id,
-        options=print_options,
-    )
+    outcomes = []
+    warnings = []
+    # Each plate's slots are read on their own: a plate uses only some of the
+    # project's filaments, and its requirements say which (#83).
+    for plate_id in plate_ids:
+        options = await gather_options(
+            client,
+            library_file_id=library_file_id,
+            printer_id=printer_id,
+            plate_id=plate_id,
+            fallback_colours=list(meta.colors),
+        )
+        presets, colours, preset_warnings = slice_filament_presets(
+            options,
+            request.filament_plan,
+            pipeline_presets=list(pipeline.filament_presets),
+            resolve=filament_preset_index(catalogue),
+            compatible=compatible,
+            alternatives=await spool_preset_alternatives(
+                client, options, request.filament_plan, compatible
+            ),
+        )
+        outcomes.append(
+            await slice_and_queue(
+                client,
+                library_file_id=library_file_id,
+                pipeline=pipeline,
+                printer_id=request.printer_id,
+                filament_presets=presets,
+                filament_colours=colours,
+                filaments=queue_filaments(options, request.filament_plan),
+                plate_id=plate_id,
+                bed_type=request.bed_type,
+                copies=copies,
+                project_id=project_id,
+                options=print_options,
+            )
+        )
+        for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
+            if warning not in warnings:
+                warnings.append(warning)
     return _queued(
         client,
         store,
         meta,
-        outcome,
+        outcomes,
         pipeline_id,
         library_file_id,
         project_id,
         folder_id,
         copies=copies,
-        warnings=warnings + preset_warnings,
+        warnings=warnings,
     )
 
 
@@ -781,7 +833,7 @@ def _queued(
     client: BambuddyClient,
     store: OutputStore,
     meta: OutputMeta,
-    outcome: QueueOutcome,
+    outcomes: list[QueueOutcome],
     pipeline_id: int,
     library_file_id: int,
     project_id: int | None,
@@ -789,23 +841,29 @@ def _queued(
     copies: int,
     warnings: list[FilamentWarning] | None = None,
 ) -> PrintRunResult:
-    """Record the queue items against the output and report the slice-and-queue run."""
-    for queue_item_id in outcome.queue_item_ids:
-        store.record_send(
-            meta.id,
-            queue_item_id=queue_item_id,
-            print_route="slice_queue",
-            slice_job_id=outcome.slice_job_id,
-            project_id=project_id,
-        )
+    """Record the queue items against the output and report the slice-and-queue run.
+
+    One outcome per plate queued (#83). The slice job and sliced file reported are the
+    first plate's; every plate's queue items are listed.
+    """
+    for outcome in outcomes:
+        for queue_item_id in outcome.queue_item_ids:
+            store.record_send(
+                meta.id,
+                queue_item_id=queue_item_id,
+                print_route="slice_queue",
+                slice_job_id=outcome.slice_job_id,
+                project_id=project_id,
+            )
+    first = outcomes[0]
     return PrintRunResult(
         pipeline_id=pipeline_id,
         library_file_id=library_file_id,
         route="slice_queue",
-        slice_job_id=outcome.slice_job_id,
-        sliced_library_file_id=outcome.sliced_library_file_id,
-        queue_item_ids=outcome.queue_item_ids,
-        printer_id=outcome.printer_id,
+        slice_job_id=first.slice_job_id,
+        sliced_library_file_id=first.sliced_library_file_id,
+        queue_item_ids=[item for outcome in outcomes for item in outcome.queue_item_ids],
+        printer_id=first.printer_id,
         copies=copies,
         warnings=warnings or [],
         project_id=project_id,

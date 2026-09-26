@@ -61,6 +61,13 @@ class PipelineDefaultPatch(BaseModel):
     pipeline_id: int | None = None
 
 
+class PrinterBedType(BaseModel):
+    """The plate on one printer (#83); ``null`` forgets it."""
+
+    printer_id: int | None = None
+    bed_type: str | None = Field(default=None, max_length=64)
+
+
 class ProjectAttach(BaseModel):
     """Which of this output's queue entries to file under the project.
 
@@ -160,6 +167,25 @@ def put_model_choices(
     """
     settings = store.set_model_choices(slug, body)
     return settings.model_print_choices.get(slug, ModelPrintChoices())
+
+
+@router.put(
+    "/printers/{printer_id}/bed-type",
+    response_model=PrinterBedType,
+    summary="Remember the plate on this printer",
+)
+def put_printer_bed_type(
+    printer_id: int, body: PrinterBedType, store: SettingsStoreDep
+) -> PrinterBedType:
+    """What the picker last printed on this printer with (#83), which it opens on next.
+
+    ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
+    Needs no Bambuddy, like the model's other remembered choices.
+    """
+    settings = store.set_printer_bed_type(printer_id, body.bed_type)
+    return PrinterBedType(
+        printer_id=printer_id, bed_type=settings.printer_bed_types.get(str(printer_id))
+    )
 
 
 @router.post(

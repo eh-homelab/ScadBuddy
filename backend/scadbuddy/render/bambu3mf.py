@@ -6,6 +6,7 @@ import re
 import uuid
 import zipfile
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -296,6 +297,40 @@ def _model_rels(count: int) -> str:
     )
 
 
+MODEL_SETTINGS_NAME = "Metadata/model_settings.config"
+
+
+@dataclass(frozen=True)
+class PlateEntry:
+    """One ``<plate>`` of ``model_settings.config``: its 1-based index, which is the
+    ``plate``/``plate_id`` Bambuddy slices and queues, and its cover image if the
+    package carries one."""
+
+    index: int
+    thumbnail: str | None
+
+
+def plates_of(path: Path) -> list[PlateEntry]:
+    """Every plate the 3MF lays out, in index order (#83).
+
+    ScadBuddy's own writer always produces one; a Bambu Studio project can hold more.
+    """
+    with zipfile.ZipFile(path) as archive:
+        names = set(archive.namelist())
+        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    plates: list[PlateEntry] = []
+    for plate in config.iter("plate"):
+        metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
+        cover = metadata.get("thumbnail_file")
+        plates.append(
+            PlateEntry(
+                index=int(metadata["plater_id"] or 0),
+                thumbnail=cover if cover in names else None,
+            )
+        )
+    return sorted(plates, key=lambda plate: plate.index)
+
+
 def write_bambu_3mf(
     parts: Sequence[ColourPart],
     out_path: Path,
@@ -334,7 +369,7 @@ def write_bambu_3mf(
                 (f"3D/Objects/object_{index}.model", object_model(part, index))
                 for index, part in enumerate(parts, start=1)
             ),
-            ("Metadata/model_settings.config", model_settings(parts, model_name, covers=covers)),
+            (MODEL_SETTINGS_NAME, model_settings(parts, model_name, covers=covers)),
             (PROJECT_SETTINGS_NAME, project_settings(parts, placement, plate)),
         )
     ]
