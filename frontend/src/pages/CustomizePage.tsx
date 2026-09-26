@@ -1,7 +1,7 @@
 import { Suspense, lazy, useCallback, useMemo, useRef, useState } from 'react'
 import { Link, Navigate, useLocation, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
-import type { Output, ParamValue } from '../api/types'
+import type { Output, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { ParameterPanel } from '../components/ParameterPanel'
@@ -12,6 +12,7 @@ const Preview = lazy(async () => ({ default: (await import('../components/Previe
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
+import { describeOvershoot, overshoots } from '../lib/plate'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
@@ -48,6 +49,17 @@ export function CustomizePage() {
   })
   const [saved, setSaved] = useState<{ jobId: string; output: Output } | undefined>(undefined)
   const captureRef = useRef<PreviewCapture | null>(null)
+
+  /**
+   * #81 — the model of the printer chosen in the print picker, which picks the plate the
+   * preview draws and the model is checked against. `null` until one is chosen, and the
+   * server then answers with the configured default plate.
+   */
+  const [printerModel, setPrinterModel] = useState<string | null>(null)
+  const plateState = useAsync(() => api.getPlate(printerModel), [printerModel])
+  // The previous plate stays up while the next one loads, rather than blinking out.
+  const [plate, setPlate] = useState<Plate | undefined>(undefined)
+  if (plateState.data && plateState.data !== plate) setPlate(plateState.data)
 
   const schema = schemaState.data
   const resolved = preloaded ?? reopenState.data ?? undefined
@@ -99,6 +111,12 @@ export function CustomizePage() {
 
   // A parameter change invalidates the saved output — Generate has to run again.
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
+
+  const bbox = job?.status === 'done' ? job.bbox_mm : undefined
+  const overshoot = useMemo(
+    () => (plate && bbox ? overshoots(bbox, plate) : []),
+    [plate, bbox],
+  )
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
@@ -232,8 +250,22 @@ export function CustomizePage() {
               </div>
             }
           >
-            <Preview job={job} rendering={rendering || !settled} captureRef={captureRef} />
+            <Preview
+              job={job}
+              rendering={rendering || !settled}
+              plate={plate}
+              captureRef={captureRef}
+            />
           </Suspense>
+          {plate && overshoot.length > 0 && (
+            <p
+              role="status"
+              data-testid="plate-fit"
+              className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
+            >
+              Does not fit: {overshoot.map((over) => describeOvershoot(over, plate)).join('; ')}.
+            </p>
+          )}
           {renderError && (
             <p role="alert" className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn">
               {renderError.message}
@@ -245,6 +277,9 @@ export function CustomizePage() {
             rendering={rendering || !settled}
             output={output}
             capture={capture}
+            overshoot={overshoot}
+            plate={plate}
+            onPrinterModel={setPrinterModel}
             onGenerated={(created) => {
               if (job) setSaved({ jobId: job.id, output: created })
               outputsState.reload()

@@ -15,6 +15,7 @@ import type {
   PipelineChoices,
   PipelineCreate,
   PipelineView,
+  Plate,
   PresetOptions,
   PresetRef,
   PrintProgress,
@@ -156,6 +157,15 @@ function bboxOf(params: Record<string, ParamValue>): BoundingBox {
     round(textSize * 1.8 + padding * 2),
     round(thickness + depth),
   )
+}
+
+function plateFor(model: string | null): Plate | undefined {
+  if (!model) return undefined
+  const key = model.toLowerCase()
+  return Object.entries(fixtures.plates).find(
+    ([code, plate]) =>
+      code.toLowerCase() === key || plate.name.toLowerCase() === key || plate.model?.toLowerCase() === key,
+  )?.[1]
 }
 
 function round(value: number): number {
@@ -986,6 +996,22 @@ export const handlers = [
     await delay(120)
     return HttpResponse.json(state.settings)
   }),
+
+  // #81 — the server resolves Bambuddy's code or the profile name, else the default.
+  http.get(`${base}/plate`, ({ request }) =>
+    HttpResponse.json(
+      plateFor(new URL(request.url).searchParams.get('model')) ??
+        plateFor(state.settings.default_plate ?? null) ??
+        fixtures.defaultPlate,
+    ),
+  ),
+
+  http.get(`${base}/plates`, () =>
+    HttpResponse.json({
+      default: plateFor(state.settings.default_plate ?? null) ?? fixtures.defaultPlate,
+      plates: Object.values(fixtures.plates),
+    }),
+  ),
 
   // Takes no body: the server tests what it has stored.
   http.get(`${base}/settings/print-options`, () => HttpResponse.json(state.printOptions)),

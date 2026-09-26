@@ -2666,6 +2666,104 @@
         "title": "PipelineView",
         "type": "object"
       },
+      "PlateArea": {
+        "properties": {
+          "max_x": {
+            "title": "Max X",
+            "type": "number"
+          },
+          "max_y": {
+            "title": "Max Y",
+            "type": "number"
+          },
+          "min_x": {
+            "title": "Min X",
+            "type": "number"
+          },
+          "min_y": {
+            "title": "Min Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "min_x",
+          "min_y",
+          "max_x",
+          "max_y"
+        ],
+        "title": "PlateArea",
+        "type": "object"
+      },
+      "PlateCatalogue": {
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/PlateView"
+          },
+          "plates": {
+            "items": {
+              "$ref": "#/components/schemas/PlateView"
+            },
+            "title": "Plates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "default",
+          "plates"
+        ],
+        "title": "PlateCatalogue",
+        "type": "object"
+      },
+      "PlateView": {
+        "description": "One printer's build volume, in millimetres.",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "number"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Size",
+            "type": "array"
+          },
+          "usable": {
+            "$ref": "#/components/schemas/PlateArea"
+          }
+        },
+        "required": [
+          "model",
+          "name",
+          "size",
+          "height",
+          "usable"
+        ],
+        "title": "PlateView",
+        "type": "object"
+      },
       "PresetChoice": {
         "description": "One row of the \"New pipeline\" form's pickers.\n\n``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns\none, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.\nAn empty list means the preset declares no restriction, not that it fits nothing.",
         "properties": {
@@ -3850,6 +3948,17 @@
             ],
             "title": "Bed Type"
           },
+          "default_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Plate"
+          },
           "filament_presets": {
             "anyOf": [
               {
@@ -3956,6 +4065,17 @@
               }
             ],
             "title": "Bed Type"
+          },
+          "default_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Plate"
           },
           "filament_presets": {
             "items": {
@@ -5897,6 +6017,79 @@
         "summary": "Upload the canvas capture",
         "tags": [
           "outputs"
+        ]
+      }
+    },
+    "/api/v1/plate": {
+      "get": {
+        "description": "An absent or unknown model is the configured default plate, not an error: that is\nwhat a customizer with no printer chosen, or no Bambuddy at all, draws.",
+        "operationId": "get_plate_api_v1_plate_get",
+        "parameters": [
+          {
+            "description": "Bambuddy's printer model (\"H2C\") or a profile name",
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Bambuddy's printer model (\"H2C\") or a profile name",
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The plate for a printer model",
+        "tags": [
+          "plates"
+        ]
+      }
+    },
+    "/api/v1/plates": {
+      "get": {
+        "operationId": "list_plates_api_v1_plates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateCatalogue"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Every plate ScadBuddy knows",
+        "tags": [
+          "plates"
         ]
       }
     },

@@ -28,6 +28,7 @@ def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
         "process_preset": None,
         "filament_presets": [],
         "bed_type": None,
+        "default_plate": None,
     }
 
 

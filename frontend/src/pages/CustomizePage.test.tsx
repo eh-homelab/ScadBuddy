@@ -2,8 +2,14 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
-import type { Job } from '../api/types'
-import { printOptions, settings as settingsFixture, versionIds } from '../mocks/fixtures'
+import type { Job, PipelineChoices, Plate } from '../api/types'
+import {
+  pipelineViews,
+  printOptions,
+  settings as settingsFixture,
+  targets,
+  versionIds,
+} from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
@@ -12,9 +18,14 @@ import { CustomizePage } from './CustomizePage'
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
 // The viewer itself is covered by the Playwright smoke test.
 vi.mock('../components/Preview', () => ({
-  Preview: ({ job, rendering }: { job?: Job; rendering: boolean }) => (
+  Preview: ({ job, rendering, plate }: { job?: Job; rendering: boolean; plate?: Plate }) => (
     <div data-testid="preview">
       {rendering && <span>rendering</span>}
+      {plate && (
+        <span data-testid="plate">
+          {plate.name} {plate.size[0]} × {plate.size[1]}
+        </span>
+      )}
       {job?.status === 'failed' && (
         <pre data-testid="render-log">{(job.log_tail ?? []).join('\n')}</pre>
       )}
@@ -622,6 +633,74 @@ describe('CustomizePage', () => {
     // The model the link actually belongs to may render; the one in the URL may not.
     expect(rendered).not.toContain('some-other-model')
   })
+
+  it('draws the default plate while no printer has been chosen (#81)', async () => {
+    render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('Default plate 256 × 256'))
+    expect(screen.queryByTestId('plate-fit')).not.toBeInTheDocument()
+  })
+
+  it('follows the printer chosen in the print picker, and warns when the model does not fit (#81)', async () => {
+    // The Draft pipeline aims at a second printer, an A1 mini, so switching pipelines
+    // switches printers — and plates.
+    server.use(
+      http.get('/api/v1/print/models/:slug/pipelines', () =>
+        HttpResponse.json({
+          pipelines: pipelineViews.map((pipeline) =>
+            pipeline.id === 2
+              ? { ...pipeline, target_printer_id: 2, target_printer_name: 'Mini', printer_ids: [2] }
+              : pipeline,
+          ),
+          printers: [
+            targets.printers![0]!,
+            { id: 2, name: 'Mini', model: 'A1M', is_active: true, nozzle_count: 1 },
+          ],
+          model_pipeline_id: null,
+          global_pipeline_id: 1,
+          default_pipeline_id: 1,
+        } satisfies PipelineChoices),
+      ),
+    )
+    const { user } = render()
+    await firstRender()
+    await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+    // The default pipeline targets the H2C.
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog', { name: 'Print' })
+    await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('H2C 330 × 320'))
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+
+    // 312.1 mm wide: on the 330 mm bed, but past the 300 mm both H2C nozzles reach.
+    await user.click(screen.getByRole('tab', { name: 'Plate' }))
+    const padding = screen.getByRole('spinbutton', { name: 'Margin around the text' })
+    await user.clear(padding)
+    await user.type(padding, '130')
+    await waitFor(
+      () =>
+        expect(screen.getByTestId('plate-fit')).toHaveTextContent(
+          'X is 12.1 mm over the H2C (312.1 of 300.0 mm)',
+        ),
+      { timeout: 4000 },
+    )
+    expect(screen.getByTestId('plate-fit')).not.toHaveTextContent(/Y is/)
+    expect(screen.getByTestId('print')).toHaveTextContent('Too big on X')
+
+    await user.click(screen.getByTestId('generate'))
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const again = await screen.findByRole('dialog', { name: 'Print' })
+    await user.click(await within(again).findByRole('radio', { name: /Draft/ }))
+
+    await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('A1 mini 180 × 180'))
+    expect(screen.getByTestId('plate-fit')).toHaveTextContent(/X is 132\.1 mm over the A1 mini/)
+    expect(screen.getByTestId('plate-fit')).toHaveTextContent(/Y is 105\.2 mm over the A1 mini/)
+    expect(screen.getByTestId('print')).toHaveTextContent('Too big on X, Y')
+    // Two generates, two picker opens and a debounced re-render.
+  }, 20000)
 
   it('counts changes against the model defaults', async () => {
     const { user } = render()

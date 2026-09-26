@@ -19,6 +19,8 @@ import type {
   PipelineCreate,
   PipelineDefault,
   PipelineView,
+  Plate,
+  PlateCatalogue,
   PresetOptions,
   PresetRef,
   PrintProgress,
@@ -331,6 +333,12 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),
+
+  /** #81 — an absent or unknown model answers with the configured default plate. */
+  getPlate: (model: string | null) =>
+    request<Plate>(model ? `/plate?${new URLSearchParams({ model })}` : '/plate'),
+
+  listPlates: () => request<PlateCatalogue>('/plates'),
 
   getSettings: () => request<Settings>('/settings'),
 

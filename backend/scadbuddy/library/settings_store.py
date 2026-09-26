@@ -32,6 +32,9 @@ class StoredSettings(BambuddyIds):
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
     public_url: str | None = None
+    #: The printer model the preview's plate falls back to when no printer is chosen
+    #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
+    default_plate: str | None = None
 
     # Used by "Slice and queue" when no pipeline is configured.
     printer_preset: PresetRef | None = None
@@ -78,6 +81,7 @@ class SettingsPatch(BaseModel):
     process_preset: PresetRef | None = None
     filament_presets: list[PresetRef] | None = None
     bed_type: str | None = None
+    default_plate: str | None = None
 
 
 class SettingsStore:
@@ -96,6 +100,7 @@ class SettingsStore:
             bambuddy_url=self.defaults.bambuddy_url,
             bambuddy_api_key=self.defaults.bambuddy_api_key,
             public_url=self.defaults.public_url,
+            default_plate=self.defaults.default_plate,
         )
 
     def load(self) -> StoredSettings:

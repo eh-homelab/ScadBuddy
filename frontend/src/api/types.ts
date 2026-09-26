@@ -123,6 +123,10 @@ export type ProjectRequest = Schemas['ProjectRequest']
 export type ProjectAttach = Schemas['ProjectAttach']
 export type AttachResult = Schemas['AttachResult']
 
+/** #81 — the build volume the preview draws and checks the model against. */
+export type Plate = Schemas['PlateView']
+export type PlateCatalogue = Schemas['PlateCatalogue']
+
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']
 export type SendMode = SendResult['mode']

@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, PrintRunResult, SendResult } from '../api/types'
+import type { Job, Output, Plate, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
+import { describeOvershoot, type Overshoot } from '../lib/plate'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
 import { SendDialog } from './SendDialog'
@@ -15,6 +16,11 @@ interface Props {
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
+  /** #81 — the axes the model overflows the plate on, which the Print button warns of. */
+  overshoot: Overshoot[]
+  plate: Plate | undefined
+  /** #81 — the model of the printer the print picker has in view. */
+  onPrinterModel: (model: string | null) => void
   onGenerated: (output: Output) => void
   onSent: (result: SendResult) => void
   /** #86 — a pipeline run started from the print picker. */
@@ -27,6 +33,9 @@ export function ActionBar({
   rendering,
   output,
   capture,
+  overshoot,
+  plate,
+  onPrinterModel,
   onGenerated,
   onSent,
   onRan,
@@ -119,8 +128,23 @@ export function ActionBar({
           <Button onClick={() => setSendOpen(true)} disabled={!output}>
             Send to Bambuddy
           </Button>
-          <Button onClick={() => setPrintOpen(true)} disabled={!output} data-testid="print">
+          <Button
+            variant={overshoot.length > 0 ? 'danger' : 'default'}
+            onClick={() => setPrintOpen(true)}
+            disabled={!output}
+            data-testid="print"
+            title={
+              plate && overshoot.length > 0
+                ? overshoot.map((over) => describeOvershoot(over, plate)).join('\n')
+                : undefined
+            }
+          >
             Print
+            {overshoot.length > 0 && (
+              <span className="text-[12px]">
+                · Too big on {overshoot.map((over) => over.axis).join(', ')}
+              </span>
+            )}
           </Button>
         </div>
       </footer>
@@ -138,6 +162,7 @@ export function ActionBar({
         output={output}
         onClose={() => setPrintOpen(false)}
         onRan={onRan}
+        onPrinterModel={onPrinterModel}
       />
     </>
   )

@@ -430,6 +430,44 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/plate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The plate for a printer model
+         * @description An absent or unknown model is the configured default plate, not an error: that is
+         *     what a customizer with no printer chosen, or no Bambuddy at all, draws.
+         */
+        get: operations["get_plate_api_v1_plate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/plates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every plate ScadBuddy knows */
+        get: operations["list_plates_api_v1_plates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/models/{slug}/pipeline": {
         parameters: {
             query?: never;
@@ -1716,6 +1754,41 @@ export interface components {
             /** Target Printer Name */
             target_printer_name?: string | null;
         };
+        /** PlateArea */
+        PlateArea: {
+            /** Max X */
+            max_x: number;
+            /** Max Y */
+            max_y: number;
+            /** Min X */
+            min_x: number;
+            /** Min Y */
+            min_y: number;
+        };
+        /** PlateCatalogue */
+        PlateCatalogue: {
+            default: components["schemas"]["PlateView"];
+            /** Plates */
+            plates: components["schemas"]["PlateView"][];
+        };
+        /**
+         * PlateView
+         * @description One printer's build volume, in millimetres.
+         */
+        PlateView: {
+            /** Height */
+            height: number;
+            /** Model */
+            model: string | null;
+            /** Name */
+            name: string;
+            /** Size */
+            size: [
+                number,
+                number
+            ];
+            usable: components["schemas"]["PlateArea"];
+        };
         /**
          * PresetChoice
          * @description One row of the "New pipeline" form's pickers.
@@ -2164,6 +2237,8 @@ export interface components {
             bambuddy_url?: string | null;
             /** Bed Type */
             bed_type?: string | null;
+            /** Default Plate */
+            default_plate?: string | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
@@ -2186,6 +2261,8 @@ export interface components {
             bambuddy_url?: string | null;
             /** Bed Type */
             bed_type?: string | null;
+            /** Default Plate */
+            default_plate?: string | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /**
@@ -3331,6 +3408,58 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_api_v1_plate_get: {
+        parameters: {
+            query?: {
+                /** @description Bambuddy's printer model ("H2C") or a profile name */
+                model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plates_api_v1_plates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateCatalogue"];
                 };
             };
         };
