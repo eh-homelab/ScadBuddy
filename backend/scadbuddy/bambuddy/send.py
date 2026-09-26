@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Literal
 
@@ -439,23 +441,30 @@ def _resolve_options(
     return resolve_print_options(settings, meta.slug, printer_id, _request_scope(request))
 
 
-def _needs_pipeline(settings: StoredSettings, meta: OutputMeta, request: SendRequest) -> bool:
-    """Whether the configured pipeline has to be read before the path can be chosen.
+async def scope_printer(
+    settings: StoredSettings,
+    request_printer_id: int | None,
+    fetch_pipeline: Callable[[], Awaitable[Pipeline]] | None,
+) -> tuple[int | None, Pipeline | None]:
+    """The printer the per-printer scope keys on, and the pipeline if it had to be read.
 
-    Reading it is what tells us the target printer the per-printer scope keys on, and the
-    presets to slice with once an option rules the run out.
+    That is the printer ScadBuddy believes it prints to: the one the request names, else
+    the configured one, else the pipeline's own target. Not the same thing as the queue
+    item's target, which a pipeline owns outright. Shared by the send bar and the print
+    picker (#141), each passing its own way of reading the pipeline, or ``None`` when
+    there is none to read.
 
-    With a printer configured the scope key is already known, so the resolution here is
-    the real one and the answer is exact. Only when it is *not* — a pipeline aimed at its
-    own printer, or at a printer class — can a remembered printer override still turn out
-    to be this send's, and then any entry in the map is reason enough to look. Deciding
-    that on "the map is non-empty" unconditionally would make one saved override cost
-    every later send an extra GET it does not need, and turn that GET's failure into a
-    send failure.
+    The pipeline is read only when no printer is named and some per-printer option is
+    remembered at all. With a printer named the key is already known; with the map empty
+    the key cannot change the resolution. Reading it on any saved override regardless
+    would make one override cost every later send an extra GET it does not need, and turn
+    that GET's failure into a send failure.
     """
-    if settings.printer_id is None and settings.printer_print_options:
-        return True
-    return bool(_resolve_options(settings, meta, request, settings.printer_id).beyond_pipeline())
+    printer_id = request_printer_id or settings.printer_id
+    if printer_id is not None or not settings.printer_print_options or fetch_pipeline is None:
+        return printer_id, None
+    pipeline = await fetch_pipeline()
+    return pipeline.target_printer_id, pipeline
 
 
 async def _queue_send(
@@ -475,16 +484,13 @@ async def _queue_send(
     """
     # The model's own default pipeline wins over the global one (#86).
     pipeline_id = settings.pipeline_for(meta.slug)
-    pipeline: Pipeline | None = None
-    if pipeline_id is not None and _needs_pipeline(settings, meta, request):
-        pipeline = await client.pipeline(pipeline_id)
-
-    # The printer the *option scopes* key on — the printer ScadBuddy believes it prints to.
-    # Not the same thing as the queue item's target, which a pipeline owns outright; see
-    # below, where conflating the two pinned a printer-class pipeline to one printer.
-    scope_printer_id = settings.printer_id
-    if scope_printer_id is None and pipeline is not None:
-        scope_printer_id = pipeline.target_printer_id
+    # The printer the *option scopes* key on; see below, where conflating it with the
+    # queue item's target pinned a printer-class pipeline to one printer.
+    scope_printer_id, pipeline = await scope_printer(
+        settings,
+        None,
+        partial(client.pipeline, pipeline_id) if pipeline_id is not None else None,
+    )
     options = _resolve_options(settings, meta, request, scope_printer_id)
 
     if pipeline_id is not None and not options.beyond_pipeline():
@@ -508,7 +514,7 @@ async def _queue_send(
     printer_id: int | None
     target_model: str | None = None
     if pipeline_id is not None:
-        if pipeline is None:  # pragma: no cover - _needs_pipeline already fetched it
+        if pipeline is None:  # the scope needed no pipeline, but the slice does
             pipeline = await client.pipeline(pipeline_id)
         slice_request = pipeline_slice_request(pipeline, meta)
         # The pipeline's own target, never ``settings.printer_id``: a ``printer_class``
