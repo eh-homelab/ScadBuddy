@@ -22,20 +22,22 @@ from scadbuddy.bambuddy.filaments import (
     COLOUR_MATCH_DISTANCE,
     FilamentOptions,
     FilamentPlan,
-    SlotChoice,
     SlotNeed,
     build_options,
     check,
     colour_distance,
     gather_options,
     normalise_colour,
+    nozzle_warnings,
     queue_filaments,
     slice_filament_presets,
     spool_preset_alternatives,
 )
 from scadbuddy.bambuddy.models import (
+    NozzleInfo,
     PresetRef,
     Printer,
+    SlotChoice,
     SlotMaterial,
     Spool,
     SpoolAssignment,
@@ -531,3 +533,42 @@ def test_the_colour_threshold_is_the_boundary_it_says_it_is() -> None:
     )
     assert [choice.spool_id for choice in inside.suggested] == [1]
     assert outside.suggested == []
+
+
+# --- the nozzle (#78) --------------------------------------------------------
+
+
+def h2c_nozzles(*diameters: str) -> list[NozzleInfo]:
+    return [NozzleInfo(nozzle_type="HS00", nozzle_diameter=diameter) for diameter in diameters]
+
+
+def test_a_pipeline_nozzle_mounted_on_either_extruder_is_no_mismatch() -> None:
+    """The H2C reports one nozzle per extruder; a 0.2 pipeline fits the 0.2 one."""
+    assert nozzle_warnings(h2c_nozzles("0.2", "0.4"), "0.2", printer_name="H2C") == []
+    assert nozzle_warnings(h2c_nozzles("0.40"), "0.4", printer_name="H2C") == []
+
+
+def test_a_pipeline_nozzle_the_printer_has_not_mounted_is_said_before_the_click() -> None:
+    [warning] = nozzle_warnings(h2c_nozzles("0.4", "0.4"), "0.2", printer_name="H2C")
+    assert warning.kind == "nozzle-mismatch"
+    assert warning.slot_id is None
+    assert "0.2 mm" in warning.message
+    assert "H2C" in warning.message
+    assert "0.4 mm" in warning.message
+
+
+@pytest.mark.parametrize(
+    ("nozzles", "diameter"),
+    [([], "0.2"), ([NozzleInfo()], "0.2"), ([NozzleInfo(nozzle_diameter="0.4")], None)],
+)
+def test_nothing_to_compare_is_no_warning(nozzles: list[NozzleInfo], diameter: str | None) -> None:
+    """A preset name that states no nozzle, or a printer reporting none, is not a mismatch."""
+    assert nozzle_warnings(nozzles, diameter, printer_name="H2C") == []
+
+
+def test_a_diameter_that_is_not_a_number_is_skipped_rather_than_failing_the_panel() -> None:
+    """Live status is firmware's to spell; a garbled value must not 500 the filaments step."""
+    assert nozzle_warnings(h2c_nozzles("?"), "0.2", printer_name="H2C") == []
+    [warning] = nozzle_warnings(h2c_nozzles("n/a", "0.4"), "0.2", printer_name="H2C")
+    assert "n/a" not in warning.message
+    assert "0.4 mm" in warning.message

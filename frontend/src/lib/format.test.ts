@@ -26,6 +26,11 @@ describe('normalizeHex', () => {
     expect(normalizeHex('abc')).toBe('#AABBCC')
     expect(normalizeHex('#1b6ca8')).toBe('#1B6CA8')
   })
+
+  it('drops alpha the way OpenSCAD does, shorthand included', () => {
+    expect(normalizeHex('#f14c')).toBe('#FF1144')
+    expect(normalizeHex('#1b6ca880')).toBe('#1B6CA8')
+  })
 })
 
 describe('inkOn', () => {

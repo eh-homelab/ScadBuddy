@@ -587,6 +587,22 @@ def test_a_plain_text_paste_without_a_name_is_rejected(client: TestClient) -> No
     assert "X-Model-Name" in response.json()["detail"]
 
 
+def test_a_name_too_long_for_a_slug_is_rejected_and_nothing_saved(
+    client: TestClient,
+) -> None:
+    response = client.post("/api/v1/models", json={"name": "x" * 300, "source": SOURCE})
+    assert response.status_code == 422
+    assert "longer than" in response.json()["detail"]
+    assert client.get("/api/v1/models").json() == []
+
+
+def test_an_upload_whose_filename_is_too_long_for_a_slug_is_rejected(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", files={"file": ("x" * 300 + ".scad", SOURCE.encode(), "text/plain")}
+    )
+    assert response.status_code == 422
+
+
 def test_a_name_that_yields_no_slug_is_rejected(client: TestClient) -> None:
     response = client.post("/api/v1/models", json={"name": "***", "source": SOURCE})
     assert response.status_code == 422

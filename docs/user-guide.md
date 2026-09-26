@@ -97,13 +97,21 @@ painting.
 
 - **Each distinct `color()` value becomes one part and one filament slot.** Two
   colour parameters set to the same value produce one part, not two.
-- **Extruder order.** Extruder numbers follow the order of the materials in
-  OpenSCAD's 3MF export. ScadBuddy numbers them 1, 2, 3… in that order and doesn't
-  reorder them. The convention is that **colour parameters are the extruder order**:
-  declare them in the order you want the extruders, and use them in that order. The
-  bundled name keychain does this (`base_color` is extruder 1, `text_color` is
-  extruder 2). Before you send, check the numbered colour swatches in the bottom
-  bar. They show which colour went to which extruder.
+- **Extruder order.** **Colour parameters are the extruder order**: the first
+  colour parameter you declare is extruder 1, the next is extruder 2, and so on,
+  whatever order the geometry draws them in. In the bundled name keychain
+  `base_color` is extruder 1 and `text_color` is extruder 2. A part gets the
+  extruder of the first colour parameter whose value is its colour, so:
+  - two colour parameters with the same value share one extruder, and the numbers
+    after them close up;
+  - a colour parameter that no geometry uses gets no extruder, and the ones after
+    it move up;
+  - colours that aren't a parameter's value (a hard-coded `color("red")`, a colour
+    computed from a parameter) come after all the parameters, in the order the
+    model first draws them.
+
+  Before you send, check the numbered colour swatches in the bottom bar. They show
+  which colour went to which extruder.
 - **Colour everything.** When any geometry is outside a `color()` call, ScadBuddy
   can't build closed per-colour solids. The job then falls back to open parts for
   every colour and warns `uncoloured geometry present; parts are not closed`.

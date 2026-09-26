@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     check,
     gather_options,
+    nozzle_warnings,
     queue_filaments,
     slice_filament_presets,
     spool_preset_alternatives,
@@ -62,13 +63,15 @@ from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
+    request_scope,
     resolve_print_options,
     scope_printer,
     target_for,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
-from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
+from scadbuddy.render.plate import nozzle_diameter_of
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +140,10 @@ class PipelineView(BaseModel):
     printer_preset_name: str | None = None
     process_preset_name: str | None = None
     filament_preset_names: list[str | None] = Field(default_factory=list)
+    #: The nozzle the process preset's name states ("0.2"), or ``None`` where it states
+    #: none. Read here, where the catalogue already is, so the filament step can compare
+    #: it with the mounted nozzles without reading the catalogue again (#78).
+    nozzle_diameter: str | None = None
     #: The target as printer ids: one for ``specific_printer``, every active printer of
     #: the class for ``printer_class``. More than one means the picker must ask.
     printer_ids: list[int] = Field(default_factory=list)
@@ -149,6 +156,8 @@ class PipelineChoices(BaseModel):
     model_pipeline_id: int | None = None
     global_pipeline_id: int | None = None
     default_pipeline_id: int | None = None
+    #: The printer and spools this model last printed with (#78).
+    model_choices: ModelPrintChoices = Field(default_factory=ModelPrintChoices)
 
 
 class PipelineDefault(BaseModel):
@@ -201,7 +210,8 @@ class PrintRunRequest(BaseModel):
     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
       queue-item fields exist on no other Bambuddy call (#87); or
     - a remembered print option applies that a run cannot carry (#124). The options
-      resolve global → per-printer → per-model → this request's ``copies``.
+      resolve global → per-printer → per-model → this request's ``options`` and
+      ``copies``.
 
     Otherwise it runs the pipeline exactly as before.
     """
@@ -223,6 +233,10 @@ class PrintRunRequest(BaseModel):
     #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
     #: be — a print with no project is simply one nobody filed.
     project_id: int | None = None
+    #: Per-print overrides from the dialog's options disclosure (#78), the most specific
+    #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
+    #: a ``quantity`` sent alongside it.
+    options: PrintOptions = Field(default_factory=PrintOptions)
 
 
 class PrintRunResult(BaseModel):
@@ -401,6 +415,7 @@ def _view(
         printer_preset_name=_names(preset_names, pipeline.printer_preset),
         process_preset_name=_names(preset_names, pipeline.process_preset),
         filament_preset_names=[_names(preset_names, ref) for ref in pipeline.filament_presets],
+        nozzle_diameter=nozzle_diameter_of(_names(preset_names, pipeline.process_preset)),
         printer_ids=_target_printer_ids(pipeline, printers),
     )
 
@@ -420,6 +435,7 @@ async def describe_pipelines(
         model_pipeline_id=settings.model_pipelines.get(slug),
         global_pipeline_id=settings.pipeline_id,
         default_pipeline_id=settings.pipeline_for(slug),
+        model_choices=settings.model_print_choices.get(slug, ModelPrintChoices()),
     )
 
 
@@ -525,6 +541,7 @@ async def filament_options_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
+    nozzle_diameter: str | None = None,
     plate_id: int = 1,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
@@ -533,15 +550,27 @@ async def filament_options_for_output(
     check does: the plate's slots are read out of a *library file*, so there is no
     answer before one exists. An output is immutable, so this uploads once.
 
+    With a printer it also carries that printer's mounted nozzles, compared with
+    ``nozzle_diameter`` — the pipeline's, as :class:`PipelineView` already reported it —
+    so a mismatch is shown before the click (#78). A class target with no printer chosen
+    yet has no nozzles to read.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
-    return await gather_options(
+    options = await gather_options(
         client,
         library_file_id=library_file_id,
         printer_id=printer_id,
         plate_id=plate_id,
         fallback_colours=list(meta.colors),
     )
+    if printer_id is None:
+        return options
+    options.nozzles = (await client.printer_status(printer_id)).nozzles
+    options.pipeline_nozzle_diameter = nozzle_diameter
+    options.warnings.extend(
+        nozzle_warnings(options.nozzles, nozzle_diameter, printer_name=options.printer_name)
+    )
+    return options
 
 
 async def run_for_output(
@@ -596,7 +625,7 @@ async def run_for_output(
     # one), so a remembered project_id is dropped here: left in, it would force the
     # queue route and then lose to the picker's project anyway.
     print_options = resolve_print_options(
-        settings, meta.slug, scope_printer_id, PrintOptions(quantity=request.copies)
+        settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 

@@ -1,5 +1,11 @@
 import { useState } from 'react'
-import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed } from '../api/types'
+import type {
+  FilamentOptions,
+  FilamentWarning,
+  NozzleInfo,
+  SlotChoice,
+  SlotNeed,
+} from '../api/types'
 import { inkOn, normalizeHex } from '../lib/format'
 import {
   NO_FILTERS,
@@ -49,6 +55,14 @@ const WARNING_TONE: Record<FilamentWarning['kind'], string> = {
   'low-filament': 'text-muted',
   'no-preset': 'text-muted',
   'no-fan-out': 'text-muted',
+  'nozzle-mismatch': 'text-warn',
+}
+
+/** `0.2 mm (HS00) and 0.4 mm (HS01)` — one per extruder, as the printer reports them. */
+function nozzleList(nozzles: NozzleInfo[]): string {
+  return nozzles
+    .map((nozzle) => `${nozzle.nozzle_diameter} mm${nozzle.nozzle_type ? ` (${nozzle.nozzle_type})` : ''}`)
+    .join(' and ')
 }
 
 function Swatch({ colour, size = 'md' }: { colour: string | null | undefined; size?: 'sm' | 'md' }) {
@@ -120,6 +134,12 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
   // Recomputed from the plan on screen, not read off the server's answer for its own
   // opening selection — that one stops being true the moment a slot is changed.
   const warnings = checkPlan(options, plan, copies)
+  // #78 — the nozzle is the printer's and the pipeline's, not the plan's, so the server's
+  // own answer stays true however the slots are changed.
+  const nozzles = (options.nozzles ?? []).filter((nozzle) => nozzle.nozzle_diameter)
+  const nozzleWarnings = (options.warnings ?? []).filter(
+    (warning) => warning.kind === 'nozzle-mismatch',
+  )
 
   return (
     <section className="mt-4">
@@ -134,6 +154,16 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
           Reset to the suggested filaments
         </button>
       </div>
+
+      {nozzles.length > 0 && (
+        <p className="mt-1 text-[12px] text-muted" data-testid="nozzles">
+          {options.printer_name ?? 'The chosen printer'} has {nozzleList(nozzles)} mounted
+          {options.pipeline_nozzle_diameter
+            ? `; this pipeline slices for ${options.pipeline_nozzle_diameter} mm.`
+            : '.'}
+        </p>
+      )}
+      <WarningList warnings={nozzleWarnings} testId="nozzle-warnings" />
 
       {/* One filter row for every slot: the inventory is the same list each time, and a
           per-slot copy would mean setting "PLA only" twice for a two-colour plate. */}

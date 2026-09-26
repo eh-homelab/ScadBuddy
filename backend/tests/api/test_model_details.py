@@ -443,6 +443,7 @@ def test_a_dropped_model_directory_lands_with_its_own_metadata(client: TestClien
         "description": "A widget.",
         "tags": ["a", "b"],
         "source": "inspired by a widget",
+        "origin_url": "https://example.com/widget.scad",
     }
     response = client.post(
         "/api/v1/models",

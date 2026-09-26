@@ -6,16 +6,19 @@ import type {
   PipelineReport,
   PipelineChoices,
   PipelineView,
+  PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
   PrintRunResult,
   SlotChoice,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
 import { eligibilityIssues, verdictFor, type Verdict } from '../lib/problems'
 import { usePrintProgress } from '../lib/usePrintProgress'
 import { FilamentPicker } from './FilamentPicker'
+import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { PrintProgressPanel } from './PrintProgressPanel'
 import { NewPipelineForm } from './NewPipelineForm'
 import { ProjectPicker } from './ProjectPicker'
@@ -40,9 +43,9 @@ import { Spinner } from './ui/Spinner'
  *   *shown*; Bambuddy still fans out by the pipeline's own `fanout_strategy` and reports
  *   the printer per copy in `run.jobs[]`.
  *
- * Deliberately out of scope, each its own issue: filament/AMS slot mapping (#87), the
- * rest of `PrintQueueItemCreate` as an options disclosure (#88), and following the run to
- * completion (#89). This panel runs the pipeline and reports what Bambuddy answered.
+ * On top of that it carries the spools per slot (#87), the rest of `PrintQueueItemCreate`
+ * as the options disclosure (#88), and follows the run to completion (#89). It opens on
+ * what this model last printed with — pipeline, class printer and spools (#78).
  */
 
 const MAX_COPIES = 50
@@ -97,6 +100,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
    * uses; the run resolves the same layers server-side.
    */
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
+  /**
+   * #88 — this print's own overrides from the options disclosure, as on the send bar.
+   * Everything but `quantity`: that one is `copies`, so the Copies box and the Quantity
+   * row stay one value rather than two that can disagree.
+   */
+  const [options, setOptions] = useState<PrintOptions>({})
   const [asDefault, setAsDefault] = useState(false)
   const [force, setForce] = useState(false)
   const [creating, setCreating] = useState(false)
@@ -218,9 +227,11 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     void load().then(() => check())
   }, [open, load, check])
 
-  // The reports describe one output's 3MF, so they do not survive a change of output.
+  // The reports describe one output's 3MF, so they do not survive a change of output. Nor
+  // do this print's option overrides, which the collapsed disclosure would not show.
   useEffect(() => {
     setReports({})
+    setOptions({})
   }, [outputId])
 
   /**
@@ -243,6 +254,24 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     current && current.target_kind === 'printer_class' && (current.printer_ids ?? []).length > 1,
   )
   const derivedPrinterId = asksForPrinter ? printerId : (current?.printer_ids?.[0] ?? null)
+
+  /**
+   * #78 — a class target opens on the printer this model last printed it with, when that
+   * printer is still in the class; otherwise the question is asked again.
+   */
+  const rememberedPrinter = choices?.model_choices?.printer_id ?? null
+  useEffect(() => {
+    setPrinterId(
+      rememberedPrinter !== null && (current?.printer_ids ?? []).includes(rememberedPrinter)
+        ? rememberedPrinter
+        : null,
+    )
+  }, [current, rememberedPrinter])
+  /**
+   * The spools it last printed with, as a string so a reload of the same answer does not
+   * re-read the inventory.
+   */
+  const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
   const verdict: Verdict | undefined = report ? verdictFor(report, derivedPrinterId) : undefined
 
   /**
@@ -271,6 +300,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
    */
   const filamentAttempt = useRef(0)
   const awaitingPrinter = asksForPrinter && printerId === null
+  // #78 — the pipeline's nozzle as the pipelines read already named it, so the server
+  // compares it with the mounted ones without reading the preset catalogue again.
+  const pipelineNozzle = current?.nozzle_diameter ?? null
   useEffect(() => {
     if (!open || !outputId || selected === null || awaitingPrinter) {
       setFilaments(null)
@@ -286,14 +318,15 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       try {
         const next = await api.getFilaments(outputId, {
           printerId: derivedPrinterId,
-          pipelineId: selected,
+          nozzleDiameter: pipelineNozzle,
           plateId: PLATE_ID,
         })
         if (token !== filamentAttempt.current) return
         setFilaments(next)
         setFilamentError(null)
-        // The server's auto-match seeds the selection; every slot stays editable.
-        setPlan((next.suggested ?? []).map((choice) => ({ ...choice })))
+        // What this model last printed with seeds the selection, else the server's
+        // auto-match (#78); every slot stays editable.
+        setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
         // A different printer makes the escalation mean something different — it names
         // the machine the copies land on — so the consent is asked for again.
         setExact(false)
@@ -306,7 +339,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         )
       }
     })()
-  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter])
+  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter, rememberedPlan, pipelineNozzle])
 
   /**
    * Whether the user has moved a slot off the server's suggestion. That is what makes
@@ -366,12 +399,37 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     // The picker remounts on the next open and re-seeds from the model's own project,
     // but until that read lands the parent would still be holding the previous one.
     setProjectId(null)
+    setOptions({})
     setError(null)
     setRunIssues([])
     setResult(null)
     setForce(false)
     setCreating(false)
     onClose()
+  }
+
+  /**
+   * #78 — the last-used choices, which is what the picker opens on next time. The printer
+   * only where the picker asked for one, and the plan only where it is one: sending the
+   * suggestion is not a choice, and an unreadable inventory is no reason to forget the
+   * spools picked before. Written only when it differs, and only once the print has
+   * started — best effort, because a preference that fails to save must never stop or
+   * fail the print itself.
+   */
+  function rememberChoices() {
+    const last = choices?.model_choices
+    const next = {
+      printer_id: asksForPrinter ? printerId : (last?.printer_id ?? null),
+      filament_plan: filaments === null ? (last?.filament_plan ?? []) : sendsPlan ? plan : [],
+    }
+    if (
+      next.printer_id === (last?.printer_id ?? null) &&
+      JSON.stringify(next.filament_plan) === rememberedPlan
+    ) {
+      return
+    }
+    // Ignored like the project attach above: the next open just falls back to the auto-match.
+    void api.putModelChoices(slug, next).catch(() => undefined)
   }
 
   async function run() {
@@ -402,6 +460,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         force,
         plate_id: PLATE_ID,
         project_id: projectId,
+        options,
       }
       /**
        * #87 — naming a printer or a filament plan is what escalates this off the
@@ -417,6 +476,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       const ran = await api.runPipeline(outputId, body)
       setResult(ran)
       onRan(ran)
+      rememberChoices()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
       // A 409 carries Bambuddy's report verbatim; list what blocked it so Run anyway is
@@ -582,7 +642,6 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                           checked={selected === pipeline.id}
                           onChange={() => {
                             setSelected(pipeline.id)
-                            setPrinterId(null)
                             setForce(false)
                             setRunIssues([])
                           }}
@@ -781,14 +840,22 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               </label>
               {planChanged && !exact && (
                 <p className="mt-1 text-[12px] text-faint">
-                  A slot has been changed, so this print will be sliced and queued for{' '}
-                  {filaments.printer_name ?? 'the chosen printer'} either way.
+                  These spools are not the suggested ones, so this print will be sliced and
+                  queued for {filaments.printer_name ?? 'the chosen printer'} either way.
                 </p>
               )}
             </>
           )}
 
-          {/* #88 adds the rest of PrintQueueItemCreate here as an options disclosure. */}
+          <PrintOptionsDisclosure
+            slug={slug}
+            printerId={scopePrinterId}
+            value={copies === null ? options : { ...options, quantity: copies }}
+            onChange={({ quantity, ...rest }) => {
+              setCopies(quantity ?? null)
+              setOptions(rest)
+            }}
+          />
 
           {issuesShown && (
             <label className="mt-3 flex cursor-pointer items-center gap-2 text-[13px] text-warn">

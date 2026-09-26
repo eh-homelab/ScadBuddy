@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
+import { ImportDialog } from '../components/ImportDialog'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { Button } from '../components/ui/Button'
@@ -12,7 +13,13 @@ import { useAsync } from '../lib/useAsync'
 export function CataloguePage() {
   const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [])
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [importOpen, setImportOpen] = useState(false)
   const navigate = useNavigate()
+
+  function added(model: ModelSummary) {
+    setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
+    void navigate(`/m/${model.slug}`)
+  }
 
   return (
     <div className="h-full overflow-y-auto">
@@ -26,6 +33,7 @@ export function CataloguePage() {
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <Button onClick={() => void navigate('/new')}>Paste source</Button>
+            <Button onClick={() => setImportOpen(true)}>Import from URL</Button>
             <Button variant="primary" onClick={() => setUploadOpen(true)}>
               Add model
             </Button>
@@ -47,7 +55,9 @@ export function CataloguePage() {
           </div>
         )}
 
-        {data && data.length === 0 && <EmptyState onUpload={() => setUploadOpen(true)} />}
+        {data && data.length === 0 && (
+          <EmptyState onUpload={() => setUploadOpen(true)} onImport={() => setImportOpen(true)} />
+        )}
 
         {data && data.length > 0 && (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
@@ -62,9 +72,16 @@ export function CataloguePage() {
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}
         onUploaded={(model) => {
-          setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
           setUploadOpen(false)
-          void navigate(`/m/${model.slug}`)
+          added(model)
+        }}
+      />
+      <ImportDialog
+        open={importOpen}
+        onClose={() => setImportOpen(false)}
+        onImported={(model) => {
+          setImportOpen(false)
+          added(model)
         }}
       />
     </div>
@@ -104,11 +121,33 @@ function ModelCard({ model }: { model: ModelSummary }) {
           Updated {timeAgo(model.updated_at)}
         </p>
       </Link>
+      {/* Outside the card's link: an anchor cannot nest inside another. */}
+      {model.origin_url && (
+        <p className="truncate px-3 pb-2.5 text-[12px] text-faint">
+          From{' '}
+          <a
+            href={model.origin_url}
+            target="_blank"
+            rel="noreferrer"
+            className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
+          >
+            {hostOf(model.origin_url)}
+          </a>
+        </p>
+      )}
     </li>
   )
 }
 
-function EmptyState({ onUpload }: { onUpload: () => void }) {
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+function EmptyState({ onUpload, onImport }: { onUpload: () => void; onImport: () => void }) {
   return (
     <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
       <h2 className="text-[15px] font-medium">No models yet</h2>
@@ -117,9 +156,12 @@ function EmptyState({ onUpload }: { onUpload: () => void }) {
         <code className="sb-num text-ink">models/</code> on the ScadBuddy volume, or add one here.
         Parameters marked up for the MakerWorld customizer work unchanged.
       </p>
-      <Button variant="primary" className="mt-4" onClick={onUpload}>
-        Add model
-      </Button>
+      <div className="mt-4 flex justify-center gap-2">
+        <Button onClick={onImport}>Import from URL</Button>
+        <Button variant="primary" onClick={onUpload}>
+          Add model
+        </Button>
+      </div>
     </div>
   )
 }

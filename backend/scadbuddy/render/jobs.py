@@ -26,7 +26,7 @@ from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.render.solids import render_solids
+from scadbuddy.render.solids import CSS_COLOURS, render_solids
 from scadbuddy.render.split import ColourPart, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
@@ -145,6 +145,47 @@ class JobStore:
                 self.delete(job.id)
                 removed.append(job.id)
         return removed
+
+
+def _as_material_colour(value: ParamValue | None) -> str | None:
+    """A colour parameter's value as the `#RRGGBB` its material would carry."""
+    if not isinstance(value, str):
+        return None
+    if not value.startswith("#"):
+        return CSS_COLOURS.get(value.strip().lower())
+    digits = value[1:].upper()
+    if len(digits) in (3, 4):
+        digits = "".join(digit * 2 for digit in digits)
+    return "#" + digits[:6]
+
+
+def extruder_order(
+    parts: Sequence[ColourPart], schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> list[ColourPart]:
+    """The split parts in extruder order: spec §7's "extruder 1 = first colour
+    parameter".
+
+    OpenSCAD numbers its materials in the order the geometry first uses each colour,
+    not in parameter order, so a model that draws its second colour first would
+    otherwise swap its extruders. Each part is matched to the first colour parameter,
+    in declaration order, whose rendered value is that part's colour; parameters that
+    share a value therefore share one extruder, and one no geometry uses gets none.
+    Every part no parameter names -- a hard-coded colour, one computed from a
+    parameter, the uncoloured Default -- follows, in OpenSCAD's material order."""
+    ranks: dict[str, int] = {}
+    for parameter in schema.parameters:
+        if parameter.type != "color":
+            continue
+        colour = _as_material_colour(params.get(parameter.name, parameter.initial))
+        if colour is not None:
+            ranks.setdefault(colour, len(ranks))
+
+    def rank(part: ColourPart) -> int:
+        if part.material_index == UNCOLOURED_MATERIAL_INDEX:
+            return len(ranks)
+        return ranks.get(part.colour, len(ranks))
+
+    return sorted(parts, key=rank)
 
 
 async def solid_parts(
@@ -373,7 +414,7 @@ async def render_job(
     work.mkdir(parents=True, exist_ok=True)
 
     output = await render_3mf(scad, schema, job.params, work / RAW_RENDER_NAME, config=config)
-    preview_parts = split_by_material(work / RAW_RENDER_NAME)
+    preview_parts = extruder_order(split_by_material(work / RAW_RENDER_NAME), schema, job.params)
     if not preview_parts:
         raise OpenSCADError("the render produced no geometry", output.log_tail)
 

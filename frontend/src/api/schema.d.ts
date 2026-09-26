@@ -130,6 +130,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/import": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Import a model from a URL
+         * @description Fetches the source on the server -- https only, from public internet addresses only, at most 8388608 bytes, within 30 seconds -- then creates the model exactly as a paste does, recording the URL as `origin_url`. A direct link to the file works; a MakerWorld model page is refused, because MakerWorld only serves files to a signed-in account. Every refusal is a 422, and an address that is not public reads the same as one that did not answer.
+         */
+        post: operations["import_model_api_v1_models_import_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}": {
         parameters: {
             query?: never;
@@ -521,6 +541,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/models/{slug}/choices": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Remember this model's printer and spools
+         * @description The rest of what the picker chose, beside the model's pipeline (#78).
+         *
+         *     Replaces this model's entry whole; an empty body forgets it, so the picker opens on
+         *     the auto-match again. Needs no Bambuddy, like the pipeline default.
+         */
+        put: operations["put_model_choices_api_v1_print_models__slug__choices_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/models/{slug}/pipeline": {
         parameters: {
             query?: never;
@@ -604,7 +647,10 @@ export interface paths {
          *
          *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
          *     this printer": without one the spools are still listed, with their last known
-         *     assignment, but the reconciled remaining weights are not.
+         *     assignment, but the reconciled remaining weights are not. It is also what reads the
+         *     mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
+         *     nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
+         *     re-derived, because naming a preset means reading the whole catalogue again.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -1200,6 +1246,10 @@ export interface components {
         FilamentOptions: {
             /** Library File Id */
             library_file_id: number;
+            /** Nozzles */
+            nozzles?: components["schemas"]["NozzleInfo"][];
+            /** Pipeline Nozzle Diameter */
+            pipeline_nozzle_diameter?: string | null;
             /** Printer Id */
             printer_id?: number | null;
             /** Printer Name */
@@ -1240,7 +1290,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out";
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out" | "nozzle-mismatch";
             /** Message */
             message: string;
             /** Slot Id */
@@ -1429,6 +1479,21 @@ export interface components {
             /** Tags */
             tags?: string[] | null;
         };
+        /**
+         * ModelPrintChoices
+         * @description What the print picker last chose for one model, beyond its pipeline (#78).
+         *
+         *     ``printer_id`` is only the printer picked for a class-targeted pipeline, which is the
+         *     one case the picker asks. ``filament_plan`` is only a plan the user moved off the
+         *     auto-match: a spool no longer in the inventory is dropped by the picker, which then
+         *     falls back to the auto-match for that slot.
+         */
+        ModelPrintChoices: {
+            /** Filament Plan */
+            filament_plan?: components["schemas"]["SlotChoice"][];
+            /** Printer Id */
+            printer_id?: number | null;
+        };
         /** ModelRecord */
         ModelRecord: {
             /**
@@ -1442,6 +1507,8 @@ export interface components {
             has_thumbnail: boolean;
             /** Name */
             name: string;
+            /** Origin Url */
+            origin_url?: string | null;
             /** Slug */
             slug: string;
             /** Source */
@@ -1480,6 +1547,23 @@ export interface components {
             message: string;
             /** Short */
             short: string;
+        };
+        /**
+         * NozzleInfo
+         * @description ``nozzle_diameter`` is a **string** here ("0.4"), unlike the float the queue
+         *     route reports back on a print.
+         */
+        NozzleInfo: {
+            /**
+             * Nozzle Diameter
+             * @default
+             */
+            nozzle_diameter: string;
+            /**
+             * Nozzle Type
+             * @default
+             */
+            nozzle_type: string;
         };
         /** Option */
         Option: {
@@ -1662,6 +1746,7 @@ export interface components {
             default_pipeline_id?: number | null;
             /** Global Pipeline Id */
             global_pipeline_id?: number | null;
+            model_choices?: components["schemas"]["ModelPrintChoices"];
             /** Model Pipeline Id */
             model_pipeline_id?: number | null;
             /** Pipelines */
@@ -1843,6 +1928,8 @@ export interface components {
             id: number;
             /** Name */
             name: string;
+            /** Nozzle Diameter */
+            nozzle_diameter?: string | null;
             /** Printer Ids */
             printer_ids?: number[];
             printer_preset?: components["schemas"]["PresetRef"] | null;
@@ -2130,7 +2217,8 @@ export interface components {
          *     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
          *       queue-item fields exist on no other Bambuddy call (#87); or
          *     - a remembered print option applies that a run cannot carry (#124). The options
-         *       resolve global → per-printer → per-model → this request's ``copies``.
+         *       resolve global → per-printer → per-model → this request's ``options`` and
+         *       ``copies``.
          *
          *     Otherwise it runs the pipeline exactly as before.
          */
@@ -2143,6 +2231,7 @@ export interface components {
              * @default false
              */
             force: boolean;
+            options?: components["schemas"]["PrintOptions"];
             /** Pipeline Id */
             pipeline_id?: number | null;
             /**
@@ -2430,7 +2519,11 @@ export interface components {
             /** Url */
             url: string;
         };
-        /** SlotChoice */
+        /**
+         * SlotChoice
+         * @description One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)
+         *     and what it remembers per model (#78).
+         */
         SlotChoice: {
             /** Slot Id */
             slot_id: number;
@@ -2521,6 +2614,25 @@ export interface components {
             storage_location?: string | null;
             /** Subtype */
             subtype?: string | null;
+        };
+        /** UrlImport */
+        UrlImport: {
+            /**
+             * Force
+             * @description Save even when the parse check fails
+             * @default false
+             */
+            force: boolean;
+            /**
+             * Name
+             * @description Display name; taken from the URL's file name when omitted
+             */
+            name?: string | null;
+            /**
+             * Url
+             * @description An https URL to the model's source
+             */
+            url: string;
         };
         /** ValidationError */
         ValidationError: {
@@ -2796,6 +2908,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SourceCheck"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    import_model_api_v1_models_import_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UrlImport"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
                 };
             };
             /** @description Validation Error */
@@ -3776,6 +3921,41 @@ export interface operations {
             };
         };
     };
+    put_model_choices_api_v1_print_models__slug__choices_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ModelPrintChoices"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelPrintChoices"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     put_model_pipeline_api_v1_print_models__slug__pipeline_put: {
         parameters: {
             query?: never;
@@ -3881,6 +4061,7 @@ export interface operations {
         parameters: {
             query?: {
                 printer_id?: number | null;
+                nozzle_diameter?: string | null;
                 plate_id?: number;
             };
             header?: never;

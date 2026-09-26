@@ -113,7 +113,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   with `<basematerials>`** and a **per-triangle material index**
   (`<triangle pid="1" p1="N"/>`), one material per distinct `color()` value
   plus a `Default` for uncoloured geometry. (Known nightly quirk: the
-  `displaycolor` alpha byte is written as `00`; ignore alpha.)
+  `displaycolor` alpha byte is written as `00`; ignore alpha.) `Default` is
+  always index 0; the colours follow in the order the geometry **first uses**
+  them, not the order the parameters are declared — measured on 2026.09.23: a
+  model declaring `base_color` then `text_color` but drawing the text first gets
+  the text colour as material 1. Extruder order is therefore imposed by
+  ScadBuddy (§7), not inherited.
 - **Splitting that mesh by `p1` does *not* give closed meshes.** OpenSCAD
   unions the top-level coloured solids and deletes the faces where they meet,
   so every part that touches another part comes back open — measured
@@ -143,6 +148,14 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   pre-slice check reads **object-level `extruder`** from `model_settings.config`
   and ignores `paint_color`, so per-object assignment is the only reliable
   path.
+- **MakerWorld does not serve a model's source to an anonymous server**
+  (checked 2026-09-26, #153/#174). Model pages sit behind a Cloudflare challenge
+  (403). `api.bambulab.com/v1/design-service/design/<id>` answers without a login
+  (title, cover, summary, licence, file list), but the Parametric Model Maker
+  `.scad` entry has an empty `modelUrl`, and every download route answers 403
+  "Please log in to download models". Some PMM sources are also marked
+  `protected`. So the URL import refuses MakerWorld links with a pointer to
+  Upload, and a resolver needs a signed-in token (#174).
 
 ## 4. Architecture
 
@@ -198,13 +211,18 @@ Data on the PVC (`SCADBUDDY_DATA_DIR`, default `/data`):
 ```
 models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
-models/<slug>/model.json          name, description, tags, thumbnail (NOT the schema)
+models/<slug>/model.json          name, description, tags, thumbnail, origin_url (NOT the schema)
 models/<slug>/thumbnail.png
 outputs/<slug>/<output-id>/       params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<slug>.json          the DERIVED customizer schema, keyed by source hash
 cache/revisions/<slug>/<commit>/  an old model revision exported out of git, derived
 ```
+
+`origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
+(not wherever redirects ended), for the catalogue's link back and a later re-pull.
+It is `null` for anything uploaded, pasted or seeded, and it is not editable:
+`PATCH /models/{slug}` does not take it.
 
 ### 4.3 Model history: git is the version store (#90)
 
@@ -549,8 +567,19 @@ Flows (all server-side, so the browser never sees the API key):
    unrelated `"Customize"` link.
 
 Colour → filament: the order of `color` parameters in the schema is the
-extruder order (extruder 1 = first colour parameter). Colours that appear in
-`color()` calls but are not parameters (hard-coded) are appended after.
+extruder order (extruder 1 = first colour parameter). OpenSCAD does not number
+its materials that way — it lists them in the order the geometry first uses
+each colour (§3) — so `render/jobs.py` `extruder_order` reorders the split parts
+before anything is written from them. Each part goes to the first colour
+parameter, in declaration order, whose rendered value (the job's, else the
+default; hex in any case, `#RGB`, an alpha channel or a CSS name) is that
+part's colour. Numbers are dense, because an extruder is a filament slot:
+parameters that share a value share the first one's extruder, and a parameter
+no geometry uses gets none, so the ones after it move up. Colours no parameter
+names — hard-coded, computed from a parameter, or the uncoloured `Default` —
+are appended after, in OpenSCAD's material order. The GLB, the 3MF and the
+job's `parts`/`colors` are all written from that one list, so the preview,
+the file and the print picker's numbered swatches agree.
 
 ## 8. API
 
@@ -560,6 +589,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 |---|---|---|
 | GET | `/models` | catalogue |
 | POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README), slug from filename; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |

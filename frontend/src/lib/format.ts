@@ -35,7 +35,9 @@ export function timeAgo(iso: string, now = Date.now()): string {
 
 export function normalizeHex(value: string): string {
   const clean = value.trim().replace(/^#/, '')
-  const full = clean.length === 3 ? [...clean].map((c) => c + c).join('') : clean
+  // `#RGB` and `#RGBA` are shorthand; alpha is dropped, as OpenSCAD's materials do.
+  const short = clean.length === 3 || clean.length === 4
+  const full = short ? [...clean].map((c) => c + c).join('') : clean
   return `#${full.padEnd(6, '0').slice(0, 6).toUpperCase()}`
 }
 
