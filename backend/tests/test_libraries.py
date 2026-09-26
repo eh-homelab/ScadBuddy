@@ -7,13 +7,14 @@ network is never involved.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
-from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     CatalogueLibrary,
@@ -130,6 +131,48 @@ def test_reinstalling_the_same_pin_is_not_a_revision(
     store.install("BOSL2")
 
     assert history.head() == head
+
+
+def test_a_failed_commit_does_not_fail_a_pin_that_was_written(
+    store: LibraryStore,
+    paths: DataPaths,
+    history: ModelHistory,
+    monkeypatch: pytest.MonkeyPatch,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """As a catalogue action: the lockfile is what renders read, so the pin is live
+    and the client must not be told it failed."""
+    _, commits = upstream
+    head = history.head()
+
+    def fail_after_prepare(
+        message: str, *paths_: str, prepare: Callable[[], None] | None = None
+    ) -> str | None:
+        assert prepare is not None
+        prepare()
+        raise GitTimeoutError("git commit timed out after 30s")
+
+    monkeypatch.setattr(history, "commit", fail_after_prepare)
+
+    pin = store.install("BOSL2")
+
+    assert pin.commit == commits["v1"]
+    assert read_pins(paths)["BOSL2"] == pin
+    assert history.head() == head
+
+
+def test_a_commit_that_failed_before_writing_still_fails(
+    store: LibraryStore, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fail_on_the_lock(
+        message: str, *paths_: str, prepare: Callable[[], None] | None = None
+    ) -> str | None:
+        raise GitTimeoutError("waited 30s for the in-process write lock")
+
+    monkeypatch.setattr(history, "commit", fail_on_the_lock)
+
+    with pytest.raises(GitTimeoutError):
+        store.install("BOSL2")
 
 
 def test_a_user_added_library_is_recorded_with_its_url(
