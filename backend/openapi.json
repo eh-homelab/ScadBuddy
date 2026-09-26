@@ -259,8 +259,8 @@
           "slug": {
             "anyOf": [
               {
-                "maxLength": 100,
-                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "maxLength": 108,
+                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
                 "type": "string"
               },
               {
@@ -1381,6 +1381,14 @@
             "title": "Name",
             "type": "string"
           },
+          "origin": {
+            "enum": [
+              "builtin",
+              "mine"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
           "slug": {
             "title": "Slug",
             "type": "string"
@@ -1423,6 +1431,7 @@
         "required": [
           "name",
           "slug",
+          "origin",
           "has_thumbnail",
           "has_readme",
           "updated_at"
@@ -4860,8 +4869,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -4895,8 +4904,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -4937,8 +4946,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -4992,8 +5001,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5038,8 +5047,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5092,8 +5101,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5146,8 +5155,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5190,8 +5199,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5229,8 +5238,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5283,8 +5292,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5323,8 +5332,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5383,8 +5392,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5454,8 +5463,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5508,8 +5517,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5562,8 +5571,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5910,8 +5919,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
@@ -5964,8 +5973,8 @@
             "name": "slug",
             "required": true,
             "schema": {
-              "maxLength": 100,
-              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
             }
