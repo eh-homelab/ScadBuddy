@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
+import gzip
+import zlib
+from collections.abc import Callable, Iterable
 
 import httpcore
 import httpx
@@ -115,6 +117,61 @@ async def test_a_body_over_the_limit_is_refused() -> None:
         await fetch_model(RAW_URL, limit=LIMIT)
 
     assert str(LIMIT) in str(caught.value)
+
+
+@respx.mock
+async def test_the_fetch_asks_for_the_file_uncompressed() -> None:
+    route = respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
+
+    await fetch_model(RAW_URL, limit=LIMIT)
+
+    assert route.calls[0].request.headers["accept-encoding"] == "identity"
+
+
+@pytest.mark.parametrize(
+    ("encoding", "compress"), [("gzip", gzip.compress), ("deflate", zlib.compress)]
+)
+@respx.mock
+async def test_a_compression_bomb_is_refused_without_being_inflated(
+    encoding: str, compress: Callable[[bytes], bytes]
+) -> None:
+    # Under the limit on the wire, a hundred times it once inflated.
+    bomb = compress(b"x" * (LIMIT * 100))
+    assert len(bomb) < LIMIT
+    respx.get(RAW_URL).mock(
+        return_value=httpx.Response(200, content=bomb, headers={"Content-Encoding": encoding})
+    )
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model(RAW_URL, limit=LIMIT)
+
+    # Refused on the header, before a byte of the body is read or decoded.
+    assert "compressed" in str(caught.value)
+
+
+def test_the_transport_connects_through_the_public_only_backend() -> None:
+    pool = url_import._transport()._pool
+
+    assert isinstance(pool, httpcore.AsyncConnectionPool)
+    assert isinstance(pool._network_backend, PublicOnlyBackend)
+
+
+def test_a_transport_the_backend_cannot_be_fitted_to_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If httpx stops keeping its pool where this looks, building the client must
+    fail -- not quietly connect through a backend that re-resolves the name."""
+
+    class Moved(httpx.AsyncHTTPTransport):
+        def __init__(self) -> None:
+            super().__init__()
+            self._connections = self._pool
+            del self._pool
+
+    monkeypatch.setattr(httpx, "AsyncHTTPTransport", Moved)
+
+    with pytest.raises(RuntimeError, match="PublicOnlyBackend"):
+        url_import._transport()
 
 
 @respx.mock
