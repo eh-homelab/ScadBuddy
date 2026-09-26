@@ -255,6 +255,15 @@ def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str
 # ── installing ────────────────────────────────────────────────────────────────
 
 
+def _same_repository(first: str, second: str) -> bool:
+    """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository."""
+
+    def bare(url: str) -> str:
+        return url.rstrip("/").removesuffix(".git").rstrip("/")
+
+    return bare(first) == bare(second)
+
+
 class LibraryStore:
     """``<data>/libraries/`` and the lockfile that pins them.
 
@@ -304,12 +313,23 @@ class LibraryStore:
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
         known = self.catalogue.get(name)
+        # A name is bound to one upstream: the catalogue's for a curated library,
+        # the one it was first added from otherwise. Every model declaring it
+        # trusts that upstream, so a different URL under the same name would
+        # silently swap the code they render with.
+        recorded = read_pins(self.paths).get(name)
+        bound = known.url if known is not None else recorded.url if recorded else None
         if url is None:
-            if known is None:
+            if bound is None:
                 raise LibraryNotFoundError(name)
-            url = known.url
+            url = bound
+        elif bound is not None:
+            if _same_repository(url, bound):
+                url = bound
+            else:
+                raise LibraryError(f"{name!r} comes from {bound}; add {url} under another name")
         if ref is None:
-            if known is None or known.url != url:
+            if known is None:
                 raise LibraryError(f"a library from {url} needs a ref to pin")
             ref = known.ref
         if not re.fullmatch(REF_PATTERN, ref) or ".." in ref:

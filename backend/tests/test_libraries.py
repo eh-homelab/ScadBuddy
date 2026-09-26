@@ -191,6 +191,52 @@ def test_a_user_added_library_is_recorded_with_its_url(
     assert entries["BOSL2"].pin is None
 
 
+@pytest.fixture
+def elsewhere(tmp_path: Path) -> str:
+    """A second upstream, standing in for someone else's repository."""
+    url, _ = make_library_upstream(tmp_path / "elsewhere", {"v1": "module marker() sphere(1);\n"})
+    return url
+
+
+def test_a_curated_name_cannot_be_pointed_at_another_repository(
+    store: LibraryStore, paths: DataPaths, elsewhere: str
+) -> None:
+    """Every model declaring BOSL2 trusts the catalogue's upstream; a caller must not
+    be able to swap that out by naming BOSL2 with its own URL."""
+    with pytest.raises(LibraryError, match="BOSL2"):
+        store.install("BOSL2", url=elsewhere, ref="v1")
+
+    assert not (paths.models / LOCKFILE_NAME).exists()
+    assert list(paths.libraries.iterdir()) == []
+
+
+@pytest.mark.parametrize("suffix", ["/", ".git", ".git/"])
+def test_the_catalogue_url_matches_however_it_is_spelled(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]], suffix: str
+) -> None:
+    url, commits = upstream
+    spelled = url.removesuffix(".git") + suffix
+
+    pin = store.install("BOSL2", url=spelled, ref="v2")
+
+    # Recorded as the catalogue spells it, so the lock never carries two spellings.
+    assert (pin.url, pin.commit) == (url, commits["v2"])
+
+
+def test_a_user_added_library_cannot_be_repointed(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]], elsewhere: str
+) -> None:
+    url, commits = upstream
+    store.install("mylib", url=url, ref="v1")
+
+    with pytest.raises(LibraryError, match="mylib"):
+        store.install("mylib", url=elsewhere, ref="v1")
+
+    assert read_pins(paths)["mylib"].url == url
+    # Its own URL still moves it to another ref.
+    assert store.install("mylib", url=url, ref="v2").commit == commits["v2"]
+
+
 def test_a_name_outside_the_catalogue_needs_a_url(store: LibraryStore) -> None:
     with pytest.raises(LibraryNotFoundError):
         store.install("nothing-here")
