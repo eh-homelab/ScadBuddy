@@ -454,6 +454,20 @@ class TestPlatesOf:
             (2, "Metadata/plate_2.png"),
         ]
 
+    def test_a_plate_without_a_plater_id_is_a_malformed_3mf(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "bad.3mf", covers=False)
+        with zipfile.ZipFile(path) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        config = entries["Metadata/model_settings.config"].decode("utf-8")
+        entries["Metadata/model_settings.config"] = config.replace(
+            "</config>", " <plate>\n </plate>\n</config>"
+        ).encode("utf-8")
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, payload in entries.items():
+                archive.writestr(name, payload)
+        with pytest.raises(ValueError, match="plater_id"):
+            plates_of(path)
+
 
 def add_plate(path: Path, index: int, *, thumbnail: bytes | None = None) -> Path:
     """Add a ``<plate>`` to a written 3MF, the way Bambu Studio lists a second plate."""

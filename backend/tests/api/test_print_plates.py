@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+import httpx
 import respx
 from fastapi.testclient import TestClient
 
@@ -256,3 +257,42 @@ def test_all_plates_are_queued_as_one_item_each(
     assert [item["quantity"] for item in queued] == [2, 2]
     assert len(body["queue_item_ids"]) == 2
     assert body["copies"] == 2
+
+
+@respx.mock
+def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Plate 1 is on Bambuddy's queue when plate 2's slice fails; the output keeps it."""
+    configure(client)
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    add_plate(_output_3mf(paths, output_id), 2)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        side_effect=[
+            httpx.Response(202, json={"job_id": 9, "status": "pending"}),
+            httpx.Response(202, json={"job_id": 10, "status": "pending"}),
+        ]
+    )
+    respx.get(f"{API}/slice-jobs/9").mock(
+        return_value=httpx.Response(
+            200, json={"id": 9, "status": "completed", "result": {"library_file_id": 52}}
+        )
+    )
+    respx.get(f"{API}/slice-jobs/10").mock(
+        return_value=httpx.Response(200, json={"id": 10, "status": "failed", "error": "no fit"})
+    )
+    queue = queue_route()
+
+    answer = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+    )
+
+    assert answer.status_code == 502
+    assert queue.call_count == 1
+    meta = json.loads(_output_3mf(paths, output_id).with_name("meta.json").read_text())
+    assert meta["queue_item_id"] == 9
+    assert meta["print_route"] == "slice_queue"
+    assert meta["slice_job_id"] == 9

@@ -696,8 +696,9 @@ async def run_for_output(
     if request.filament_plan is None:
         # Only the options or the plate forced this route: slice what the run would have.
         slice_request = pipeline_slice_request(pipeline, meta)
-        outcomes = [
-            await slice_and_queue(
+        outcomes = []
+        for plate_id in plate_ids:
+            outcome = await slice_and_queue(
                 client,
                 library_file_id=library_file_id,
                 pipeline=pipeline,
@@ -710,8 +711,8 @@ async def run_for_output(
                 project_id=project_id,
                 options=print_options,
             )
-            for plate_id in plate_ids
-        ]
+            _record_queued(store, meta, outcome, project_id)
+            outcomes.append(outcome)
         warnings: list[FilamentWarning] = []
         target_model = outcomes[0].target_model
         if target_model is not None:
@@ -732,8 +733,6 @@ async def run_for_output(
             )
         return _queued(
             client,
-            store,
-            meta,
             outcomes,
             pipeline_id,
             library_file_id,
@@ -781,29 +780,27 @@ async def run_for_output(
                 client, options, request.filament_plan, compatible
             ),
         )
-        outcomes.append(
-            await slice_and_queue(
-                client,
-                library_file_id=library_file_id,
-                pipeline=pipeline,
-                printer_id=request.printer_id,
-                filament_presets=presets,
-                filament_colours=colours,
-                filaments=queue_filaments(options, request.filament_plan),
-                plate_id=plate_id,
-                bed_type=request.bed_type,
-                copies=copies,
-                project_id=project_id,
-                options=print_options,
-            )
+        outcome = await slice_and_queue(
+            client,
+            library_file_id=library_file_id,
+            pipeline=pipeline,
+            printer_id=request.printer_id,
+            filament_presets=presets,
+            filament_colours=colours,
+            filaments=queue_filaments(options, request.filament_plan),
+            plate_id=plate_id,
+            bed_type=request.bed_type,
+            copies=copies,
+            project_id=project_id,
+            options=print_options,
         )
+        _record_queued(store, meta, outcome, project_id)
+        outcomes.append(outcome)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
             if warning not in warnings:
                 warnings.append(warning)
     return _queued(
         client,
-        store,
-        meta,
         outcomes,
         pipeline_id,
         library_file_id,
@@ -829,10 +826,26 @@ async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pip
     return pipeline
 
 
+def _record_queued(
+    store: OutputStore, meta: OutputMeta, outcome: QueueOutcome, project_id: int | None
+) -> None:
+    """Record one plate's queue items as soon as it is queued.
+
+    Recorded per plate, not after the last one: a later plate failing to slice must not
+    leave the plates already on Bambuddy's queue unknown to the output (#83).
+    """
+    for queue_item_id in outcome.queue_item_ids:
+        store.record_send(
+            meta.id,
+            queue_item_id=queue_item_id,
+            print_route="slice_queue",
+            slice_job_id=outcome.slice_job_id,
+            project_id=project_id,
+        )
+
+
 def _queued(
     client: BambuddyClient,
-    store: OutputStore,
-    meta: OutputMeta,
     outcomes: list[QueueOutcome],
     pipeline_id: int,
     library_file_id: int,
@@ -841,20 +854,11 @@ def _queued(
     copies: int,
     warnings: list[FilamentWarning] | None = None,
 ) -> PrintRunResult:
-    """Record the queue items against the output and report the slice-and-queue run.
+    """Report the slice-and-queue run; each plate was recorded as it was queued.
 
     One outcome per plate queued (#83). The slice job and sliced file reported are the
     first plate's; every plate's queue items are listed.
     """
-    for outcome in outcomes:
-        for queue_item_id in outcome.queue_item_ids:
-            store.record_send(
-                meta.id,
-                queue_item_id=queue_item_id,
-                print_route="slice_queue",
-                slice_job_id=outcome.slice_job_id,
-                project_id=project_id,
-            )
     first = outcomes[0]
     return PrintRunResult(
         pipeline_id=pipeline_id,

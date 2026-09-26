@@ -322,6 +322,8 @@ def plates_of(path: Path) -> list[PlateEntry]:
     for plate in config.iter("plate"):
         metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
         cover = metadata.get("thumbnail_file")
+        if "plater_id" not in metadata:
+            raise ValueError("a <plate> in the 3MF's model settings has no plater_id")
         plates.append(
             PlateEntry(
                 index=int(metadata["plater_id"] or 0),
