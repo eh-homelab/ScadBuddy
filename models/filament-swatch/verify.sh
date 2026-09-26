@@ -23,7 +23,7 @@ FONT_FAMILY="DejaVu Sans"
 mkdir -p "$OUT"
 
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -qF "$FONT_FAMILY"; then
+if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     if ! docker image inspect "$FONTS_IMAGE" >/dev/null 2>&1; then
         echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
         docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE

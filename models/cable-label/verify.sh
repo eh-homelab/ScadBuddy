@@ -20,7 +20,7 @@ mkdir -p "$OUT"
 # the text measurements are meaningless, so derive an image that has the
 # ScadBuddy image's font packages when the base one lacks it.
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -qF "$FONT_FAMILY"; then
+if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE

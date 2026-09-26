@@ -20,7 +20,7 @@ mkdir -p "$OUT"
 IMAGE="$BASE_IMAGE"
 if docker image inspect "$FONTS_IMAGE" >/dev/null 2>&1; then
     IMAGE="$FONTS_IMAGE"
-elif ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -qF "$FONT_FAMILY"; then
+elif ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE

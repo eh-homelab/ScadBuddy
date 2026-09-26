@@ -34,7 +34,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
-if ! docker run --rm "$IMAGE" fc-list : family | grep -qF "$FONT_FAMILY"; then
+if ! docker run --rm "$IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "FAIL: $IMAGE has no '$FONT_FAMILY'" >&2
     exit 1
 fi
