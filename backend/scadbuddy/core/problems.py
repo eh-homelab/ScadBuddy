@@ -20,6 +20,8 @@ _TITLES = {
     409: "Conflict",
     415: "Unsupported Media Type",
     422: "Unprocessable Content",
+    # nginx's, not IANA's: the client hung up before it was answered.
+    499: "Client Closed Request",
     500: "Internal Server Error",
     503: "Service Unavailable",
 }

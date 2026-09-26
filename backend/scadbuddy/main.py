@@ -4,13 +4,15 @@ import asyncio
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from fastapi import APIRouter, FastAPI
+from pydantic import BaseModel
 
 from scadbuddy import __version__
 from scadbuddy.api import fonts, health, jobs, models, outputs, printing, settings, versions
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
-from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, BodySizeGate
+from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.problems import install_problem_handlers
@@ -33,6 +35,30 @@ def _api_router() -> APIRouter:
     router.include_router(settings.router)
     router.include_router(fonts.router)
     return router
+
+
+def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
+    """Add models no route declares to the OpenAPI `components`.
+
+    A route that parses its own body, as `POST /models` does for its three content
+    types, can only describe it through `openapi_extra`, which FastAPI copies in
+    verbatim: the model would be inlined and never named, and the generated client
+    would have no type for it. Named here, `openapi_extra` points at it by `$ref`.
+    """
+    generate = app.openapi
+
+    def openapi() -> dict[str, Any]:
+        if app.openapi_schema is not None:
+            return app.openapi_schema
+        schema = generate()
+        named = schema.setdefault("components", {}).setdefault("schemas", {})
+        for model in extra:
+            named[model.__name__] = model.model_json_schema(
+                ref_template="#/components/schemas/{model}"
+            )
+        return schema
+
+    app.openapi = openapi  # type: ignore[method-assign]
 
 
 @asynccontextmanager
@@ -88,11 +114,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     setattr(app.state, STATE_ATTR, build_state(app_settings))
     install_problem_handlers(app)
-    # Outermost, so an oversized paste is refused on its headers rather than buffered.
-    app.add_middleware(BodySizeGate, limit=MAX_TEXT_BODY_BYTES)
+    # Outermost, so an oversized body is refused on its headers rather than buffered.
+    app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 
     app.include_router(health.router)
     app.include_router(_api_router())
+    _name_in_openapi(app, models.PastedSource)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()

@@ -1467,6 +1467,35 @@ export interface components {
             /** Watertight */
             watertight: boolean;
         };
+        /**
+         * PastedSource
+         * @description A model pasted as source rather than uploaded as a file.
+         */
+        PastedSource: {
+            /**
+             * Description
+             * @default
+             */
+            description: string;
+            /**
+             * Force
+             * @description Save even when the parse check fails
+             * @default false
+             */
+            force: boolean;
+            /**
+             * Name
+             * @description Display name; its slug is derived from it
+             */
+            name: string;
+            /**
+             * Source
+             * @description The OpenSCAD source
+             */
+            source: string;
+            /** Tags */
+            tags?: string[];
+        };
         /** PerPrinterReport */
         PerPrinterReport: {
             /** Issues */
@@ -2544,31 +2573,7 @@ export interface operations {
         };
         requestBody?: {
             content: {
-                "application/json": {
-                    /**
-                     * Description
-                     * @default
-                     */
-                    description?: string;
-                    /**
-                     * Force
-                     * @description Save even when the parse check fails
-                     * @default false
-                     */
-                    force?: boolean;
-                    /**
-                     * Name
-                     * @description Display name; its slug is derived from it
-                     */
-                    name: string;
-                    /**
-                     * Source
-                     * @description The OpenSCAD source
-                     */
-                    source: string;
-                    /** Tags */
-                    tags?: string[];
-                };
+                "application/json": components["schemas"]["PastedSource"];
                 "multipart/form-data": components["schemas"]["Body_create_model_api_v1_models_post"];
                 "text/plain": string;
             };
@@ -2887,7 +2892,10 @@ export interface operations {
     };
     put_source_api_v1_models__slug__source_put: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Save even when the parse check fails */
+                force?: boolean;
+            };
             header?: never;
             path: {
                 slug: string;

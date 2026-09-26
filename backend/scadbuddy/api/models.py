@@ -222,7 +222,8 @@ async def _guard_source(
     openapi_extra={
         "requestBody": {
             "content": {
-                "application/json": {"schema": PastedSource.model_json_schema()},
+                # Named in `components` by `create_app`, so the client gets a type for it.
+                "application/json": {"schema": {"$ref": "#/components/schemas/PastedSource"}},
                 "text/plain": {"schema": {"type": "string"}},
             }
         }
@@ -480,6 +481,7 @@ async def put_source(
     paths: PathsDep,
     config: ConfigDep,
     checks: ChecksDep,
+    force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
 ) -> ModelRecord:
     # `require_model_exists`, not `require_model`: building a record costs a
     # `git log` for the model's revision, and this handler is `async def`. The
@@ -488,7 +490,8 @@ async def put_source(
     checked = await _guard_source(
         body.source,
         config=config,
-        force=body.force,
+        # Either spelling forces, as on `POST /models`.
+        force=force or body.force,
         limit=checks,
         # The model's own directory, so a replacement that includes a sibling file is
         # checked — and has its schema derived — against the files it will really see.
