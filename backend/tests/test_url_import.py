@@ -43,6 +43,9 @@ NOT_PUBLIC = [
     "::ffff:127.0.0.1",
     "::ffff:10.0.0.1",
     "64:ff9b::a00:1",
+    "::10.0.0.1",
+    "::a9fe:a9fe",
+    "2002:a00:1::1",
 ]
 
 
@@ -226,7 +229,9 @@ def test_addresses_that_are_not_globally_routable_are_not_public(address: str) -
     assert not is_public(address)
 
 
-@pytest.mark.parametrize("address", [PUBLIC_ADDRESS, "2606:4700::1111", "::ffff:8.8.8.8"])
+@pytest.mark.parametrize(
+    "address", [PUBLIC_ADDRESS, "2606:4700::1111", "::ffff:8.8.8.8", "2002:808:808::1"]
+)
 def test_globally_routable_addresses_are_public(address: str) -> None:
     assert is_public(address)
 

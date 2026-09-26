@@ -58,8 +58,12 @@ IMPORT_TIMEOUT = 30.0
 #: one, which would otherwise reach OpenSCAD and fail as a baffling parse error.
 HTML_TYPES = frozenset({"text/html", "application/xhtml+xml"})
 
-#: NAT64's well-known prefix embeds an IPv4 address that `is_global` does not look at.
-NAT64_PREFIX = ipaddress.ip_network("64:ff9b::/96")
+#: IPv6 forms whose low 32 bits are an IPv4 address that `is_global` does not look
+#: at: NAT64's well-known prefix, and the deprecated IPv4-compatible ``::a.b.c.d``.
+EMBEDDED_IPV4_PREFIXES = (
+    ipaddress.ip_network("64:ff9b::/96"),
+    ipaddress.ip_network("::/96"),
+)
 
 
 class ImportRefusedError(Exception):
@@ -81,7 +85,9 @@ def is_public(address: str) -> bool:
     if isinstance(ip, ipaddress.IPv6Address):
         if ip.ipv4_mapped is not None:
             ip = ip.ipv4_mapped
-        elif ip in NAT64_PREFIX:
+        elif ip.sixtofour is not None:
+            ip = ip.sixtofour
+        elif any(ip in prefix for prefix in EMBEDDED_IPV4_PREFIXES):
             ip = ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
     return ip.is_global and not ip.is_multicast
 
