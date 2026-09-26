@@ -5,6 +5,7 @@ description = "Self-hosted OpenSCAD customizer for Bambuddy"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "fastapi>=0.115",
+    "httpcore>=1.0",
     "httpx>=0.28",
     "lxml>=5.3",
     "networkx>=3.4",

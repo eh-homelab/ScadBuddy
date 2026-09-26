@@ -6,6 +6,7 @@ import struct
 import subprocess
 import zipfile
 import zlib
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,7 @@ import numpy as np
 import pytest
 
 from scadbuddy.core.config import load_config
+from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -136,3 +138,26 @@ def read_png(data: bytes) -> np.ndarray:
     if rows[:, 0].any():
         raise ValueError("expected filter type 0 on every row")
     return rows[:, 1:].reshape(height, width, 4)
+
+
+#: Any globally routable address; nothing ever connects to it.
+PUBLIC_ADDRESS = "93.184.215.14"
+
+
+@pytest.fixture
+def fake_dns(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[str]]:
+    """Name resolution for the URL import, without the network.
+
+    An address literal resolves to itself, as `getaddrinfo` does; any other name to
+    `PUBLIC_ADDRESS` unless the test maps it to something else in the returned dict.
+    """
+    answers: dict[str, list[str]] = {}
+
+    async def resolve(host: str, port: int) -> list[str]:
+        try:
+            return [str(ip_address(host))]
+        except ValueError:
+            return answers.get(host, [PUBLIC_ADDRESS])
+
+    monkeypatch.setattr(url_import, "resolve_host", resolve)
+    return answers
