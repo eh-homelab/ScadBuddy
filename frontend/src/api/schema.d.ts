@@ -451,6 +451,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/plate/fit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether a model fits a printer */
+        get: operations["get_plate_fit_api_v1_plate_fit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/plates": {
         parameters: {
             query?: never;
@@ -1465,6 +1482,18 @@ export interface components {
             /** Warnings */
             warnings?: string[];
         };
+        /** Overshoot */
+        Overshoot: {
+            /**
+             * Axis
+             * @enum {string}
+             */
+            axis: "X" | "Y" | "Z";
+            /** Limit */
+            limit: number;
+            /** Size */
+            size: number;
+        };
         /** Parameter */
         Parameter: {
             /** Caption */
@@ -1770,6 +1799,18 @@ export interface components {
             default: components["schemas"]["PlateView"];
             /** Plates */
             plates: components["schemas"]["PlateView"][];
+        };
+        /**
+         * PlateFit
+         * @description Whether a model of a given size can be sent to a printer, judged by the code the
+         *     send itself runs, so the customizer never says "fits" to a model the send refuses.
+         */
+        PlateFit: {
+            /** Overshoots */
+            overshoots: components["schemas"]["Overshoot"][];
+            plate: components["schemas"]["PlateView"];
+            /** Problem */
+            problem?: string | null;
         };
         /**
          * PlateView
@@ -3431,6 +3472,46 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PlateView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_fit_api_v1_plate_fit_get: {
+        parameters: {
+            query: {
+                /** @description Bounding box width, mm */
+                x: number;
+                /** @description Bounding box depth, mm */
+                y: number;
+                /** @description Bounding box height, mm */
+                z: number;
+                /** @description As for GET /plate */
+                model?: string | null;
+                /** @description More than one needs a prime tower, as at send time */
+                colours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateFit"];
                 };
             };
             /** @description Validation Error */

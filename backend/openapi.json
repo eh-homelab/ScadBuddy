@@ -1689,6 +1689,34 @@
         "title": "OutputDetail",
         "type": "object"
       },
+      "Overshoot": {
+        "properties": {
+          "axis": {
+            "enum": [
+              "X",
+              "Y",
+              "Z"
+            ],
+            "title": "Axis",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "number"
+          },
+          "size": {
+            "title": "Size",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "size",
+          "limit"
+        ],
+        "title": "Overshoot",
+        "type": "object"
+      },
       "Parameter": {
         "properties": {
           "caption": {
@@ -2712,6 +2740,38 @@
           "plates"
         ],
         "title": "PlateCatalogue",
+        "type": "object"
+      },
+      "PlateFit": {
+        "description": "Whether a model of a given size can be sent to a printer, judged by the code the\nsend itself runs, so the customizer never says \"fits\" to a model the send refuses.",
+        "properties": {
+          "overshoots": {
+            "items": {
+              "$ref": "#/components/schemas/Overshoot"
+            },
+            "title": "Overshoots",
+            "type": "array"
+          },
+          "plate": {
+            "$ref": "#/components/schemas/PlateView"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          }
+        },
+        "required": [
+          "plate",
+          "overshoots"
+        ],
+        "title": "PlateFit",
         "type": "object"
       },
       "PlateView": {
@@ -6067,6 +6127,106 @@
           }
         },
         "summary": "The plate for a printer model",
+        "tags": [
+          "plates"
+        ]
+      }
+    },
+    "/api/v1/plate/fit": {
+      "get": {
+        "operationId": "get_plate_fit_api_v1_plate_fit_get",
+        "parameters": [
+          {
+            "description": "Bounding box width, mm",
+            "in": "query",
+            "name": "x",
+            "required": true,
+            "schema": {
+              "description": "Bounding box width, mm",
+              "minimum": 0,
+              "title": "X",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Bounding box depth, mm",
+            "in": "query",
+            "name": "y",
+            "required": true,
+            "schema": {
+              "description": "Bounding box depth, mm",
+              "minimum": 0,
+              "title": "Y",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Bounding box height, mm",
+            "in": "query",
+            "name": "z",
+            "required": true,
+            "schema": {
+              "description": "Bounding box height, mm",
+              "minimum": 0,
+              "title": "Z",
+              "type": "number"
+            }
+          },
+          {
+            "description": "As for GET /plate",
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "As for GET /plate",
+              "title": "Model"
+            }
+          },
+          {
+            "description": "More than one needs a prime tower, as at send time",
+            "in": "query",
+            "name": "colours",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "More than one needs a prime tower, as at send time",
+              "minimum": 1,
+              "title": "Colours",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateFit"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whether a model fits a printer",
         "tags": [
           "plates"
         ]

@@ -126,6 +126,7 @@ export type AttachResult = Schemas['AttachResult']
 /** #81 — the build volume the preview draws and checks the model against. */
 export type Plate = Schemas['PlateView']
 export type PlateCatalogue = Schemas['PlateCatalogue']
+export type PlateFit = Schemas['PlateFit']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

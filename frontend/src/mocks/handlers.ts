@@ -16,6 +16,7 @@ import type {
   PipelineCreate,
   PipelineView,
   Plate,
+  PlateFit,
   PresetOptions,
   PresetRef,
   PrintProgress,
@@ -1005,6 +1006,29 @@ export const handlers = [
         fixtures.defaultPlate,
     ),
   ),
+
+  // The axes only: the real route also runs the send's placement, which a test that
+  // needs a prime-tower refusal overrides this handler to answer with.
+  http.get(`${base}/plate/fit`, ({ request }) => {
+    const search = new URL(request.url).searchParams
+    const plate =
+      plateFor(search.get('model')) ??
+      plateFor(state.settings.default_plate ?? null) ??
+      fixtures.defaultPlate
+    const { usable } = plate
+    const limits = [
+      ['X', Number(search.get('x')), usable.max_x - usable.min_x],
+      ['Y', Number(search.get('y')), usable.max_y - usable.min_y],
+      ['Z', Number(search.get('z')), plate.height],
+    ] as const
+    return HttpResponse.json({
+      plate,
+      overshoots: limits
+        .filter(([, size, limit]) => size > limit)
+        .map(([axis, size, limit]) => ({ axis, size, limit })),
+      problem: null,
+    } satisfies PlateFit)
+  }),
 
   http.get(`${base}/plates`, () =>
     HttpResponse.json({

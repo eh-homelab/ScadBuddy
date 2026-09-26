@@ -12,6 +12,9 @@ from scadbuddy.core.settings import Settings
 SETTINGS_NAME = "settings.json"
 KEY_FILE_MODE = 0o600
 
+#: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
+ENV_SEEDED = ("bambuddy_url", "bambuddy_api_key", "public_url", "default_plate")
+
 
 class BambuddyIds(BaseModel):
     """The Bambuddy object ids ScadBuddy points at.
@@ -67,6 +70,11 @@ class StoredSettings(BambuddyIds):
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
 
+    #: The :data:`ENV_SEEDED` fields a ``PUT /settings`` explicitly cleared. The file
+    #: stores every field, so a ``null`` in it cannot tell "cleared" from "never set";
+    #: this list can, and it is what lets a clear outlast the environment's value.
+    cleared: list[str] = Field(default_factory=list)
+
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it."""
@@ -88,7 +96,11 @@ class SettingsStore:
     """``data/settings.json``, mode 0600 because it holds the API key.
 
     The environment seeds the initial values; once the file exists it wins, so the
-    UI can change what a deployment shipped with.
+    UI can change what a deployment shipped with. For an :data:`ENV_SEEDED` field that
+    means: a value in the file wins; a field the UI explicitly cleared stays cleared
+    (#81 — a Settings page option that clears ``default_plate`` has to beat
+    ``SCADBUDDY_DEFAULT_PLATE``); and a field the file has never held a value for still
+    follows the environment, so a variable added to a deployment later is honoured.
     """
 
     def __init__(self, path: Path, defaults: Settings) -> None:
@@ -110,6 +122,8 @@ class SettingsStore:
         on_disk = StoredSettings.model_validate_json(self.path.read_text(encoding="utf-8"))
         merged = stored.model_dump()
         merged.update(on_disk.model_dump(exclude_none=True))
+        for name in on_disk.cleared:
+            merged[name] = None
         return StoredSettings.model_validate(merged)
 
     def save(self, patch: SettingsPatch) -> StoredSettings:
@@ -120,7 +134,15 @@ class SettingsStore:
         changes = patch.model_dump(mode="json", exclude_unset=True)
         if changes.get("bambuddy_api_key") == "":
             changes["bambuddy_api_key"] = None
-        current.update(changes)
+        cleared = set(current["cleared"])
+        for name in ENV_SEEDED:
+            if name not in changes:
+                continue
+            if changes[name] is None:
+                cleared.add(name)
+            else:
+                cleared.discard(name)
+        current.update(changes, cleared=sorted(cleared))
         return self._write(StoredSettings.model_validate(current))
 
     def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:

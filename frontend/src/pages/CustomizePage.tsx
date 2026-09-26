@@ -12,7 +12,7 @@ const Preview = lazy(async () => ({ default: (await import('../components/Previe
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
-import { describeOvershoot, overshoots } from '../lib/plate'
+import { fitMessages } from '../lib/plate'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
@@ -113,10 +113,13 @@ export function CustomizePage() {
   const output = settled && saved && saved.jobId === job?.id ? saved.output : undefined
 
   const bbox = job?.status === 'done' ? job.bbox_mm : undefined
-  const overshoot = useMemo(
-    () => (plate && bbox ? overshoots(bbox, plate) : []),
-    [plate, bbox],
+  const colours = job?.colors?.length ?? 1
+  const fitState = useAsync(
+    async () => (bbox ? await api.getPlateFit(printerModel, bbox.size, colours) : null),
+    [printerModel, bbox?.size, colours],
   )
+  const fit = fitState.data ?? undefined
+  const misfit = fit ? fitMessages(fit) : []
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
@@ -257,13 +260,13 @@ export function CustomizePage() {
               captureRef={captureRef}
             />
           </Suspense>
-          {plate && overshoot.length > 0 && (
+          {misfit.length > 0 && (
             <p
               role="status"
               data-testid="plate-fit"
               className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
             >
-              Does not fit: {overshoot.map((over) => describeOvershoot(over, plate)).join('; ')}.
+              Does not fit: {misfit.join('; ')}.
             </p>
           )}
           {renderError && (
@@ -277,8 +280,7 @@ export function CustomizePage() {
             rendering={rendering || !settled}
             output={output}
             capture={capture}
-            overshoot={overshoot}
-            plate={plate}
+            fit={fit}
             onPrinterModel={setPrinterModel}
             onGenerated={(created) => {
               if (job) setSaved({ jobId: job.id, output: created })

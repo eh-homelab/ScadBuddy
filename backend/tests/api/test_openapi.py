@@ -46,6 +46,7 @@ EXPECTED_PATHS = {
     "/api/v1/fonts/catalogue",
     "/api/v1/fonts/install",
     "/api/v1/plate",
+    "/api/v1/plate/fit",
     "/api/v1/plates",
 }
 

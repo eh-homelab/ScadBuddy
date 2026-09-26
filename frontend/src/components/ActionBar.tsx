@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { api, ApiError } from '../api/client'
-import type { Job, Output, Plate, PrintRunResult, SendResult } from '../api/types'
+import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
-import { describeOvershoot, type Overshoot } from '../lib/plate'
+import { fitLabel, fitMessages } from '../lib/plate'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
 import { SendDialog } from './SendDialog'
@@ -16,9 +16,8 @@ interface Props {
   output: Output | undefined
   /** Captures the preview canvas as the output thumbnail (spec §6). */
   capture: () => Promise<Blob | null>
-  /** #81 — the axes the model overflows the plate on, which the Print button warns of. */
-  overshoot: Overshoot[]
-  plate: Plate | undefined
+  /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
+  fit: PlateFit | undefined
   /** #81 — the model of the printer the print picker has in view. */
   onPrinterModel: (model: string | null) => void
   onGenerated: (output: Output) => void
@@ -33,8 +32,7 @@ export function ActionBar({
   rendering,
   output,
   capture,
-  overshoot,
-  plate,
+  fit,
   onPrinterModel,
   onGenerated,
   onSent,
@@ -48,6 +46,7 @@ export function ActionBar({
 
   const ready = job?.status === 'done' && !rendering
   const stale = Boolean(output) && output?.id !== undefined && !ready
+  const misfit = fit ? fitLabel(fit) : null
 
   async function generate() {
     if (!job) return
@@ -129,22 +128,14 @@ export function ActionBar({
             Send to Bambuddy
           </Button>
           <Button
-            variant={overshoot.length > 0 ? 'danger' : 'default'}
+            variant={misfit ? 'danger' : 'default'}
             onClick={() => setPrintOpen(true)}
             disabled={!output}
             data-testid="print"
-            title={
-              plate && overshoot.length > 0
-                ? overshoot.map((over) => describeOvershoot(over, plate)).join('\n')
-                : undefined
-            }
+            title={misfit && fit ? fitMessages(fit).join('\n') : undefined}
           >
             Print
-            {overshoot.length > 0 && (
-              <span className="text-[12px]">
-                · Too big on {overshoot.map((over) => over.axis).join(', ')}
-              </span>
-            )}
+            {misfit && <span className="text-[12px]">· {misfit}</span>}
           </Button>
         </div>
       </footer>

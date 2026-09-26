@@ -702,6 +702,37 @@ describe('CustomizePage', () => {
     // Two generates, two picker opens and a debounced re-render.
   }, 20000)
 
+  it('warns of what the send would refuse even when every axis fits (#81)', async () => {
+    // The server runs the send's own placement; a box inside the reachable area can
+    // still leave no room for a multi-colour print's prime tower.
+    const asked: URLSearchParams[] = []
+    server.use(
+      http.get('/api/v1/plate/fit', ({ request }) => {
+        asked.push(new URL(request.url).searchParams)
+        return HttpResponse.json({
+          plate: {
+            model: null,
+            name: 'Default plate',
+            size: [256, 256],
+            height: 250,
+            usable: { min_x: 0, min_y: 0, max_x: 256, max_y: 256 },
+          },
+          overshoots: [],
+          problem: 'the model is 64.1 x 37.2 mm, which leaves no room for the 60 mm prime tower',
+        })
+      }),
+    )
+    render()
+    await firstRender()
+    await waitFor(() =>
+      expect(screen.getByTestId('plate-fit')).toHaveTextContent(/no room for the 60 mm prime tower/),
+    )
+    expect(screen.getByTestId('print')).toHaveTextContent('Does not fit')
+    // Two colours, so the check is asked with the tower the send would add.
+    expect(asked.at(-1)?.get('colours')).toBe('2')
+    expect(asked.at(-1)?.get('x')).toBe('64.1')
+  })
+
   it('counts changes against the model defaults', async () => {
     const { user } = render()
     await firstRender()

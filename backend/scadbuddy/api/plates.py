@@ -12,7 +12,7 @@ from fastapi import APIRouter, Query
 from pydantic import BaseModel
 
 from scadbuddy.api.deps import SettingsStoreDep
-from scadbuddy.render.plate import PlateGeometry, plate_for
+from scadbuddy.render.plate import Axis, PlateGeometry, fit_problem, overshoots, plate_for
 from scadbuddy.render.plate_profiles import PLATE_PROFILES
 
 router = APIRouter(tags=["plates"])
@@ -38,9 +38,27 @@ class PlateView(BaseModel):
     size: tuple[float, float]
     #: The Z limit.
     height: float
-    #: Where every extruder reaches — what the send refuses a model for overflowing,
-    #: so what the fit warning checks X and Y against.
+    #: Where every extruder reaches.
     usable: PlateArea
+
+
+class Overshoot(BaseModel):
+    axis: Axis
+    size: float
+    limit: float
+
+
+class PlateFit(BaseModel):
+    """Whether a model of a given size can be sent to a printer, judged by the code the
+    send itself runs, so the customizer never says "fits" to a model the send refuses."""
+
+    plate: PlateView
+    #: Each axis the bounding box overflows: X and Y against where every extruder
+    #: reaches, Z against the printable height.
+    overshoots: list[Overshoot]
+    #: What ``place_on_plate`` refuses a box that does fit those for — no room for the
+    #: prime tower, or no way round the filament cutter. ``None`` when it would place it.
+    problem: str | None = None
 
 
 class PlateCatalogue(BaseModel):
@@ -79,6 +97,28 @@ def get_plate(
     """An absent or unknown model is the configured default plate, not an error: that is
     what a customizer with no printer chosen, or no Bambuddy at all, draws."""
     return _view(_resolve(model, store.load().default_plate))
+
+
+@router.get("/plate/fit", response_model=PlateFit, summary="Whether a model fits a printer")
+def get_plate_fit(
+    store: SettingsStoreDep,
+    x: Annotated[float, Query(ge=0, description="Bounding box width, mm")],
+    y: Annotated[float, Query(ge=0, description="Bounding box depth, mm")],
+    z: Annotated[float, Query(ge=0, description="Bounding box height, mm")],
+    model: Annotated[str | None, Query(description="As for GET /plate")] = None,
+    colours: Annotated[
+        int, Query(ge=1, description="More than one needs a prime tower, as at send time")
+    ] = 1,
+) -> PlateFit:
+    plate = _resolve(model, store.load().default_plate)
+    size = (x, y, z)
+    over = [
+        Overshoot(axis=axis, size=want, limit=have) for axis, want, have in overshoots(size, plate)
+    ]
+    # An axis overflow is already the more useful answer; the placement would only say
+    # the same thing less precisely.
+    problem = None if over else fit_problem(size, plate, tower=colours > 1)
+    return PlateFit(plate=_view(plate), overshoots=over, problem=problem)
 
 
 @router.get("/plates", response_model=PlateCatalogue, summary="Every plate ScadBuddy knows")
