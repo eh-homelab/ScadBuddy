@@ -30,8 +30,9 @@ def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
 def _remove_tree(path: Path) -> bool:
     """``rmtree`` that logs a real failure rather than raising or hiding it.
 
-    Concurrent deletes and sweeps can race for the same tombstone, so anything
-    vanishing underneath this one counts as removed, not as a failure.
+    Concurrent deletes and sweeps can race for the same tombstone or orphan, and
+    a reused slug may have nothing left to clear, so a path that is already gone,
+    or vanishes underneath this one, is not a failure.
     """
     try:
         if path.is_dir() and not path.is_symlink():
