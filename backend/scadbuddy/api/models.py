@@ -346,7 +346,7 @@ async def create_model(
         # Everything else the model.json holds (`source`, `origin_url`) carries over.
         meta=base.model_copy(
             update={
-                "name": name or base.name,
+                "name": _first_name(name, base.name, slug),
                 "description": description if description is not None else base.description,
                 "tags": parsed_tags if parsed_tags is not None else base.tags,
             }
@@ -355,6 +355,15 @@ async def create_model(
         thumbnail=thumbnail_bytes,
         readme=readme_text,
     )
+
+
+def _first_name(*candidates: str | None) -> str:
+    """The first candidate that is not blank, stripped. The last one is the slug,
+    which never is, so a blank form field or model.json name can never name a model."""
+    for candidate in candidates:
+        if candidate is not None and candidate.strip():
+            return candidate.strip()
+    raise ValueError("every name candidate is blank")
 
 
 def _require_png(payload: bytes) -> bytes:

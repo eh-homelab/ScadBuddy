@@ -479,6 +479,50 @@ def test_form_fields_win_over_the_model_json(client: TestClient) -> None:
     assert (response.json()["name"], response.json()["tags"]) == ("From Form", ["json"])
 
 
+def _create_with_meta(
+    client: TestClient, meta: dict[str, Any], data: dict[str, str] | None = None
+) -> dict[str, Any]:
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
+        },
+        data=data or {},
+    )
+    assert response.status_code == 201, response.text
+    body: dict[str, Any] = response.json()
+    return body
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_model_json_name_falls_back_to_the_slug(client: TestClient, blank: str) -> None:
+    assert _create_with_meta(client, {"name": blank})["name"] == SLUG
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_form_name_falls_through_to_the_model_json_name(
+    client: TestClient, blank: str
+) -> None:
+    body = _create_with_meta(client, {"name": "From JSON"}, data={"name": blank})
+    assert body["name"] == "From JSON"
+
+
+def test_a_form_name_wins_over_the_model_json_name_and_is_stored_stripped(
+    client: TestClient,
+) -> None:
+    body = _create_with_meta(client, {"name": "From JSON"}, data={"name": "  From Form  "})
+    assert body["name"] == "From Form"
+
+
+def test_a_model_json_name_is_stored_stripped(client: TestClient) -> None:
+    assert _create_with_meta(client, {"name": "  Widget  "})["name"] == "Widget"
+
+
+def test_blank_everywhere_names_the_model_after_its_slug(client: TestClient) -> None:
+    assert _create_with_meta(client, {"name": " "}, data={"name": " "})["name"] == SLUG
+
+
 @pytest.mark.parametrize(
     "payload", [b"{not json", b"[1, 2]", json.dumps({"tags": "not-a-list"}).encode()]
 )
