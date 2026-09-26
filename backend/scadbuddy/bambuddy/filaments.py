@@ -471,6 +471,8 @@ def slice_filament_presets(
     *,
     pipeline_presets: list[PresetRef],
     resolve: dict[str, PresetRef],
+    compatible: set[str] | None = None,
+    alternatives: dict[int, list[str]] | None = None,
 ) -> tuple[list[PresetRef], list[str], list[FilamentWarning]]:
     """The filament presets and colours to slice this plan with.
 
@@ -479,6 +481,13 @@ def slice_filament_presets(
     are the baseline and stay in place wherever the spool names none or names one
     Bambuddy's catalogue cannot look up, because sending an id it cannot resolve fails
     the slice naming a preset nobody chose. ``resolve`` is that catalogue, by preset id.
+
+    A spool's ``slicer_filament`` is only its default, usually the 0.4 nozzle's (#161).
+    ``compatible`` is the set of preset ids that fit the pipeline's printer preset
+    (``None``: no restriction), and ``alternatives`` the spool's own per-nozzle presets
+    by spool id. The first of the spool's presets that fits is used; when none does,
+    the pipeline's own preset stays, since slicing a 0.2 nozzle with 0.4 settings is
+    worse than slicing it with the pipeline's generic ones.
     """
     by_id = {option.spool_id: option for option in options.spools}
     presets = list(pipeline_presets)
@@ -510,7 +519,25 @@ def slice_filament_presets(
         colours.append((option.colour if option else slot.colour) or "#FFFFFF")
         if option is None or option.slicer_filament is None:
             continue
-        ref = resolve.get(option.slicer_filament)
+        candidates = [option.slicer_filament, *(alternatives or {}).get(option.spool_id, [])]
+        known = [preset_id for preset_id in candidates if preset_id in resolve]
+        fitting = [
+            preset_id for preset_id in known if compatible is None or preset_id in compatible
+        ]
+        if known and not fitting:
+            warnings.append(
+                FilamentWarning(
+                    kind="no-preset",
+                    slot_id=slot.slot_id,
+                    message=(
+                        f"None of {_label(option)}'s slicer presets is for this pipeline's "
+                        "printer and nozzle, so the pipeline's own filament preset is used "
+                        "for this slot."
+                    ),
+                )
+            )
+            continue
+        ref = resolve[fitting[0]] if fitting else None
         if ref is None:
             warnings.append(
                 FilamentWarning(
@@ -527,6 +554,32 @@ def slice_filament_presets(
         presets[slot.slot_id - 1] = ref
 
     return presets, colours, warnings
+
+
+async def spool_preset_alternatives(
+    client: BambuddyClient,
+    options: FilamentOptions,
+    plan: FilamentPlan,
+    compatible: set[str] | None,
+) -> dict[int, list[str]]:
+    """Each picked spool's per-nozzle presets, for :func:`slice_filament_presets` (#161).
+
+    Only read for a spool whose own ``slicer_filament`` does not fit the pipeline's
+    printer — the common case needs no extra call.
+    """
+    if compatible is None:
+        return {}
+    by_id = {option.spool_id: option for option in options.spools}
+    alternatives: dict[int, list[str]] = {}
+    for slot in options.slots:
+        option = by_id.get(plan.spool_for(slot.slot_id) or -1)
+        if option is None or option.slicer_filament in compatible:
+            continue
+        if option.spool_id in alternatives:
+            continue
+        rows = await client.spool_filament_presets(option.spool_id)
+        alternatives[option.spool_id] = [row.slicer_filament for row in rows]
+    return alternatives
 
 
 async def gather_options(

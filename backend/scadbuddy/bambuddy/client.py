@@ -60,6 +60,7 @@ from scadbuddy.bambuddy.models import (
     SliceRequest,
     Spool,
     SpoolAssignment,
+    SpoolFilamentPreset,
 )
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import StoredSettings
@@ -277,6 +278,21 @@ class BambuddyClient:
             params={"include_archived": include_archived},
         )
         return [Spool.model_validate(row) for row in self._rows(response, what=what)]
+
+    async def spool_filament_presets(self, spool_id: int) -> list[SpoolFilamentPreset]:
+        """``GET /api/v1/inventory/spools/{id}/filament-presets`` — per-nozzle presets.
+
+        The spool row's ``slicer_filament`` is one preset; this is every printer model
+        and nozzle size the spool has its own preset for (#161).
+        """
+        what = "list a spool's per-nozzle filament presets"
+        response = await self._send(
+            "GET",
+            f"/inventory/spools/{spool_id}/filament-presets",
+            scope=Scope.READ_STATUS,
+            what=what,
+        )
+        return [SpoolFilamentPreset.model_validate(row) for row in self._rows(response, what=what)]
 
     async def spool_assignments(self, *, printer_id: int | None = None) -> list[SpoolAssignment]:
         """``GET /api/v1/inventory/assignments`` — spool to printer/AMS/tray.

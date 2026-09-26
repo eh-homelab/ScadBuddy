@@ -40,6 +40,7 @@ from scadbuddy.bambuddy.filaments import (
     gather_options,
     queue_filaments,
     slice_filament_presets,
+    spool_preset_alternatives,
 )
 from scadbuddy.bambuddy.models import (
     EligibilityReport,
@@ -687,11 +688,26 @@ async def run_for_output(
         fallback_colours=list(meta.colors),
     )
     warnings = check(options, request.filament_plan, copies=copies)
+    printer_preset = pipeline.printer_preset
+    printer_preset_name = (
+        catalogue.names().get((printer_preset.source, printer_preset.id))
+        if printer_preset is not None
+        else None
+    )
+    compatible = (
+        {choice.ref.id for choice in catalogue.filament if _fits(choice, printer_preset_name)}
+        if printer_preset_name is not None
+        else None
+    )
     presets, colours, preset_warnings = slice_filament_presets(
         options,
         request.filament_plan,
         pipeline_presets=list(pipeline.filament_presets),
         resolve=filament_preset_index(catalogue),
+        compatible=compatible,
+        alternatives=await spool_preset_alternatives(
+            client, options, request.filament_plan, compatible
+        ),
     )
     outcome = await slice_and_queue(
         client,

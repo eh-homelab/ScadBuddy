@@ -482,6 +482,20 @@ class Spool(BambuddyModel):
         return max(0.0, float(self.label_weight) - self.weight_used)
 
 
+class SpoolFilamentPreset(BambuddyModel):
+    """A row of ``GET /api/v1/inventory/spools/{id}/filament-presets``.
+
+    One per printer model and nozzle size. A spool's own ``slicer_filament`` is only its
+    default — typically the 0.4 nozzle's — so a pipeline for another nozzle needs the
+    row that matches it (#161).
+    """
+
+    printer_model: str | None = None
+    nozzle_diameter: str | None = None
+    slicer_filament: str
+    slicer_filament_name: str | None = None
+
+
 class SpoolAssignment(BambuddyModel):
     """``GET /api/v1/inventory/assignments`` — which spool sits in which tray.
 
