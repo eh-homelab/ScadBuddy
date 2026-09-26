@@ -13,6 +13,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
@@ -305,6 +306,44 @@ def test_a_lookup_racing_an_output_being_saved_is_not_kept(
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == COVER_ONE
 
 
+def test_deleting_a_model_forgets_its_resolved_cover(client: TestClient, paths: DataPaths) -> None:
+    _create(client)
+    _generate(client, paths, SLUG, COVER_ONE)
+    assert _listed(client)[SLUG]["thumbnail_source"] == "output"
+    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    assert store.remembers_plate_cover(SLUG)
+
+    assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+
+    assert not store.remembers_plate_cover(SLUG)
+    # Nothing else is kept per slug: the only other state is one store-wide counter.
+    assert SLUG not in store._covers
+    assert not [
+        value for value in vars(store).values() if isinstance(value, dict) and SLUG in value
+    ]
+
+
+def test_a_cover_scan_in_flight_across_a_model_delete_is_not_stored(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _create(client)
+    _generate(client, paths, SLUG, COVER_ONE)
+    store = client.app.state.scadbuddy.outputs  # type: ignore[attr-defined]
+    real_scan = store._scan_plate_cover
+
+    def scan_then_delete(slug: str) -> Any:
+        found = real_scan(slug)
+        # The model goes away while this scan holds its answer.
+        assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
+        return found
+
+    monkeypatch.setattr(store, "_scan_plate_cover", scan_then_delete)
+
+    assert store.plate_cover_archive(SLUG) is not None
+
+    assert not store.remembers_plate_cover(SLUG)
+
+
 def test_deleting_the_covering_output_falls_back_to_the_next(
     client: TestClient, paths: DataPaths
 ) -> None:
@@ -402,6 +441,35 @@ def test_a_readme_body_of_the_wrong_shape_is_refused(client: TestClient) -> None
     response = client.put(f"/api/v1/models/{SLUG}/readme", json={"text": "# Widget\n"})
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
+
+
+def test_a_readme_too_long_to_save_again_is_refused_at_creation(client: TestClient) -> None:
+    """The create path holds a README to the cap `PUT /readme` does, so a model
+    never starts with one that Edit details could not save back."""
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "readme": ("README.md", b"x" * (MAX_SOURCE_CHARS + 1), "text/markdown"),
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert "the README is too large" in response.json()["detail"]
+    assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_readme_at_the_cap_is_accepted_at_creation(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "readme": ("README.md", b"x" * MAX_SOURCE_CHARS, "text/markdown"),
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert _put_readme(client, "x" * MAX_SOURCE_CHARS).status_code == 200
 
 
 # ── unknown models ────────────────────────────────────────────────────────────
@@ -536,6 +604,36 @@ def test_a_model_json_that_cannot_be_read_is_refused(client: TestClient, payload
     )
     assert response.status_code == 422
     assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+# ── PATCH names ───────────────────────────────────────────────────────────────
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t\n"])
+def test_a_blank_name_is_refused_and_nothing_is_committed(client: TestClient, blank: str) -> None:
+    before = _create(client)
+
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": blank})
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    after = client.get(f"/api/v1/models/{SLUG}").json()
+    assert after["name"] == before["name"]
+    assert after["version"] == before["version"]
+
+
+def test_a_patched_name_is_stored_stripped(client: TestClient) -> None:
+    _create(client)
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"name": "  Widget  "})
+    assert response.status_code == 200
+    assert response.json()["name"] == "Widget"
+
+
+def test_a_patch_without_a_name_leaves_it_alone(client: TestClient) -> None:
+    before = _create(client)
+    response = client.patch(f"/api/v1/models/{SLUG}", json={"description": "new"})
+    assert response.status_code == 200
+    assert response.json()["name"] == before["name"]
 
 
 # ── every change is a revision ────────────────────────────────────────────────

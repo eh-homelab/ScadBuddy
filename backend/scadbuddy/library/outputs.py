@@ -102,7 +102,11 @@ class OutputStore:
         # every output record and opening 3MFs, and the catalogue asks on every
         # listing, so it is done once per state of the model's outputs.
         self._covers: dict[str, _ResolvedCover] = {}
-        self._cover_generations: dict[str, int] = {}
+        #: Bumped by every `forget_plate_cover`. Store-wide rather than per slug, so
+        #: forgetting a slug leaves no key behind -- a deleted model's slug must not
+        #: stay in memory for the life of the process -- while a scan that was in
+        #: flight across a forget still knows not to store what it found.
+        self._cover_epoch = 0
         self._covers_lock = threading.Lock()
 
     def _find_dir(self, output_id: str) -> Path:
@@ -286,10 +290,12 @@ class OutputStore:
 
         The common case -- nothing changed since the last ask -- costs one `stat`
         of ``outputs/<slug>/`` and opens nothing. A write through this store
-        (`create`, `delete`) forgets the entry outright; anything else that adds
-        or removes an output moves the directory's mtime, which the entry is keyed
-        on. A resolution that raced a `create` is not stored: the generation it
-        started under is stale by the time it finishes.
+        (`create`, `delete`) forgets the entry outright, as the catalogue does when
+        it removes a model's outputs; anything else that adds or removes an output
+        moves the directory's mtime, which the entry is keyed on. A resolution
+        that raced any forget is not stored: the epoch it started under is stale
+        by the time it finishes. That can discard a good result for another slug,
+        which costs only one rescan.
         """
         try:
             stamp = (self.paths.outputs / slug).stat().st_mtime_ns
@@ -300,20 +306,25 @@ class OutputStore:
             return None
         with self._covers_lock:
             cached = self._covers.get(slug)
-            generation = self._cover_generations.get(slug, 0)
+            epoch = self._cover_epoch
         if cached is not None and cached.stamp == stamp:
             return cached.archive
         archive = self._scan_plate_cover(slug)
         with self._covers_lock:
-            if self._cover_generations.get(slug, 0) == generation:
+            if self._cover_epoch == epoch:
                 self._covers[slug] = _ResolvedCover(stamp=stamp, archive=archive)
         return archive
 
     def forget_plate_cover(self, slug: str) -> None:
-        """Drop the resolved cover for ``slug``; the next ask scans again."""
+        """Drop everything held for ``slug``; the next ask scans again."""
         with self._covers_lock:
             self._covers.pop(slug, None)
-            self._cover_generations[slug] = self._cover_generations.get(slug, 0) + 1
+            self._cover_epoch += 1
+
+    def remembers_plate_cover(self, slug: str) -> bool:
+        """Whether anything is held for ``slug`` -- for tests of the cache's lifetime."""
+        with self._covers_lock:
+            return slug in self._covers
 
     def has_plate_cover(self, slug: str) -> bool:
         """Whether :meth:`plate_cover` has an image to give, without reading it."""

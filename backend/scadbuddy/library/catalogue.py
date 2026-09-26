@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.core.paths import SOURCE_NAME, DataPaths
 from scadbuddy.library.history import GitError, ModelHistory, summarise
@@ -89,6 +89,17 @@ class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+
+    @field_validator("name")
+    @classmethod
+    def _name_is_not_blank(cls, name: str | None) -> str | None:
+        """A model is never renamed to nothing. Stored stripped, as the upload
+        path stores a name (#179)."""
+        if name is None:
+            return None
+        if not name.strip():
+            raise ValueError("the name cannot be blank")
+        return name.strip()
 
 
 #: Where a model's catalogue thumbnail comes from: ``model`` is one set on the model
@@ -416,6 +427,8 @@ class Catalogue:
         # outputs (NOT in the repository: a 3MF is a build artefact, not source)
         # -- and any an earlier delete failed to clear or a race wrote since.
         self.sweep_orphans()
+        # Whether or not the sweep got to its outputs: the model is gone either way.
+        self._forget_cover(slug)
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -472,6 +485,8 @@ class Catalogue:
                 continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
+                if path.parent == self.paths.outputs:
+                    self._forget_cover(slug)
         return removed
 
     def _clear_derived(self, slug: str) -> None:
@@ -487,6 +502,13 @@ class Catalogue:
             self.paths.outputs / slug,
         ):
             _remove_tree(path)
+        self._forget_cover(slug)
+
+    def _forget_cover(self, slug: str) -> None:
+        """Drop the output store's resolved fallback cover for ``slug``, whose
+        outputs are gone -- so a removed model leaves nothing behind in memory."""
+        if self.outputs is not None:
+            self.outputs.forget_plate_cover(slug)
 
     def seed(self, seed_dir: Path) -> list[str]:
         """Copy any bundled model whose slug is not in the catalogue yet."""

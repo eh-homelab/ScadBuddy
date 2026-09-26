@@ -331,6 +331,8 @@ async def create_model(
     readme_text: str | None = None
     if readme is not None:
         readme_text = _readme_text(await readme.read())
+        # The cap `PUT /readme` holds it to, so what is created can be saved again.
+        _require_within_cap(readme_text, "the README")
 
     # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
     # directory lands with the same metadata the image seed would give it.
