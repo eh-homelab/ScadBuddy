@@ -304,6 +304,16 @@ def test_concurrent_adds_of_one_new_name_cannot_both_bind_it(
         f"'mylib' comes from {url}; add {elsewhere} under another name"
     ]
     assert read_pins(paths)["mylib"].url == url
+    # The per-name lock is dropped once nobody holds or waits for it, so the table
+    # does not grow with every name ever added -- or ever tried.
+    assert store._names == {}
+
+
+def test_a_refused_add_leaves_no_lock_behind(store: LibraryStore) -> None:
+    with pytest.raises(LibraryNotFoundError):
+        store.install("nothing-here")
+
+    assert store._names == {}
 
 
 def test_an_add_of_one_name_does_not_hold_up_another(

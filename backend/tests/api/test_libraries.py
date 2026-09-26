@@ -10,7 +10,9 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import httpx
 import pytest
+import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -197,6 +199,35 @@ def test_the_schema_is_derived_with_only_the_declared_libraries(
 
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
 
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(paths.libraries / "BOSL2" / commits["v1"])
+    ]
+
+
+@respx.mock
+@pytest.mark.usefixtures("fake_dns")
+def test_an_imported_model_declares_libraries_like_any_other(
+    lib_client: TestClient,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#153's URL import goes through the same create path, so its model takes a
+    declaration and renders with exactly that library, keeping where it came from."""
+    _, commits = upstream
+    raw = "https://raw.githubusercontent.com/someone/models/main/widget.scad"
+    respx.get(raw).mock(return_value=httpx.Response(200, text=SOURCE))
+    add(lib_client, name="BOSL2")
+    imported = lib_client.post("/api/v1/models/import", json={"url": raw})
+    assert imported.status_code == 201, imported.text
+    log = tmp_path / "openscadpath.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+
+    record = declare(lib_client, "BOSL2")
+
+    assert (record["libraries"], record["origin_url"]) == (["BOSL2"], raw)
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert log.read_text(encoding="utf-8").splitlines() == [
         str(paths.libraries / "BOSL2" / commits["v1"])
     ]

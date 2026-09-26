@@ -32,6 +32,7 @@ import subprocess
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
@@ -267,6 +268,14 @@ def _same_repository(first: str, second: str) -> bool:
     return bare(first) == bare(second)
 
 
+@dataclass
+class _NameLock:
+    """One library name's install lock, and how many adds hold or wait for it."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    users: int = 0
+
+
 class LibraryStore:
     """``<data>/libraries/`` and the lockfile that pins them.
 
@@ -295,8 +304,11 @@ class LibraryStore:
         self._lock = threading.Lock()
         # One lock per library name, held from reading the URL the name is bound
         # to until its pin is recorded: two adds of the same new name must not
-        # both find it unbound. Other names still clone concurrently.
-        self._names: dict[str, threading.Lock] = {}
+        # both find it unbound. Per name rather than one lock for every add,
+        # because a clone can take minutes (NopSCADlib) and adding BOSL2 should
+        # not queue behind it. Counted, so an entry goes once nobody holds or
+        # waits for it and the table never outgrows the adds in flight.
+        self._names: dict[str, _NameLock] = {}
         self._names_guard = threading.Lock()
 
     def entries(self) -> list[LibraryEntry]:
@@ -321,9 +333,16 @@ class LibraryStore:
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
         with self._names_guard:
-            lock = self._names.setdefault(name, threading.Lock())
-        with lock:
-            return self._install_locked(name, url, ref)
+            entry = self._names.setdefault(name, _NameLock())
+            entry.users += 1
+        try:
+            with entry.lock:
+                return self._install_locked(name, url, ref)
+        finally:
+            with self._names_guard:
+                entry.users -= 1
+                if entry.users == 0:
+                    del self._names[name]
 
     def _install_locked(self, name: str, url: str | None, ref: str | None) -> LibraryPin:
         known = self.catalogue.get(name)
