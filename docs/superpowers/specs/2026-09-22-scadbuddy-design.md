@@ -113,7 +113,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   with `<basematerials>`** and a **per-triangle material index**
   (`<triangle pid="1" p1="N"/>`), one material per distinct `color()` value
   plus a `Default` for uncoloured geometry. (Known nightly quirk: the
-  `displaycolor` alpha byte is written as `00`; ignore alpha.)
+  `displaycolor` alpha byte is written as `00`; ignore alpha.) `Default` is
+  always index 0; the colours follow in the order the geometry **first uses**
+  them, not the order the parameters are declared — measured on 2026.09.23: a
+  model declaring `base_color` then `text_color` but drawing the text first gets
+  the text colour as material 1. Extruder order is therefore imposed by
+  ScadBuddy (§7), not inherited.
 - **Splitting that mesh by `p1` does *not* give closed meshes.** OpenSCAD
   unions the top-level coloured solids and deletes the faces where they meet,
   so every part that touches another part comes back open — measured
@@ -549,8 +554,19 @@ Flows (all server-side, so the browser never sees the API key):
    unrelated `"Customize"` link.
 
 Colour → filament: the order of `color` parameters in the schema is the
-extruder order (extruder 1 = first colour parameter). Colours that appear in
-`color()` calls but are not parameters (hard-coded) are appended after.
+extruder order (extruder 1 = first colour parameter). OpenSCAD does not number
+its materials that way — it lists them in the order the geometry first uses
+each colour (§3) — so `render/jobs.py` `extruder_order` reorders the split parts
+before anything is written from them. Each part goes to the first colour
+parameter, in declaration order, whose rendered value (the job's, else the
+default; hex in any case, `#RGB`, an alpha channel or a CSS name) is that
+part's colour. Numbers are dense, because an extruder is a filament slot:
+parameters that share a value share the first one's extruder, and a parameter
+no geometry uses gets none, so the ones after it move up. Colours no parameter
+names — hard-coded, computed from a parameter, or the uncoloured `Default` —
+are appended after, in OpenSCAD's material order. The GLB, the 3MF and the
+job's `parts`/`colors` are all written from that one list, so the preview,
+the file and the print picker's numbered swatches agree.
 
 ## 8. API
 

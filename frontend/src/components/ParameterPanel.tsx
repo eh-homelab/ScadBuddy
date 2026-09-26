@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
-import { colorParamNames, diffFromDefaults, groupsOf, type ParamValues } from '../lib/params'
+import { diffFromDefaults, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
 import { Button } from './ui/Button'
 
@@ -21,13 +21,8 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
   const [active, setActive] = useState(() => tabs[0]?.name ?? GLOBAL_GROUP)
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
-  const extruderOf = useMemo(() => {
-    const order = colorParamNames(schema)
-    return (name: string) => {
-      const index = order.indexOf(name)
-      return index === -1 ? undefined : index + 1
-    }
-  }, [schema])
+  const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
+  const extruderOf = (name: string) => extruders.get(name)
 
   // The font picker previews what will actually be printed, so it needs the model's
   // own text: the first string parameter, which on the keychain is the name.
