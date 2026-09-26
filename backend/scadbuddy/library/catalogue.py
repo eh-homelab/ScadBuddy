@@ -212,6 +212,7 @@ class Catalogue:
     ) -> ModelRecord:
         if self.exists(slug):
             raise ModelExistsError(slug)
+        self._clear_derived(slug)
         directory = self.paths.model_dir(slug)
         directory.mkdir(parents=True, exist_ok=True)
         self.paths.model_source(slug).write_text(source, encoding="utf-8")
@@ -357,6 +358,19 @@ class Catalogue:
                 removed.append(str(path.relative_to(self.paths.root)))
         return removed
 
+    def _clear_derived(self, slug: str) -> None:
+        """Remove what an earlier model of this slug left behind, before it is reused.
+
+        The orphan sweep normally has, but one that failed would otherwise hand
+        a new model the old one's outputs and cached schema.
+        """
+        for path in (
+            self.paths.model_schema_cache(slug),
+            self.paths.model_revisions / slug,
+            self.paths.outputs / slug,
+        ):
+            _remove_tree(path)
+
     def seed(self, seed_dir: Path) -> list[str]:
         """Copy any bundled model whose slug is not in the catalogue yet."""
         if not seed_dir.is_dir():
@@ -365,6 +379,7 @@ class Catalogue:
         for candidate in sorted(seed_dir.iterdir()):
             if not (candidate / SOURCE_NAME).is_file() or self.exists(candidate.name):
                 continue
+            self._clear_derived(candidate.name)
             shutil.copytree(
                 candidate,
                 self.paths.model_dir(candidate.name),

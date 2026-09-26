@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.models import MAX_SOURCE_CHARS
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue
+from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.render.jobs import Job, JobStore
 from scadbuddy.render.runner import ProcessOutput, RenderTimeoutError
 from scadbuddy.render.schema import source_sha256
@@ -286,6 +286,23 @@ def test_a_slug_or_root_that_cannot_be_checked_is_kept_and_the_rest_swept(
     assert (paths.outputs / "unknown").exists()
     assert "could not check a model for orphans" in caplog.text
     assert "could not list for orphans" in caplog.text
+
+
+def test_a_new_model_does_not_inherit_a_gone_models_leftovers(
+    client: TestClient, paths: DataPaths
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    # What a delete whose sweep failed leaves behind for the next model of the name.
+    (paths.outputs / "reused" / "deadbeef").mkdir(parents=True)
+    paths.model_revision_dir("reused", "0" * 40).mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("reused").write_text("{}\n", encoding="utf-8")
+
+    catalogue.create("reused", "cube(1);\n", ModelMeta(name="Reused"))
+
+    assert not (paths.outputs / "reused").exists()
+    assert not (paths.model_revisions / "reused").exists()
+    assert not paths.model_schema_cache("reused").exists()
 
 
 def test_the_orphan_sweep_never_touches_a_live_model(
