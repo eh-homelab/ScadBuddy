@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 from dataclasses import dataclass
+from functools import partial
 from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
@@ -62,6 +63,7 @@ from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
     resolve_print_options,
+    scope_printer,
     target_for,
 )
 from scadbuddy.core.problems import ApiError
@@ -587,14 +589,9 @@ async def run_for_output(
         client, store, meta, settings, target=target, folder_id=folder_id
     )
 
-    # The per-printer scope keys on the printer ScadBuddy believes it prints to. With
-    # none named the pipeline's own target decides; the pipeline is only read for it
-    # when some per-printer option is remembered at all.
-    pipeline: Pipeline | None = None
-    scope_printer_id = request.printer_id or settings.printer_id
-    if scope_printer_id is None and settings.printer_print_options:
-        pipeline = await _pipeline_or_conflict(client, pipeline_id)
-        scope_printer_id = pipeline.target_printer_id
+    scope_printer_id, pipeline = await scope_printer(
+        settings, request.printer_id, partial(_pipeline_or_conflict, client, pipeline_id)
+    )
     # The picker's project is its own control (ProjectPicker, defaulting to the last
     # one), so a remembered project_id is dropped here: left in, it would force the
     # queue route and then lose to the picker's project anyway.
