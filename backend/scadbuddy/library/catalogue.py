@@ -224,9 +224,6 @@ class Catalogue:
         raw = self.read_raw_meta(slug)
         raw.update(patch.model_dump(exclude_none=True))
         self.write_raw_meta(slug, raw)
-        if patch.libraries is not None:
-            # Derived with the old OPENSCADPATH, and keyed only by the source hash.
-            self.paths.model_schema_cache(slug).unlink(missing_ok=True)
         self._commit(f"Update {slug} metadata", slug)
         return self.record(slug)
 

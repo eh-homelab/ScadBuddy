@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, Literal, TypeGuard
 
@@ -123,22 +124,38 @@ def build_schema(param_json: dict[str, Any], source: str) -> CustomizerSchema:
     )
 
 
-def load_cached_schema(cache_path: Path, expected_sha: str) -> CustomizerSchema | None:
+def load_cached_schema(
+    cache_path: Path, expected_sha: str, *, library_path: Sequence[Path] = ()
+) -> CustomizerSchema | None:
     """Read a derived schema back, or ``None`` when it does not match the source.
 
     ``cache_path`` is a file under ``data/cache`` (`SCHEMA_CACHE_NAME`), never the
     model's ``model.json``: this is derived, it is written by a read, and it must
     not land in the versioned models repository.
+
+    ``library_path`` is part of the key (#93): the same source derives against
+    whatever its libraries define, and each checkout on it is named by the commit
+    it is pinned to -- so a re-pin, a changed declaration and a restore of old pins
+    all miss here, without anything having to find and drop the entry.
     """
     if not cache_path.is_file():
         return None
-    cached = json.loads(cache_path.read_text(encoding="utf-8")).get("schema")
+    body = json.loads(cache_path.read_text(encoding="utf-8"))
+    cached = body.get("schema")
     if not isinstance(cached, dict) or cached.get("source_sha256") != expected_sha:
+        return None
+    # Absent on an entry written before #93, which had no libraries.
+    if body.get("library_path", []) != [str(path) for path in library_path]:
         return None
     return CustomizerSchema.model_validate(cached)
 
 
-def store_cached_schema(cache_path: Path, schema: CustomizerSchema) -> None:
+def store_cached_schema(
+    cache_path: Path, schema: CustomizerSchema, *, library_path: Sequence[Path] = ()
+) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    body: dict[str, Any] = {"schema": schema.model_dump(mode="json")}
+    body: dict[str, Any] = {
+        "schema": schema.model_dump(mode="json"),
+        "library_path": [str(path) for path in library_path],
+    }
     cache_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")

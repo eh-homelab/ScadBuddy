@@ -243,6 +243,84 @@ def test_a_declared_library_whose_checkout_is_gone_is_a_409(
     assert render.status_code == 409
 
 
+def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """The check takes its source from the body, so it wires the library path up on
+    its own rather than through `resolve_source` -- and must fail the same way."""
+    _, commits = upstream
+    add(lib_client, name="BOSL2")
+    create_model(lib_client)
+    declare(lib_client, "BOSL2")
+    (paths.libraries / "BOSL2" / commits["v1"]).rename(paths.root / "elsewhere")
+
+    checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
+    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+
+    assert checked.status_code == 409
+    assert checked.headers["content-type"] == "application/problem+json"
+    assert "BOSL2" in checked.json()["detail"]
+    assert saved.status_code == 409
+
+
+def _schema_runs(log: Path) -> int:
+    return len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
+
+
+def test_a_new_pin_re_derives_the_schema_of_models_that_declare_it(
+    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same source, other library code: the cached schema is keyed on the pins too."""
+    add(lib_client, name="BOSL2")
+    create_model(lib_client)
+    declare(lib_client, "BOSL2")
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+    assert _schema_runs(log) == 1
+
+    add(lib_client, name="BOSL2", ref="v2")
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+    assert _schema_runs(log) == 2
+
+
+def test_changing_the_declaration_re_derives_the_schema(
+    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add(lib_client, name="BOSL2")
+    create_model(lib_client)
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    # The create's own check derived it, so this one is served from the cache.
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+    assert _schema_runs(log) == 0
+
+    declare(lib_client, "BOSL2")
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+    assert _schema_runs(log) == 1
+
+
+def test_restoring_old_pins_re_derives_the_schema(
+    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    add(lib_client, name="BOSL2")
+    create_model(lib_client)
+    current = declare(lib_client, "BOSL2")["version"]
+    add(lib_client, name="BOSL2", ref="v2")
+    log = tmp_path / "invocations.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{current}/restore")
+    assert restored.status_code == 200, restored.text
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+    assert _schema_runs(log) == 2
+
+
 def test_restoring_a_revision_restores_its_pins(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:

@@ -525,7 +525,9 @@ async def put_source(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if checked is not None and checked.schema is not None:
         # After the write: `write_source` drops the old cache entry.
-        store_cached_schema(paths.model_schema_cache(slug), checked.schema)
+        store_cached_schema(
+            paths.model_schema_cache(slug), checked.schema, library_path=library_path
+        )
     else:
         # A forced save, or no openscad at all: nothing was derived to store. GET
         # /schema is where the failure surfaces.

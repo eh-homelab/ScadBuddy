@@ -437,18 +437,3 @@ async def test_an_old_revision_renders_against_the_pins_it_was_written_with(
 
     assert old.library_path == (paths.libraries / "BOSL2" / commits["v1"],)
     assert live.library_path == (paths.libraries / "BOSL2" / commits["v2"],)
-
-
-def test_changing_the_declaration_drops_the_derived_schema(
-    store: LibraryStore, catalogue: Catalogue, paths: DataPaths
-) -> None:
-    catalogue.create("widget", "cube(1);\n", ModelMeta(name="Widget"))
-    cache = paths.model_schema_cache("widget")
-    cache.parent.mkdir(parents=True, exist_ok=True)
-    cache.write_text("{}", encoding="utf-8")
-    store.install("BOSL2")
-
-    record = catalogue.update("widget", ModelPatch(libraries=["BOSL2"]))
-
-    assert record.libraries == ["BOSL2"]
-    assert not cache.exists()
