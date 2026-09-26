@@ -143,6 +143,20 @@ def test_a_url_on_a_transport_that_is_not_allowed_is_a_422(lib_client: TestClien
     assert response.status_code == 422
 
 
+def test_a_curated_name_with_another_url_is_a_422(
+    lib_client: TestClient, paths: DataPaths, tmp_path: Path
+) -> None:
+    elsewhere, _ = make_library_upstream(tmp_path / "elsewhere", {"v1": "sphere(1);\n"})
+
+    response = lib_client.post(
+        "/api/v1/libraries", json={"name": "BOSL2", "url": elsewhere, "ref": "v1"}
+    )
+
+    assert response.status_code == 422
+    assert "BOSL2" in response.json()["detail"]
+    assert not (paths.models / LOCKFILE_NAME).exists()
+
+
 def test_a_name_with_a_path_in_it_is_a_422(lib_client: TestClient) -> None:
     response = lib_client.post("/api/v1/libraries", json={"name": "../up"})
     assert response.status_code == 422
