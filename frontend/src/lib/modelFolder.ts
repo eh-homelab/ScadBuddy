@@ -37,10 +37,7 @@ function pick(candidates: File[], preferred: string): File | undefined {
 export function classifyFiles(chosen: File[], folder?: string): Classified {
   const scad = pick(chosen.filter(isScad), 'model.scad')
   if (!scad) return { files: null, ignored: chosen.map((file) => file.name) }
-  const meta = pick(
-    chosen.filter((file) => lower(file) === 'model.json'),
-    'model.json',
-  )
+  const meta = chosen.find((file) => lower(file) === 'model.json')
   const thumbnail = pick(chosen.filter(isPng), 'thumbnail.png')
   const readme = pick(chosen.filter(isMarkdown), 'readme.md')
   const used = new Set([scad, meta, thumbnail, readme])

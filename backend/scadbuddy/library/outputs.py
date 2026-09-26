@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import threading
 import uuid
 import zipfile
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -80,11 +82,28 @@ class OutputMeta(BaseModel):
     project_id: int | None = None
 
 
+@dataclass(frozen=True)
+class _ResolvedCover:
+    """Which 3MF holds a model's fallback cover, as of one state of its outputs."""
+
+    #: ``st_mtime_ns`` of ``outputs/<slug>/`` when this was resolved. Adding or
+    #: removing an output directory moves it, which catches a change made by
+    #: anything other than this store -- the orphan sweep, a model delete.
+    stamp: int
+    archive: Path | None
+
+
 class OutputStore:
     """``data/outputs/<slug>/<output-id>/`` — a persisted render plus its parameters."""
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
+        # The fallback-cover resolution per slug (#179). Finding it means reading
+        # every output record and opening 3MFs, and the catalogue asks on every
+        # listing, so it is done once per state of the model's outputs.
+        self._covers: dict[str, _ResolvedCover] = {}
+        self._cover_generations: dict[str, int] = {}
+        self._covers_lock = threading.Lock()
 
     def _find_dir(self, output_id: str) -> Path:
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
@@ -164,6 +183,9 @@ class OutputStore:
             warnings=list(job.result.warnings),
         )
         self._write_meta(directory, meta)
+        # After the record is complete: a lookup racing the writes above may have
+        # resolved against a half-written output.
+        self.forget_plate_cover(job.slug)
         return meta
 
     def record_send(
@@ -219,7 +241,9 @@ class OutputStore:
         return updated
 
     def delete(self, output_id: str) -> None:
-        shutil.rmtree(self._find_dir(output_id), ignore_errors=True)
+        directory = self._find_dir(output_id)
+        shutil.rmtree(directory, ignore_errors=True)
+        self.forget_plate_cover(directory.parent.name)
 
     def _oldest_first(self, slug: str) -> list[OutputMeta]:
         """The model's outputs, oldest first, skipping any record that cannot be read.
@@ -240,7 +264,7 @@ class OutputStore:
                 logger.warning("skipped an unreadable output record", extra={"path": str(path)})
         return sorted(metas, key=lambda meta: meta.created_at)
 
-    def _plate_cover_archive(self, slug: str) -> Path | None:
+    def _scan_plate_cover(self, slug: str) -> Path | None:
         """The 3MF of the first generated output that carries a plate cover image.
 
         An output whose cover render timed out or failed has none (see
@@ -257,9 +281,43 @@ class OutputStore:
                 continue
         return None
 
+    def plate_cover_archive(self, slug: str) -> Path | None:
+        """:meth:`_scan_plate_cover`, resolved once per state of the model's outputs.
+
+        The common case -- nothing changed since the last ask -- costs one `stat`
+        of ``outputs/<slug>/`` and opens nothing. A write through this store
+        (`create`, `delete`) forgets the entry outright; anything else that adds
+        or removes an output moves the directory's mtime, which the entry is keyed
+        on. A resolution that raced a `create` is not stored: the generation it
+        started under is stale by the time it finishes.
+        """
+        try:
+            stamp = (self.paths.outputs / slug).stat().st_mtime_ns
+        except OSError:
+            # No outputs at all (or none readable): nothing to resolve or keep.
+            with self._covers_lock:
+                self._covers.pop(slug, None)
+            return None
+        with self._covers_lock:
+            cached = self._covers.get(slug)
+            generation = self._cover_generations.get(slug, 0)
+        if cached is not None and cached.stamp == stamp:
+            return cached.archive
+        archive = self._scan_plate_cover(slug)
+        with self._covers_lock:
+            if self._cover_generations.get(slug, 0) == generation:
+                self._covers[slug] = _ResolvedCover(stamp=stamp, archive=archive)
+        return archive
+
+    def forget_plate_cover(self, slug: str) -> None:
+        """Drop the resolved cover for ``slug``; the next ask scans again."""
+        with self._covers_lock:
+            self._covers.pop(slug, None)
+            self._cover_generations[slug] = self._cover_generations.get(slug, 0) + 1
+
     def has_plate_cover(self, slug: str) -> bool:
         """Whether :meth:`plate_cover` has an image to give, without reading it."""
-        return self._plate_cover_archive(slug) is not None
+        return self.plate_cover_archive(slug) is not None
 
     def plate_cover(self, slug: str) -> bytes | None:
         """The first generated output's ``plate_1.png`` -- the catalogue thumbnail of
@@ -267,16 +325,17 @@ class OutputStore:
 
         Read out of the output's 3MF, where the renderer already put it, rather than
         copied beside the model: the model's directory is versioned, and a render is
-        not a catalogue change.
+        not a catalogue change. Only the resolved archive is opened.
         """
-        archive_path = self._plate_cover_archive(slug)
+        archive_path = self.plate_cover_archive(slug)
         if archive_path is None:
             return None
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 return archive.read(PLATE_THUMBNAIL)
         except (OSError, KeyError, zipfile.BadZipFile):
-            # Deleted or replaced between finding it and reading it.
+            # Deleted or replaced since it was resolved; the next ask rescans.
+            self.forget_plate_cover(slug)
             return None
 
     def thumbnail_path(self, output_id: str) -> Path:
