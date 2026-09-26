@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -232,6 +233,27 @@ def test_a_delete_sweeps_other_models_orphans(
 
     assert not (paths.outputs / "gone").exists()
     assert not paths.model_schema_cache("gone").exists()
+
+
+def test_a_root_that_cannot_be_listed_does_not_stop_the_others(
+    client: TestClient, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    catalogue = client.app.state.scadbuddy.catalogue  # type: ignore[attr-defined]
+    (paths.outputs / "gone" / "deadbeef").mkdir(parents=True)
+    paths.schema_cache.mkdir(parents=True)
+    paths.model_schema_cache("gone").write_text("{}\n", encoding="utf-8")
+    iterdir = Path.iterdir
+
+    def stalled(self: Path) -> Iterator[Path]:
+        if self == paths.outputs:
+            raise OSError("EIO")
+        return iterdir(self)
+
+    with patch.object(Path, "iterdir", stalled):
+        removed = catalogue.sweep_orphans()
+
+    assert removed == ["cache/schema/gone.json"]
+    assert "could not list for orphans" in caplog.text
 
 
 def test_the_orphan_sweep_never_touches_a_live_model(

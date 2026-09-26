@@ -323,15 +323,22 @@ class Catalogue:
         ``model.scad`` does: `create` and `seed` make the directory first, and a
         model mid-creation must not lose anything. A live slug is never touched,
         so this is safe beside a running render.
+
+        Each root is listed on its own: one that cannot be read is logged and
+        skipped, and the others are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        for root in (self.paths.outputs, self.paths.model_revisions):
-            if root.is_dir():
-                candidates.extend((entry.name, entry) for entry in root.iterdir())
-        if self.paths.schema_cache.is_dir():
-            candidates.extend(
-                (entry.stem, entry) for entry in self.paths.schema_cache.glob("*.json")
-            )
+        for root in (self.paths.outputs, self.paths.model_revisions, self.paths.schema_cache):
+            if not root.is_dir():
+                continue
+            try:
+                for entry in root.iterdir():
+                    if root != self.paths.schema_cache:
+                        candidates.append((entry.name, entry))
+                    elif entry.suffix == ".json":
+                        candidates.append((entry.stem, entry))
+            except OSError:
+                logger.exception("could not list for orphans", extra={"path": str(root)})
         removed: list[str] = []
         for slug, path in sorted(candidates):
             if self.paths.model_dir(slug).exists():
