@@ -43,6 +43,17 @@ def test_a_name_overrides_the_one_taken_from_the_url(client: TestClient) -> None
 
 
 @respx.mock
+def test_a_name_too_long_for_a_slug_is_refused_and_nothing_saved(client: TestClient) -> None:
+    respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
+
+    response = client.post("/api/v1/models/import", json={"url": RAW_URL, "name": "x" * 300})
+
+    assert response.status_code == 422
+    assert "longer than" in response.json()["detail"]
+    assert client.get("/api/v1/models").json() == []
+
+
+@respx.mock
 def test_an_import_over_an_existing_slug_conflicts(client: TestClient) -> None:
     respx.get(RAW_URL).mock(return_value=httpx.Response(200, text=SOURCE))
     assert client.post("/api/v1/models/import", json={"url": RAW_URL}).status_code == 201
