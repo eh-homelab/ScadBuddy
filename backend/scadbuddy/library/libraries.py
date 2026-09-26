@@ -293,6 +293,11 @@ class LibraryStore:
         # Serialises the lockfile's read-modify-write when there is no history
         # to do it under; with one, its own write lock does.
         self._lock = threading.Lock()
+        # One lock per library name, held from reading the URL the name is bound
+        # to until its pin is recorded: two adds of the same new name must not
+        # both find it unbound. Other names still clone concurrently.
+        self._names: dict[str, threading.Lock] = {}
+        self._names_guard = threading.Lock()
 
     def entries(self) -> list[LibraryEntry]:
         pins = read_pins(self.paths)
@@ -315,6 +320,12 @@ class LibraryStore:
         """
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
+        with self._names_guard:
+            lock = self._names.setdefault(name, threading.Lock())
+        with lock:
+            return self._install_locked(name, url, ref)
+
+    def _install_locked(self, name: str, url: str | None, ref: str | None) -> LibraryPin:
         known = self.catalogue.get(name)
         # A name is bound to one upstream: the catalogue's for a curated library,
         # the one it was first added from otherwise. Every model declaring it

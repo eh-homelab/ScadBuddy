@@ -7,6 +7,7 @@ network is never involved.
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Callable
 from pathlib import Path
 
@@ -246,6 +247,84 @@ def test_a_user_added_library_cannot_be_repointed(
     assert read_pins(paths)["mylib"].url == url
     # Its own URL still moves it to another ref.
     assert store.install("mylib", url=url, ref="v2").commit == commits["v2"]
+
+
+def _hold_the_first_clone(
+    store: LibraryStore, monkeypatch: pytest.MonkeyPatch
+) -> tuple[threading.Event, threading.Event]:
+    """Park the first clone until released, so a second install can race it."""
+    started, release = threading.Event(), threading.Event()
+    clone = store._clone
+    calls: list[str] = []
+
+    def slow_clone(name: str, url: str, ref: str) -> str:
+        calls.append(name)
+        if len(calls) == 1:
+            started.set()
+            assert release.wait(10)
+        return clone(name, url, ref)
+
+    monkeypatch.setattr(store, "_clone", slow_clone)
+    return started, release
+
+
+def test_concurrent_adds_of_one_new_name_cannot_both_bind_it(
+    store: LibraryStore,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    elsewhere: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both would pass the one-name-one-URL check before either had recorded a pin;
+    the second must wait for the first and then see its URL."""
+    url, _ = upstream
+    started, release = _hold_the_first_clone(store, monkeypatch)
+    errors: list[BaseException] = []
+
+    def add_first() -> None:
+        store.install("mylib", url=url, ref="v1")
+
+    def add_second() -> None:
+        try:
+            store.install("mylib", url=elsewhere, ref="v1")
+        except LibraryError as error:
+            errors.append(error)
+
+    first = threading.Thread(target=add_first)
+    first.start()
+    assert started.wait(10)
+    second = threading.Thread(target=add_second)
+    second.start()
+    second.join(0.5)
+    release.set()
+    first.join(10)
+    second.join(10)
+
+    assert [str(error) for error in errors] == [
+        f"'mylib' comes from {url}; add {elsewhere} under another name"
+    ]
+    assert read_pins(paths)["mylib"].url == url
+
+
+def test_an_add_of_one_name_does_not_hold_up_another(
+    store: LibraryStore,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url, commits = upstream
+    started, release = _hold_the_first_clone(store, monkeypatch)
+    first = threading.Thread(target=lambda: store.install("mylib", url=url, ref="v1"))
+    first.start()
+    assert started.wait(10)
+
+    try:
+        assert store.install("BOSL2").commit == commits["v1"]
+    finally:
+        release.set()
+        first.join(10)
+
+    assert set(read_pins(paths)) == {"BOSL2", "mylib"}
 
 
 def test_a_name_outside_the_catalogue_needs_a_url(store: LibraryStore) -> None:
