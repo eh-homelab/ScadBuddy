@@ -8,12 +8,17 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.paths import SOURCE_NAME, DataPaths
 from scadbuddy.library.history import GitError, ModelHistory, summarise
+
+if TYPE_CHECKING:
+    # Type-only: `library.outputs` reaches this module again through
+    # `render.provenance`, so a runtime import here would be circular.
+    from scadbuddy.library.outputs import OutputStore
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +65,10 @@ class ModelNotFoundError(KeyError):
     pass
 
 
+class SidecarNotFoundError(KeyError):
+    """The model exists, but the thumbnail or README being removed does not."""
+
+
 class ModelExistsError(ValueError):
     pass
 
@@ -79,10 +88,18 @@ class ModelPatch(BaseModel):
     tags: list[str] | None = None
 
 
+#: Where a model's catalogue thumbnail comes from: ``model`` is one set on the model
+#: itself, ``output`` the first generated output's plate cover, standing in until one
+#: is set (#179).
+ThumbnailSource = Literal["model", "output"]
+
+
 class ModelRecord(ModelMeta):
     slug: str
+    #: True when ``GET /models/{slug}/thumbnail`` has an image, from either source.
     has_thumbnail: bool
     has_readme: bool
+    thumbnail_source: ThumbnailSource | None = None
     updated_at: datetime
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
@@ -92,9 +109,16 @@ class ModelRecord(ModelMeta):
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
-    def __init__(self, paths: DataPaths, history: ModelHistory | None = None) -> None:
+    def __init__(
+        self,
+        paths: DataPaths,
+        history: ModelHistory | None = None,
+        outputs: OutputStore | None = None,
+    ) -> None:
         self.paths = paths
         self.history = history
+        #: Where the fallback thumbnail is read from; None turns the fallback off.
+        self.outputs = outputs
 
     def _commit(self, message: str, *slugs: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
@@ -149,6 +173,25 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
+    def thumbnail_source(self, slug: str) -> ThumbnailSource | None:
+        if self.thumbnail_path(slug).is_file():
+            return "model"
+        if self.outputs is not None and self.outputs.has_plate_cover(slug):
+            return "output"
+        return None
+
+    def thumbnail(self, slug: str) -> bytes | None:
+        """The catalogue thumbnail: the model's own, else the first generated
+        output's plate cover, else None."""
+        self._require(slug)
+        try:
+            return self.thumbnail_path(slug).read_bytes()
+        except FileNotFoundError:
+            pass
+        if self.outputs is None:
+            return None
+        return self.outputs.plate_cover(slug)
+
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
         if not meta_path.is_file():
@@ -183,10 +226,12 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
+        thumbnail_source = self.thumbnail_source(slug)
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
-            has_thumbnail=self.thumbnail_path(slug).is_file(),
+            has_thumbnail=thumbnail_source is not None,
+            thumbnail_source=thumbnail_source,
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
@@ -234,6 +279,71 @@ class Catalogue:
         self.write_raw_meta(slug, raw)
         self._commit(f"Update {slug} metadata", slug)
         return self.record(slug)
+
+    def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
+        """Set or replace the model's own thumbnail, as one revision."""
+        self._write_sidecar(slug, THUMBNAIL_NAME, png)
+        self._commit(f"Set {slug} thumbnail", slug)
+        return self.record(slug)
+
+    def delete_thumbnail(self, slug: str) -> ModelRecord:
+        """Remove the model's own thumbnail, as one revision. The record may still
+        report one: the fallback takes over when the model has been generated."""
+        self._remove_sidecar(slug, THUMBNAIL_NAME)
+        self._commit(f"Remove {slug} thumbnail", slug)
+        return self.record(slug)
+
+    def read_readme(self, slug: str) -> str:
+        self._require(slug)
+        try:
+            return self.readme_path(slug).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise SidecarNotFoundError(README_NAME) from None
+
+    def write_readme(self, slug: str, text: str) -> ModelRecord:
+        """Set or replace the model's README, as one revision."""
+        self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+        self._commit(f"Set {slug} README", slug)
+        return self.record(slug)
+
+    def delete_readme(self, slug: str) -> ModelRecord:
+        self._remove_sidecar(slug, README_NAME)
+        self._commit(f"Remove {slug} README", slug)
+        return self.record(slug)
+
+    def _write_sidecar(self, slug: str, name: str, payload: bytes) -> None:
+        """Swap one of the model's files in atomically, as `write_source` does.
+
+        The same reasons apply: a reader (a GET, or git staging a concurrent
+        commit) must never see a half-written file, and a write racing a delete
+        must fail with the delete's 404 rather than recreate the directory.
+        """
+        self._require(slug)
+        directory = self.paths.model_dir(slug)
+        try:
+            handle, staged = tempfile.mkstemp(dir=directory, prefix=".sidecar-")
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
+        try:
+            with os.fdopen(handle, "wb") as writer:
+                writer.write(payload)
+            os.replace(staged, directory / name)
+        except FileNotFoundError:
+            Path(staged).unlink(missing_ok=True)
+            raise ModelNotFoundError(slug) from None
+        except BaseException:
+            Path(staged).unlink(missing_ok=True)
+            raise
+
+    def _remove_sidecar(self, slug: str, name: str) -> None:
+        self._require(slug)
+        try:
+            (self.paths.model_dir(slug) / name).unlink()
+        except FileNotFoundError:
+            # Either the file was never there or a delete took the whole model;
+            # which one decides the answer.
+            self._require(slug)
+            raise SidecarNotFoundError(name) from None
 
     def write_source(self, slug: str, source: str, *, message: str | None = None) -> ModelRecord:
         """Replace a model's ``.scad`` as one revision.

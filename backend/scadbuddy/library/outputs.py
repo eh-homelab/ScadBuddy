@@ -1,22 +1,27 @@
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 import uuid
+import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, PartInfo
 from scadbuddy.render.provenance import Provenance, source_version, stamp
 from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import ParamValue
+
+logger = logging.getLogger(__name__)
 
 META_NAME = "meta.json"
 PARAMS_NAME = "params.json"
@@ -215,6 +220,64 @@ class OutputStore:
 
     def delete(self, output_id: str) -> None:
         shutil.rmtree(self._find_dir(output_id), ignore_errors=True)
+
+    def _oldest_first(self, slug: str) -> list[OutputMeta]:
+        """The model's outputs, oldest first, skipping any record that cannot be read.
+
+        Unlike `list_for`, this feeds the catalogue listing, so one unreadable or
+        half-deleted output must cost only itself -- never the whole page.
+        """
+        directory = self.paths.outputs / slug
+        metas: list[OutputMeta] = []
+        try:
+            candidates = sorted(directory.glob(f"*/{META_NAME}"))
+        except OSError:
+            return []
+        for path in candidates:
+            try:
+                metas.append(OutputMeta.model_validate_json(path.read_text(encoding="utf-8")))
+            except (OSError, ValidationError):
+                logger.warning("skipped an unreadable output record", extra={"path": str(path)})
+        return sorted(metas, key=lambda meta: meta.created_at)
+
+    def _plate_cover_archive(self, slug: str) -> Path | None:
+        """The 3MF of the first generated output that carries a plate cover image.
+
+        An output whose cover render timed out or failed has none (see
+        `render.jobs.plate_thumbnails`), so the next one is tried rather than
+        giving up on the model.
+        """
+        for meta in self._oldest_first(slug):
+            archive_path = self.paths.output_dir(slug, meta.id) / MODEL_NAME
+            try:
+                with zipfile.ZipFile(archive_path) as archive:
+                    if PLATE_THUMBNAIL in archive.namelist():
+                        return archive_path
+            except (OSError, zipfile.BadZipFile):
+                continue
+        return None
+
+    def has_plate_cover(self, slug: str) -> bool:
+        """Whether :meth:`plate_cover` has an image to give, without reading it."""
+        return self._plate_cover_archive(slug) is not None
+
+    def plate_cover(self, slug: str) -> bytes | None:
+        """The first generated output's ``plate_1.png`` -- the catalogue thumbnail of
+        a model that has none of its own (#179).
+
+        Read out of the output's 3MF, where the renderer already put it, rather than
+        copied beside the model: the model's directory is versioned, and a render is
+        not a catalogue change.
+        """
+        archive_path = self._plate_cover_archive(slug)
+        if archive_path is None:
+            return None
+        try:
+            with zipfile.ZipFile(archive_path) as archive:
+                return archive.read(PLATE_THUMBNAIL)
+        except (OSError, KeyError, zipfile.BadZipFile):
+            # Deleted or replaced between finding it and reading it.
+            return None
 
     def thumbnail_path(self, output_id: str) -> Path:
         return self._find_dir(output_id) / THUMBNAIL_NAME

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
@@ -29,6 +29,7 @@ from scadbuddy.library.catalogue import (
     ModelNotFoundError,
     ModelPatch,
     ModelRecord,
+    SidecarNotFoundError,
 )
 from scadbuddy.library.history import MAX_SUBJECT
 from scadbuddy.library.scad import (
@@ -126,6 +127,10 @@ class SourceUpdate(BaseModel):
     )
 
 
+class ReadmeUpdate(BaseModel):
+    content: str = Field(max_length=MAX_SOURCE_CHARS, description="The README, as Markdown text")
+
+
 class CheckRequest(BaseModel):
     source: str = Field(
         max_length=MAX_SOURCE_CHARS, description="The OpenSCAD source to parse-check"
@@ -214,7 +219,8 @@ async def _guard_source(
     summary="Add a model",
     description=(
         "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` "
-        "file (plus an optional thumbnail and README); `application/json` posts "
+        "file (plus an optional thumbnail, README and `model.json`, the layout of a "
+        "bundled model's directory); `application/json` posts "
         "`{name, source}` pasted straight in; `text/plain` posts the bare source and "
         "takes its name from the `X-Model-Name` header. All three derive the slug, "
         "parse-check the source and build the customizer schema identically."
@@ -237,6 +243,10 @@ async def create_model(
     file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
     thumbnail: Annotated[UploadFile | None, File(description="Optional PNG")] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
+    meta: Annotated[
+        UploadFile | None,
+        File(description="Optional model.json; the name, description and tags fields win"),
+    ] = None,
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
@@ -316,18 +326,16 @@ async def create_model(
 
     thumbnail_bytes: bytes | None = None
     if thumbnail is not None:
-        thumbnail_bytes = await thumbnail.read()
-        if not thumbnail_bytes.startswith(PNG_MAGIC):
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
+        thumbnail_bytes = _require_png(await thumbnail.read())
 
     readme_text: str | None = None
     if readme is not None:
-        try:
-            readme_text = decode_source(await readme.read())
-        except NotOpenSCADError:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
-            ) from None
+        readme_text = _readme_text(await readme.read())
+
+    # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
+    # directory lands with the same metadata the image seed would give it.
+    base = _read_meta_file(await meta.read(), slug) if meta is not None else ModelMeta(name=slug)
+    parsed_tags = _parse_tags(tags)
 
     return await _create(
         catalogue,
@@ -336,14 +344,46 @@ async def create_model(
         slug=slug,
         source=source,
         meta=ModelMeta(
-            name=name or slug,
-            description=description or "",
-            tags=_parse_tags(tags) or [],
+            name=name or base.name,
+            description=description if description is not None else base.description,
+            tags=parsed_tags if parsed_tags is not None else base.tags,
+            source=base.source,
         ),
         force=force,
         thumbnail=thumbnail_bytes,
         readme=readme_text,
     )
+
+
+def _require_png(payload: bytes) -> bytes:
+    if not payload.startswith(PNG_MAGIC):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
+    return payload
+
+
+def _readme_text(payload: bytes) -> str:
+    try:
+        return decode_source(payload)
+    except NotOpenSCADError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
+        ) from None
+
+
+def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
+    """A ``model.json`` part, read the way the catalogue reads one from disk."""
+    try:
+        raw = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not valid JSON"
+        ) from None
+    if not isinstance(raw, dict):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
+    try:
+        return ModelMeta.model_validate({"name": slug, **raw})
+    except ValidationError as error:
+        raise _malformed_body(error) from None
 
 
 def _slug_from_name(name: str) -> str:
@@ -544,13 +584,121 @@ async def get_schema(
 
 @router.get(
     "/models/{slug}/thumbnail",
-    response_class=FileResponse,
+    response_class=Response,
     responses={200: {"content": {"image/png": {}}}},
     summary="Model thumbnail",
+    description=(
+        "The thumbnail set on the model or, when it has none, the plate image of its "
+        "first generated output. 404 when there is neither."
+    ),
 )
-def get_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> FileResponse:
-    require_model(catalogue, slug)
-    path = catalogue.thumbnail_path(slug)
-    if not path.is_file():
+def get_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> Response:
+    require_model_exists(catalogue, slug)
+    try:
+        png = catalogue.thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    if png is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
-    return FileResponse(path, media_type="image/png")
+    # Revalidated every time: the image changes under the same URL when one is set,
+    # removed, or first generated.
+    return Response(png, media_type="image/png", headers={"Cache-Control": "no-cache"})
+
+
+@router.put(
+    "/models/{slug}/thumbnail",
+    response_model=ModelRecord,
+    summary="Set a model's thumbnail",
+    description=(
+        "Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision "
+        "in the model's history."
+    ),
+)
+async def put_thumbnail(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    file: Annotated[UploadFile, File(description="The thumbnail, a PNG")],
+) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    png = _require_png(await file.read())
+    try:
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        return await asyncio.to_thread(catalogue.write_thumbnail, slug, png)
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+@router.delete(
+    "/models/{slug}/thumbnail",
+    response_model=ModelRecord,
+    summary="Remove a model's thumbnail",
+    description=(
+        "Removes the thumbnail set on the model, as one revision in its history. The "
+        "record that comes back can still have one: a generated model falls back to "
+        "its first output's plate image (`thumbnail_source` is then `output`)."
+    ),
+)
+def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    try:
+        return catalogue.delete_thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove"
+        ) from None
+
+
+@router.get(
+    "/models/{slug}/readme",
+    response_class=PlainTextResponse,
+    responses={200: {"content": {"text/markdown": {"schema": {"type": "string"}}}}},
+    summary="Model README",
+)
+def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> PlainTextResponse:
+    require_model_exists(catalogue, slug)
+    try:
+        text = catalogue.read_readme(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README") from None
+    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+
+
+@router.put(
+    "/models/{slug}/readme",
+    response_model=ModelRecord,
+    summary="Set a model's README",
+    description="Sets or replaces the README, as one revision in the model's history.",
+)
+async def put_readme(slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    if "\x00" in body.content:
+        # The same line `_guard_source` draws: the models repository holds text.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the README contains a NUL byte, so it is binary, not text",
+        )
+    try:
+        return await asyncio.to_thread(catalogue.write_readme, slug, body.content)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+@router.delete(
+    "/models/{slug}/readme",
+    response_model=ModelRecord,
+    summary="Remove a model's README",
+    description="Removes the README, as one revision in the model's history.",
+)
+def delete_readme(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    try:
+        return catalogue.delete_readme(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove") from None
