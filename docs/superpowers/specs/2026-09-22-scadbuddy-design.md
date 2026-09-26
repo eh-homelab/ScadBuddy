@@ -143,6 +143,14 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   pre-slice check reads **object-level `extruder`** from `model_settings.config`
   and ignores `paint_color`, so per-object assignment is the only reliable
   path.
+- **MakerWorld does not serve a model's source to an anonymous server**
+  (checked 2026-09-26, #153/#174). Model pages sit behind a Cloudflare challenge
+  (403). `api.bambulab.com/v1/design-service/design/<id>` answers without a login
+  (title, cover, summary, licence, file list), but the Parametric Model Maker
+  `.scad` entry has an empty `modelUrl`, and every download route answers 403
+  "Please log in to download models". Some PMM sources are also marked
+  `protected`. So the URL import refuses MakerWorld links with a pointer to
+  Upload, and a resolver needs a signed-in token (#174).
 
 ## 4. Architecture
 

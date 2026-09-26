@@ -303,10 +303,10 @@ async def create_model(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the upload needs a file part")
     try:
         slug = slug_from_filename(file.filename or "")
-    except InvalidSlugError:
+    except InvalidSlugError as exc:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the upload needs a filename that yields a slug",
+            f"the upload needs a filename that yields a slug: {exc}",
         ) from None
 
     try:
