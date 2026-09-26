@@ -564,7 +564,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
-| PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`), replaces it as one revision named by `message`, and re-derives the schema |
+| PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema |
 | GET | `/models/{slug}/versions` | the model's git history: commit, date, author, message, changed files |
 | GET | `/models/{slug}/versions/{commit}/source` | that revision's `.scad` |
 | GET | `/models/{slug}/versions/{commit}/schema` | that revision's customizer schema |

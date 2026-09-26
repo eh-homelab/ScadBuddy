@@ -58,3 +58,11 @@ def test_the_committed_schema_is_up_to_date(tmp_path: Path) -> None:
     ``uv run python -m scadbuddy.tools.export_openapi``."""
     fresh = export(tmp_path / "openapi.json").read_text(encoding="utf-8")
     assert DEFAULT_OUTPUT.read_text(encoding="utf-8") == fresh
+
+
+def test_the_pasted_source_body_is_a_named_schema(tmp_path: Path) -> None:
+    """Named, so the frontend's `PastedSource` is generated rather than hand-written."""
+    schema = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))
+    body = schema["paths"]["/api/v1/models"]["post"]["requestBody"]["content"]
+    assert body["application/json"]["schema"] == {"$ref": "#/components/schemas/PastedSource"}
+    assert schema["components"]["schemas"]["PastedSource"]["required"] == ["name", "source"]

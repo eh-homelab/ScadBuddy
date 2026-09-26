@@ -23,18 +23,7 @@ export type ModelSummary = Schemas['ModelRecord']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
 
-/**
- * Body for creating a model from pasted source. Hand-written because the route
- * accepts three content types and FastAPI inlines this one's schema in the
- * document rather than naming it under `components`.
- */
-export interface PastedSource {
-  name: string
-  source: string
-  description?: string
-  tags?: string[]
-  force?: boolean
-}
+export type PastedSource = Schemas['PastedSource']
 
 /** #90 — one entry of a model's git history, and a patch between two of them. */
 export type ModelVersion = Schemas['ModelVersion']

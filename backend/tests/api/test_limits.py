@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from scadbuddy.api.limits import (
+    MAX_MULTIPART_BODY_BYTES,
     MAX_TEXT_BODY_BYTES,
     ClientGoneError,
     unless_the_client_leaves,
@@ -80,6 +81,19 @@ def test_a_chunked_body_is_cut_off_at_the_limit(client: TestClient) -> None:
     assert response.status_code == 413
     assert response.headers["content-type"] == "application/problem+json"
     assert "most this API reads" in response.json()["detail"]
+
+
+def test_an_oversized_upload_is_refused_like_a_paste(client: TestClient) -> None:
+    """Starlette spools a file part to disk with no total, and the route then reads it
+    whole, so multipart is gated too -- with the same 413 problem the pastes get."""
+    response = client.post(
+        "/api/v1/models",
+        files={"file": ("huge.scad", b"x" * (MAX_MULTIPART_BODY_BYTES + 1), "text/plain")},
+    )
+    assert response.status_code == 413
+    assert response.headers["content-type"] == "application/problem+json"
+    assert response.json()["title"] == "Content Too Large"
+    assert "reads at most" in response.json()["detail"]
 
 
 def test_a_small_chunked_body_passes_the_gate(client: TestClient) -> None:
