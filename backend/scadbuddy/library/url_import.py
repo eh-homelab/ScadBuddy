@@ -44,7 +44,9 @@ import asyncio
 import ipaddress
 import socket
 from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 from typing import Protocol
 
 import httpcore
@@ -92,15 +94,27 @@ def is_public(address: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
+#: `getaddrinfo` blocks a thread and cannot be cancelled, so a resolver that hangs
+#: holds its thread whatever the deadline says. Its own two threads, not the loop's
+#: default executor, so that can only ever stall other imports -- never the git
+#: calls and health checks that share the default one.
+_RESOLVER = ThreadPoolExecutor(max_workers=2, thread_name_prefix="import-dns")
+
+#: Well inside `IMPORT_TIMEOUT`, so a slow resolver leaves the fetch its time.
+RESOLVE_TIMEOUT = 10.0
+
+
 async def resolve_host(host: str, port: int) -> list[str]:
-    infos = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    infos = await asyncio.get_running_loop().run_in_executor(
+        _RESOLVER, partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
+    )
     return [str(info[4][0]) for info in infos]
 
 
 async def _public_addresses(host: str, port: int) -> list[str]:
     try:
-        addresses = await resolve_host(host, port)
-    except OSError:
+        addresses = await asyncio.wait_for(resolve_host(host, port), RESOLVE_TIMEOUT)
+    except (OSError, TimeoutError):
         raise unreachable(host) from None
     if not addresses or not all(is_public(address) for address in addresses):
         raise unreachable(host)
