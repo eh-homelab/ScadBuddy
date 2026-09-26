@@ -298,10 +298,7 @@ class Catalogue:
         # Its derived files -- the schema cache, exported old revisions and its
         # outputs (NOT in the repository: a 3MF is a build artefact, not source)
         # -- and any an earlier delete failed to clear or a race wrote since.
-        try:
-            self.sweep_orphans()
-        except OSError:
-            logger.exception("could not sweep orphaned files")
+        self.sweep_orphans()
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
