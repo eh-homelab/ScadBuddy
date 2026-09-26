@@ -36,6 +36,9 @@ export interface PastedSource {
   force?: boolean
 }
 
+/** #153 — a model fetched from a URL rather than uploaded or pasted. */
+export type UrlImport = Schemas['UrlImport']
+
 /** #90 — one entry of a model's git history, and a patch between two of them. */
 export type ModelVersion = Schemas['ModelVersion']
 export type VersionFile = Schemas['VersionFile']

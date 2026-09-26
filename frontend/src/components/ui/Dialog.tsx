@@ -18,9 +18,14 @@ export function Dialog({ open, title, description, onClose, children, footer }: 
       if (event.key === 'Escape') onClose()
     }
     document.addEventListener('keydown', onKey)
-    panelRef.current?.focus()
     return () => document.removeEventListener('keydown', onKey)
   }, [open, onClose])
+
+  // On opening only. Callers pass a fresh `onClose` every render, and refocusing the
+  // panel with it would pull focus out of a text field after its first keystroke.
+  useEffect(() => {
+    if (open) panelRef.current?.focus()
+  }, [open])
 
   if (!open) return null
 
