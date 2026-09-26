@@ -45,8 +45,10 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import (
+    NozzleInfo,
     PresetRef,
     Printer,
+    SlotChoice,
     SlotMaterial,
     Spool,
     SpoolAssignment,
@@ -60,7 +62,9 @@ logger = logging.getLogger(__name__)
 #: opening selection; every slot stays editable and nothing is decided by it.
 COLOUR_MATCH_DISTANCE = 48.0
 
-WarningKind = Literal["not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out"]
+WarningKind = Literal[
+    "not-loaded", "low-filament", "no-choice", "no-preset", "no-fan-out", "nozzle-mismatch"
+]
 
 
 class LoadedAt(BaseModel):
@@ -115,11 +119,6 @@ class FilamentWarning(BaseModel):
     message: str
 
 
-class SlotChoice(BaseModel):
-    slot_id: int
-    spool_id: int
-
-
 class FilamentPlan(BaseModel):
     """What the dialog submits: one spool per slot, and how hard to insist on it.
 
@@ -153,6 +152,11 @@ class FilamentOptions(BaseModel):
     suggested: list[SlotChoice] = Field(default_factory=list)
     #: Warnings for :attr:`suggested`, so the dialog can show them before any click.
     warnings: list[FilamentWarning] = Field(default_factory=list)
+    #: The chosen printer's mounted nozzles, one per extruder (#78). Empty without a
+    #: printer: a class target nobody has narrowed yet has no hardware to read.
+    nozzles: list[NozzleInfo] = Field(default_factory=list)
+    #: The nozzle the pipeline slices for, read off its process preset's name.
+    pipeline_nozzle_diameter: str | None = None
 
 
 class QueueFilaments(BaseModel):
@@ -426,6 +430,47 @@ def _slot_warnings(
         )
 
     return found
+
+
+def nozzle_warnings(
+    nozzles: list[NozzleInfo], diameter: str | None, *, printer_name: str | None
+) -> list[FilamentWarning]:
+    """A pipeline slicing for a nozzle the printer has not mounted, said before the click.
+
+    Any extruder's nozzle counts: which extruder prints which slot is Bambuddy's mapping,
+    not ScadBuddy's. Compared as numbers, since ``"0.40"`` and ``"0.4"`` are one nozzle.
+    Nothing to compare — a preset name that states no nozzle, or a printer reporting
+    none — is not a mismatch. Neither is a diameter that is not a number: live status is
+    the firmware's to spell, and one garbled value must not fail the whole filament step.
+    """
+    wanted = _millimetres(diameter)
+    mounted = [
+        nozzle.nozzle_diameter
+        for nozzle in nozzles
+        if _millimetres(nozzle.nozzle_diameter) is not None
+    ]
+    if wanted is None or not mounted:
+        return []
+    if any(_millimetres(each) == wanted for each in mounted):
+        return []
+    return [
+        FilamentWarning(
+            kind="nozzle-mismatch",
+            message=(
+                f"This pipeline slices for a {diameter} mm nozzle, but "
+                f"{printer_name or 'the chosen printer'} has "
+                f"{' and '.join(f'{each} mm' for each in mounted)} mounted."
+            ),
+        )
+    ]
+
+
+def _millimetres(raw: str | None) -> float | None:
+    """``"0.4"`` → ``0.4``; empty or not a number → ``None``."""
+    try:
+        return float(raw) if raw else None
+    except ValueError:
+        return None
 
 
 def _label(option: SpoolOption) -> str:

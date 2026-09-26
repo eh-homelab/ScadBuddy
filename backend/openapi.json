@@ -726,6 +726,24 @@
             "title": "Library File Id",
             "type": "integer"
           },
+          "nozzles": {
+            "items": {
+              "$ref": "#/components/schemas/NozzleInfo"
+            },
+            "title": "Nozzles",
+            "type": "array"
+          },
+          "pipeline_nozzle_diameter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Nozzle Diameter"
+          },
           "printer_id": {
             "anyOf": [
               {
@@ -811,7 +829,8 @@
               "low-filament",
               "no-choice",
               "no-preset",
-              "no-fan-out"
+              "no-fan-out",
+              "nozzle-mismatch"
             ],
             "title": "Kind",
             "type": "string"
@@ -1362,6 +1381,31 @@
         "title": "ModelPatch",
         "type": "object"
       },
+      "ModelPrintChoices": {
+        "description": "What the print picker last chose for one model, beyond its pipeline (#78).\n\n``printer_id`` is only the printer picked for a class-targeted pipeline, which is the\none case the picker asks. ``filament_plan`` is only a plan the user moved off the\nauto-match: a spool no longer in the inventory is dropped by the picker, which then\nfalls back to the auto-match for that slot.",
+        "properties": {
+          "filament_plan": {
+            "items": {
+              "$ref": "#/components/schemas/SlotChoice"
+            },
+            "title": "Filament Plan",
+            "type": "array"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          }
+        },
+        "title": "ModelPrintChoices",
+        "type": "object"
+      },
       "ModelRecord": {
         "properties": {
           "description": {
@@ -1485,6 +1529,23 @@
           "message"
         ],
         "title": "ModelVersion",
+        "type": "object"
+      },
+      "NozzleInfo": {
+        "description": "``nozzle_diameter`` is a **string** here (\"0.4\"), unlike the float the queue\nroute reports back on a print.",
+        "properties": {
+          "nozzle_diameter": {
+            "default": "",
+            "title": "Nozzle Diameter",
+            "type": "string"
+          },
+          "nozzle_type": {
+            "default": "",
+            "title": "Nozzle Type",
+            "type": "string"
+          }
+        },
+        "title": "NozzleInfo",
         "type": "object"
       },
       "Option": {
@@ -2073,6 +2134,9 @@
             ],
             "title": "Global Pipeline Id"
           },
+          "model_choices": {
+            "$ref": "#/components/schemas/ModelPrintChoices"
+          },
           "model_pipeline_id": {
             "anyOf": [
               {
@@ -2644,6 +2708,17 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "nozzle_diameter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Diameter"
           },
           "printer_ids": {
             "items": {
@@ -3415,7 +3490,7 @@
         "type": "object"
       },
       "PrintRunRequest": {
-        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\nThe request does not choose its route; what it needs does. A pipeline run takes\nonly a source, ``copies`` and ``force``, so it is sliced and queued instead when\neither:\n\n- it carries a ``filament_plan``. A plan names one spool per plate slot, and those\n  queue-item fields exist on no other Bambuddy call (#87); or\n- a remembered print option applies that a run cannot carry (#124). The options\n  resolve global \u2192 per-printer \u2192 per-model \u2192 this request's ``copies``.\n\nOtherwise it runs the pipeline exactly as before.",
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\nThe request does not choose its route; what it needs does. A pipeline run takes\nonly a source, ``copies`` and ``force``, so it is sliced and queued instead when\neither:\n\n- it carries a ``filament_plan``. A plan names one spool per plate slot, and those\n  queue-item fields exist on no other Bambuddy call (#87); or\n- a remembered print option applies that a run cannot carry (#124). The options\n  resolve global \u2192 per-printer \u2192 per-model \u2192 this request's ``options`` and\n  ``copies``.\n\nOtherwise it runs the pipeline exactly as before.",
         "properties": {
           "copies": {
             "anyOf": [
@@ -3444,6 +3519,9 @@
             "default": false,
             "title": "Force",
             "type": "boolean"
+          },
+          "options": {
+            "$ref": "#/components/schemas/PrintOptions"
           },
           "pipeline_id": {
             "anyOf": [
@@ -4313,6 +4391,7 @@
         "type": "object"
       },
       "SlotChoice": {
+        "description": "One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)\nand what it remembers per model (#78).",
         "properties": {
           "slot_id": {
             "title": "Slot Id",
@@ -6354,6 +6433,61 @@
         ]
       }
     },
+    "/api/v1/print/models/{slug}/choices": {
+      "put": {
+        "description": "The rest of what the picker chose, beside the model's pipeline (#78).\n\nReplaces this model's entry whole; an empty body forgets it, so the picker opens on\nthe auto-match again. Needs no Bambuddy, like the pipeline default.",
+        "operationId": "put_model_choices_api_v1_print_models__slug__choices_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 100,
+              "pattern": "^[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelPrintChoices"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelPrintChoices"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remember this model's printer and spools",
+        "tags": [
+          "print"
+        ]
+      }
+    },
     "/api/v1/print/models/{slug}/pipeline": {
       "put": {
         "description": "Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug.",
@@ -6509,7 +6643,7 @@
     },
     "/api/v1/print/outputs/{output_id}/filaments": {
       "get": {
-        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not.",
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not. It is also what reads the\nmounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's\nnozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than\nre-derived, because naming a preset means reading the whole catalogue again.",
         "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
         "parameters": [
           {
@@ -6536,6 +6670,23 @@
                 }
               ],
               "title": "Printer Id"
+            }
+          },
+          {
+            "in": "query",
+            "name": "nozzle_diameter",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 16,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Nozzle Diameter"
             }
           },
           {

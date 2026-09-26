@@ -10,6 +10,7 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  ModelPrintChoices,
   ModelSummary,
   ModelVersion,
   Output,
@@ -249,6 +250,13 @@ export const api = {
       body: JSON.stringify({ pipeline_id: pipelineId }),
     }),
 
+  /** #78 — replaces this model's remembered printer and spools; empty forgets them. */
+  putModelChoices: (slug: string, body: ModelPrintChoices) =>
+    request<ModelPrintChoices>(`/print/models/${seg(slug)}/choices`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
   /** Uploads the 3MF if Bambuddy has not got it yet, then asks each pipeline. */
   checkEligibility: (outputId: string, pipelineIds?: number[]) =>
     request<EligibilityOverview>(`/print/outputs/${seg(outputId)}/eligibility`, {
@@ -265,18 +273,19 @@ export const api = {
    * `printerId` is what makes `loaded` mean "loaded *here*" and what makes reachability
    * answerable at all — without one the server can say where a spool is but not whether
    * the chosen slot can reach it.
+   *
+   * `nozzleDiameter` is the pipeline's, as `PipelineView.nozzle_diameter` reported it;
+   * the server compares it with the printer's mounted nozzles (#78).
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; pipelineId?: number | null; plateId?: number } = {},
+    query: { printerId?: number | null; nozzleDiameter?: string | null; plateId?: number } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
       search.set('printer_id', String(query.printerId))
     }
-    if (query.pipelineId !== null && query.pipelineId !== undefined) {
-      search.set('pipeline_id', String(query.pipelineId))
-    }
+    if (query.nozzleDiameter) search.set('nozzle_diameter', query.nozzleDiameter)
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)

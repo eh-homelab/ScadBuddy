@@ -311,3 +311,28 @@ def test_a_remembered_quantity_is_reported_on_the_queue_route(
 
     assert json.loads(queue.calls.last.request.read())["quantity"] == 4
     assert body["copies"] == 4
+
+
+@respx.mock
+def test_the_pickers_own_options_ride_on_this_print_only(client: TestClient, model: str) -> None:
+    """#78: the Print dialog's options disclosure, like the send bar's, overrides every
+    remembered layer for this request and is remembered nowhere. ``copies`` still wins
+    over a quantity sent alongside it, as on the send bar."""
+    configure(client)
+    remember(client, "global", {"timelapse": False})
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    slice_route()
+    queue = queue_route()
+
+    client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={"pipeline_id": 1, "copies": 2, "options": {"timelapse": True, "quantity": 5}},
+    )
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert (queued["timelapse"], queued["quantity"]) == (True, 2)
+    remembered = client.get("/api/v1/settings/print-options").json()
+    assert remembered["global_options"]["timelapse"] is False

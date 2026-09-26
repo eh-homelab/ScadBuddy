@@ -425,6 +425,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.20mm Standard @BBL H2C',
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1],
   },
   {
@@ -443,6 +444,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.28mm Draft @BBL H2C',
     filament_preset_names: ['Bambu ABS @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1],
   },
   {
@@ -461,6 +463,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.20mm Standard @BBL H2C',
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1, 2],
   },
 ]
@@ -987,4 +990,11 @@ export const filamentOptions: FilamentOptions = {
         'Load Elegoo PLA Basic Deep Pink into the printer before this prints — it is stored in Shelf B.',
     },
   ],
+  // #78 — the H2C's two extruders, as `printers/{id}/status` reports them. The 0.4 one is
+  // what pipeline 1's printer preset names, so nothing is mismatched here.
+  nozzles: [
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+    { nozzle_type: 'HS01', nozzle_diameter: '0.4' },
+  ],
+  pipeline_nozzle_diameter: '0.4',
 }

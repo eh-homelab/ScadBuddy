@@ -92,6 +92,9 @@ export type SlotChoice = Schemas['SlotChoice']
 export type FilamentPlan = Schemas['FilamentPlan']
 export type FilamentWarning = Schemas['FilamentWarning']
 export type LoadedAt = Schemas['LoadedAt']
+/** #78 — a printer's mounted nozzle, and what the picker remembers per model. */
+export type NozzleInfo = Schemas['NozzleInfo']
+export type ModelPrintChoices = Schemas['ModelPrintChoices']
 
 /**
  * #89 — run tracking.

@@ -411,12 +411,16 @@ def pipeline_slice_request(pipeline: Pipeline, meta: OutputMeta) -> SliceRequest
     )
 
 
-def _request_scope(request: SendRequest) -> PrintOptions:
-    """The per-request overlay. ``copies`` is the send bar's own control for the same
-    quantity, and wins over an ``options.quantity`` sent alongside it."""
-    if request.copies is None:
-        return request.options
-    return request.options.model_copy(update={"quantity": request.copies})
+def request_scope(copies: int | None, options: PrintOptions) -> PrintOptions:
+    """The per-request overlay. ``copies`` is each dialog's own control for the same
+    quantity, and wins over an ``options.quantity`` sent alongside it.
+
+    Shared by the send bar and the print picker (#78) for the same reason
+    :func:`resolve_print_options` is.
+    """
+    if copies is None:
+        return options
+    return options.model_copy(update={"quantity": copies})
 
 
 def resolve_print_options(
@@ -438,7 +442,9 @@ def resolve_print_options(
 def _resolve_options(
     settings: StoredSettings, meta: OutputMeta, request: SendRequest, printer_id: int | None
 ) -> PrintOptions:
-    return resolve_print_options(settings, meta.slug, printer_id, _request_scope(request))
+    return resolve_print_options(
+        settings, meta.slug, printer_id, request_scope(request.copies, request.options)
+    )
 
 
 async def scope_printer(

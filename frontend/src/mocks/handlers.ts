@@ -8,6 +8,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  ModelPrintChoices,
   ModelSummary,
   ModelVersion,
   Output,
@@ -53,6 +54,8 @@ const state = {
   pipelines: [...fixtures.pipelineViews] as PipelineView[],
   /** #86 — per-model default pipelines, the store's `model_pipelines`. */
   modelPipelines: {} as Record<string, number>,
+  /** #78 — per-model printer and spools, the store's `model_print_choices`. */
+  modelChoices: {} as Record<string, ModelPrintChoices>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
   lastProjectId: null as number | null,
@@ -76,6 +79,7 @@ export function resetMockState(): void {
   state.jobs.clear()
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
+  state.modelChoices = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
@@ -700,7 +704,17 @@ export const handlers = [
       model_pipeline_id: modelPipelineId,
       global_pipeline_id: state.settings.pipeline_id ?? null,
       default_pipeline_id: modelPipelineId ?? state.settings.pipeline_id ?? null,
+      model_choices: state.modelChoices[slug] ?? { printer_id: null, filament_plan: [] },
     } satisfies PipelineChoices)
+  }),
+
+  http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const body = (await request.json()) as ModelPrintChoices
+    const empty = { printer_id: null, filament_plan: [] }
+    if (body.printer_id == null && !body.filament_plan?.length) delete state.modelChoices[slug]
+    else state.modelChoices[slug] = { ...empty, ...body }
+    return HttpResponse.json(state.modelChoices[slug] ?? empty)
   }),
 
   http.put(`${base}/print/models/:slug/pipeline`, async ({ params, request }) => {
@@ -752,9 +766,17 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/filaments`, ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    const printerId = new URL(request.url).searchParams.get('printer_id')
+    const search = new URL(request.url).searchParams
+    const printerId = search.get('printer_id')
+    // #78 — no printer, no hardware to read: a class target nobody has narrowed yet. The
+    // pipeline's nozzle is echoed from the query, as the server does.
+    const hardware =
+      printerId === null
+        ? { nozzles: [], pipeline_nozzle_diameter: null }
+        : { pipeline_nozzle_diameter: search.get('nozzle_diameter') }
     return HttpResponse.json({
       ...fixtures.filamentOptions,
+      ...hardware,
       library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
