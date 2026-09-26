@@ -223,6 +223,17 @@ def test_the_catalogue_url_matches_however_it_is_spelled(
     assert (pin.url, pin.commit) == (url, commits["v2"])
 
 
+def test_the_catalogue_url_matches_whatever_the_case_of_its_scheme(
+    store: LibraryStore, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    scheme, rest = url.split("://", 1)
+
+    pin = store.install("BOSL2", url=f"{scheme.upper()}://{rest}", ref="v2")
+
+    assert (pin.url, pin.commit) == (url, commits["v2"])
+
+
 def test_a_user_added_library_cannot_be_repointed(
     store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]], elsewhere: str
 ) -> None:

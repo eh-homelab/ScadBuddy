@@ -34,6 +34,7 @@ import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel
 
@@ -256,10 +257,12 @@ def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str
 
 
 def _same_repository(first: str, second: str) -> bool:
-    """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository."""
+    """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository,
+    whatever the case of the scheme and host (the path's case is significant)."""
 
     def bare(url: str) -> str:
-        return url.rstrip("/").removesuffix(".git").rstrip("/")
+        parts = urlsplit(url.rstrip("/").removesuffix(".git").rstrip("/"))
+        return urlunsplit(parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()))
 
     return bare(first) == bare(second)
 
@@ -334,7 +337,7 @@ class LibraryStore:
             ref = known.ref
         if not re.fullmatch(REF_PATTERN, ref) or ".." in ref:
             raise LibraryError(f"{ref!r} is not a usable branch or tag name")
-        scheme = url.split("://", 1)[0] if "://" in url else ""
+        scheme = urlsplit(url).scheme.lower()
         if scheme not in self.protocols:
             raise LibraryError(f"{url!r} is not a {' or '.join(self.protocols)} URL")
 
