@@ -1832,6 +1832,46 @@
         "title": "PartInfo",
         "type": "object"
       },
+      "PastedSource": {
+        "description": "A model pasted as source rather than uploaded as a file.",
+        "properties": {
+          "description": {
+            "default": "",
+            "title": "Description",
+            "type": "string"
+          },
+          "force": {
+            "default": false,
+            "description": "Save even when the parse check fails",
+            "title": "Force",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "Display name; its slug is derived from it",
+            "title": "Name",
+            "type": "string"
+          },
+          "source": {
+            "description": "The OpenSCAD source",
+            "maxLength": 1000000,
+            "title": "Source",
+            "type": "string"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "source"
+        ],
+        "title": "PastedSource",
+        "type": "object"
+      },
       "PerPrinterReport": {
         "properties": {
           "issues": {
@@ -4729,44 +4769,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "A model pasted as source rather than uploaded as a file.",
-                "properties": {
-                  "description": {
-                    "default": "",
-                    "title": "Description",
-                    "type": "string"
-                  },
-                  "force": {
-                    "default": false,
-                    "description": "Save even when the parse check fails",
-                    "title": "Force",
-                    "type": "boolean"
-                  },
-                  "name": {
-                    "description": "Display name; its slug is derived from it",
-                    "title": "Name",
-                    "type": "string"
-                  },
-                  "source": {
-                    "description": "The OpenSCAD source",
-                    "maxLength": 1000000,
-                    "title": "Source",
-                    "type": "string"
-                  },
-                  "tags": {
-                    "items": {
-                      "type": "string"
-                    },
-                    "title": "Tags",
-                    "type": "array"
-                  }
-                },
-                "required": [
-                  "name",
-                  "source"
-                ],
-                "title": "PastedSource",
-                "type": "object"
+                "$ref": "#/components/schemas/PastedSource"
               }
             },
             "multipart/form-data": {
@@ -5233,6 +5236,18 @@
               "pattern": "^[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
+            }
+          },
+          {
+            "description": "Save even when the parse check fails",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Save even when the parse check fails",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],

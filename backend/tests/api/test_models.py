@@ -558,6 +558,15 @@ def test_a_replacement_that_does_not_parse_is_refused_unless_forced(
     assert client.get(f"/api/v1/models/{model}/source").text == "%%FAIL%%\n"
 
 
+def test_the_force_query_parameter_forces_a_replacement(client: TestClient, model: str) -> None:
+    """The same spelling `POST /models` takes, so a client forces both routes one way."""
+    response = client.put(
+        f"/api/v1/models/{model}/source?force=true", json={"source": "%%FAIL%%\n"}
+    )
+    assert response.status_code == 200
+    assert client.get(f"/api/v1/models/{model}/source").text == "%%FAIL%%\n"
+
+
 def test_replacing_the_source_of_a_model_that_is_not_there(client: TestClient) -> None:
     assert client.put("/api/v1/models/nope/source", json={"source": SOURCE}).status_code == 404
 

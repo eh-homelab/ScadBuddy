@@ -10,7 +10,12 @@ export function NewModelPage() {
   const navigate = useNavigate()
 
   async function save(force: boolean) {
-    const model = await api.createModelFromSource({ name: name.trim(), source, force })
+    const model = await api.createModelFromSource({
+      name: name.trim(),
+      source,
+      description: '',
+      force,
+    })
     await navigate(`/m/${model.slug}`)
   }
 

@@ -9,13 +9,13 @@ the headers alone.
 
 A body sent without Content-Length (chunked) makes no such promise, so it is counted
 as it arrives instead, and refused the moment it passes the same limit. Either way no
-more than `limit` bytes are ever buffered.
+more than the limit is ever buffered.
 """
 
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Coroutine, Mapping
 from typing import Any
 
 from starlette.datastructures import Headers
@@ -25,15 +25,27 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from scadbuddy.core.problems import PROBLEM_MEDIA_TYPE
 
-#: Only the text bodies are gated: a multipart upload legitimately carries a
-#: thumbnail and a README beside the source, and its own limits live elsewhere.
-GATED_CONTENT_TYPES = frozenset({"application/json", "text/plain"})
-
-#: The ceiling for those bodies. Well above `MAX_SOURCE_CHARS` even once the source is
-#: JSON-escaped and UTF-8 encoded, so the field cap stays the thing that answers 422
+#: The ceiling for the text bodies. Well above `MAX_SOURCE_CHARS` even once the source
+#: is JSON-escaped and UTF-8 encoded, so the field cap stays the thing that answers 422
 #: for a source that is merely too long; this one only stops a body that was never
 #: going to be read to the end.
 MAX_TEXT_BODY_BYTES = 8 * 1024 * 1024
+
+#: The ceiling for a multipart upload, which carries a thumbnail and a README beside
+#: the source. Starlette caps none of that by default: a non-file field is held to
+#: 1 MiB, but a file part is spooled to disk without any total, and the routes then
+#: `read()` it whole. This leaves room for a source at `MAX_SOURCE_CHARS` fully
+#: UTF-8 encoded (4 MiB), a README as large again, and a viewer-sized PNG.
+MAX_MULTIPART_BODY_BYTES = 32 * 1024 * 1024
+
+#: The gated content types and what each may carry. A url-encoded form holds no
+#: files, so it gets the text ceiling; anything else is not a body any route reads.
+BODY_LIMITS: Mapping[str, int] = {
+    "application/json": MAX_TEXT_BODY_BYTES,
+    "text/plain": MAX_TEXT_BODY_BYTES,
+    "application/x-www-form-urlencoded": MAX_TEXT_BODY_BYTES,
+    "multipart/form-data": MAX_MULTIPART_BODY_BYTES,
+}
 
 
 class _BodyTooLargeError(Exception):
@@ -41,15 +53,15 @@ class _BodyTooLargeError(Exception):
 
 
 class BodySizeGate:
-    """Refuse a gated body larger than `limit` bytes with a 413 problem.
+    """Refuse a gated body larger than its content type's limit with a 413 problem.
 
     A declared length is judged on the headers alone. An undeclared one is counted
     chunk by chunk, and reading stops at the first chunk that crosses the limit.
     """
 
-    def __init__(self, app: ASGIApp, *, limit: int) -> None:
+    def __init__(self, app: ASGIApp, *, limits: Mapping[str, int]) -> None:
         self.app = app
-        self.limit = limit
+        self.limits = limits
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -57,17 +69,18 @@ class BodySizeGate:
             return
         headers = Headers(scope=scope)
         kind = headers.get("content-type", "").split(";")[0].strip().lower()
-        if kind not in GATED_CONTENT_TYPES:
+        limit = self.limits.get(kind)
+        if limit is None:
             await self.app(scope, receive, send)
             return
         declared = headers.get("content-length", "")
         if declared.isdigit():
-            if int(declared) > self.limit:
+            if int(declared) > limit:
                 await self._refuse(
                     scope,
                     receive,
                     send,
-                    f"the body declares {declared} bytes and this API reads at most {self.limit}",
+                    f"the body declares {declared} bytes and this API reads at most {limit}",
                 )
                 return
             await self.app(scope, receive, send)
@@ -81,7 +94,7 @@ class BodySizeGate:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.limit:
+                if received > limit:
                     raise _BodyTooLargeError
             return message
 
@@ -100,7 +113,7 @@ class BodySizeGate:
                 scope,
                 receive,
                 send,
-                f"the body passed {self.limit} bytes, which is the most this API reads",
+                f"the body passed {limit} bytes, which is the most this API reads",
             )
 
     @staticmethod

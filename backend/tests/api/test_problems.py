@@ -7,6 +7,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import get_catalogue
+from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.main import create_app
@@ -25,6 +26,11 @@ def test_a_404_is_an_rfc_9457_document(client: TestClient) -> None:
         "detail": "no model named 'missing'",
         "instance": "/api/v1/models/missing",
     }
+
+
+def test_a_client_that_hung_up_gets_a_named_title() -> None:
+    """Not the generic "Error": 499 is nginx's, so no library table names it."""
+    assert ApiError(499, "gone").title == "Client Closed Request"
 
 
 def test_a_body_that_does_not_validate_lists_the_offending_fields(client: TestClient) -> None:
