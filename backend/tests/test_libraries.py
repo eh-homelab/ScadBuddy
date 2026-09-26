@@ -437,3 +437,22 @@ async def test_an_old_revision_renders_against_the_pins_it_was_written_with(
 
     assert old.library_path == (paths.libraries / "BOSL2" / commits["v1"],)
     assert live.library_path == (paths.libraries / "BOSL2" / commits["v2"],)
+
+
+def test_the_orphan_sweep_leaves_libraries_alone(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """Checkouts and the lockfile are not slug-keyed: the only model declaring a
+    library being gone must not sweep either."""
+    _, commits = upstream
+    store.install("BOSL2")
+    _declare_bosl2(catalogue)
+    catalogue.delete("widget")
+
+    catalogue.sweep_orphans()
+
+    assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad").is_file()
+    assert read_pins(paths)["BOSL2"].commit == commits["v1"]
