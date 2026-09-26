@@ -559,6 +559,25 @@ def test_syncing_mirrors_the_image_as_one_commit(catalogue: Catalogue, tmp_path:
     assert len(catalogue.history.log("_builtin")) == 1
 
 
+def test_an_unchanged_built_in_is_not_rewritten(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Every boot syncs; one that finds nothing changed must not write to the PVC."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    before = {path: path.stat() for path in mirror.rglob("*")}
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+
+    catalogue.sync_builtins(image)
+
+    keychain = {path: stat for path, stat in before.items() if "keychain" in path.parts}
+    assert keychain
+    for path, stat in keychain.items():
+        assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stat.st_ino, stat.st_mtime_ns)
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+
+
 def test_syncing_overwrites_and_drops_what_the_image_no_longer_has(
     catalogue: Catalogue, tmp_path: Path
 ) -> None:

@@ -392,11 +392,12 @@ class Catalogue:
     def sync_builtins(self, bundled: Path) -> str | None:
         """Mirror the image's bundled models into ``_builtin/`` as one commit.
 
-        The image is the source of truth for a built-in, so each one is replaced
-        whole and one the image no longer has is removed. Nothing else writes the
-        mirror, so its history is each built-in's version history. The commit
-        decides whether anything changed: an unchanged image stages nothing, which
-        is why the copy keeps the image's mtimes (`copytree`'s `copy2`).
+        The image is the source of truth for a built-in: one whose files differ
+        from the mirror's in any way is replaced whole, and one the image no
+        longer has is removed. One that matches is not touched at all -- this
+        runs on every boot, and rewriting an unchanged tree is PVC writes and
+        mtime churn for nothing. Nothing else writes the mirror, so its history
+        is each built-in's version history.
 
         Runs at boot, before the render queue starts, so nothing reads a
         built-in while it is being replaced.
@@ -407,18 +408,32 @@ class Catalogue:
         for present in sorted(mirror.iterdir()):
             if present.name not in wanted:
                 _remove_tree(present)
+        changed: list[str] = []
         for slug in wanted:
+            if _tree(bundled / slug) == _tree(mirror / slug):
+                continue
             _remove_tree(mirror / slug)
-            shutil.copytree(
-                bundled / slug,
-                mirror / slug,
-                ignore=shutil.ignore_patterns(".*"),
-                dirs_exist_ok=True,
-            )
+            shutil.copytree(bundled / slug, mirror / slug, ignore=shutil.ignore_patterns(".*"))
+            changed.append(slug)
         commit = self._commit(SYNC_MESSAGE, BUILTIN_DIR)
         if commit is not None:
-            logger.info("synced built-in templates", extra={"slugs": wanted, "from": str(bundled)})
+            logger.info(
+                "synced built-in templates", extra={"changed": changed, "from": str(bundled)}
+            )
         return commit
+
+
+def _tree(directory: Path) -> dict[str, bytes]:
+    """Every file under ``directory`` by relative path, dotfiles left out as the copy
+    leaves them out. Empty when there is no such directory."""
+    if not directory.is_dir():
+        return {}
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in directory.rglob("*")
+        if path.is_file()
+        and not any(part.startswith(".") for part in path.relative_to(directory).parts)
+    }
 
 
 def _templates_in(directory: Path) -> list[str]:
