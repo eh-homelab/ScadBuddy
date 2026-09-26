@@ -431,3 +431,37 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
     preview = trimesh.load(paths.root / result.preview_glb, file_type="glb")
     assert isinstance(preview, trimesh.Scene)
     assert list(preview.geometry) == ["Color 2", "Color 1"]
+
+
+async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> None:
+    """The `builtin:` of the model id is not a name to show in the slicer."""
+    paths.model_dir("builtin:demo").mkdir(parents=True)
+    paths.model_source("builtin:demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def one_box(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[])
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _colour_schema(("base_color", "#0047BB"))
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    job = _job("b").model_copy(update={"slug": "builtin:demo"})
+    with (
+        mock.patch.object(jobs, "render_3mf", one_box),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+
+    with zipfile.ZipFile(paths.root / result.model_3mf) as archive:
+        root = archive.read("3D/3dmodel.model").decode()
+        settings = archive.read("Metadata/model_settings.config").decode()
+    assert '<metadata name="Title">demo</metadata>' in root
+    assert 'name="demo"' in root
+    assert '<metadata key="name" value="demo"/>' in settings
+    assert "builtin:" not in root and "builtin:" not in settings

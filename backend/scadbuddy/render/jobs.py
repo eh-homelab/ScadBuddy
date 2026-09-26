@@ -19,7 +19,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths, model_path
+from scadbuddy.core.paths import (
+    BUILTIN_PREFIX,
+    SCHEMA_CACHE_NAME,
+    SOURCE_NAME,
+    DataPaths,
+    model_path,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
@@ -430,8 +436,14 @@ async def render_job(
     warnings += thumbnail_warnings
 
     model_path = work / MODEL_NAME
+    # A built-in's bare slug, as download_filename names the file: the id's
+    # `builtin:` prefix is not something to show as the model's title.
     await asyncio.to_thread(
-        write_bambu_3mf, parts, model_path, thumbnails=thumbnails, model_name=job.slug
+        write_bambu_3mf,
+        parts,
+        model_path,
+        thumbnails=thumbnails,
+        model_name=job.slug.removeprefix(BUILTIN_PREFIX),
     )
 
     result = JobResult(
