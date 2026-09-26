@@ -129,6 +129,8 @@ def test_the_pipeline_list_names_the_presets_and_resolves_the_target(
     assert pipeline["bed_type"] == "Textured PEI Plate"
     # Bambuddy gives refs; the picker needs names, and there is no preset-by-id route.
     assert pipeline["process_preset_name"] == "0.08mm High Quality @BBL H2C 0.2 nozzle"
+    # Read off that name once here, so the filament step need not read the catalogue (#78).
+    assert pipeline["nozzle_diameter"] == "0.2"
     assert pipeline["printer_preset"] == {"source": "cloud", "id": "GM041"}
     # A specific_printer target is one printer, named.
     assert pipeline["target_kind"] == "specific_printer"

@@ -230,7 +230,7 @@ async def get_filaments(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
-    pipeline_id: Annotated[int | None, Query()] = None,
+    nozzle_diameter: Annotated[str | None, Query(max_length=16)] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
@@ -243,7 +243,9 @@ async def get_filaments(
     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
     this printer": without one the spools are still listed, with their last known
     assignment, but the reconciled remaining weights are not. It is also what reads the
-    mounted nozzles, which ``pipeline_id`` is compared against (#78).
+    mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
+    nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
+    re-derived, because naming a preset means reading the whole catalogue again.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -254,7 +256,7 @@ async def get_filaments(
             meta,
             settings,
             printer_id=printer_id,
-            pipeline_id=pipeline_id,
+            nozzle_diameter=nozzle_diameter,
             plate_id=plate_id,
         )
 

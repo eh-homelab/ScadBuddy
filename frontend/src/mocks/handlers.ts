@@ -720,10 +720,14 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/filaments`, ({ params, request }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    const printerId = new URL(request.url).searchParams.get('printer_id')
-    // #78 — no printer, no hardware to read: a class target nobody has narrowed yet.
+    const search = new URL(request.url).searchParams
+    const printerId = search.get('printer_id')
+    // #78 — no printer, no hardware to read: a class target nobody has narrowed yet. The
+    // pipeline's nozzle is echoed from the query, as the server does.
     const hardware =
-      printerId === null ? { nozzles: [], pipeline_nozzle_diameter: null } : {}
+      printerId === null
+        ? { nozzles: [], pipeline_nozzle_diameter: null }
+        : { pipeline_nozzle_diameter: search.get('nozzle_diameter') }
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,

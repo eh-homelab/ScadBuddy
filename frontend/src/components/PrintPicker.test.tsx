@@ -651,10 +651,17 @@ describe('PrintPicker · Nozzles', () => {
   beforeEach(() => resetMockState())
 
   it('shows the chosen printer’s mounted nozzles beside the pipeline’s', async () => {
+    const reads: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.includes('/filaments')) reads.push(request.url)
+    })
     open()
     await listed()
 
     const nozzles = await screen.findByTestId('nozzles')
+    server.events.removeAllListeners()
+    // The pipeline's nozzle is the one the pipelines read already named, passed back.
+    expect(reads.at(-1)).toContain('nozzle_diameter=0.4')
     expect(nozzles).toHaveTextContent('3DP-31B-598 has 0.2 mm (HS00) and 0.4 mm (HS01) mounted')
     expect(nozzles).toHaveTextContent('this pipeline slices for 0.4 mm')
     expect(screen.queryByTestId('nozzle-warnings')).not.toBeInTheDocument()
@@ -750,6 +757,31 @@ describe('PrintPicker · Remembered choices', () => {
         ]),
       },
     ])
+  })
+})
+
+describe('PrintPicker · Remembered choices, failing to save', () => {
+  beforeEach(() => resetMockState())
+
+  it('still prints when the choices cannot be saved', async () => {
+    server.use(
+      http.put('/api/v1/print/models/:slug/choices', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Internal Server Error', status: 500, detail: 'disk full' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const onRan = vi.fn()
+    const { user } = open(onRan)
+    await listed()
+    const slot = await screen.findByTestId('filament-slot-2')
+    await user.click(within(slot).getByTestId('spool-22'))
+    await user.click(screen.getByTestId('run-pipeline'))
+
+    expect(await screen.findByTestId('queued-items')).toBeInTheDocument()
+    expect(onRan).toHaveBeenCalledTimes(1)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
 })
 

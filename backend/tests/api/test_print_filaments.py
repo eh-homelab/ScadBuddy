@@ -126,10 +126,6 @@ def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model
 
 
 def nozzle_routes(*diameters: str) -> respx.Route:
-    """Pipeline 1 slices for a 0.2 nozzle (its process preset GP243 says so by name)."""
-    respx.get(f"{API}/slicer-pipelines/1").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipeline.json"))
-    )
     status = recording("printer-status.json")
     if diameters:
         status["nozzles"] = [
@@ -142,20 +138,27 @@ def nozzle_routes(*diameters: str) -> respx.Route:
 def test_the_filament_step_shows_the_mounted_nozzles_and_the_pipelines(
     client: TestClient, model: str
 ) -> None:
-    """#78 — the recorded H2C carries a 0.2 and a 0.4, so a 0.2 pipeline fits."""
+    """#78 — the recorded H2C carries a 0.2 and a 0.4, so a 0.2 pipeline fits.
+
+    The pipeline's nozzle arrives as ``PipelineView.nozzle_diameter`` already said it,
+    so neither the pipeline nor the ~4000-row preset catalogue is read again here.
+    """
     output_id = prepared(client, model)
     upload_route()
     pipelines_route()
-    presets_routes()
+    local = respx.get(f"{API}/local-presets/")
+    pipeline = respx.get(f"{API}/slicer-pipelines/1")
     inventory_routes()
     nozzle_routes()
 
     body = client.get(
-        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&pipeline_id=1"
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&nozzle_diameter=0.2"
     ).json()
     assert [nozzle["nozzle_diameter"] for nozzle in body["nozzles"]] == ["0.2", "0.4"]
     assert body["pipeline_nozzle_diameter"] == "0.2"
     assert not [w for w in body["warnings"] if w["kind"] == "nozzle-mismatch"]
+    assert not local.called
+    assert not pipeline.called
 
 
 @respx.mock
@@ -170,7 +173,7 @@ def test_a_nozzle_the_printer_has_not_mounted_is_warned_about_before_the_click(
     nozzle_routes("0.4", "0.4")
 
     body = client.get(
-        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&pipeline_id=1"
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&nozzle_diameter=0.2"
     ).json()
     [warning] = [w for w in body["warnings"] if w["kind"] == "nozzle-mismatch"]
     assert "0.2 mm" in warning["message"]
@@ -188,7 +191,7 @@ def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     inventory_routes(printer_id=None)
     status = nozzle_routes()
 
-    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?pipeline_id=1").json()
+    body = client.get(f"/api/v1/print/outputs/{output_id}/filaments?nozzle_diameter=0.2").json()
     assert body["nozzles"] == []
     assert body["pipeline_nozzle_diameter"] is None
     assert not status.called

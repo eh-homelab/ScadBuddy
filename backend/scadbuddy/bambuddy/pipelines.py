@@ -140,6 +140,10 @@ class PipelineView(BaseModel):
     printer_preset_name: str | None = None
     process_preset_name: str | None = None
     filament_preset_names: list[str | None] = Field(default_factory=list)
+    #: The nozzle the process preset's name states ("0.2"), or ``None`` where it states
+    #: none. Read here, where the catalogue already is, so the filament step can compare
+    #: it with the mounted nozzles without reading the catalogue again (#78).
+    nozzle_diameter: str | None = None
     #: The target as printer ids: one for ``specific_printer``, every active printer of
     #: the class for ``printer_class``. More than one means the picker must ask.
     printer_ids: list[int] = Field(default_factory=list)
@@ -411,6 +415,7 @@ def _view(
         printer_preset_name=_names(preset_names, pipeline.printer_preset),
         process_preset_name=_names(preset_names, pipeline.process_preset),
         filament_preset_names=[_names(preset_names, ref) for ref in pipeline.filament_presets],
+        nozzle_diameter=nozzle_diameter_of(_names(preset_names, pipeline.process_preset)),
         printer_ids=_target_printer_ids(pipeline, printers),
     )
 
@@ -536,7 +541,7 @@ async def filament_options_for_output(
     settings: StoredSettings,
     *,
     printer_id: int | None = None,
-    pipeline_id: int | None = None,
+    nozzle_diameter: str | None = None,
     plate_id: int = 1,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
@@ -545,9 +550,10 @@ async def filament_options_for_output(
     check does: the plate's slots are read out of a *library file*, so there is no
     answer before one exists. An output is immutable, so this uploads once.
 
-    With a printer it also carries that printer's mounted nozzles, and with a pipeline
-    too the nozzle its process preset names, so a mismatch is shown before the click
-    (#78). A class target with no printer chosen yet has no nozzles to read.
+    With a printer it also carries that printer's mounted nozzles, compared with
+    ``nozzle_diameter`` — the pipeline's, as :class:`PipelineView` already reported it —
+    so a mismatch is shown before the click (#78). A class target with no printer chosen
+    yet has no nozzles to read.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
     options = await gather_options(
@@ -560,17 +566,10 @@ async def filament_options_for_output(
     if printer_id is None:
         return options
     options.nozzles = (await client.printer_status(printer_id)).nozzles
-    if pipeline_id is not None:
-        process = (await client.pipeline(pipeline_id)).process_preset
-        name = _names((await _catalogue(client)).names(), process)
-        options.pipeline_nozzle_diameter = nozzle_diameter_of(name)
-        options.warnings.extend(
-            nozzle_warnings(
-                options.nozzles,
-                options.pipeline_nozzle_diameter,
-                printer_name=options.printer_name,
-            )
-        )
+    options.pipeline_nozzle_diameter = nozzle_diameter
+    options.warnings.extend(
+        nozzle_warnings(options.nozzles, nozzle_diameter, printer_name=options.printer_name)
+    )
     return options
 
 

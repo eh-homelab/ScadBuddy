@@ -2698,6 +2698,17 @@
             "title": "Name",
             "type": "string"
           },
+          "nozzle_diameter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Nozzle Diameter"
+          },
           "printer_ids": {
             "items": {
               "type": "integer"
@@ -6546,7 +6557,7 @@
     },
     "/api/v1/print/outputs/{output_id}/filaments": {
       "get": {
-        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not. It is also what reads the\nmounted nozzles, which ``pipeline_id`` is compared against (#78).",
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not. It is also what reads the\nmounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's\nnozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than\nre-derived, because naming a preset means reading the whole catalogue again.",
         "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
         "parameters": [
           {
@@ -6577,18 +6588,19 @@
           },
           {
             "in": "query",
-            "name": "pipeline_id",
+            "name": "nozzle_diameter",
             "required": false,
             "schema": {
               "anyOf": [
                 {
-                  "type": "integer"
+                  "maxLength": 16,
+                  "type": "string"
                 },
                 {
                   "type": "null"
                 }
               ],
-              "title": "Pipeline Id"
+              "title": "Nozzle Diameter"
             }
           },
           {

@@ -425,6 +425,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.20mm Standard @BBL H2C',
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1],
   },
   {
@@ -443,6 +444,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.28mm Draft @BBL H2C',
     filament_preset_names: ['Bambu ABS @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1],
   },
   {
@@ -461,6 +463,7 @@ export const pipelineViews: PipelineView[] = [
     printer_preset_name: 'Bambu Lab H2C 0.4 nozzle',
     process_preset_name: '0.20mm Standard @BBL H2C',
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
+    nozzle_diameter: '0.4',
     printer_ids: [1, 2],
   },
 ]

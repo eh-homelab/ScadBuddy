@@ -300,6 +300,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
    */
   const filamentAttempt = useRef(0)
   const awaitingPrinter = asksForPrinter && printerId === null
+  // #78 — the pipeline's nozzle as the pipelines read already named it, so the server
+  // compares it with the mounted ones without reading the preset catalogue again.
+  const pipelineNozzle = current?.nozzle_diameter ?? null
   useEffect(() => {
     if (!open || !outputId || selected === null || awaitingPrinter) {
       setFilaments(null)
@@ -315,7 +318,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       try {
         const next = await api.getFilaments(outputId, {
           printerId: derivedPrinterId,
-          pipelineId: selected,
+          nozzleDiameter: pipelineNozzle,
           plateId: PLATE_ID,
         })
         if (token !== filamentAttempt.current) return
@@ -336,7 +339,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         )
       }
     })()
-  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter, rememberedPlan])
+  }, [open, outputId, selected, derivedPrinterId, awaitingPrinter, rememberedPlan, pipelineNozzle])
 
   /**
    * Whether the user has moved a slot off the server's suggestion. That is what makes
@@ -405,6 +408,30 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     onClose()
   }
 
+  /**
+   * #78 — the last-used choices, which is what the picker opens on next time. The printer
+   * only where the picker asked for one, and the plan only where it is one: sending the
+   * suggestion is not a choice, and an unreadable inventory is no reason to forget the
+   * spools picked before. Written only when it differs, and only once the print has
+   * started — best effort, because a preference that fails to save must never stop or
+   * fail the print itself.
+   */
+  function rememberChoices() {
+    const last = choices?.model_choices
+    const next = {
+      printer_id: asksForPrinter ? printerId : (last?.printer_id ?? null),
+      filament_plan: filaments === null ? (last?.filament_plan ?? []) : sendsPlan ? plan : [],
+    }
+    if (
+      next.printer_id === (last?.printer_id ?? null) &&
+      JSON.stringify(next.filament_plan) === rememberedPlan
+    ) {
+      return
+    }
+    // Ignored like the project attach above: the next open just falls back to the auto-match.
+    void api.putModelChoices(slug, next).catch(() => undefined)
+  }
+
   async function run() {
     if (!outputId || selected === null) return
     setRunning(true)
@@ -427,23 +454,6 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       }
       if (asDefault && stored !== selected) await remember(selected)
       else if (!asDefault && stored === selected) await remember(null)
-      /**
-       * #78 — the last-used choices, which is what the picker opens on next time. The
-       * printer only where the picker asked for one, and the plan only where it is one:
-       * sending the suggestion is not a choice, and an unreadable inventory is no reason
-       * to forget the spools picked before. Written only when it differs.
-       */
-      const last = choices?.model_choices
-      const nextChoices = {
-        printer_id: asksForPrinter ? printerId : (last?.printer_id ?? null),
-        filament_plan: filaments === null ? (last?.filament_plan ?? []) : sendsPlan ? plan : [],
-      }
-      if (
-        nextChoices.printer_id !== (last?.printer_id ?? null) ||
-        JSON.stringify(nextChoices.filament_plan) !== rememberedPlan
-      ) {
-        await api.putModelChoices(slug, nextChoices)
-      }
       const body: PrintRunRequest = {
         pipeline_id: selected,
         ...(copies === null ? {} : { copies }),
@@ -466,6 +476,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       const ran = await api.runPipeline(outputId, body)
       setResult(ran)
       onRan(ran)
+      rememberChoices()
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
       // A 409 carries Bambuddy's report verbatim; list what blocked it so Run anyway is

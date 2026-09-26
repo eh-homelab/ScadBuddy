@@ -592,7 +592,9 @@ export interface paths {
          *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
          *     this printer": without one the spools are still listed, with their last known
          *     assignment, but the reconciled remaining weights are not. It is also what reads the
-         *     mounted nozzles, which ``pipeline_id`` is compared against (#78).
+         *     mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
+         *     nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
+         *     re-derived, because naming a preset means reading the whole catalogue again.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -1853,6 +1855,8 @@ export interface components {
             id: number;
             /** Name */
             name: string;
+            /** Nozzle Diameter */
+            nozzle_diameter?: string | null;
             /** Printer Ids */
             printer_ids?: number[];
             printer_preset?: components["schemas"]["PresetRef"] | null;
@@ -3760,7 +3764,7 @@ export interface operations {
         parameters: {
             query?: {
                 printer_id?: number | null;
-                pipeline_id?: number | null;
+                nozzle_diameter?: string | null;
                 plate_id?: number;
             };
             header?: never;
