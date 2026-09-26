@@ -141,7 +141,7 @@ export interface paths {
         put?: never;
         /**
          * Import a model from a URL
-         * @description Fetches the source on the server -- https only, at most 8388608 bytes, within 30 seconds -- then creates the model exactly as a paste does, recording the URL as `origin_url`. A direct link to the file works; a MakerWorld model page is refused with a 422, because MakerWorld only serves files to a signed-in account. An unreachable URL is a 502, or a 504 when it ran out of time.
+         * @description Fetches the source on the server -- https only, from public internet addresses only, at most 8388608 bytes, within 30 seconds -- then creates the model exactly as a paste does, recording the URL as `origin_url`. A direct link to the file works; a MakerWorld model page is refused, because MakerWorld only serves files to a signed-in account. Every refusal is a 422, and an address that is not public reads the same as one that did not answer.
          */
         post: operations["import_model_api_v1_models_import_post"];
         delete?: never;
