@@ -24,6 +24,7 @@ one of git's command-running transports.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -39,10 +40,13 @@ from pydantic import BaseModel
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.history import (
     GIT,
+    GitError,
     ModelHistory,
     RevisionNotFoundError,
     git_env,
 )
+
+logger = logging.getLogger(__name__)
 
 LOCKFILE_NAME = "libraries.lock"
 #: A directory name OpenSCAD can `use <NAME/...>`: no separators, no dot-files.
@@ -372,8 +376,16 @@ class LibraryStore:
             with self._lock:
                 write()
             return
-        # The read-modify-write runs under the history's write lock, so a restore
-        # putting an old pin back cannot interleave with it and lose one of the two.
-        self.history.commit(
-            f"Pin {name} to {pin.ref} ({pin.commit[:7]})", LOCKFILE_NAME, prepare=write
-        )
+        message = f"Pin {name} to {pin.ref} ({pin.commit[:7]})"
+        try:
+            # The read-modify-write runs under the history's write lock, so a restore
+            # putting an old pin back cannot interleave with it and lose one of the two.
+            self.history.commit(message, LOCKFILE_NAME, prepare=write)
+        except (GitError, OSError):
+            # As `Catalogue._commit`: once `write` has run the pin is live, since
+            # renders read the lockfile, not HEAD, and a lost revision is the smaller
+            # harm than telling the client an add failed that did not. A failure
+            # before `write` (the lock wait) left the old pin, and that one raises.
+            if read_pins(self.paths).get(name) != pin:
+                raise
+            logger.exception("could not record a revision", extra={"revision_message": message})

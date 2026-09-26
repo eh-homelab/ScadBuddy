@@ -412,7 +412,9 @@ async def check_model_source(
     context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
     if body.slug and context is not None:
         # The model's own libraries, as its render will see them (#93).
-        config = replace(config, library_path=model_search_path(paths, body.slug))
+        # Off the loop, like every other read of the PVC from an `async def`.
+        library_path = await asyncio.to_thread(model_search_path, paths, body.slug)
+        config = replace(config, library_path=library_path)
     try:
         return await unless_the_client_leaves(
             request, check_source(body.source, config=config, limit=checks, context=context)
@@ -504,9 +506,10 @@ async def put_source(
     # `git log` for the model's revision, and this handler is `async def`. The
     # record `write_source` returns carries the new revision anyway.
     require_model_exists(catalogue, slug)
+    library_path = await asyncio.to_thread(model_search_path, paths, slug)
     checked = await _guard_source(
         body.source,
-        config=replace(config, library_path=model_search_path(paths, slug)),
+        config=replace(config, library_path=library_path),
         force=body.force,
         limit=checks,
         # The model's own directory, so a replacement that includes a sibling file is

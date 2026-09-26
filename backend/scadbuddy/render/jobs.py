@@ -287,7 +287,9 @@ async def resolve_source(
             scad=paths.model_source(slug),
             schema_cache=paths.model_schema_cache(slug),
             version=current,
-            library_path=model_search_path(paths, slug),
+            # Off the loop: `model.json`, the lockfile and each checkout are reads
+            # on the same PVC the history's calls are offloaded for.
+            library_path=await asyncio.to_thread(model_search_path, paths, slug),
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
@@ -305,7 +307,9 @@ async def resolve_source(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
-        library_path=search_path(paths, declared_libraries(directory), pins),
+        library_path=await asyncio.to_thread(
+            lambda: search_path(paths, declared_libraries(directory), pins)
+        ),
     )
 
 
