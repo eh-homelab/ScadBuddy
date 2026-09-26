@@ -12,9 +12,10 @@ answers ``403 {"error": "Please log in to download models."}``, and the model
 pages themselves sit behind a Cloudflare challenge. Measured 2026-09-26. Until
 there is a signed-in resolver (#174) the refusal says how to get the file in by hand.
 
-The fetch is https only -- redirects included -- capped in bytes, and bounded by
-one deadline for the whole exchange, so a server that drips its body cannot hold
-the request open past it.
+The fetch is https only -- redirects included -- capped in bytes as they arrive
+(uncompressed: a compressed reply is refused, not inflated), and bounded by one
+deadline for the whole exchange, so a server that drips its body cannot hold the
+request open past it.
 
 **Public addresses only.** The pod sits inside the cluster, next to Bambuddy and
 whatever else the namespace can reach, and the API has no authentication; an
@@ -128,11 +129,22 @@ class PublicOnlyBackend(httpcore.AsyncNetworkBackend):
 
 
 def _transport() -> httpx.AsyncHTTPTransport:
+    """httpx's transport over a pool that connects through `PublicOnlyBackend`.
+
+    httpx takes no network backend, but httpcore's pool does, publicly -- so the
+    pool is built here and swapped for the one httpx made. The swap is the one
+    private step, and it is checked: if httpx stops keeping its pool in `_pool`,
+    this raises rather than leave a transport that connects through a backend
+    that resolves the name again.
+    """
     transport = httpx.AsyncHTTPTransport()
-    # httpx takes no network backend, so it is set on the pool it built. A test
-    # drives a rebinding name through this, so an httpx upgrade that moves the
-    # attribute fails that test rather than silently dropping the check.
-    transport._pool._network_backend = PublicOnlyBackend()
+    if not isinstance(getattr(transport, "_pool", None), httpcore.AsyncConnectionPool):
+        raise RuntimeError(
+            "httpx no longer keeps its connection pool where PublicOnlyBackend is fitted"
+        )
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=httpx.create_ssl_context(), network_backend=PublicOnlyBackend()
+    )
     return transport
 
 
@@ -219,8 +231,16 @@ async def _fetch(url: httpx.URL, client: httpx.AsyncClient, *, limit: int) -> by
             raise ImportRefusedError(
                 f"{url.host} answered with a web page, not a file; link to the raw .scad instead"
             )
+        # Asked for `identity`, so an encoding here is the server insisting. It is
+        # refused rather than inflated: a few KB of gzip can decode to gigabytes in
+        # one step, well before a cap on the decoded bytes gets to look.
+        if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+            raise ImportRefusedError(
+                f"{url.host} sent the file compressed after being asked not to, so it was not read"
+            )
         body = bytearray()
-        async for chunk in response.aiter_bytes():
+        # Raw, so the cap counts what arrives rather than what it decodes to.
+        async for chunk in response.aiter_raw():
             body.extend(chunk)
             if len(body) > limit:
                 raise ImportRefusedError(
@@ -246,6 +266,7 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
                 timeout=IMPORT_TIMEOUT,
                 follow_redirects=True,
                 event_hooks={"request": [_vet_hop]},
+                headers={"Accept-Encoding": "identity"},
                 # Its own transport, which also means no proxy from the environment:
                 # a proxy would make the connection, and the vetting with it.
                 transport=_transport(),
