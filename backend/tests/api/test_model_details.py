@@ -511,7 +511,6 @@ def test_a_dropped_model_directory_lands_with_its_own_metadata(client: TestClien
         "description": "A widget.",
         "tags": ["a", "b"],
         "source": "inspired by a widget",
-        "origin_url": "https://example.com/widget.scad",
     }
     response = client.post(
         "/api/v1/models",
@@ -528,6 +527,38 @@ def test_a_dropped_model_directory_lands_with_its_own_metadata(client: TestClien
     assert body["slug"] == SLUG
     assert {key: body[key] for key in meta} == meta
     assert (body["has_thumbnail"], body["has_readme"]) == (True, True)
+
+
+@pytest.mark.parametrize(
+    "origin_url",
+    [
+        "javascript:alert(document.domain)",
+        "JavaScript:alert(1)",
+        "data:text/html,<script>alert(1)</script>",
+        "https://example.com/widget.scad",
+        "http://10.0.0.1/internal",
+    ],
+)
+def test_a_dropped_model_json_never_sets_origin_url(client: TestClient, origin_url: str) -> None:
+    """Only `POST /models/import` sets it; from an uploaded file it would be a stored
+    link of the uploader's choosing on every catalogue card."""
+    body = _create_with_meta(
+        client, {"name": "Widget", "source": "inspired by a widget", "origin_url": origin_url}
+    )
+
+    assert body["origin_url"] is None
+    # The rest of the file still carries over.
+    assert body["source"] == "inspired by a widget"
+    assert client.get(f"/api/v1/models/{SLUG}").json()["origin_url"] is None
+
+
+def test_patch_cannot_set_origin_url(client: TestClient) -> None:
+    _create(client)
+    response = client.patch(
+        f"/api/v1/models/{SLUG}", json={"description": "x", "origin_url": "javascript:alert(1)"}
+    )
+    assert response.status_code == 200
+    assert response.json()["origin_url"] is None
 
 
 def test_form_fields_win_over_the_model_json(client: TestClient) -> None:

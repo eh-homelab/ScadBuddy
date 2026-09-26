@@ -345,12 +345,16 @@ async def create_model(
         checks,
         slug=slug,
         source=source,
-        # Everything else the model.json holds (`source`, `origin_url`) carries over.
+        # The model.json's `source` attribution carries over. Its `origin_url` never
+        # does: that is set only by `POST /models/import`, which fetched the URL over
+        # https itself, and the catalogue renders it as a link -- taken from an
+        # uploaded file it would be a stored `javascript:` link waiting for a click.
         meta=base.model_copy(
             update={
                 "name": _first_name(name, base.name, slug),
                 "description": description if description is not None else base.description,
                 "tags": parsed_tags if parsed_tags is not None else base.tags,
+                "origin_url": None,
             }
         ),
         force=force,

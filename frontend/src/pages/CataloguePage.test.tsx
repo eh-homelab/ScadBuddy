@@ -144,4 +144,26 @@ describe('CataloguePage', () => {
     expect(link).toHaveAttribute('href', origin)
     expect(link).toHaveAttribute('target', '_blank')
   })
+
+  it.each([
+    'javascript:alert(document.domain)',
+    'JAVASCRIPT:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'not a url',
+  ])('links no origin that is not http(s): %s', async (origin) => {
+    server.use(
+      http.get('/api/v1/models', () =>
+        HttpResponse.json([{ ...(models[0] as (typeof models)[number]), origin_url: origin }]),
+      ),
+    )
+    renderPage(<CataloguePage />)
+
+    const heading = await screen.findByRole('heading', { name: 'Name Keychain' })
+    const card = heading.closest('li') as HTMLElement
+    expect(within(card).queryByText(/^From/)).not.toBeInTheDocument()
+    // The card's own link is the only anchor, and it points into the app.
+    for (const anchor of card.querySelectorAll('a')) {
+      expect(anchor.getAttribute('href')).toBe('/m/name-keychain')
+    }
+  })
 })

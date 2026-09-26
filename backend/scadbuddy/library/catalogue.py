@@ -510,6 +510,18 @@ class Catalogue:
         if self.outputs is not None:
             self.outputs.forget_plate_cover(slug)
 
+    def _drop_origin_url(self, slug: str) -> None:
+        """A seeded model has no `origin_url`: only `POST /models/import` sets one,
+        after fetching it over https, and the catalogue renders it as a link."""
+        try:
+            raw = self.read_raw_meta(slug)
+        except (OSError, ValueError):
+            # Unreadable metadata is the record's problem to report, not the seed's.
+            return
+        if "origin_url" in raw:
+            del raw["origin_url"]
+            self.write_raw_meta(slug, raw)
+
     def seed(self, seed_dir: Path) -> list[str]:
         """Copy any bundled model whose slug is not in the catalogue yet."""
         if not seed_dir.is_dir():
@@ -525,6 +537,7 @@ class Catalogue:
                 dirs_exist_ok=True,
             )
             self._clear_derived(candidate.name)
+            self._drop_origin_url(candidate.name)
             seeded.append(candidate.name)
         if seeded:
             logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})

@@ -534,6 +534,23 @@ def test_seeding_records_the_seed_as_a_commit(catalogue: Catalogue, tmp_path: Pa
     assert catalogue.seed(seed) == []
 
 
+def test_a_seeded_model_json_never_sets_origin_url(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Only a URL import sets `origin_url` (#179); a seed keeps the rest of its file."""
+    seed = tmp_path / "seed"
+    (seed / "keychain").mkdir(parents=True)
+    (seed / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    (seed / "keychain" / "model.json").write_text(
+        json.dumps({"name": "Keychain", "source": "inspired", "origin_url": "javascript:alert(1)"}),
+        encoding="utf-8",
+    )
+
+    assert catalogue.seed(seed) == ["keychain"]
+
+    record = catalogue.record("keychain")
+    assert (record.name, record.source, record.origin_url) == ("Keychain", "inspired", None)
+    assert "origin_url" not in catalogue.read_raw_meta("keychain")
+
+
 def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:
     first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain")).version
     catalogue.write_source("keychain", "cube(20);\n")
