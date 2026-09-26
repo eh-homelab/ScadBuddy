@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from scadbuddy.core.config import load_config
-from scadbuddy.library.history import GIT
+from scadbuddy.library.history import GIT, git_env
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -36,6 +36,35 @@ def git_binary() -> str | None:
     """`git` is baked into every image stage, so this skip is dead where CI runs
     the suite -- it is a developer convenience, not a supported configuration."""
     return shutil.which(GIT)
+
+
+def make_library_upstream(root: Path, versions: dict[str, str]) -> tuple[str, dict[str, str]]:
+    """A bare repository standing in for a library's upstream (#93): one commit and
+    one tag per entry of ``versions`` (tag -> the ``std.scad`` at that tag).
+
+    Returns its ``file://`` URL and each tag's commit. Local, so the library tests
+    exercise the real ``git clone`` without ever touching the network.
+    """
+    work = root / "upstream-work"
+    bare = root / "upstream.git"
+    env = git_env()
+
+    def git(*args: str, cwd: Path = work) -> str:
+        return subprocess.run(
+            [GIT, *args], cwd=cwd, env=env, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+    work.mkdir(parents=True)
+    git("init", "--initial-branch=main", ".")
+    commits: dict[str, str] = {}
+    for tag, source in versions.items():
+        (work / "std.scad").write_text(source, encoding="utf-8")
+        git("add", "-A")
+        git("commit", "-m", f"release {tag}")
+        git("tag", tag)
+        commits[tag] = git("rev-parse", "HEAD")
+    git("clone", "--bare", str(work), str(bare), cwd=root)
+    return f"file://{bare}", commits
 
 
 def installed_font_families() -> str:

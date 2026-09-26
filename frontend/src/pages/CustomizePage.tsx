@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import type { Output, ParamValue } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
+import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
 
@@ -209,6 +210,7 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
+          <ModelLibrariesButton slug={slug} name={schema.title ?? slug} />
           <DeleteModelButton slug={slug} name={schema.title ?? slug} />
         </div>
       </div>

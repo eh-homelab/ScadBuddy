@@ -11,6 +11,7 @@ import type {
   CatalogueFont,
   CustomizerSchema,
   FontFamily,
+  LibraryEntry,
   ModelSummary,
   ModelVersion,
   Output,
@@ -277,6 +278,35 @@ export const fontCatalogue: CatalogueFont[] = [
 
 /** The family the install route refuses, so the widget's error path is reachable. */
 export const UNINSTALLABLE_FONT = 'Playfair Display'
+
+/** #93 — BOSL2 is pinned, dotSCAD is only in the catalogue. */
+export const libraries: LibraryEntry[] = [
+  {
+    name: 'BOSL2',
+    url: 'https://github.com/BelfrySCAD/BOSL2.git',
+    ref: 'v2.0.761',
+    licence: 'BSD-2-Clause',
+    homepage: 'https://github.com/BelfrySCAD/BOSL2',
+    curated: true,
+    pin: {
+      url: 'https://github.com/BelfrySCAD/BOSL2.git',
+      ref: 'v2.0.761',
+      commit: 'f47030c41d88d0676bca73be1c6b7ba58564f9dd',
+    },
+  },
+  {
+    name: 'dotSCAD',
+    url: 'https://github.com/JustinSDK/dotSCAD.git',
+    ref: 'v3.3',
+    licence: 'LGPL-3.0',
+    homepage: 'https://github.com/JustinSDK/dotSCAD',
+    curated: true,
+    pin: null,
+  },
+]
+
+/** A ref no mock upstream has, so adding at it fails the way a bad tag does. */
+export const MISSING_REF = 'v9.9.9'
 
 export const outputs: Output[] = [
   {

@@ -39,6 +39,12 @@ class DataPaths:
     def fonts(self) -> Path:
         return fonts_dir(self.root)
 
+    @property
+    def libraries(self) -> Path:
+        """Third-party OpenSCAD library checkouts (#93). Not under ``models/``: they
+        are pinned by ``models/libraries.lock``, not versioned themselves."""
+        return self.root / "libraries"
+
     def model_dir(self, slug: str) -> Path:
         return self.models / slug
 
@@ -83,5 +89,12 @@ class DataPaths:
         return self.jobs / f"{job_id}.work"
 
     def ensure(self) -> None:
-        for directory in (self.models, self.outputs, self.jobs, self.cache, self.fonts):
+        for directory in (
+            self.models,
+            self.outputs,
+            self.jobs,
+            self.cache,
+            self.fonts,
+            self.libraries,
+        ):
             directory.mkdir(parents=True, exist_ok=True)

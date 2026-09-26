@@ -89,6 +89,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/libraries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Libraries and their pins */
+        get: operations["list_libraries_api_v1_libraries_get"];
+        put?: never;
+        /**
+         * Add a library, or pin it to another ref
+         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.
+         */
+        post: operations["add_library_api_v1_libraries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -1300,6 +1321,56 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
+        /** LibraryAdd */
+        LibraryAdd: {
+            /**
+             * Name
+             * @description The directory `use <NAME/...>` names
+             */
+            name: string;
+            /**
+             * Ref
+             * @description A tag or branch to pin; the catalogue's default when omitted
+             */
+            ref?: string | null;
+            /**
+             * Url
+             * @description An https git URL; the catalogue's when omitted
+             */
+            url?: string | null;
+        };
+        /**
+         * LibraryEntry
+         * @description The catalogue and the lockfile, joined: what can be added, and what is.
+         */
+        LibraryEntry: {
+            /** Curated */
+            curated: boolean;
+            /** Homepage */
+            homepage?: string | null;
+            /** Licence */
+            licence?: string | null;
+            /** Name */
+            name: string;
+            pin?: components["schemas"]["LibraryPin"] | null;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
+        /**
+         * LibraryPin
+         * @description One entry of ``libraries.lock``: where it came from, what was asked for, what
+         *     that resolved to.
+         */
+        LibraryPin: {
+            /** Commit */
+            commit: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /**
          * LoadedAt
          * @description Where a spool physically is, when Bambuddy says it is loaded somewhere.
@@ -1320,6 +1391,8 @@ export interface components {
         ModelPatch: {
             /** Description */
             description?: string | null;
+            /** Libraries */
+            libraries?: string[] | null;
             /** Name */
             name?: string | null;
             /** Tags */
@@ -1336,6 +1409,8 @@ export interface components {
             has_readme: boolean;
             /** Has Thumbnail */
             has_thumbnail: boolean;
+            /** Libraries */
+            libraries?: string[];
             /** Name */
             name: string;
             /** Slug */
@@ -2496,6 +2571,59 @@ export interface operations {
                 };
                 content: {
                     "model/gltf-binary": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_libraries_api_v1_libraries_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryEntry"][];
+                };
+            };
+        };
+    };
+    add_library_api_v1_libraries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryAdd"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryEntry"];
                 };
             };
             /** @description Validation Error */

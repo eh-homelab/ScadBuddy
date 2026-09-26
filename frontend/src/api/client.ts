@@ -10,6 +10,9 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  LibraryAdd,
+  LibraryEntry,
+  ModelPatch,
   ModelSummary,
   ModelVersion,
   Output,
@@ -150,6 +153,10 @@ export const api = {
       body: JSON.stringify({ source, slug: slug ?? null }),
       signal,
     }),
+
+  /** Metadata, and since #93 the libraries the model renders with. */
+  updateModel: (slug: string, patch: ModelPatch) =>
+    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
@@ -331,6 +338,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ family }),
     }),
+
+  /** #93 — the curated catalogue plus anything added by URL, each with its pin. */
+  listLibraries: () => request<LibraryEntry[]>('/libraries'),
+
+  /** Clones the library at `ref` server-side and pins it in `libraries.lock`. */
+  addLibrary: (body: LibraryAdd) =>
+    request<LibraryEntry>('/libraries', { method: 'POST', body: JSON.stringify(body) }),
 
   getSettings: () => request<Settings>('/settings'),
 

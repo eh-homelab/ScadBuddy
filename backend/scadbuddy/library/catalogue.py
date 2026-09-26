@@ -62,12 +62,16 @@ class ModelMeta(BaseModel):
     description: str = ""
     tags: list[str] = Field(default_factory=list)
     source: str | None = None
+    # The third-party libraries (#93) this model renders with: the only ones on
+    # its OPENSCADPATH, each at the commit `libraries.lock` pins.
+    libraries: list[str] = Field(default_factory=list)
 
 
 class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    libraries: list[str] | None = None
 
 
 class ModelRecord(ModelMeta):

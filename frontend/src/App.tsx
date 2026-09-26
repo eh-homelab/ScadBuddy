@@ -5,6 +5,7 @@ import { CataloguePage } from './pages/CataloguePage'
 import { CustomizePage } from './pages/CustomizePage'
 import { EditPage } from './pages/EditPage'
 import { HistoryPage } from './pages/HistoryPage'
+import { LibrariesPage } from './pages/LibrariesPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { VersionsPage } from './pages/VersionsPage'
 
@@ -56,6 +57,7 @@ export function App() {
         <Route path="m/:slug/history" element={<HistoryPage />} />
         <Route path="m/:slug/versions" element={<VersionsPage />} />
         <Route path="edit/:outputId" element={<EditPage />} />
+        <Route path="libraries" element={<LibrariesPage />} />
         <Route path="settings" element={<SettingsPage />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>
