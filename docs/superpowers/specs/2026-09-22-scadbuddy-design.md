@@ -198,13 +198,18 @@ Data on the PVC (`SCADBUDDY_DATA_DIR`, default `/data`):
 ```
 models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
-models/<slug>/model.json          name, description, tags, thumbnail (NOT the schema)
+models/<slug>/model.json          name, description, tags, thumbnail, origin_url (NOT the schema)
 models/<slug>/thumbnail.png
 outputs/<slug>/<output-id>/       params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<slug>.json          the DERIVED customizer schema, keyed by source hash
 cache/revisions/<slug>/<commit>/  an old model revision exported out of git, derived
 ```
+
+`origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
+(not wherever redirects ended), for the catalogue's link back and a later re-pull.
+It is `null` for anything uploaded, pasted or seeded, and it is not editable:
+`PATCH /models/{slug}` does not take it.
 
 ### 4.3 Model history: git is the version store (#90)
 
@@ -560,6 +565,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 |---|---|---|
 | GET | `/models` | catalogue |
 | POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README), slug from filename; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only (redirects included), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata |
 | GET | `/models/{slug}/schema` | customizer schema |

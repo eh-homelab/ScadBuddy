@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import gzip
+import socket
+import threading
+import time
 import zlib
 from collections.abc import Callable, Iterable
 
@@ -17,6 +20,7 @@ from scadbuddy.library.url_import import (
     is_public,
     unreachable,
 )
+from scadbuddy.library.url_import import resolve_host as real_resolve_host
 from tests.conftest import PUBLIC_ADDRESS
 
 pytestmark = pytest.mark.usefixtures("fake_dns")
@@ -271,6 +275,35 @@ async def test_a_name_with_any_private_address_is_refused(
         await fetch_model("https://mixed.example.com/model.scad", limit=LIMIT)
 
     assert not mock.calls
+
+
+async def test_a_hung_resolver_is_unreachable_within_its_deadline_on_its_own_threads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = threading.Event()
+    threads: list[str] = []
+
+    def hang(*args: object, **kwargs: object) -> list[object]:
+        threads.append(threading.current_thread().name)
+        release.wait(5)
+        raise OSError("released")
+
+    # The real `resolve_host`, over a `getaddrinfo` that never answers.
+    monkeypatch.setattr(url_import, "resolve_host", real_resolve_host)
+    monkeypatch.setattr(socket, "getaddrinfo", hang)
+    monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 0.05)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(ImportRefusedError) as caught:
+            await fetch_model("https://hangs.invalid/model.scad", limit=LIMIT)
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert str(caught.value) == str(unreachable("hangs.invalid"))
+    assert elapsed < 1
+    assert threads and threads[0].startswith("import-dns")
 
 
 async def test_a_name_that_does_not_resolve_reads_as_unreachable(
