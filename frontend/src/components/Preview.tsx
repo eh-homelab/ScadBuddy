@@ -3,7 +3,7 @@ import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
-import type { BoundingBox, Job } from '../api/types'
+import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
 import { Spinner } from './ui/Spinner'
 
@@ -39,9 +39,6 @@ function useViewerTheme(): ViewerTheme {
   return theme
 }
 
-/** Bambu X1C / P1S build plate. */
-export const PLATE_MM = 256
-
 export interface PreviewCapture {
   capturePng: () => Promise<Blob | null>
 }
@@ -49,10 +46,12 @@ export interface PreviewCapture {
 interface Props {
   job: Job | undefined
   rendering: boolean
+  /** #81 — the chosen printer's plate, or the configured default. Undrawn until known. */
+  plate?: Plate
   captureRef?: React.RefObject<PreviewCapture | null>
 }
 
-export function Preview({ job, rendering, captureRef }: Props) {
+export function Preview({ job, rendering, plate, captureRef }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   const [shown, setShown] = useState<{ url: string; bbox?: BoundingBox; colors: string[] } | undefined>()
 
@@ -88,7 +87,7 @@ export function Preview({ job, rendering, captureRef }: Props) {
         <directionalLight position={[180, 320, 140]} intensity={2.1} />
         <directionalLight position={[-220, 140, -180]} intensity={0.7} />
 
-        <BuildPlate theme={theme} />
+        {plate && <BuildPlate theme={theme} size={plate.size} />}
         <FitCamera bbox={shown?.bbox} />
 
         {shown && (
@@ -109,7 +108,7 @@ export function Preview({ job, rendering, captureRef }: Props) {
 
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
         <div className="flex items-start justify-between gap-3">
-          <PlateBadge />
+          {plate ? <PlateBadge plate={plate} /> : <span />}
           {rendering && (
             <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
               <Spinner /> Rendering
@@ -131,10 +130,12 @@ export function Preview({ job, rendering, captureRef }: Props) {
   )
 }
 
-function PlateBadge() {
+function PlateBadge({ plate }: { plate: Plate }) {
+  const [width, depth] = plate.size
   return (
     <span className="sb-num rounded-[6px] border border-line bg-surface/90 px-2 py-1 text-[11px] text-faint backdrop-blur-sm">
-      {PLATE_MM} × {PLATE_MM} mm plate
+      {plate.model ? `${plate.name} · ` : ''}
+      {width} × {depth} mm plate
     </span>
   )
 }
@@ -167,11 +168,15 @@ function RenderError({ log }: { log?: string }) {
   )
 }
 
-function BuildPlate({ theme }: { theme: ViewerTheme }) {
+function BuildPlate({ theme, size }: { theme: ViewerTheme; size: [number, number] }) {
+  // Plate X is the scene's X and plate Y its Z: the scene is Y-up.
+  const [width, depth] = size
+  const outline = useMemo(() => new THREE.BoxGeometry(width, 0.001, depth), [width, depth])
+  useEffect(() => () => outline.dispose(), [outline])
   return (
     <group>
       <Grid
-        args={[PLATE_MM, PLATE_MM]}
+        args={[width, depth]}
         cellSize={10}
         cellThickness={0.6}
         cellColor={theme.cell}
@@ -184,10 +189,7 @@ function BuildPlate({ theme }: { theme: ViewerTheme }) {
         position={[0, 0, 0]}
       />
       <lineSegments position={[0, 0.05, 0]}>
-        <edgesGeometry
-          args={[new THREE.BoxGeometry(PLATE_MM, 0.001, PLATE_MM)]}
-          attach="geometry"
-        />
+        <edgesGeometry args={[outline]} attach="geometry" />
         <lineBasicMaterial color={theme.edge} attach="material" />
       </lineSegments>
     </group>

@@ -15,6 +15,7 @@ import type {
   ModelVersion,
   Output,
   Param,
+  Plate,
   PrintProgress,
   Settings,
 } from '../api/types'
@@ -25,6 +26,35 @@ import type {
  */
 function param(group: string, rest: Omit<Param, 'group'>): Param {
   return { group, ...rest }
+}
+
+/**
+ * #81 — a few rows of the backend's plate table (`render/plate_profiles.py`, generated
+ * from Bambu Studio's machine profiles), as `GET /plate` serves them.
+ */
+export const defaultPlate: Plate = {
+  model: null,
+  name: 'Default plate',
+  size: [256, 256],
+  height: 250,
+  usable: { min_x: 0, min_y: 0, max_x: 256, max_y: 256 },
+}
+
+export const plates: Record<string, Plate> = {
+  H2C: {
+    model: 'Bambu Lab H2C',
+    name: 'H2C',
+    size: [330, 320],
+    height: 325,
+    usable: { min_x: 25, min_y: 0, max_x: 325, max_y: 320 },
+  },
+  A1M: {
+    model: 'Bambu Lab A1 mini',
+    name: 'A1 mini',
+    size: [180, 180],
+    height: 180,
+    usable: { min_x: 0, min_y: 0, max_x: 180, max_y: 180 },
+  },
 }
 
 /** A bounding box as the API reports it: corners plus the size, not a bare `{x,y,z}`. */
@@ -370,6 +400,7 @@ export const settings: Settings = {
   process_preset: null,
   filament_presets: [],
   bed_type: null,
+  default_plate: null,
 }
 
 /**

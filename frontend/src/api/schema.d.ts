@@ -430,6 +430,61 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/plate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The plate for a printer model
+         * @description An absent or unknown model is the configured default plate, not an error: that is
+         *     what a customizer with no printer chosen, or no Bambuddy at all, draws.
+         */
+        get: operations["get_plate_api_v1_plate_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/plate/fit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Whether a model fits a printer */
+        get: operations["get_plate_fit_api_v1_plate_fit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/plates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Every plate ScadBuddy knows */
+        get: operations["list_plates_api_v1_plates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/models/{slug}/pipeline": {
         parameters: {
             query?: never;
@@ -1427,6 +1482,18 @@ export interface components {
             /** Warnings */
             warnings?: string[];
         };
+        /** Overshoot */
+        Overshoot: {
+            /**
+             * Axis
+             * @enum {string}
+             */
+            axis: "X" | "Y" | "Z";
+            /** Limit */
+            limit: number;
+            /** Size */
+            size: number;
+        };
         /** Parameter */
         Parameter: {
             /** Caption */
@@ -1715,6 +1782,53 @@ export interface components {
             target_printer_id?: number | null;
             /** Target Printer Name */
             target_printer_name?: string | null;
+        };
+        /** PlateArea */
+        PlateArea: {
+            /** Max X */
+            max_x: number;
+            /** Max Y */
+            max_y: number;
+            /** Min X */
+            min_x: number;
+            /** Min Y */
+            min_y: number;
+        };
+        /** PlateCatalogue */
+        PlateCatalogue: {
+            default: components["schemas"]["PlateView"];
+            /** Plates */
+            plates: components["schemas"]["PlateView"][];
+        };
+        /**
+         * PlateFit
+         * @description Whether a model of a given size can be sent to a printer, judged by the code the
+         *     send itself runs, so the customizer never says "fits" to a model the send refuses.
+         */
+        PlateFit: {
+            /** Overshoots */
+            overshoots: components["schemas"]["Overshoot"][];
+            plate: components["schemas"]["PlateView"];
+            /** Problem */
+            problem?: string | null;
+        };
+        /**
+         * PlateView
+         * @description One printer's build volume, in millimetres.
+         */
+        PlateView: {
+            /** Height */
+            height: number;
+            /** Model */
+            model: string | null;
+            /** Name */
+            name: string;
+            /** Size */
+            size: [
+                number,
+                number
+            ];
+            usable: components["schemas"]["PlateArea"];
         };
         /**
          * PresetChoice
@@ -2164,6 +2278,8 @@ export interface components {
             bambuddy_url?: string | null;
             /** Bed Type */
             bed_type?: string | null;
+            /** Default Plate */
+            default_plate?: string | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
@@ -2186,6 +2302,8 @@ export interface components {
             bambuddy_url?: string | null;
             /** Bed Type */
             bed_type?: string | null;
+            /** Default Plate */
+            default_plate?: string | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /**
@@ -3331,6 +3449,98 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_api_v1_plate_get: {
+        parameters: {
+            query?: {
+                /** @description Bambuddy's printer model ("H2C") or a profile name */
+                model?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateView"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_fit_api_v1_plate_fit_get: {
+        parameters: {
+            query: {
+                /** @description Bounding box width, mm */
+                x: number;
+                /** @description Bounding box depth, mm */
+                y: number;
+                /** @description Bounding box height, mm */
+                z: number;
+                /** @description As for GET /plate */
+                model?: string | null;
+                /** @description More than one needs a prime tower, as at send time */
+                colours?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateFit"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_plates_api_v1_plates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PlateCatalogue"];
                 };
             };
         };

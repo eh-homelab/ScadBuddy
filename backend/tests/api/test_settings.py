@@ -28,6 +28,7 @@ def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
         "process_preset": None,
         "filament_presets": [],
         "bed_type": None,
+        "default_plate": None,
     }
 
 
@@ -86,6 +87,13 @@ def test_the_environment_seeds_the_settings_and_the_file_then_wins(
         assert client.get("/api/v1/settings").json()["bambuddy_url"] == (
             "https://edited-in-the-ui.test"
         )
+
+        # A clear is a stored answer too: the environment's key does not come back.
+        client.put("/api/v1/settings", json={"public_url": None, "bambuddy_api_key": ""})
+    with TestClient(create_app(settings)) as client:
+        body = client.get("/api/v1/settings").json()
+        assert body["has_api_key"] is False
+        assert body["bambuddy_url"] == "https://edited-in-the-ui.test"
 
 
 @respx.mock

@@ -1689,6 +1689,34 @@
         "title": "OutputDetail",
         "type": "object"
       },
+      "Overshoot": {
+        "properties": {
+          "axis": {
+            "enum": [
+              "X",
+              "Y",
+              "Z"
+            ],
+            "title": "Axis",
+            "type": "string"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "number"
+          },
+          "size": {
+            "title": "Size",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "size",
+          "limit"
+        ],
+        "title": "Overshoot",
+        "type": "object"
+      },
       "Parameter": {
         "properties": {
           "caption": {
@@ -2664,6 +2692,136 @@
           "fanout_strategy"
         ],
         "title": "PipelineView",
+        "type": "object"
+      },
+      "PlateArea": {
+        "properties": {
+          "max_x": {
+            "title": "Max X",
+            "type": "number"
+          },
+          "max_y": {
+            "title": "Max Y",
+            "type": "number"
+          },
+          "min_x": {
+            "title": "Min X",
+            "type": "number"
+          },
+          "min_y": {
+            "title": "Min Y",
+            "type": "number"
+          }
+        },
+        "required": [
+          "min_x",
+          "min_y",
+          "max_x",
+          "max_y"
+        ],
+        "title": "PlateArea",
+        "type": "object"
+      },
+      "PlateCatalogue": {
+        "properties": {
+          "default": {
+            "$ref": "#/components/schemas/PlateView"
+          },
+          "plates": {
+            "items": {
+              "$ref": "#/components/schemas/PlateView"
+            },
+            "title": "Plates",
+            "type": "array"
+          }
+        },
+        "required": [
+          "default",
+          "plates"
+        ],
+        "title": "PlateCatalogue",
+        "type": "object"
+      },
+      "PlateFit": {
+        "description": "Whether a model of a given size can be sent to a printer, judged by the code the\nsend itself runs, so the customizer never says \"fits\" to a model the send refuses.",
+        "properties": {
+          "overshoots": {
+            "items": {
+              "$ref": "#/components/schemas/Overshoot"
+            },
+            "title": "Overshoots",
+            "type": "array"
+          },
+          "plate": {
+            "$ref": "#/components/schemas/PlateView"
+          },
+          "problem": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Problem"
+          }
+        },
+        "required": [
+          "plate",
+          "overshoots"
+        ],
+        "title": "PlateFit",
+        "type": "object"
+      },
+      "PlateView": {
+        "description": "One printer's build volume, in millimetres.",
+        "properties": {
+          "height": {
+            "title": "Height",
+            "type": "number"
+          },
+          "model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "maxItems": 2,
+            "minItems": 2,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Size",
+            "type": "array"
+          },
+          "usable": {
+            "$ref": "#/components/schemas/PlateArea"
+          }
+        },
+        "required": [
+          "model",
+          "name",
+          "size",
+          "height",
+          "usable"
+        ],
+        "title": "PlateView",
         "type": "object"
       },
       "PresetChoice": {
@@ -3850,6 +4008,17 @@
             ],
             "title": "Bed Type"
           },
+          "default_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Plate"
+          },
           "filament_presets": {
             "anyOf": [
               {
@@ -3956,6 +4125,17 @@
               }
             ],
             "title": "Bed Type"
+          },
+          "default_plate": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Default Plate"
           },
           "filament_presets": {
             "items": {
@@ -5897,6 +6077,179 @@
         "summary": "Upload the canvas capture",
         "tags": [
           "outputs"
+        ]
+      }
+    },
+    "/api/v1/plate": {
+      "get": {
+        "description": "An absent or unknown model is the configured default plate, not an error: that is\nwhat a customizer with no printer chosen, or no Bambuddy at all, draws.",
+        "operationId": "get_plate_api_v1_plate_get",
+        "parameters": [
+          {
+            "description": "Bambuddy's printer model (\"H2C\") or a profile name",
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Bambuddy's printer model (\"H2C\") or a profile name",
+              "title": "Model"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The plate for a printer model",
+        "tags": [
+          "plates"
+        ]
+      }
+    },
+    "/api/v1/plate/fit": {
+      "get": {
+        "operationId": "get_plate_fit_api_v1_plate_fit_get",
+        "parameters": [
+          {
+            "description": "Bounding box width, mm",
+            "in": "query",
+            "name": "x",
+            "required": true,
+            "schema": {
+              "description": "Bounding box width, mm",
+              "minimum": 0,
+              "title": "X",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Bounding box depth, mm",
+            "in": "query",
+            "name": "y",
+            "required": true,
+            "schema": {
+              "description": "Bounding box depth, mm",
+              "minimum": 0,
+              "title": "Y",
+              "type": "number"
+            }
+          },
+          {
+            "description": "Bounding box height, mm",
+            "in": "query",
+            "name": "z",
+            "required": true,
+            "schema": {
+              "description": "Bounding box height, mm",
+              "minimum": 0,
+              "title": "Z",
+              "type": "number"
+            }
+          },
+          {
+            "description": "As for GET /plate",
+            "in": "query",
+            "name": "model",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "As for GET /plate",
+              "title": "Model"
+            }
+          },
+          {
+            "description": "More than one needs a prime tower, as at send time",
+            "in": "query",
+            "name": "colours",
+            "required": false,
+            "schema": {
+              "default": 1,
+              "description": "More than one needs a prime tower, as at send time",
+              "minimum": 1,
+              "title": "Colours",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateFit"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Whether a model fits a printer",
+        "tags": [
+          "plates"
+        ]
+      }
+    },
+    "/api/v1/plates": {
+      "get": {
+        "operationId": "list_plates_api_v1_plates_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlateCatalogue"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Every plate ScadBuddy knows",
+        "tags": [
+          "plates"
         ]
       }
     },

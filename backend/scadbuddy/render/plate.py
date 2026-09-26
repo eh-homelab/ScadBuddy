@@ -44,12 +44,11 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Literal
+
+import numpy as np
 
 from scadbuddy.render.plate_profiles import EXTRA_ALIASES, PLATE_PROFILES
-
-if TYPE_CHECKING:
-    import numpy as np
 
 #: Widest ``prime_tower_width`` across BBL process profiles, and the side of the
 #: square this module reserves for the tower.
@@ -345,6 +344,41 @@ def _tower_corner(
         return None
     # ``wipe_tower_x``/``_y`` name the tower itself; the brim sits outside it.
     return (x + PRIME_TOWER_BRIM, y + PRIME_TOWER_BRIM)
+
+
+Axis = Literal["X", "Y", "Z"]
+
+
+def overshoots(
+    size: tuple[float, float, float], plate: PlateGeometry
+) -> list[tuple[Axis, float, float]]:
+    """``(axis, size, limit)`` for each axis ``size`` does not fit (#81).
+
+    X and Y against the area every extruder reaches — the first thing
+    :func:`place_on_plate` refuses — and Z against ``printable_height``.
+    """
+    area = plate.usable
+    limits: tuple[tuple[Axis, float, float], ...] = (
+        ("X", size[0], area.width),
+        ("Y", size[1], area.depth),
+        ("Z", size[2], plate.height),
+    )
+    return [(axis, want, have) for axis, want, have in limits if want > have]
+
+
+def fit_problem(
+    size: tuple[float, float, float], plate: PlateGeometry, *, tower: bool
+) -> str | None:
+    """Why :func:`place_on_plate` would refuse a model of ``size``, or ``None``.
+
+    The same call the send makes, so the customizer's warning covers what an axis
+    comparison cannot: the prime tower's room and the filament-cutter cutout (#81).
+    """
+    try:
+        place_on_plate(np.array([[0.0, 0.0, 0.0], list(size)]), plate, tower=tower)
+    except PlateFitError as error:
+        return str(error)
+    return None
 
 
 def centre_on_plate(bounds: np.ndarray, plate: PlateGeometry) -> Placement:
