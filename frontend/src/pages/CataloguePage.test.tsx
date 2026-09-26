@@ -94,4 +94,54 @@ describe('CataloguePage', () => {
     const dialog = screen.getByRole('dialog')
     expect(within(dialog).getByRole('button', { name: 'Add model' })).toBeDisabled()
   })
+
+  it('imports a model from a URL and opens it', async () => {
+    const { user } = renderPage(<CataloguePage />)
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+
+    await user.click(screen.getByRole('button', { name: 'Import from URL' }))
+    const dialog = screen.getByRole('dialog')
+    await user.type(
+      within(dialog).getByLabelText('URL'),
+      'https://raw.githubusercontent.com/someone/models/main/Vase%20Mode.scad',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+  })
+
+  it('keeps the dialog open with the reason when a URL cannot be imported', async () => {
+    const { user } = renderPage(<CataloguePage />)
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+
+    await user.click(screen.getByRole('button', { name: 'Import from URL' }))
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText('URL'), 'https://makerworld.com/en/models/1398039')
+    await user.click(within(dialog).getByRole('button', { name: 'Import' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('MakerWorld')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('offers an import from the empty state too', async () => {
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    renderPage(<CataloguePage />)
+
+    await screen.findByRole('heading', { name: 'No models yet' })
+    expect(screen.getAllByRole('button', { name: 'Import from URL' })).toHaveLength(2)
+  })
+
+  it('links an imported model back to where it came from', async () => {
+    const origin = 'https://raw.githubusercontent.com/someone/models/main/bin.scad'
+    server.use(
+      http.get('/api/v1/models', () =>
+        HttpResponse.json([{ ...(models[0] as (typeof models)[number]), origin_url: origin }]),
+      ),
+    )
+    renderPage(<CataloguePage />)
+
+    const link = await screen.findByRole('link', { name: /raw\.githubusercontent\.com/ })
+    expect(link).toHaveAttribute('href', origin)
+    expect(link).toHaveAttribute('target', '_blank')
+  })
 })

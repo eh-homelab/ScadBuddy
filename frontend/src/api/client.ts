@@ -42,6 +42,7 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  UrlImport,
   VersionDiff,
 } from './types'
 
@@ -124,6 +125,10 @@ export const api = {
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
     request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
+
+  /** #153 — fetched on the server, then created through the same path as a paste. */
+  importModel: (body: UrlImport) =>
+    request<ModelSummary>('/models/import', { method: 'POST', body: JSON.stringify(body) }),
 
   getSource: (slug: string) => requestText(`/models/${seg(slug)}/source`),
 
