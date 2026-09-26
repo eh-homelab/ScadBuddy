@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 import zlib
-from collections.abc import Callable, Iterable
+from collections.abc import AsyncIterator, Callable, Iterable, Iterator
 
 import httpcore
 import httpx
@@ -114,6 +114,54 @@ async def test_an_https_redirect_is_followed_and_the_pasted_url_is_the_origin() 
 
     assert imported.source == SOURCE
     assert imported.origin_url == "https://example.com/latest.scad"
+
+
+class _WatchedBody(httpx.AsyncByteStream):
+    """A body that records whether anything read it -- by default far over the limit."""
+
+    def __init__(self, body: bytes = b"x" * LIMIT * 100) -> None:
+        self.body = body
+        self.read = False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        self.read = True
+        yield self.body
+
+
+async def test_a_redirect_is_followed_without_reading_its_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Not respx: it reads a mocked body itself to build the response, so whether
+    # the fetch read it could not be seen. A MockTransport hands the stream over as is.
+    huge = _WatchedBody()
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/start.scad":
+            return httpx.Response(
+                302, headers={"Location": "https://cdn.example.com/final.scad"}, stream=huge
+            )
+        # A stream, not `text=`: a Response built from bytes reads itself at once.
+        return httpx.Response(200, stream=_WatchedBody(SOURCE.encode()))
+
+    monkeypatch.setattr(url_import, "_transport", lambda: httpx.MockTransport(answer))
+
+    imported = await fetch_model("https://example.com/start.scad", limit=LIMIT)
+
+    assert imported.source == SOURCE
+    assert not huge.read
+
+
+@respx.mock
+async def test_too_many_redirects_are_refused() -> None:
+    hop = respx.get("https://example.com/loop.scad").mock(
+        return_value=httpx.Response(302, headers={"Location": "https://example.com/loop.scad"})
+    )
+
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://example.com/loop.scad", limit=LIMIT)
+
+    assert "redirected more than" in str(caught.value)
+    assert hop.call_count == url_import.MAX_REDIRECTS + 1
 
 
 @respx.mock
@@ -277,33 +325,77 @@ async def test_a_name_with_any_private_address_is_refused(
     assert not mock.calls
 
 
-async def test_a_hung_resolver_is_unreachable_within_its_deadline_on_its_own_threads(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    release = threading.Event()
-    threads: list[str] = []
+class HungResolver:
+    """A `getaddrinfo` that does not answer until released, under the real
+    `resolve_host`, so the lookups run on the import's own threads."""
 
-    def hang(*args: object, **kwargs: object) -> list[object]:
-        threads.append(threading.current_thread().name)
-        release.wait(5)
-        raise OSError("released")
+    def __init__(self) -> None:
+        self.release = threading.Event()
+        self.threads: list[str] = []
+        self.returned = threading.Semaphore(0)
 
-    # The real `resolve_host`, over a `getaddrinfo` that never answers.
+    def __call__(self, *args: object, **kwargs: object) -> list[object]:
+        self.threads.append(threading.current_thread().name)
+        try:
+            self.release.wait(5)
+            raise OSError("released")
+        finally:
+            self.returned.release()
+
+
+@pytest.fixture
+def hung_resolver(monkeypatch: pytest.MonkeyPatch) -> Iterator[HungResolver]:
+    hung = HungResolver()
     monkeypatch.setattr(url_import, "resolve_host", real_resolve_host)
-    monkeypatch.setattr(socket, "getaddrinfo", hang)
+    monkeypatch.setattr(socket, "getaddrinfo", hung)
     monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 0.05)
+    yield hung
+    hung.release.set()
+    # Every hung lookup has to have given its thread back before the next test.
+    for _ in hung.threads:
+        assert hung.returned.acquire(timeout=5)
 
+
+async def test_a_hung_resolver_is_unreachable_within_its_deadline_on_its_own_threads(
+    hung_resolver: HungResolver,
+) -> None:
     started = time.monotonic()
-    try:
-        with pytest.raises(ImportRefusedError) as caught:
-            await fetch_model("https://hangs.invalid/model.scad", limit=LIMIT)
-        elapsed = time.monotonic() - started
-    finally:
-        release.set()
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://hangs.invalid/model.scad", limit=LIMIT)
 
     assert str(caught.value) == str(unreachable("hangs.invalid"))
-    assert elapsed < 1
-    assert threads and threads[0].startswith("import-dns")
+    assert time.monotonic() - started < 1
+    assert len(hung_resolver.threads) == 1
+    assert hung_resolver.threads[0].startswith("import-dns")
+
+
+async def test_with_every_resolver_thread_busy_a_lookup_is_refused_not_queued(
+    hung_resolver: HungResolver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("first", "second"):
+        with pytest.raises(ImportRefusedError):
+            await fetch_model(f"https://{name}.invalid/model.scad", limit=LIMIT)
+    assert len(hung_resolver.threads) == url_import.RESOLVER_THREADS
+
+    # Long enough that waiting for a thread would show: a queued lookup would sit
+    # out this whole deadline before it gave up.
+    monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 3.0)
+    started = time.monotonic()
+    with pytest.raises(ImportRefusedError) as caught:
+        await fetch_model("https://third.invalid/model.scad", limit=LIMIT)
+    assert str(caught.value) == str(unreachable("third.invalid"))
+    assert time.monotonic() - started < 1
+
+    # Once the two threads are free: a queued third lookup would run now.
+    hung_resolver.release.set()
+    for _ in range(url_import.RESOLVER_THREADS):
+        assert hung_resolver.returned.acquire(timeout=5)
+    assert not hung_resolver.returned.acquire(timeout=0.2)
+    assert len(hung_resolver.threads) == url_import.RESOLVER_THREADS
+    hung_resolver.returned.release(url_import.RESOLVER_THREADS)
+    # The threads came back, and with them the slots.
+    assert url_import._RESOLVER_SLOTS.acquire(blocking=False)
+    url_import._RESOLVER_SLOTS.release()
 
 
 async def test_a_name_that_does_not_resolve_reads_as_unreachable(

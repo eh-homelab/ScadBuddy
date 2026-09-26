@@ -43,10 +43,10 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import partial
 from typing import Protocol
 
 import httpcore
@@ -94,21 +94,44 @@ def is_public(address: str) -> bool:
     return ip.is_global and not ip.is_multicast
 
 
-#: `getaddrinfo` blocks a thread and cannot be cancelled, so a resolver that hangs
-#: holds its thread whatever the deadline says. Its own two threads, not the loop's
-#: default executor, so that can only ever stall other imports -- never the git
-#: calls and health checks that share the default one.
-_RESOLVER = ThreadPoolExecutor(max_workers=2, thread_name_prefix="import-dns")
+#: `getaddrinfo` blocks a thread and cannot be cancelled, so a slow lookup holds its
+#: thread whatever `RESOLVE_TIMEOUT` says. Its own threads, not the loop's default
+#: executor, so that can only ever stall other imports -- never the git calls and
+#: health checks that share the default one.
+#:
+#: The threads do come back: glibc's resolver gives up by itself, after resolv.conf's
+#: `timeout` (default 5 s) x `attempts` (default 2) per nameserver, for each name it
+#: tries from the search list. Under Kubernetes' `ndots:5` and a few search domains
+#: that adds up to tens of seconds, not forever -- but long enough that two such
+#: lookups could hold both threads for a while. So a lookup that finds both busy is
+#: refused at once rather than queued behind them (`_RESOLVER_SLOTS`).
+RESOLVER_THREADS = 2
+_RESOLVER = ThreadPoolExecutor(max_workers=RESOLVER_THREADS, thread_name_prefix="import-dns")
+#: Taken on the loop before a lookup is submitted, given back by the worker thread
+#: when `getaddrinfo` actually returns -- not when the awaiting import gives up --
+#: so it counts threads that are really busy.
+_RESOLVER_SLOTS = threading.BoundedSemaphore(RESOLVER_THREADS)
 
 #: Well inside `IMPORT_TIMEOUT`, so a slow resolver leaves the fetch its time.
 RESOLVE_TIMEOUT = 10.0
 
+#: Hops followed after the first request. Raw links redirect once or twice at most.
+MAX_REDIRECTS = 5
+
+
+def _getaddrinfo(host: str, port: int) -> list[str]:
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    finally:
+        _RESOLVER_SLOTS.release()
+    return [str(info[4][0]) for info in infos]
+
 
 async def resolve_host(host: str, port: int) -> list[str]:
-    infos = await asyncio.get_running_loop().run_in_executor(
-        _RESOLVER, partial(socket.getaddrinfo, host, port, type=socket.SOCK_STREAM)
-    )
-    return [str(info[4][0]) for info in infos]
+    if not _RESOLVER_SLOTS.acquire(blocking=False):
+        # An OSError, so it reads as `unreachable` like any other failed lookup.
+        raise OSError("every import resolver thread is busy")
+    return await asyncio.get_running_loop().run_in_executor(_RESOLVER, _getaddrinfo, host, port)
 
 
 async def _public_addresses(host: str, port: int) -> list[str]:
@@ -243,30 +266,52 @@ async def _vet_hop(request: httpx.Request) -> None:
 
 
 async def _fetch(url: httpx.URL, client: httpx.AsyncClient, *, limit: int) -> bytes:
-    async with client.stream("GET", url) as response:
-        if response.is_error:
-            raise ImportRefusedError(f"{url.host} answered {response.status_code}")
-        kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
-        if kind in HTML_TYPES:
+    """Follow redirects by hand, reading only the last response, and that capped.
+
+    Not httpx's `follow_redirects`: it reads every redirect's body in full
+    (`await response.aread()` in `_send_handling_redirects`, httpx 0.28), with no
+    cap, before it moves on. Here a redirect is closed unread. Each hop still
+    passes the request hook, so https and the public-address check apply to it.
+    """
+    request = client.build_request("GET", url)
+    for _ in range(MAX_REDIRECTS + 1):
+        response = await client.send(request, stream=True)
+        try:
+            if response.next_request is None:
+                return await _read_capped(response, limit=limit)
+            request = response.next_request
+        finally:
+            await response.aclose()
+    raise ImportRefusedError(
+        f"{url.host} redirected more than {MAX_REDIRECTS} times, so the file was not fetched"
+    )
+
+
+async def _read_capped(response: httpx.Response, *, limit: int) -> bytes:
+    host = response.url.host
+    if response.is_error:
+        raise ImportRefusedError(f"{host} answered {response.status_code}")
+    kind = response.headers.get("content-type", "").split(";")[0].strip().lower()
+    if kind in HTML_TYPES:
+        raise ImportRefusedError(
+            f"{host} answered with a web page, not a file; link to the raw .scad instead"
+        )
+    # Asked for `identity`, so an encoding here is the server insisting. It is
+    # refused rather than inflated: a few KB of gzip can decode to gigabytes in
+    # one step, well before a cap on the decoded bytes gets to look.
+    if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
+        raise ImportRefusedError(
+            f"{host} sent the file compressed after being asked not to, so it was not read"
+        )
+    body = bytearray()
+    # Raw, so the cap counts what arrives rather than what it decodes to.
+    async for chunk in response.aiter_raw():
+        body.extend(chunk)
+        if len(body) > limit:
             raise ImportRefusedError(
-                f"{url.host} answered with a web page, not a file; link to the raw .scad instead"
+                f"the file is larger than {limit} bytes, which is the most an import reads"
             )
-        # Asked for `identity`, so an encoding here is the server insisting. It is
-        # refused rather than inflated: a few KB of gzip can decode to gigabytes in
-        # one step, well before a cap on the decoded bytes gets to look.
-        if response.headers.get("content-encoding", "identity").strip().lower() != "identity":
-            raise ImportRefusedError(
-                f"{url.host} sent the file compressed after being asked not to, so it was not read"
-            )
-        body = bytearray()
-        # Raw, so the cap counts what arrives rather than what it decodes to.
-        async for chunk in response.aiter_raw():
-            body.extend(chunk)
-            if len(body) > limit:
-                raise ImportRefusedError(
-                    f"the file is larger than {limit} bytes, which is the most an import reads"
-                )
-        return bytes(body)
+    return bytes(body)
 
 
 async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
@@ -284,7 +329,8 @@ async def fetch_model(pasted: str, *, limit: int) -> ImportedModel:
             asyncio.timeout(IMPORT_TIMEOUT),
             httpx.AsyncClient(
                 timeout=IMPORT_TIMEOUT,
-                follow_redirects=True,
+                # `_fetch` follows them itself; see why there.
+                follow_redirects=False,
                 event_hooks={"request": [_vet_hop]},
                 headers={"Accept-Encoding": "identity"},
                 # Its own transport, which also means no proxy from the environment:
