@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
+import type { CustomizerSchema } from '../api/types'
 import { keychainSchema } from '../mocks/fixtures'
-import { colorParamNames, colorsFrom, defaultValues, diffFromDefaults } from './params'
+import {
+  colorParamNames,
+  colorsFrom,
+  defaultValues,
+  diffFromDefaults,
+  extrudersOf,
+} from './params'
 
 describe('defaultValues', () => {
   it('takes every parameter from every group', () => {
@@ -19,6 +26,24 @@ describe('colour order', () => {
   it('reads the live values', () => {
     const values = { ...defaultValues(keychainSchema), body_color: '#000000' }
     expect(colorsFrom(keychainSchema, values)).toEqual(['#000000', '#E8532F'])
+  })
+
+  it('gives parameters sharing a colour the first one’s extruder, with no gap', () => {
+    const schema: CustomizerSchema = {
+      ...keychainSchema,
+      parameters: [
+        ...(keychainSchema.parameters ?? []),
+        { name: 'rim_color', type: 'color', initial: '#123456', group: 'Colours' },
+      ],
+    }
+    const values = { ...defaultValues(schema), text_color: '#000000', body_color: '#000' }
+    expect(extrudersOf(schema, values)).toEqual(
+      new Map([
+        ['body_color', 1],
+        ['text_color', 1],
+        ['rim_color', 2],
+      ]),
+    )
   })
 })
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -26,12 +27,15 @@ from scadbuddy.render.jobs import (
     JobStore,
     PartInfo,
     RenderQueue,
+    extruder_order,
     plate_thumbnails,
     solid_parts,
 )
 from scadbuddy.render.runner import OpenSCADError
-from scadbuddy.render.schema import CustomizerSchema
+from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
+from scadbuddy.render.solids import SolidRender
 from scadbuddy.render.split import ColourPart
+from tests.conftest import write_openscad_3mf
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -304,3 +308,126 @@ def test_a_job_written_before_the_source_hash_existed_still_loads(paths: DataPat
     loaded = store.read("old")
     assert loaded.result is not None
     assert loaded.result.source_version == ""
+
+
+def _colour_schema(*colours: tuple[str, str]) -> CustomizerSchema:
+    return CustomizerSchema(
+        parameters=[
+            Parameter(name="name", type="string", initial="Reagan"),
+            *(Parameter(name=name, type="color", initial=initial) for name, initial in colours),
+        ]
+    )
+
+
+def _part(index: int, colour: str) -> ColourPart:
+    name = "Default" if index == 0 else f"Color {index}"
+    return ColourPart(index, name, colour, trimesh.creation.box())
+
+
+def _order(parts: list[ColourPart]) -> list[tuple[int, str]]:
+    return [(part.material_index, part.colour) for part in parts]
+
+
+def test_extruders_follow_colour_parameter_order_not_first_use() -> None:
+    """OpenSCAD numbers materials in the order the geometry first uses them (measured
+    on 2026.09.23), so a model that colours its letters first makes them material 1."""
+    schema = _colour_schema(("base_color", "#0047BB"), ("text_color", "#FF1493"))
+    split = [_part(1, "#FF1493"), _part(2, "#0047BB")]
+
+    assert _order(extruder_order(split, schema, {})) == [(2, "#0047BB"), (1, "#FF1493")]
+
+
+def test_extruder_order_matches_the_rendered_values() -> None:
+    """The job's value wins over the default, and a value matches the way OpenSCAD
+    resolves it: any case, `#RGB` shorthand, an alpha channel, a CSS name."""
+    schema = _colour_schema(("a", "#000000"), ("b", "#111111"), ("c", "#222222"), ("d", "red"))
+    split = [
+        _part(1, "#FF0000"),
+        _part(2, "#AABBCC"),
+        _part(3, "#1F6FEB"),
+        _part(4, "#0000FF"),
+    ]
+    params: dict[str, ParamValue] = {"a": "#1f6feb80", "b": "Blue", "c": "#abc"}
+
+    assert _order(extruder_order(split, schema, params)) == [
+        (3, "#1F6FEB"),
+        (4, "#0000FF"),
+        (2, "#AABBCC"),
+        (1, "#FF0000"),
+    ]
+
+
+def test_parameters_sharing_a_colour_share_the_first_ones_extruder() -> None:
+    """One colour is one part, so it takes the first parameter's place and the numbers
+    stay dense: an extruder is a filament slot, and a gap would ask for a filament no
+    part uses."""
+    schema = _colour_schema(("a", "#FF1493"), ("b", "#FF1493"), ("c", "#0047BB"))
+    split = [_part(1, "#0047BB"), _part(2, "#FF1493")]
+
+    assert _order(extruder_order(split, schema, {})) == [(2, "#FF1493"), (1, "#0047BB")]
+
+
+def test_colours_no_parameter_names_come_last_in_material_order() -> None:
+    """Hard-coded colours, colours computed from a parameter, and the uncoloured
+    Default -- which never claims a parameter, even one set to its yellow. A parameter
+    the geometry never uses gets no extruder."""
+    schema = _colour_schema(("unused", "#123456"), ("base", "#0047BB"), ("x", "#F9D72C"))
+    split = [
+        _part(0, "#F9D72C"),
+        _part(1, "#FFFFFF"),
+        _part(2, "#0047BB"),
+        _part(3, "#000000"),
+    ]
+
+    assert _order(extruder_order(split, schema, {})) == [
+        (2, "#0047BB"),
+        (0, "#F9D72C"),
+        (1, "#FFFFFF"),
+        (3, "#000000"),
+    ]
+
+
+async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
+    paths: DataPaths,
+) -> None:
+    schema = _colour_schema(("base_color", "#0047BB"), ("text_color", "#FF1493"))
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def text_first(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(
+            out,
+            [
+                ("Color 1", "#FF149300", trimesh.creation.box(extents=(2, 2, 2))),
+                ("Color 2", "#0047BB00", trimesh.creation.box(extents=(10, 10, 1))),
+            ],
+        )
+        return mock.Mock(log_tail=[])
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return schema
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", text_first),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(_job("j"), config=CONFIG, paths=paths)
+
+    assert [(p.extruder, p.colour) for p in result.parts] == [(1, "#0047BB"), (2, "#FF1493")]
+    assert result.colors == ["#0047BB", "#FF1493"]
+
+    with zipfile.ZipFile(paths.root / result.model_3mf) as archive:
+        settings = json.loads(archive.read("Metadata/project_settings.config"))
+        parts = archive.read("Metadata/model_settings.config").decode()
+    assert settings["filament_colour"] == ["#0047BB", "#FF1493"]
+    assert parts.index('"Color 2"') < parts.index('"Color 1"')
+
+    preview = trimesh.load(paths.root / result.preview_glb, file_type="glb")
+    assert isinstance(preview, trimesh.Scene)
+    assert list(preview.geometry) == ["Color 2", "Color 1"]

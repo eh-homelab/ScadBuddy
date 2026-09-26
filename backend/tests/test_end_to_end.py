@@ -48,9 +48,11 @@ async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) 
         data, SLUG, {"name": "Reagan", "base_colour": "#ff6ac1", "text_colour": "#1f6feb"}
     )
 
+    # The fixture declares `text_colour` first but draws the base first, so OpenSCAD
+    # makes the base material 1; extruders follow the parameters (spec §7).
     assert [part.extruder for part in result.parts] == [1, 2]
-    assert result.colors == ["#FF6AC1", "#1F6FEB"]
-    assert [part.name for part in result.parts] == ["Color 1", "Color 2"]
+    assert result.colors == ["#1F6FEB", "#FF6AC1"]
+    assert [part.name for part in result.parts] == ["Color 2", "Color 1"]
     assert result.warnings == []
 
     # Each part comes from its own solid render, so each one closes on its own.
@@ -69,7 +71,7 @@ async def test_render_pipeline_produces_a_two_colour_bambu_3mf(data: DataPaths) 
 
     preview = trimesh.load(data.root / result.preview_glb, file_type="glb")
     assert isinstance(preview, trimesh.Scene)
-    assert sorted(preview.geometry) == ["Color 1", "Color 2"]
+    assert list(preview.geometry) == ["Color 2", "Color 1"]
 
 
 async def test_the_model_directory_is_left_as_it_was(data: DataPaths) -> None:

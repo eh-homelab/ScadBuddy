@@ -1,4 +1,5 @@
 import type { CustomizerSchema, Param, ParamGroup, ParamValue } from '../api/types'
+import { normalizeHex } from './format'
 
 export type ParamValues = Record<string, ParamValue>
 
@@ -47,6 +48,22 @@ export function colorParamNames(schema: CustomizerSchema): string[] {
 
 export function colorsFrom(schema: CustomizerSchema, values: ParamValues): string[] {
   return colorParamNames(schema).map((name) => String(values[name] ?? '#9AA4B2'))
+}
+
+/**
+ * Each colour parameter's extruder, as the backend numbers them (`jobs.extruder_order`):
+ * parameters sharing a colour are one part, so they share the first one's extruder.
+ * A colour the geometry never uses gets no part; only the rendered job knows that.
+ */
+export function extrudersOf(schema: CustomizerSchema, values: ParamValues): Map<string, number> {
+  const byColour = new Map<string, number>()
+  const extruders = new Map<string, number>()
+  for (const name of colorParamNames(schema)) {
+    const colour = normalizeHex(String(values[name] ?? ''))
+    if (!byColour.has(colour)) byColour.set(colour, byColour.size + 1)
+    extruders.set(name, byColour.get(colour)!)
+  }
+  return extruders
 }
 
 export interface ParamDiff {
