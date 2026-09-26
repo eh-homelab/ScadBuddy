@@ -212,9 +212,11 @@ class Catalogue:
     ) -> ModelRecord:
         if self.exists(slug):
             raise ModelExistsError(slug)
-        self._clear_derived(slug)
         directory = self.paths.model_dir(slug)
         directory.mkdir(parents=True, exist_ok=True)
+        # After the mkdir, so the window between `exists` and claiming the slug
+        # is no wider than it was.
+        self._clear_derived(slug)
         self.paths.model_source(slug).write_text(source, encoding="utf-8")
         self.write_raw_meta(slug, meta.model_dump())
         if thumbnail is not None:
@@ -380,13 +382,13 @@ class Catalogue:
         for candidate in sorted(seed_dir.iterdir()):
             if not (candidate / SOURCE_NAME).is_file() or self.exists(candidate.name):
                 continue
-            self._clear_derived(candidate.name)
             shutil.copytree(
                 candidate,
                 self.paths.model_dir(candidate.name),
                 ignore=shutil.ignore_patterns(".*"),
                 dirs_exist_ok=True,
             )
+            self._clear_derived(candidate.name)
             seeded.append(candidate.name)
         if seeded:
             logger.info("seeded models", extra={"slugs": seeded, "from": str(seed_dir)})
