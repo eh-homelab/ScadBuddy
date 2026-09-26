@@ -14,7 +14,10 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
-from tests.api.test_print import API, pipelines_route, printers_route, run_body
+from tests.api.test_print import API, pipelines_route, presets_routes, printers_route, run_body
+from tests.api.test_print_filaments import inventory_routes
+from tests.api.test_print_filaments import queue_route as plan_queue_route
+from tests.api.test_print_filaments import slice_routes as plan_slice_routes
 from tests.api.test_send import configure, make_output, upload_route
 from tests.api.test_send_options import queue_route, remember
 from tests.bambuddy.conftest import recording
@@ -105,6 +108,47 @@ def test_no_remembered_option_still_runs_the_pipeline(client: TestClient, model:
     assert run.called
     assert not sliced.called
     assert body["route"] == "pipeline"
+
+
+@respx.mock
+def test_a_filament_plan_carries_the_remembered_options_too(client: TestClient, model: str) -> None:
+    """#141: the plan route queues with the options as well as the plan's overrides.
+
+    No printer is named, so the per-printer scope keys on the pipeline's own target.
+    """
+    configure(client)
+    remember(client, "global", {"timelapse": False})
+    remember(client, "printer", {"bed_levelling": "off"}, key="1")
+    pipelines_route()
+    printers_route()
+    presets_routes()
+    inventory_routes()
+    output_id = make_output(client, model)
+    upload_route()
+    run = respx.post(f"{API}/slicer-pipelines/1/run")
+    plan_slice_routes()
+    queue = plan_queue_route()
+
+    body = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={
+            "pipeline_id": 1,
+            "copies": 2,
+            "filament_plan": {
+                "slots": [
+                    {"slot_id": 1, "spool_id": 9},
+                    {"slot_id": 2, "spool_id": 5},
+                ]
+            },
+        },
+    ).json()
+
+    assert not run.called
+    assert body["route"] == "slice_queue"
+    queued = json.loads(queue.calls.last.request.read())
+    assert (queued["timelapse"], queued["bed_levelling"]) == (False, "off")
+    assert queued["quantity"] == 2
+    assert [override["slot_id"] for override in queued["filament_overrides"]] == [1, 2]
 
 
 @respx.mock
