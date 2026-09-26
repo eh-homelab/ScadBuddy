@@ -310,7 +310,8 @@ export const handlers = [
     if (url.protocol !== 'https:') {
       return problem(422, 'Unprocessable Content', 'only https URLs can be imported')
     }
-    if (url.hostname === 'makerworld.com' || url.hostname.endsWith('.makerworld.com')) {
+    const host = url.hostname.replace(/\.$/, '')
+    if (host === 'makerworld.com' || host.endsWith('.makerworld.com')) {
       return problem(
         422,
         'Unprocessable Content',
