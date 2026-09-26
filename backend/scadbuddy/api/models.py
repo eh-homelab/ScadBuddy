@@ -358,10 +358,8 @@ def _require_within_cap(source: str, what: str) -> None:
 def _slug_from_name(name: str) -> str:
     try:
         return slugify(name)
-    except InvalidSlugError:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, f"{name!r} does not yield a usable slug"
-        ) from None
+    except InvalidSlugError as exc:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
 
 
 async def _create(
