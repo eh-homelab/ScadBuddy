@@ -50,7 +50,7 @@ size = 80; // [50:5:150]
 // Outline of the plaque
 shape = "square"; // [square:Square, rounded:Rounded square, round:Round]
 
-// Caption under the code (leave empty for none)
+// Caption under the code (leave empty for none; long lines shrink to fit)
 caption = "Scan for WiFi"; // 30
 
 // Print the network name and password under the code (WiFi mode only)
@@ -59,22 +59,22 @@ show_credentials = false;
 // Pockets in the back for round magnets (fridge magnet)
 magnet_pockets = false;
 
-// Magnet pocket diameter (magnet diameter plus clearance)
+// Magnet pocket diameter in mm (magnet diameter plus clearance)
 magnet_diameter = 10.2; // [5:0.1:20]
 
-// Magnet pocket depth
+// Magnet pocket depth in mm (capped to leave 0.6 mm of plate above it)
 magnet_depth = 2.2; // [1:0.1:4]
 
 // Add a separate desk stand the plaque slots into
 stand = "none"; // [none:None, desk_stand:Desk stand]
 
-// Extra width of the stand's slot over the plaque thickness
+// Extra width in mm of the stand's slot over the plaque thickness
 stand_clearance = 0.4; // [0.1:0.05:1]
 
 // Plate thickness in mm
 thickness = 3; // [2:0.5:6]
 
-// Height of the raised code and text, or depth of the inlay
+// Height in mm of the raised code and text, or depth of the inlay
 module_height = 0.6; // [0.4:0.2:1.2]
 
 // Raised: code stands on the plate. Inlay: code is set flush into the plate
@@ -101,15 +101,12 @@ quiet_zone_full = 4;
 quiet_zone_min = 2;
 min_module = 1.0;
 
-// Nominal text sizes, as a fraction of the plaque size, and the average
-// advance per character used to shrink long lines to fit (OpenSCAD cannot
-// measure text in the stable language). DejaVu Sans Mono is exactly 0.602 em.
+// Nominal text sizes, as a fraction of the plaque size. Lines longer than
+// the text band shrink to fit it (fit_x below), never grow.
 caption_frac = 0.075;
 cred_frac = 0.05;
 caption_font = "DejaVu Sans:style=Bold";
 cred_font = "DejaVu Sans Mono:style=Bold";
-caption_advance = 0.72;
-cred_advance = 0.61;
 line_pitch = 1.5;
 
 // Desk stand
@@ -416,22 +413,33 @@ module code_2d() {
     }
 }
 
-function fit_size(s, fs0, adv) = min(fs0, text_w / (max(1, len(s)) * adv));
+// Shrink-only fit to width w, as in models/name-sign: resize() the text
+// together with a hair-thin bar exactly w long, so text already narrower is
+// left alone and wider text is scaled down (both axes) to w. The bar sits
+// above the cut and is dropped by the projection.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([-w / 2, 0, 10]) cube([w, 0.01, 0.01]);
+            }
+}
 
-module text_line(s, fs0, font, adv, yc) {
-    translate([0, yc])
-        text(s, size = fit_size(s, fs0, adv), font = font, halign = "center", valign = "center");
+module text_line(s, fs0, font, yc) {
+    translate([0, yc]) fit_x(text_w)
+        text(s, size = fs0, font = font, halign = "center", valign = "center");
 }
 
 module text_2d() {
     y_start = block_top - S;
     if (has_caption)
-        text_line(caption, cap_fs0, caption_font, caption_advance, y_start - cap_fs0 * line_pitch / 2);
+        text_line(caption, cap_fs0, caption_font, y_start - cap_fs0 * line_pitch / 2);
     y_cred = y_start - (has_caption ? cap_fs0 * line_pitch : 0);
     if (cred_lines >= 1)
-        text_line(str("SSID: ", ssid), cred_fs0, cred_font, cred_advance, y_cred - cred_fs0 * line_pitch / 2);
+        text_line(str("SSID: ", ssid), cred_fs0, cred_font, y_cred - cred_fs0 * line_pitch / 2);
     if (cred_lines >= 2)
-        text_line(str("Pass: ", password), cred_fs0, cred_font, cred_advance, y_cred - cred_fs0 * line_pitch * 1.5);
+        text_line(str("Pass: ", password), cred_fs0, cred_font, y_cred - cred_fs0 * line_pitch * 1.5);
 }
 
 mag_depth = min(magnet_depth, thickness - (inlay ? module_height : 0) - 0.6);

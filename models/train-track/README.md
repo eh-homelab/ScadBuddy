@@ -24,8 +24,8 @@ children under 3. Supervise.
 | Parameter | Default | What it does |
 |---|---|---|
 | `type` | `straight` | `straight`, `curve`, `ramp` (ascending), `crossing` (90 degrees), `end_stop` (buffer at the far end), `name_tile` (straight with a word between the rails). |
-| `length` | `144` | Length in mm, end face to end face, of a straight, ramp, crossing arm, end stop or name tile. 36-216 in 18 mm steps, which reaches every standard size: 54, 72, 108, 144, 216. |
-| `curve_radius` | `182` | Curve inner-edge radius in mm. 182 is the standard large curve, 90 the short curve. |
+| `length` | `144` | Length in mm, end face to end face, of a straight, ramp, crossing arm, end stop or name tile. 36-216 in 18 mm steps, which reaches every standard size: 54, 72, 108, 144, 216. A socket-socket straight, ramp or name tile, and a crossing with any socket, is at least 54 mm (see below). |
+| `curve_radius` | `182` | Curve inner-edge radius in mm. 182 is the standard large curve, 90 the short curve. A socket-socket curve too short for both sockets gets a larger radius (see below). |
 | `curve_angle` | `45` | Curve angle, 22.5-90. Eight 45-degree curves make a circle. |
 | `ramp_rise` | `64` | Height the ramp climbs, 16-96 mm. 64 is one standard level. |
 | `connectors` | `male_female` | Peg and socket at the two ends, or two pegs, or two sockets. A crossing uses the pair on both arms; an end stop uses only the first. |
@@ -105,6 +105,24 @@ large curve's inner radius, not its centre line (202 mm).
 - **end_stop**: a straight with a rounded 26 mm-tall buffer across the far end
   and a connector only at the near end.
 
+## Short pieces with two sockets
+
+A socket reaches `12.75 + 6 + clearance` mm (about 19 mm) into the piece from
+its end face. Two of them on a 36 mm straight overlap and cut it in two, and on
+a 36 mm crossing the sockets of neighbouring arms meet in the middle and gut it.
+So the model builds a longer piece instead, rounding up to the next 18 mm step,
+and echoes a `NOTE:`:
+
+- socket-socket straight, ramp or name tile: at least `2 × reach + 3` mm, i.e. 54;
+- crossing with any socket: each socket must stop a socket radius + 1 mm short
+  of the centre, i.e. 54;
+- socket-socket curve: the centre-line arc must be `2 × reach + 3` mm long;
+  if not, `curve_radius` is raised (to 86 mm at 22.5°) and the angle is kept,
+  so eight 45° or sixteen 22.5° curves still make a circle.
+
+Peg-peg pieces, peg-socket straights and end stops are unaffected and can be
+36 mm.
+
 ## Print orientation
 
 Flat on the bottom face, grooves up. The profile is vertical walls and an
@@ -122,15 +140,17 @@ nothing needs supports.
 ./verify.sh
 ```
 
-Renders 15 cases — every type, short and long, small and wide curves, a steep
-peg-peg ramp, a 36 mm crossing, all three connector pairs, loose clearance, and
-text on a straight, a name tile and a name tile too short for it — and checks
-for each: the expected colour parts, nothing on the `Default` material, the
+Renders 19 cases — every type, short and long, small and wide curves, a steep
+peg-peg ramp, a 36 mm crossing, all three connector pairs, loose clearance,
+text on a straight, a name tile and a name tile too short for it, and four
+socket-socket / crossing cases short enough to be lengthened or widened — and
+checks for each: the expected colour parts, nothing on the `Default` material, the
 bounding box the piece's dimensions imply (including 18.5 mm per peg), sitting
 on z=0, the grooves 6 wide / 3 deep / 26 apart at the end face, every peg and
 socket at the right diameter from the bed to the deck top (and the ramp's top
 peg standing on its post), and the ramp climbing exactly `ramp_rise`. From one
-closed render per colour it checks every part is a closed mesh, the word sits
+closed render per colour it checks every part is a closed mesh, the track is
+one connected piece, the word sits
 1 mm deep in the right place, and track + word volumes equal the plain track's.
 
 It also joins two default straights, peg into socket, for clearances 0.1, 0.3

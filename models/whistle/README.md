@@ -66,7 +66,7 @@ extruded straight up and closed by a flat floor and roof:
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | *(empty)* | Up to 12 characters, inlaid 0.6 mm flush into the upper side over the chamber. Letters are half the chamber radius tall and shrink to fit 1.7 × the chamber radius. |
+| `name` | *(empty)* | Up to 12 characters, inlaid 0.6 mm flush into the upper side over the chamber. Letters are at most half the chamber radius tall and shrink to fit the chamber's flat side (1.5 mm in from its edge): a 6-letter name is about 3.5 mm tall on the classic whistle, a 12-letter one about 2 mm, and about 1.3 mm on the mini — keep names short on small whistles. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface (`// font`). |
 
 ### Colors
@@ -114,12 +114,13 @@ breakaway lanyard.
 ./verify.sh
 ```
 
-Renders the defaults and seven variations (every style, sizes 0.8 to 1.5, loop
-on and off, short and long names) in `scadbuddy-verify:local`, and checks:
+Renders the defaults and eight variations (every style, sizes 0.8 to 1.5, loop
+on and off, short and long names, a 12-letter name on the mini) in `scadbuddy-verify:local`, and checks:
 
 - exactly the colour parts the parameters imply, nothing on the `Default`
   material, the bounding box the parameters imply, on z=0, the name inlaid
-  flush;
+  flush, over the chamber and 1.5 mm inside its edge, and a long name using
+  the chamber's whole width;
 - by casting rays through the closed whistle part: the windway is open from the
   mouth to the window at nine points across its section, and exactly the
   height (never under 1 mm) and width the parameters imply; the window is open

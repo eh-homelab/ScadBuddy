@@ -33,6 +33,7 @@ DOCKERFILE
     IMAGE="$FONTS_IMAGE"
 fi
 
+WARN=0
 render() {
     local name="$1"; shift
     local args=()
@@ -41,8 +42,11 @@ render() {
     local t0 t1
     t0=$(date +%s.%N)
     docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
-        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad 2>&1 \
-        | grep -E 'ERROR|WARNING' || true
+        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad >"$OUT/$name.log" 2>&1 \
+        || { echo "  FAIL  openscad exited non-zero (see $OUT/$name.log)"; WARN=1; }
+    if grep -E 'ERROR|WARNING' "$OUT/$name.log"; then
+        echo "  FAIL  OpenSCAD warnings (see $OUT/$name.log)"; WARN=1
+    fi
     t1=$(date +%s.%N)
     printf '    %.1f s\n' "$(echo "$t1 - $t0" | bc)"
 }
@@ -59,6 +63,8 @@ render solid_square "$C" 'cap_style="solid"' 'shape="square"' 'cap_text="USB"'
 render open_ring "$C" 'cap_style="open_ring"'
 render small_tight "$C" 'hole_d=20' 'slot_w=30' 'fit=0' 'flange_w=3' 'desk_thickness=10'
 render big_loose "$C" 'hole_d=100' 'fit=1' 'flange_w=15' 'desk_thickness=60' 'cap_style="brush_segments"'
+render long_text "$C" 'cap_text="WWWWWWWWWWWW"'
+render long_text_solid "$C" 'cap_style="solid"' 'cap_text="WWWWWWWWWWWW"'
 
 python3 - "$OUT" <<'PY'
 import math, sys, zipfile, xml.etree.ElementTree as ET
@@ -78,6 +84,8 @@ CASES = {
     "slot_text": dict(distinct=True, cap_text="CABLES"),
     "brush": dict(distinct=True, cap_style="brush_segments"),
     "solid_square": dict(distinct=True, cap_style="solid", shape="square", cap_text="USB"),
+    "long_text": dict(distinct=True, cap_text="WWWWWWWWWWWW"),
+    "long_text_solid": dict(distinct=True, cap_style="solid", cap_text="WWWWWWWWWWWW"),
     "open_ring": dict(distinct=True, cap_style="open_ring"),
     "small_tight": dict(distinct=True, hole_d=20, fit=0, flange_w=3, desk_thickness=10),
     "big_loose": dict(distinct=True, hole_d=100, fit=1, flange_w=15, desk_thickness=60,
@@ -142,7 +150,7 @@ for name, over in CASES.items():
     if not p["distinct"]:
         continue
     by_col = {mats[i][1]: [verts[v] for v in per_mat[i]] for i in named}
-    sleeve = by_col.get("#1E1E1E", [])
+    sleeve = by_col.get("#5B6470", [])
     cap = by_col.get("#FF8800", [])
     check(bool(sleeve) and bool(cap), "sleeve and cap are separate materials")
     if not (sleeve and cap):
@@ -181,9 +189,20 @@ for name, over in CASES.items():
         check(bool(tz) and max(tz) <= INLAY + TOL,
               "cap text inlaid into the face on the bed (z %.3f .. %.3f)"
               % (min(tz), max(tz)) if tz else "cap text present")
+        # Text is shrunk to fit 1.5 mm inside the rim. Letters cut off by
+        # the rim would have vertices on that circle.
+        tr = [math.hypot(x - cap_x, y) for x, y, z in tv]
+        check(bool(tr) and max(tr) < F / 2 - 1.5 - 0.05,
+              "cap text fits inside the rim, not cut off (max r %.2f < %.2f)"
+              % (max(tr) if tr else 0, F / 2 - 1.5))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
     sys.exit(1)
 print("\nOK")
 PY
+
+if [ "$WARN" -ne 0 ]; then
+    echo "FAILED: OpenSCAD warnings or errors above"
+    exit 1
+fi
