@@ -19,7 +19,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_store import LOST_WORKER_ERROR, JobBackend, render_key
+from scadbuddy.render.job_store import LOST_WORKER_ERROR, JobBackend, QueueCounts, render_key
 from scadbuddy.render.jobs import (
     SUPERSEDED_ERROR,
     Job,
@@ -613,3 +613,22 @@ def test_a_retry_renders_into_a_directory_of_its_own(paths: DataPaths) -> None:
     assert first == paths.job_work_dir(job.id)
     assert retry != first
     assert retry.is_relative_to(paths.job_work_dir(job.id))  # deleted with the job
+
+
+async def test_a_store_that_cannot_be_read_says_so(make_queue: QueueFactory) -> None:
+    """The queue gauges keep their last values through an outage, so the outage
+    needs a signal of its own for the stall alert to key off."""
+    gate = Gate()
+    gate.release.set()
+    queue = await make_queue(gate)
+    queue.refresh_metrics()
+    assert _sample(queue.metrics, "scadbuddy_render_store_up") == 1
+
+    def down() -> QueueCounts:
+        raise ConnectionError("the database went away")
+
+    queue.store.counts = down  # type: ignore[method-assign]
+    queue.refresh_metrics()  # must not raise: the scrape still answers
+
+    assert _sample(queue.metrics, "scadbuddy_render_store_up") == 0
+    assert _sample(queue.metrics, "scadbuddy_render_store_errors_total", operation="read") == 1

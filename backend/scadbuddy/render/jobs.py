@@ -578,8 +578,19 @@ class RenderQueue:
 
     def refresh_metrics(self) -> None:
         """Read the queue's gauges from the store. Called per scrape, from a sync
-        route: with Postgres they count every replica's jobs, not this one's."""
-        counts = self.store.counts()
+        route: with Postgres they count every replica's jobs, not this one's.
+
+        Never raises: a store outage must not cost the scrape. The gauges then keep
+        their last good values -- they do NOT go absent -- so the failure is its
+        own signal, `scadbuddy_render_store_up` 0, for an alert to watch."""
+        try:
+            counts = self.store.counts()
+        except Exception:
+            logger.exception("could not read the render queue from its store")
+            self.metrics.store_up.set(0)
+            self.metrics.store_errors.labels("read").inc()
+            return
+        self.metrics.store_up.set(1)
         self.metrics.queue_depth.set(counts.pending)
         self.metrics.running.set(counts.running)
         oldest = counts.oldest_pending
@@ -619,6 +630,7 @@ class RenderQueue:
                 raise
             except Exception:  # a store outage must not kill the worker
                 logger.exception("render worker failed to claim or record a job")
+                self.metrics.store_errors.labels("work").inc()
                 job = None
                 await asyncio.sleep(self.config.render_poll_interval)
             finally:
@@ -643,6 +655,7 @@ class RenderQueue:
                 raise
             except Exception:
                 logger.exception("could not reap render jobs with expired leases")
+                self.metrics.store_errors.labels("reap").inc()
             else:
                 for job in reaped.requeued:
                     logger.warning("requeued a render whose worker stopped", extra={"job": job.id})
@@ -662,6 +675,7 @@ class RenderQueue:
                 await asyncio.to_thread(self.store.heartbeat, job)
             except Exception:
                 logger.exception("could not heartbeat a render job", extra={"job": job.id})
+                self.metrics.store_errors.labels("heartbeat").inc()
 
     async def _run(self, job: Job) -> None:
         waited = max(0.0, ((job.started_at or _now()) - job.created_at).total_seconds())

@@ -29,6 +29,9 @@ __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "Re
 #: and never reached a worker; ``superseded`` was replaced by a newer render first.
 RenderOutcome = Literal["done", "failed", "expired", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
+#: What a job store call that failed was doing: a worker claiming or recording a
+#: job, a heartbeat, the lease reaper, or the per-scrape read of the queue gauges.
+StoreOperation = Literal["work", "heartbeat", "reap", "read"]
 
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
@@ -57,6 +60,18 @@ class Metrics:
         self.render_coalesced = Counter(
             "scadbuddy_render_jobs_coalesced",
             "Render requests answered with an identical job already waiting.",
+            registry=r,
+        )
+        self.store_up = Gauge(
+            "scadbuddy_render_store_up",
+            "1 when the last per-scrape read of the queue from its job store worked, 0 "
+            "when it failed. While 0, the queue gauges hold their last good values.",
+            registry=r,
+        )
+        self.store_errors = Counter(
+            "scadbuddy_render_store_errors",
+            "Job store calls that failed, by what they were doing.",
+            ["operation"],
             registry=r,
         )
         self.render_rejected = Counter(
@@ -162,6 +177,8 @@ class Metrics:
             self.render_duration.labels(outcome)
         for stage in get_args(RenderStage):
             self.stage_duration.labels(stage)
+        for operation in get_args(StoreOperation):
+            self.store_errors.labels(operation)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:

@@ -102,7 +102,8 @@ for the project picker).
   writable, and the build revision.
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store, so across replicas with Postgres), wait time and latency
-  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, the
+  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
+  the queue's store can be read (`scadbuddy_render_store_up`), the
   SLO targets, and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
 
