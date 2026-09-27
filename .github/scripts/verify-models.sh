@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+#
+# Run `models/<slug>/verify.sh` for each slug given on stdin (one per line, the
+# output of select-models.sh), several at once, and fail if any of them fails.
+# Used by the `models` job in ci.yml (#229); runs the same locally:
+#
+#   .github/scripts/select-models.sh all | .github/scripts/verify-models.sh
+#
+# Every verify.sh reads SCADBUDDY_OPENSCAD_IMAGE / SCADBUDDY_FONTS_IMAGE for the
+# image it renders in; the caller sets both to one image so no script falls
+# back to building its own from the rolling `openscad/openscad:dev`.
+#
+# Each template's output goes to its own log and is printed whole, in a
+# collapsible group, once that template finishes — interleaved output from
+# parallel renders is unreadable. A summary table goes to $GITHUB_STEP_SUMMARY
+# when it is set.
+set -euo pipefail
+
+JOBS="${VERIFY_JOBS:-$(nproc)}"
+# Per template. The slowest bundled template takes a few minutes; this is a
+# hang guard, not a budget.
+TIMEOUT="${VERIFY_TIMEOUT:-20m}"
+LOG_DIR="${VERIFY_LOG_DIR:-$(mktemp -d)}"
+mkdir -p "$LOG_DIR"
+
+mapfile -t slugs < <(grep -v '^[[:space:]]*$' || true)
+if [ "${#slugs[@]}" -eq 0 ]; then
+  echo "No template selected; nothing to verify."
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    echo "No template's \`verify.sh\` was selected for this change." >>"$GITHUB_STEP_SUMMARY"
+  fi
+  exit 0
+fi
+
+echo "Verifying ${#slugs[@]} template(s), $JOBS at a time: ${slugs[*]}"
+
+# One template: run it, record exit status and wall time next to its log.
+run_one() {
+  local slug="$1" start rc
+  start=$(date +%s)
+  rc=0
+  timeout "$TIMEOUT" "models/$slug/verify.sh" >"$LOG_DIR/$slug.log" 2>&1 || rc=$?
+  echo "$rc $(($(date +%s) - start))" >"$LOG_DIR/$slug.result"
+  if [ "$rc" -eq 0 ]; then
+    echo "PASS $slug"
+  else
+    echo "FAIL $slug (exit $rc)"
+  fi
+}
+export -f run_one
+export LOG_DIR TIMEOUT
+
+# `|| true`: run_one never fails, but xargs exits non-zero if a child is
+# killed; the per-template .result files are what decide the verdict below.
+# shellcheck disable=SC2016 # $1 is expanded by the child bash, on purpose.
+printf '%s\n' "${slugs[@]}" | xargs -P "$JOBS" -I{} bash -c 'run_one "$1"' _ {} || true
+
+failed=0
+summary="| Template | Result | Time |"$'\n'"| --- | --- | --- |"
+for slug in "${slugs[@]}"; do
+  rc=missing secs='?'
+  if [ -f "$LOG_DIR/$slug.result" ]; then read -r rc secs <"$LOG_DIR/$slug.result"; fi
+  if [ "$rc" = 0 ]; then
+    verdict=PASS
+  else
+    verdict="FAIL (exit $rc)"
+    failed=$((failed + 1))
+  fi
+  echo "::group::$slug — $verdict in ${secs}s"
+  cat "$LOG_DIR/$slug.log" 2>/dev/null || echo "(no log)"
+  echo "::endgroup::"
+  if [ "$verdict" != PASS ]; then
+    echo "::error title=models/$slug/verify.sh::$verdict — expand the '$slug' group above for the failing cases"
+  fi
+  summary+=$'\n'"| \`$slug\` | $verdict | ${secs}s |"
+done
+
+if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+  printf '### Template verify.sh\n\n%s\n' "$summary" >>"$GITHUB_STEP_SUMMARY"
+fi
+printf '%s\n' "$summary"
+
+if [ "$failed" -ne 0 ]; then
+  echo "$failed of ${#slugs[@]} template(s) failed."
+  exit 1
+fi
+echo "All ${#slugs[@]} template(s) passed."
