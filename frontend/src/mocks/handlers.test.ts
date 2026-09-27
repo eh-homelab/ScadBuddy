@@ -151,6 +151,24 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body).toMatchObject({ description: '', tags: [] })
   })
 
+  it.each([
+    ['{not json', 'the model.json is not valid JSON'],
+    ['[1, 2]', 'the model.json is not an object'],
+    ['null', 'the model.json is not an object'],
+  ])('refuses a model.json of %s as the backend does', async (meta, detail) => {
+    const parts: Part[] = [
+      { name: 'file', value: 'cube(10);\n', filename: 'widget.scad' },
+      { name: 'meta', value: meta, filename: 'model.json' },
+    ]
+    const response = await fetch('/api/v1/models', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart(parts),
+    })
+    expect(response.status).toBe(422)
+    expect(((await response.json()) as { detail: string }).detail).toBe(detail)
+  })
+
   it('refuses tags that start as a JSON array but are not valid JSON', async () => {
     const { status, body } = await upload({ tags: '[not json' })
     expect(status).toBe(422)

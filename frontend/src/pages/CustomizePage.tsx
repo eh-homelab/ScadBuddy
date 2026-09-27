@@ -262,7 +262,14 @@ export function CustomizePage() {
                 onSaved={schemaState.reload}
               />
               {/* #179: only a template of mine is writable, so its details are too. */}
-              <EditDetailsButton slug={slug} />
+              <EditDetailsButton
+                slug={slug}
+                // The record this page holds (its name feeds Duplicate's prefill) is
+                // stale after a save. The save answers with the new one, so it is
+                // taken as it is: no refetch, and no flicker of the actions while
+                // the record reloads.
+                onSaved={modelState.setData}
+              />
               <DeleteModelButton slug={slug} name={schema.title ?? slug} />
             </>
           )}

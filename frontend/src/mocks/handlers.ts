@@ -370,9 +370,20 @@ export const handlers = [
     const meta = part('meta')
     const thumbnailPart = part('thumbnail')
     const readmePart = part('readme')
-    const metaFields = meta
-      ? (JSON.parse(await meta.text()) as { name?: string; description?: string; tags?: string[] })
-      : null
+    // As `_read_meta_file`: a model.json that is not JSON, or not an object, is a 422.
+    let metaFields: { name?: string; description?: string; tags?: string[] } | null = null
+    if (meta) {
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(await meta.text())
+      } catch {
+        return problem(422, 'Unprocessable Content', 'the model.json is not valid JSON')
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return problem(422, 'Unprocessable Content', 'the model.json is not an object')
+      }
+      metaFields = parsed as { name?: string; description?: string; tags?: string[] }
+    }
     const tagsField = parseFormTags(formText(form, 'tags'))
     if (typeof tagsField === 'string') return problem(422, 'Unprocessable Content', tagsField)
     // Not `instanceof File`: the entry's class differs between the browser worker

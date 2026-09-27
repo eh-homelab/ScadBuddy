@@ -38,6 +38,20 @@ test.describe('model details', () => {
     await expect(card.getByText('widget', { exact: true })).toBeVisible()
   })
 
+  test('shows the server refusing a model.json that is not JSON', async ({ page }) => {
+    await page.goto('/')
+    await page.getByRole('button', { name: 'Add model' }).click()
+    const dialog = page.getByRole('dialog', { name: 'Add a model' })
+
+    await dialog.getByLabel('OpenSCAD source file').setInputFiles([
+      { name: 'model.scad', mimeType: 'text/plain', buffer: Buffer.from('cube(10);\n') },
+      { name: 'model.json', mimeType: 'application/json', buffer: Buffer.from('{not json') },
+    ])
+    await dialog.getByRole('button', { name: 'Add model' }).click()
+
+    await expect(dialog.getByRole('alert')).toHaveText('the model.json is not valid JSON')
+  })
+
   test('edits a model’s name, thumbnail and README after it was created', async ({ page }) => {
     await page.goto('/m/gridfinity-bin')
     await page.getByRole('button', { name: 'Edit details' }).click()

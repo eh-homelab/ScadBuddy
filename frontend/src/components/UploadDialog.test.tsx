@@ -1,6 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import { models } from '../mocks/fixtures'
 import { renderPage } from '../test/utils'
 import { UploadDialog } from './UploadDialog'
@@ -189,6 +189,32 @@ describe('UploadDialog', () => {
     await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
     await waitFor(() => expect(upload).toHaveBeenCalledOnce())
     expect(upload.mock.calls[0]?.[1]?.readme).toBeUndefined()
+  })
+
+  it('shows the server refusing a folder whose model.json is not JSON', async () => {
+    // Spied, as the other uploads here are: the multipart body cannot cross from
+    // jsdom into Node's fetch. The mock's own 422 is pinned in handlers.test, and
+    // the whole path in the browser by e2e/model-details.spec.
+    vi.spyOn(api, 'uploadModel').mockRejectedValue(
+      new ApiError({
+        type: 'about:blank',
+        title: 'Unprocessable Content',
+        status: 422,
+        detail: 'the model.json is not valid JSON',
+      }),
+    )
+    const { dialog, user } = render()
+
+    await user.upload(within(dialog).getByLabelText('Model folder'), [
+      inFolder('widget', 'model.scad'),
+      inFolder('widget', 'model.json', '{not json'),
+    ])
+    await user.click(await within(dialog).findByRole('button', { name: 'Add model' }))
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'the model.json is not valid JSON',
+    )
+    expect(screen.getByRole('dialog', { name: 'Add a model' })).toBeInTheDocument()
   })
 
   it('says so when a folder holds no source', async () => {
