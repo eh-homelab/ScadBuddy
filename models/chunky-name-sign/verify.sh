@@ -97,7 +97,17 @@ CASES = [
                                text_shape="arch_down"), None),
     ("thin-square-magnets", dict(backing_thickness=2, bevel=0, mount="magnets"), 1),
     ("empty-text", dict(text=""), 1),
+    # Parameters that would run off the 300 x 320 mm plate are capped to it.
+    ("plate-long", dict(text="Christopher", max_length=400, text_size=100), None),
+    ("plate-nofit", dict(text="ABCDEFGHIJKLMNOPQRST", auto_fit=False, text_size=100), None),
+    ("plate-rotated-foot", dict(text="Christopher", layout="vertical_rotated",
+                                max_length=400, text_size=100, stand="foot"), None),
+    ("plate-circle", dict(text="Charlotte", text_shape="circle", circle_radius=150,
+                          outer_ring=True), 1),
+    ("plate-stairs", dict(text="ABCDEFGHIJKLMNOPQRST", text_shape="stairs",
+                          stair_step=30, stand="foot"), None),
 ]
+PLATE_W, PLATE_D = 300, 320
 
 
 def scad(v):
@@ -238,6 +248,9 @@ for name, ov, want_pieces in CASES:
 
     lo, hi = bbox(verts)
     check(near(lo[2], 0), "sits on z=0 (min z %.3f)" % lo[2])
+    check(hi[0] - lo[0] <= PLATE_W and hi[1] - lo[1] <= PLATE_D,
+          "fits the %d x %d mm plate (%.1f x %.1f)"
+          % (PLATE_W, PLATE_D, hi[0] - lo[0], hi[1] - lo[1]))
     top = max(T + LH, FOOT_H if p(ov, "stand") == "foot" else 0)
     check(near(hi[2], top), "top at z=%.3f (expected %.3f)" % (hi[2], top))
 

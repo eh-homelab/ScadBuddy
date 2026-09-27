@@ -23,16 +23,16 @@
 
 /* [Hole] */
 
-// Diameter (or side, for square) of the hole in the desk
+// Diameter (or side, for square) of the hole in the desk, mm
 hole_d = 60; // [20:1:100]
 
-// Thickness of the desk top
+// Thickness of the desk top, mm (sets the sleeve length)
 desk_thickness = 25; // [10:1:60]
 
-// How far the flange reaches over the desk beyond the hole
+// How far the flange reaches over the desk beyond the hole, mm
 flange_w = 6; // [3:1:15]
 
-// Clearance at each joint: sleeve in the hole, cap lip in the sleeve
+// Clearance at each joint, mm: sleeve in the hole, cap lip in the sleeve (0 = press fit)
 fit = 0.3; // [0:0.1:1]
 
 // Shape of the hole
@@ -43,10 +43,10 @@ shape = "round"; // [round:Round, square:Square (rounded corners)]
 // Cap style
 cap_style = "slot"; // [slot:Cable slot, brush_segments:Brush fingers, solid:Solid, open_ring:Open ring]
 
-// Width of the cable slot (slot style)
+// Width of the cable slot, mm (slot style only)
 slot_w = 12; // [5:1:30]
 
-// Text inlaid in the cap's top face (slot and solid styles). Empty for none
+// Text inlaid in the cap's top face (slot and solid styles only; shrinks to fit). Empty for none
 cap_text = ""; // 12
 
 // Typeface for the cap text
@@ -55,10 +55,10 @@ font = "DejaVu Sans:style=Bold"; // font
 /* [Colors] */
 
 // Sleeve and flange (extruder 1)
-sleeve_color = "#1E1E1E"; // color
+sleeve_color = "#5B6470"; // color
 
 // Cap (extruder 2)
-cap_color = "#1E1E1E"; // color
+cap_color = "#5B6470"; // color
 
 // Cap text (extruder 3)
 cap_text_color = "#FFFFFF"; // color
@@ -151,13 +151,45 @@ module lip_2d() {
     }
 }
 
-// Text centred in the solid half of the cap (opposite the slot), clipped to
-// the plate so it never breaks out through an edge.
+// Text in the solid part of the cap: centred in the band between the slot's
+// end and the rim on the side opposite the slot, or across the middle of a
+// solid cap. Letters are cap_text_size tall at most and shrink
+// (never grow) to fit the widest chord of the band they sit in, measured on
+// a circle 1.5 mm inside the cap's edge, so a long word is scaled down rather
+// than cut off by the rim.
+text_r = flange_size / 2 - 1.5;
+text_y_in = cap_style == "slot" ? slot_eff / 2 + 1.5 : 0;
+text_h = cap_style == "slot" ? min(cap_text_size, (text_r - text_y_in) * 0.8) : cap_text_size;
+text_yc = cap_style == "slot" ? -(text_y_in + text_r) / 2 : 0;
+text_w = 2 * sqrt(max(0, pow(text_r, 2) - pow(abs(text_yc) + text_h / 2, 2)));
+
+// Shrink-only fits, as in models/building-brick: resize() the children plus
+// a hair-thin bar of the target length, so smaller text is left alone and
+// larger text is scaled down uniformly.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([-w / 2, 0, 10]) cube([w, 0.01, 0.01]);
+            }
+}
+
+module fit_y(h) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([0, h, 0], auto = [true, false, false])
+            union() {
+                linear_extrude(1) children();
+                translate([0, -h / 2, 10]) cube([0.01, h, 0.01]);
+            }
+}
+
 module cap_text_2d() {
     intersection() {
-        translate([0, cap_style == "slot" ? -(slot_eff / 2 + flange_size / 2) / 2 : 0])
-            text(cap_text, size = cap_text_size, font = font,
-                 halign = "center", valign = "center");
+        translate([0, text_yc])
+            fit_y(text_h) fit_x(text_w)
+                text(cap_text, size = text_h, font = font,
+                     halign = "center", valign = "center");
         offset(delta = -1.5) cap_plate_2d();
     }
 }
