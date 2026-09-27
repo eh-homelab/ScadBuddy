@@ -841,6 +841,33 @@ def test_a_seeded_template_becomes_a_duplicate_of_its_built_in(
     assert _merge(catalogue, "name-keychain") == KEYCHAIN.replace("size = 10", "size = 12")
 
 
+def test_a_seeded_templates_update_diffs_from_where_the_source_was_seeded(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    """#236: base is the seed commit at ``<slug>``, the built-in lives at
+    ``_builtin/<slug>``; the preview's patch is the change, not the whole file added."""
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+    catalogue.link_seeded()
+
+    status = catalogue.upstream_status("name-keychain")
+
+    assert status.upstream.path == "name-keychain"
+    assert status.preview is not None
+    patch = status.preview.patch
+    assert "--- a/name-keychain/model.scad\n+++ b/name-keychain/model.scad\n" in patch
+    assert [
+        line for line in patch.splitlines() if line[:1] in "+-" and line[:3] not in {"---", "+++"}
+    ] == [
+        "-size = 10;",
+        "+size = 12;",
+    ]
+    assert "new file" not in patch
+    assert "model.json" not in patch
+
+
 def test_an_edited_seeded_template_keeps_its_edits_through_the_merge(
     catalogue: Catalogue, tmp_path: Path
 ) -> None:

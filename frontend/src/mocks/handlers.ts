@@ -192,7 +192,9 @@ function planMerge(slug: string, model: ModelSummary): MergePreview {
   const ours = state.sources[slug] ?? ''
   const baseSource = (upstream.base && state.sourceAt[upstream.base]) || ''
   const theirs = state.sources[upstream.id] ?? ''
-  const plan = { ours, base: baseSource, theirs, taken: [], kept: [] }
+  // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
+  const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
+  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
   if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
   if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
   const merged =

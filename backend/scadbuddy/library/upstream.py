@@ -20,7 +20,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.core.paths import MODEL_META_NAME, SOURCE_NAME, model_path
+from scadbuddy.core.paths import BUILTIN_PREFIX, MODEL_META_NAME, SOURCE_NAME, model_path
 from scadbuddy.library.history import ModelHistory, RevisionNotFoundError
 
 UpstreamState = Literal["current", "update", "dismissed", "gone"]
@@ -91,6 +91,10 @@ class MergePreview(BaseModel):
     ours: str = Field(description="This template's `model.scad`")
     base: str = Field(description="The upstream's `model.scad` at `base`")
     theirs: str = Field(description="The upstream's current `model.scad`")
+    patch: str = Field(
+        description="The upstream's own changes since `base`: a unified patch from its "
+        "directory at `base` (at `upstream.path`) to its current one, `model.json` aside"
+    )
     merged: str = Field(
         description="`git merge-file -p --diff3 ours base theirs`: conflict markers when not clean"
     )
@@ -175,10 +179,19 @@ def plan_merge(
         else:
             kept.append(name)
 
+    patch = history.diff_dirs(
+        upstream.base,
+        upstream.path,
+        revision,
+        theirs_path,
+        label=upstream.id.removeprefix(BUILTIN_PREFIX),
+        exclude=(MODEL_META_NAME,),
+    )
     preview = MergePreview(
         ours=ours,
         base=base,
         theirs=theirs,
+        patch=patch,
         merged=merged,
         clean=conflicts == 0,
         taken=sorted(files),
