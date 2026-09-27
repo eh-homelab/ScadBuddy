@@ -8,6 +8,8 @@ carrying ``completed_at`` and a ``Slice failed: …`` message. Every assertion a
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -321,6 +323,30 @@ async def test_every_plate_is_polled_not_only_the_last(bambuddy: BambuddyClient)
         (1, 51, "running"),
         (2, 52, "done"),
     ]
+
+
+@respx.mock
+async def test_plates_are_polled_together_and_reported_in_plate_order(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Plate 1's read only answers once plate 2's has started, so a one-after-another
+    poll would never finish; the result is still in plate order."""
+    sliced()
+    second_started = asyncio.Event()
+
+    async def first(request: httpx.Request) -> httpx.Response:
+        await second_started.wait()
+        return httpx.Response(200, json={"id": 51, "status": "printing"})
+
+    def second(request: httpx.Request) -> httpx.Response:
+        second_started.set()
+        return httpx.Response(200, json={"id": 52, "status": "completed"})
+
+    respx.get(f"{API}/queue/51").mock(side_effect=first)
+    respx.get(f"{API}/queue/52").mock(side_effect=second)
+    progress = await asyncio.wait_for(progress_for(bambuddy, plates_meta()), timeout=5)
+    assert progress is not None
+    assert [c.plate_id for c in progress.copies_detail] == [1, 2]
 
 
 @respx.mock

@@ -21,6 +21,7 @@ by which stage produced it, so it stays right when Bambuddy rewords a message.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -351,11 +352,16 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
 
     if route == "slice_queue":
         if len(meta.plates) > 1:
+            # Polled together; `gather` keeps plate order and raises the first failure.
             return from_plates(
-                [
-                    await _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
-                    for plate in meta.plates
-                ],
+                list(
+                    await asyncio.gather(
+                        *(
+                            _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
+                            for plate in meta.plates
+                        )
+                    )
+                ),
                 [plate.plate_id for plate in meta.plates],
                 slice_job_id=meta.slice_job_id,
                 queue_item_id=meta.queue_item_id,
