@@ -78,6 +78,18 @@ describe('useFullscreen', () => {
     expect(result.current.mode).toBe('window')
   })
 
+  it('leaves an Escape to a dialog that opened after it', () => {
+    const { element, result } = mount()
+    act(() => result.current.toggle())
+    // What `Dialog` does: a document listener, added when it opens, that takes the key.
+    const dialog = (event: KeyboardEvent) => event.preventDefault()
+    document.addEventListener('keydown', dialog)
+
+    fireEvent.keyDown(element, { key: 'Escape' })
+    document.removeEventListener('keydown', dialog)
+    expect(result.current.mode).toBe('window')
+  })
+
   it('uses the Fullscreen API where the page may', async () => {
     const { element, result } = mount()
     const api = offerFullscreen(element)

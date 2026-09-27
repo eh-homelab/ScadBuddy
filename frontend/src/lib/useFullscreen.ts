@@ -34,14 +34,16 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
 
   useEffect(() => {
     if (!windowed) return
+    // On the window, which an event reaches last, so any Escape handled on its way —
+    // the assistant panel's, or a dialog's (the font picker opens from the flyout) —
+    // is seen as taken and leaves full screen alone.
     const onKey = (event: KeyboardEvent) => {
-      // A handler nearer the focus (the assistant panel's own Escape) goes first.
       if (event.key !== 'Escape' || event.defaultPrevented) return
       event.preventDefault()
       setWindowed(false)
     }
-    document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
   }, [windowed])
 
   const toggle = useCallback(() => {

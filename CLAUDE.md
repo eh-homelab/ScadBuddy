@@ -152,8 +152,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   when embedded.
 - Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
   Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
-  where it is refused (`document.fullscreenEnabled` is false) the preview covers the
-  frame instead.
+  where it is refused (`document.fullscreenEnabled` is false) the full-screen view
+  covers the frame instead.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 

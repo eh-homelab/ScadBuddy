@@ -1,5 +1,6 @@
 import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
+import type { ReactNode } from 'react'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -19,10 +20,25 @@ import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
 
 // WebGL does not exist in jsdom, so the canvas is replaced with a readable stand-in.
-// The viewer itself is covered by the Playwright smoke test.
+// The viewer itself is covered by the Playwright smoke test. The page's own buttons,
+// which the viewer lays over the scene, are rendered as they are.
 vi.mock('../components/Preview', () => ({
-  Preview: ({ job, rendering, plate }: { job?: Job; rendering: boolean; plate?: Plate }) => (
+  Preview: ({
+    job,
+    rendering,
+    plate,
+    leading,
+    controls,
+  }: {
+    job?: Job
+    rendering: boolean
+    plate?: Plate
+    leading?: ReactNode
+    controls?: ReactNode
+  }) => (
     <div data-testid="preview">
+      {leading}
+      {controls}
       {rendering && <span>rendering</span>}
       {plate && (
         <span data-testid="plate">
@@ -959,5 +975,80 @@ describe('CustomizePage', () => {
     await screen.findByRole('button', { name: 'Duplicate' })
     expect(screen.queryByTestId('update-badge')).not.toBeInTheDocument()
     expect(screen.queryByTestId('upstream-gone')).not.toBeInTheDocument()
+  })
+})
+
+// jsdom has no Fullscreen API, so these run the fallback: the workspace covers the
+// window. The API itself is exercised by the Playwright run.
+describe('full screen', () => {
+  it('shows the view alone, with the parameters in a flyout', async () => {
+    const { user } = render()
+    await firstRender()
+    const generate = screen.getByTestId('generate')
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument()
+    // The parameters wait in the closed flyout, and the actions outside full screen.
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+    expect(generate).not.toBeVisible()
+
+    const parameters = screen.getByRole('button', { name: 'Parameters' })
+    expect(parameters).toHaveAttribute('aria-expanded', 'false')
+    await user.click(parameters)
+    expect(parameters).toHaveAttribute('aria-expanded', 'true')
+    const close = screen.getByRole('button', { name: 'Close parameters' })
+    expect(close).toHaveFocus()
+
+    // A change made in the flyout renders like any other.
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Nova')
+    await waitFor(() => expect(screen.getByTestId('bbox')).toHaveTextContent('46.7'), {
+      timeout: 4000,
+    })
+
+    await user.click(close)
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+    expect(parameters).toHaveFocus()
+
+    await user.click(screen.getByRole('button', { name: 'Exit full screen' }))
+    expect(screen.queryByRole('button', { name: 'Parameters' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Close parameters' })).not.toBeInTheDocument()
+    // Back in its column with the change, never remounted.
+    expect(screen.getByRole('textbox', { name: 'Name on the tag' })).toHaveValue('Nova')
+    expect(generate).toBeVisible()
+  })
+
+  it('opens each full screen on the view alone', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    await user.click(screen.getByRole('button', { name: 'Parameters' }))
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    expect(screen.getByRole('button', { name: 'Parameters' })).toHaveAttribute(
+      'aria-expanded',
+      'false',
+    )
+    expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
+  })
+
+  it('lets Escape close the font picker in the flyout without leaving full screen', async () => {
+    const { user } = render()
+    await firstRender()
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+    await user.click(screen.getByRole('button', { name: 'Parameters' }))
+    await user.click(screen.getByRole('button', { name: 'Browse' }))
+    expect(screen.getByRole('dialog', { name: 'Choose a font' })).toBeInTheDocument()
+
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Exit full screen' })).toBeInTheDocument()
+
+    // With nothing else to take it, the next one leaves full screen.
+    await user.keyboard('{Escape}')
+    expect(screen.getByRole('button', { name: 'Full screen' })).toBeInTheDocument()
   })
 })

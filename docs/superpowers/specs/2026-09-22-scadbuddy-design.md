@@ -387,12 +387,16 @@ Left: tabs per group, widgets, "Reset to defaults". Right: 3D preview
 bounding-box dimensions in mm, a full-screen toggle). Bottom bar: **Generate**,
 then **Download 3MF** and **Send to Bambuddy**.
 
-Full screen takes the viewer with its overlays (plate, bounding box, render state,
-a failed render's log) through the Fullscreen API. A cross-origin frame may only use
-that API when its `<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`),
-and Bambuddy's is only known to set its sandbox flags (§1), so wherever the API is
-refused the viewer covers the window instead — when embedded, the frame. Escape
-leaves either.
+Full screen takes the whole workspace. The viewer and its overlays (plate, bounding
+box, render state, a failed render's log) fill the screen; the parameter panel becomes
+a flyout over the scene, opened from **Parameters** (a full-width sheet on a narrow
+screen), with the overlays moving clear of it; the bottom bar waits outside. The panel
+and the canvas are never remounted, so the camera and the chosen tab survive. It goes
+through the Fullscreen API, but a cross-origin frame may only use that API when its
+`<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`), and Bambuddy's is
+only known to set its sandbox flags (§1), so wherever the API is refused the workspace
+covers the window instead — when embedded, the frame. Escape leaves either, unless a
+dialog opened from the flyout takes it first.
 
 The preview is not a separate cheap render — it **is** the render. Every
 parameter change (debounced 400 ms) submits a render job; the job produces the

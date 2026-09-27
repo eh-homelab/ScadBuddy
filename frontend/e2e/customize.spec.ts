@@ -43,23 +43,41 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('bbox-readout')).toContainText('81.4', { timeout: 10_000 })
   })
 
-  test('shows the preview full screen and puts it back', async ({ page }) => {
+  test('shows the view full screen with the parameters in a flyout, and puts it back', async ({
+    page,
+  }) => {
     await page.goto('/m/name-keychain')
     const bbox = page.getByTestId('bbox-readout')
     await expect(bbox).toContainText('64.1')
     const canvas = page.getByTestId('preview-canvas')
     const docked = await canvas.boundingBox()
+    const parameters = page.getByRole('region', { name: 'Parameters' })
+    const name = page.getByRole('textbox', { name: 'Name on the tag' })
 
     await page.getByRole('button', { name: 'Full screen', exact: true }).click()
     const exit = page.getByRole('button', { name: 'Exit full screen' })
     await expect(exit).toBeVisible()
-    // The browser's own full screen, with the readouts still over the scene.
+    // The browser's own full screen: the view alone, its readouts still over the scene.
     expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
     const viewport = page.viewportSize()
-    await expect
-      .poll(() => canvas.boundingBox())
-      .toEqual({ x: 0, y: 0, width: viewport?.width, height: viewport?.height })
+    const whole = { x: 0, y: 0, width: viewport?.width, height: viewport?.height }
+    await expect.poll(() => canvas.boundingBox()).toEqual(whole)
     await expect(bbox).toContainText('64.1')
+    await expect(parameters).toBeHidden()
+    await expect(page.getByTestId('generate')).toBeHidden()
+
+    // The parameters fly out over the scene, and a change renders while in full screen.
+    await page.getByRole('button', { name: 'Parameters', exact: true }).click()
+    await expect
+      .poll(() => parameters.boundingBox())
+      .toEqual({ x: 0, y: 0, width: 360, height: viewport?.height })
+    await name.fill('Nova')
+    await expect(bbox).toContainText('46.7 × 37.2 × 6.8 mm')
+    // The readouts move clear of it; the scene stays where it was.
+    expect((await bbox.boundingBox())?.x).toBeGreaterThanOrEqual(360)
+    expect(await canvas.boundingBox()).toEqual(whole)
+    await page.getByRole('button', { name: 'Close parameters' }).click()
+    await expect(parameters).toBeHidden()
 
     await exit.click()
     await expect(page.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
@@ -67,6 +85,7 @@ test.describe('customizer', () => {
     // Back in its place and no wider: the canvas is sized in pixels, and its full-screen
     // width must not hold the column open.
     await expect.poll(() => canvas.boundingBox()).toEqual(docked)
+    await expect(name).toHaveValue('Nova')
   })
 
   test('fills the frame where the page may not go full screen, as inside Bambuddy', async ({

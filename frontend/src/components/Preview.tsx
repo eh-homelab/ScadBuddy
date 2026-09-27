@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { Canvas, useLoader, useThree } from '@react-three/fiber'
 import { Grid, OrbitControls } from '@react-three/drei'
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
@@ -6,7 +6,6 @@ import * as THREE from 'three'
 import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
 import { plateSize, useDisplayUnit } from '../lib/units'
-import { useFullscreen } from '../lib/useFullscreen'
 import { Spinner } from './ui/Spinner'
 
 interface ViewerTheme {
@@ -51,9 +50,27 @@ interface Props {
   /** #81 — the chosen printer's plate, or the configured default. Undrawn until known. */
   plate?: Plate
   captureRef?: React.RefObject<PreviewCapture | null>
+  /** Laid over the scene's top left, before the plate: the page's own buttons. */
+  leading?: ReactNode
+  /** Laid over the scene's top right: the page's own buttons. */
+  controls?: ReactNode
+  /**
+   * How much of the scene's left edge the page covers, as a CSS length — the
+   * parameters flyout in full screen. The readouts keep clear of it; the scene does not
+   * move, so the camera's view stays as it was.
+   */
+  covered?: string
 }
 
-export function Preview({ job, rendering, plate, captureRef }: Props) {
+export function Preview({
+  job,
+  rendering,
+  plate,
+  captureRef,
+  leading,
+  controls,
+  covered,
+}: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
   const [shown, setShown] = useState<{ url: string; bbox?: BoundingBox; colors: string[] } | undefined>()
 
@@ -65,22 +82,14 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
 
   const theme = useViewerTheme()
   const failed = job?.status === 'failed'
-
-  // The overlays go full screen with the scene, so the dimensions, the render state and
-  // a failed render's log stay in view. One element throughout, whichever way it fills
-  // the screen: remounting the canvas would reload the model and lose the camera.
-  const frame = useRef<HTMLDivElement>(null)
-  const fullscreen = useFullscreen(frame)
+  const clear = covered ? { left: covered } : undefined
 
   return (
     <div
-      ref={frame}
       // min-w-0: the canvas is sized in pixels, and without it that width holds the
       // column open, so the view never narrows again after full screen or a smaller
       // window.
-      className={`bg-bg ${
-        fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative h-full min-h-0 w-full min-w-0'
-      }`}
+      className="relative h-full min-h-0 w-full min-w-0 bg-bg"
     >
       <Canvas
         key={theme.bg}
@@ -122,26 +131,37 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
         />
       </Canvas>
 
-      <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
+      <div
+        className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3"
+        style={clear}
+      >
         <div className="flex items-start justify-between gap-3">
-          {plate ? <PlateBadge plate={plate} /> : <span />}
-          <div className="flex items-center gap-2">
+          {/* Beside the flyout the room can run short: the left side wraps, so the
+              right side's controls stay on screen. */}
+          <div className="flex min-w-0 flex-wrap items-center gap-2">
+            {leading}
+            {plate && <PlateBadge plate={plate} />}
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
             {rendering && (
               <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
                 <Spinner /> Rendering
               </span>
             )}
-            <FullscreenButton active={fullscreen.mode !== null} onClick={fullscreen.toggle} />
+            {controls}
           </div>
         </div>
 
         {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} />}
       </div>
 
-      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
+      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} covered={covered} />}
 
       {!shown && !failed && !rendering && (
-        <p className="absolute inset-0 flex items-center justify-center text-[13px] text-faint">
+        <p
+          className="absolute inset-0 flex items-center justify-center text-[13px] text-faint"
+          style={clear}
+        >
           Change a parameter to render.
         </p>
       )}
@@ -159,33 +179,6 @@ function PlateBadge({ plate }: { plate: Plate }) {
   )
 }
 
-function FullscreenButton({ active, onClick }: { active: boolean; onClick: () => void }) {
-  const label = active ? 'Exit full screen' : 'Full screen'
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-label={label}
-      title={active ? `${label} (Esc)` : label}
-      className="pointer-events-auto flex size-7 items-center justify-center rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm transition-colors hover:border-line-strong hover:text-ink"
-    >
-      <svg
-        viewBox="0 0 16 16"
-        aria-hidden="true"
-        className="size-3.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        {/* Corners pointing out to enter, in to leave. */}
-        <path d={active ? 'M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4' : 'M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4'} />
-      </svg>
-    </button>
-  )
-}
-
 function Dimensions({ bbox }: { bbox: BoundingBox }) {
   const unit = useDisplayUnit()
   return (
@@ -199,9 +192,12 @@ function Dimensions({ bbox }: { bbox: BoundingBox }) {
   )
 }
 
-function RenderError({ log }: { log?: string }) {
+function RenderError({ log, covered }: { log?: string; covered?: string }) {
   return (
-    <div className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm">
+    <div
+      className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm"
+      style={covered ? { left: `calc(${covered} + 0.75rem)` } : undefined}
+    >
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         OpenSCAD could not render these parameters.
       </p>
