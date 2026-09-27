@@ -31,12 +31,14 @@ lookup nor a ``Location`` can move it somewhere that was not vetted.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
+import signal
 import subprocess
 import tempfile
 import threading
@@ -483,7 +485,10 @@ class LibraryStore:
             # the URL follows `--`.
             # No redirects: a vetted host must not hand the clone on to one that
             # was not.
-            completed = subprocess.run(
+            # Its own process group: a clone runs git-remote-https as a child, and on
+            # a timeout that helper must go too, or a tarpit host keeps it (and the
+            # socket) alive after the request has given up.
+            process = subprocess.Popen(
                 [
                     self.git,
                     "-c",
@@ -493,15 +498,21 @@ class LibraryStore:
                     *args,
                 ],
                 env=env,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                check=False,
-                timeout=self.timeout,
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as error:
-            raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
         except OSError as error:
             raise LibraryFetchError(f"could not run {self.git!r}: {error}") from error
+        try:
+            stdout, stderr = process.communicate(timeout=self.timeout)
+        except subprocess.TimeoutExpired as error:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
+        completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
         if completed.returncode != 0:
             # git's stderr stays in the log: it describes what the fetch reached,
             # or failed to, which is no business of the client's.

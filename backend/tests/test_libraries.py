@@ -7,7 +7,9 @@ network is never involved.
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -329,6 +331,35 @@ def test_the_lock_is_swapped_in_whole(paths: DataPaths, monkeypatch: pytest.Monk
 
     assert read_pins(paths) == before
     assert [p.name for p in paths.models.iterdir() if p.name.startswith(".libraries-")] == []
+
+
+def test_a_git_that_times_out_is_killed_with_its_helpers(
+    paths: DataPaths, history: ModelHistory, tmp_path: Path
+) -> None:
+    """A clone runs git-remote-https as a child; a timeout must take it too, or a
+    tarpit host keeps it alive after the request has given up."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    fake_git.write_text(
+        f"#!/bin/sh\nsleep 60 & echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    store = LibraryStore(paths, history, catalogue=(), git=str(fake_git), timeout=0.5)
+
+    with pytest.raises(LibraryFetchError, match="timed out"):
+        store._git("ls-remote", "--", "https://git.example/o/r.git")
+
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the timed-out git's child is still running")
 
 
 def test_a_refused_add_leaves_no_lock_behind(store: LibraryStore) -> None:
