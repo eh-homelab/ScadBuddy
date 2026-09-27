@@ -359,7 +359,7 @@ class ModelHistory:
         """Stage ``paths`` and commit them. ``None`` when nothing actually changed.
 
         ``prepare`` runs under the write lock first, which makes a read-modify-write
-        of a shared file -- ``libraries.lock`` (#93) -- atomic with its commit.
+        -- of a ``model.json``, say -- atomic with its commit.
         """
         with self._exclusive():
             if prepare is not None:
@@ -405,8 +405,8 @@ class ModelHistory:
         """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite.
 
         ``also`` is called with the resolved commit under the write lock, and the
-        paths it returns go into the same commit -- how a model's library pins come
-        back with it (#93).
+        paths it returns go into the same commit -- how a revision from before
+        per-model library pins comes back pinned (#93).
         """
         resolved = self.resolve(commit)
         with self._exclusive():

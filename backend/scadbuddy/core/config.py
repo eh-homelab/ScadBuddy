@@ -44,6 +44,9 @@ DEFAULT_OPENSCAD_LSP = "openscad-lsp"
 DEFAULT_LSP_SESSIONS = 4
 DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
 DEFAULT_GIT_TIMEOUT = 30.0
+# A shallow clone is still unbounded in size, and every checkout shares the data
+# volume (#213). NopSCADlib, the largest curated library, is about 60 MB.
+DEFAULT_LIBRARY_MAX_BYTES = 200_000_000
 
 
 @dataclass(frozen=True)
@@ -67,12 +70,14 @@ class Config:
     # Bounds every git call and the wait for the model repository's write lock.
     git_timeout: float = DEFAULT_GIT_TIMEOUT
     # Per model, never per process (#93): the checkouts of the libraries ONE model
-    # declares, and so the whole of OPENSCADPATH. Empty here; whoever resolved a
+    # pins, and so the whole of OPENSCADPATH. Empty here; whoever resolved a
     # model's source sets it with `dataclasses.replace`, which carries it through
     # every openscad call for that model -- schema, render and solids alike.
     library_path: tuple[Path, ...] = ()
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
+    # The most one library's clone may take on the data volume (#213).
+    library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
@@ -102,6 +107,11 @@ class Config:
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
             raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
+        # Zero or less would refuse every library, however small.
+        if self.library_max_bytes < 1:
+            raise ValueError(
+                f"SCADBUDDY_LIBRARY_MAX_BYTES must be at least 1, not {self.library_max_bytes}"
+            )
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
@@ -144,4 +154,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         git_timeout=float(source.get("SCADBUDDY_GIT_TIMEOUT") or DEFAULT_GIT_TIMEOUT),
         openscad_lsp=source.get("SCADBUDDY_OPENSCAD_LSP") or DEFAULT_OPENSCAD_LSP,
         lsp_sessions=int(source.get("SCADBUDDY_LSP_SESSIONS") or DEFAULT_LSP_SESSIONS),
+        library_max_bytes=int(
+            source.get("SCADBUDDY_LIBRARY_MAX_BYTES") or DEFAULT_LIBRARY_MAX_BYTES
+        ),
     )

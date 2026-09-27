@@ -79,6 +79,14 @@ CASES = [
     ("end-stop", dict(type="end_stop", length=54, text="ignored")),
     ("end-stop-ff", dict(type="end_stop", length=72, connectors="female_female")),
     ("loose", dict(connector_clearance=0.6)),
+    # Two sockets on a short piece used to cut it in two (or gut a crossing);
+    # the model now lengthens it / widens the curve.
+    ("socket-socket-36-raised", dict(length=36, connectors="female_female")),
+    ("crossing-36-socket-raised", dict(type="crossing", length=36)),
+    ("ramp-ff-36-raised", dict(type="ramp", length=36, connectors="female_female",
+                               connector_clearance=0.6)),
+    ("curve-ff-tight-raised", dict(type="curve", curve_radius=80, curve_angle=22.5,
+                                   connectors="female_female")),
 ]
 
 
@@ -146,6 +154,42 @@ def closed(tris):
         for a, b in ((0, 1), (1, 2), (2, 0)):
             edges[tuple(sorted((k[a], k[b])))] += 1
     return all(n == 2 for n in edges.values())
+
+
+def effective(p):
+    """The length / radius model.scad actually builds (see min_len, min_rc)."""
+    q = dict(p)
+    reach = HEAD_C + (12 + 2 * p["connector_clearance"]) / 2
+    ff = p["connectors"] == "female_female"
+    if p["type"] == "crossing" and p["connectors"] != "male_male":
+        need = 2 * (reach + (12 + 2 * p["connector_clearance"]) / 2 + 1)
+    elif p["type"] in ("straight", "name_tile", "ramp") and ff:
+        need = 2 * reach + 3
+    else:
+        need = 0
+    if p["length"] < need:
+        q["length"] = 18 * math.ceil(need / 18)
+    if p["type"] == "curve" and ff:
+        rc = (2 * reach + 3) / math.radians(p["curve_angle"])
+        if p["curve_radius"] + W / 2 < rc:
+            q["curve_radius"] = 2 * math.ceil((rc - W / 2) / 2)
+    return q
+
+
+def pieces(tris):
+    """Connected components of a triangle soup (vertices matched to 1e-4)."""
+    parent = {}
+
+    def find(a):
+        while parent.setdefault(a, a) != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+    for t in tris:
+        k = [tuple(round(c, 4) for c in v) for v in t]
+        for v in k[1:]:
+            parent[find(v)] = find(k[0])
+    return len({find(v) for v in parent})
 
 
 def kinds(c):
@@ -272,7 +316,7 @@ def near(a, b, tol=TOL):
 
 
 for name, ov in CASES:
-    p = dict(D, **ov)
+    p = effective(dict(D, **ov))
     t, L = p["type"], p["length"]
     text = has_text(p)
     print("\n[%s] %s  (%.1fs)" % (name, " ".join("%s=%s" % kv for kv in ov.items()) or "defaults",
@@ -317,8 +361,12 @@ for name, ov in CASES:
             cx, cy, r, z = x - HEAD_C * c, y - HEAD_C * s, 6 + p["connector_clearance"], 0
         ring = [v for v in verts if near(v[2], z) and abs(math.hypot(v[0] - cx, v[1] - cy) - r) <= 0.005]
         top = [v for v in verts if near(v[2], zb + T) and abs(math.hypot(v[0] - cx, v[1] - cy) - r) <= 0.005]
-        check(len(ring) >= 20 and len(top) >= 20,
-              "%s at (%.1f, %.1f): Ø%.2f from the bed to z=%g" % (k, cx, cy, 2 * r, zb + T))
+        # On a short ramp a socket reaches past the level landing, so its rim
+        # follows the slope and is not a full circle at deck height.
+        sloped = t == "ramp" and k == "female" and HEAD_C + r > min(20, L / 6)
+        check(len(ring) >= 20 and (len(top) >= 20 or (sloped and len(top) >= 3)),
+              "%s at (%.1f, %.1f): Ø%.2f from the bed to z=%g%s"
+              % (k, cx, cy, 2 * r, zb + T, " (rim partly on the slope)" if sloped else ""))
 
     if t == "ramp":
         rise = p["ramp_rise"]
@@ -331,6 +379,9 @@ for name, ov in CASES:
         stl = read_stl("%s/%s_%s.stl" % (OUT, name, col[1:]))
         parts[col] = stl
         check(closed(stl), "%s closed part is a closed mesh (%d triangles)" % (col, len(stl)))
+        if col == WOOD:
+            n = pieces(stl)
+            check(n == 1, "track is one piece (%d connected bodies)" % n)
     if text:
         tp = [v for q in parts[BROWN] for v in q]
         if t == "name_tile":

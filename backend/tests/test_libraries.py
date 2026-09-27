@@ -1,4 +1,5 @@
-"""Third-party OpenSCAD libraries as pinned git checkouts (#93), against real git.
+"""Third-party OpenSCAD libraries as pinned git checkouts (#93), pinned per model,
+against real git.
 
 Every upstream here is a local bare repository: the clone is the real one, the
 network is never involved.
@@ -8,35 +9,40 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import threading
 import time
-from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from scadbuddy.api.deps import build_state
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
-from scadbuddy.library.history import GitTimeoutError, ModelHistory
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.catalogue import Catalogue, LibraryNotDeclaredError, ModelMeta
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
+    KILL_WAIT,
     LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
+    LibraryDeclarationError,
     LibraryError,
     LibraryFetchError,
     LibraryNotFoundError,
     LibraryNotInstalledError,
     LibraryPin,
     LibraryStore,
+    LibraryTooLargeError,
     Lock,
-    LockfileError,
-    _write_pins,
+    ModelLibrary,
     declared_libraries,
     lock_at,
+    migrate_lockfile,
+    model_search_path,
+    pin_restored_declaration,
     read_lock,
-    read_pins,
-    restore_pins,
     search_path,
 )
 from scadbuddy.render.jobs import resolve_source
@@ -47,6 +53,7 @@ pytestmark = pytest.mark.requires_git
 
 V1 = "module marker() cube(1);\n"
 V2 = "module marker() cube(2);\n"
+SOURCE = "use <BOSL2/std.scad>\nmarker();\n"
 
 
 @pytest.fixture
@@ -69,13 +76,10 @@ def history(paths: DataPaths) -> ModelHistory:
 
 
 @pytest.fixture
-def store(
-    paths: DataPaths, history: ModelHistory, upstream: tuple[str, dict[str, str]]
-) -> LibraryStore:
+def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStore:
     url, _ = upstream
     return LibraryStore(
         paths,
-        history,
         catalogue=(
             CatalogueLibrary(
                 name="BOSL2",
@@ -89,148 +93,136 @@ def store(
     )
 
 
-def test_install_clones_the_catalogue_default_and_records_the_commit(
+@pytest.fixture
+def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
+    return Catalogue(paths, history)
+
+
+def _create(catalogue: Catalogue, slug: str = "widget") -> None:
+    catalogue.create(slug, SOURCE, ModelMeta(name=slug.title()))
+
+
+# ── fetching a pin ────────────────────────────────────────────────────────────
+
+
+def test_resolve_clones_the_catalogue_default_and_records_nothing(
     store: LibraryStore,
     paths: DataPaths,
     history: ModelHistory,
     upstream: tuple[str, dict[str, str]],
 ) -> None:
     url, commits = upstream
+    head = history.head()
 
-    pin = store.install("BOSL2")
+    pin = store.resolve("BOSL2")
 
-    assert (pin.url, pin.ref, pin.commit) == (url, "v1", commits["v1"])
+    assert pin == ModelLibrary(name="BOSL2", url=url, ref="v1", commit=commits["v1"])
     # Laid out so `use <BOSL2/std.scad>` resolves with the parent on OPENSCADPATH.
     checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
     assert checkout.read_text(encoding="utf-8") == V1
-    lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert lock == {"BOSL2": {"url": url, "ref": "v1", "commit": commits["v1"]}}
-    # The pin is a revision of the models repository, not a file beside it.
-    latest = history.log(limit=1)[0]
-    assert latest.message == f"Pin BOSL2 to v1 ({commits['v1'][:7]})"
-    assert [change.path for change in latest.files] == [LOCKFILE_NAME]
-
-
-def test_a_new_ref_moves_the_pin_and_keeps_the_old_checkout(
-    store: LibraryStore,
-    paths: DataPaths,
-    history: ModelHistory,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    _, commits = upstream
-    store.install("BOSL2")
-
-    pin = store.install("BOSL2", ref="v2")
-
-    assert pin.commit == commits["v2"]
-    assert read_pins(paths)["BOSL2"].commit == commits["v2"]
-    # An old revision still renders against the pin it was written with.
-    assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2").is_dir()
-    assert (paths.libraries / "BOSL2" / commits["v2"] / "BOSL2").is_dir()
-    assert [r.message for r in history.log(limit=2)] == [
-        f"Pin BOSL2 to v2 ({commits['v2'][:7]})",
-        f"Pin BOSL2 to v1 ({commits['v1'][:7]})",
-    ]
-
-
-def test_reinstalling_the_same_pin_is_not_a_revision(
-    store: LibraryStore, history: ModelHistory
-) -> None:
-    store.install("BOSL2")
-    head = history.head()
-
-    store.install("BOSL2")
-
+    # The pin is the model's to record; fetching it is no revision, and no lockfile.
     assert history.head() == head
+    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
-def test_a_failed_commit_does_not_fail_a_pin_that_was_written(
-    store: LibraryStore,
-    paths: DataPaths,
-    history: ModelHistory,
-    monkeypatch: pytest.MonkeyPatch,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    """As a catalogue action: the lockfile is what renders read, so the pin is live
-    and the client must not be told it failed."""
-    _, commits = upstream
-    head = history.head()
-
-    def fail_after_prepare(
-        message: str, *paths_: str, prepare: Callable[[], None] | None = None
-    ) -> str | None:
-        assert prepare is not None
-        prepare()
-        raise GitTimeoutError("git commit timed out after 30s")
-
-    monkeypatch.setattr(history, "commit", fail_after_prepare)
-
-    pin = store.install("BOSL2")
-
-    assert pin.commit == commits["v1"]
-    assert read_pins(paths)["BOSL2"] == pin
-    assert history.head() == head
-
-
-def test_a_commit_that_failed_before_writing_still_fails(
-    store: LibraryStore, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def fail_on_the_lock(
-        message: str, *paths_: str, prepare: Callable[[], None] | None = None
-    ) -> str | None:
-        raise GitTimeoutError("waited 30s for the in-process write lock")
-
-    monkeypatch.setattr(history, "commit", fail_on_the_lock)
-
-    with pytest.raises(GitTimeoutError):
-        store.install("BOSL2")
-
-
-def test_a_user_added_library_is_recorded_with_its_url(
+def test_a_new_ref_is_a_second_checkout_beside_the_first(
     store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
-    url, commits = upstream
+    _, commits = upstream
 
-    store.install("mylib", url=url, ref="v2")
+    store.resolve("BOSL2")
+    assert store.resolve("BOSL2", ref="v2").commit == commits["v2"]
 
-    assert read_pins(paths)["mylib"].url == url
-    entries = {entry.name: entry for entry in store.entries()}
-    assert entries["mylib"].curated is False
-    assert entries["mylib"].pin is not None
-    assert entries["mylib"].pin.commit == commits["v2"]
-    assert entries["BOSL2"].curated is True
-    assert entries["BOSL2"].pin is None
+    assert sorted(entry.name for entry in (paths.libraries / "BOSL2").iterdir()) == sorted(
+        [commits["v1"], commits["v2"]]
+    )
+
+
+def test_a_clone_that_finds_its_commit_already_there_keeps_that_checkout(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """The rename onto an existing checkout fails; the tree there is the same commit,
+    so the clone gives way to it and leaves no staging directory behind."""
+    _, commits = upstream
+    first = store.resolve("BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2"
+    marker = checkout / ".first"
+    marker.write_text("", encoding="utf-8")
+
+    second = store.resolve("BOSL2")
+
+    assert second == first
+    assert marker.is_file()
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+
+
+def test_concurrent_clones_of_one_commit_both_succeed(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    barrier = threading.Barrier(2)
+    results: list[ModelLibrary] = []
+    errors: list[BaseException] = []
+
+    def resolve() -> None:
+        barrier.wait(10)
+        try:
+            results.append(store.resolve("BOSL2"))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=resolve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert errors == []
+    assert [pin.commit for pin in results] == [commits["v1"]] * 2
+    checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
+    assert checkout.read_text(encoding="utf-8") == V1
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+
+
+def test_the_catalogue_is_what_can_be_suggested(store: LibraryStore) -> None:
+    assert [entry.name for entry in store.entries()] == ["BOSL2"]
 
 
 @pytest.fixture
 def elsewhere(tmp_path: Path) -> str:
-    """A second upstream, standing in for someone else's repository."""
+    """A second upstream, standing in for a fork."""
     url, _ = make_library_upstream(tmp_path / "elsewhere", {"v1": "module marker() sphere(1);\n"})
     return url
 
 
-def test_a_curated_name_cannot_be_pointed_at_another_repository(
-    store: LibraryStore, paths: DataPaths, elsewhere: str
+def test_a_curated_name_can_be_pinned_from_a_fork(
+    store: LibraryStore, elsewhere: str, paths: DataPaths
 ) -> None:
-    """Every model declaring BOSL2 trusts the catalogue's upstream; a caller must not
-    be able to swap that out by naming BOSL2 with its own URL."""
-    with pytest.raises(LibraryError, match="BOSL2"):
-        store.install("BOSL2", url=elsewhere, ref="v1")
+    """A fork of BOSL2 is still `use <BOSL2/...>`. The pin is one model's, so it
+    swaps nothing out from under any other."""
+    pin = store.resolve("BOSL2", url=elsewhere, ref="v1")
 
-    assert not (paths.models / LOCKFILE_NAME).exists()
-    assert list(paths.libraries.iterdir()) == []
+    assert pin.url == elsewhere
+    assert (paths.libraries / "BOSL2" / pin.commit / "BOSL2" / "std.scad").read_text(
+        encoding="utf-8"
+    ) == "module marker() sphere(1);\n"
+
+
+def test_a_fork_of_a_curated_name_needs_a_ref(store: LibraryStore, elsewhere: str) -> None:
+    with pytest.raises(LibraryError, match="ref"):
+        store.resolve("BOSL2", url=elsewhere)
 
 
 @pytest.mark.parametrize("suffix", ["/", ".git", ".git/"])
 def test_the_catalogue_url_matches_however_it_is_spelled(
-    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]], suffix: str
+    store: LibraryStore, upstream: tuple[str, dict[str, str]], suffix: str
 ) -> None:
     url, commits = upstream
     spelled = url.removesuffix(".git") + suffix
 
-    pin = store.install("BOSL2", url=spelled, ref="v2")
+    pin = store.resolve("BOSL2", url=spelled, ref="v2")
 
-    # Recorded as the catalogue spells it, so the lock never carries two spellings.
+    # Recorded as the catalogue spells it, so pins never carry two spellings.
     assert (pin.url, pin.commit) == (url, commits["v2"])
 
 
@@ -240,172 +232,25 @@ def test_the_catalogue_url_matches_whatever_the_case_of_its_scheme(
     url, commits = upstream
     scheme, rest = url.split("://", 1)
 
-    pin = store.install("BOSL2", url=f"{scheme.upper()}://{rest}", ref="v2")
+    pin = store.resolve("BOSL2", url=f"{scheme.upper()}://{rest}")
 
-    assert (pin.url, pin.commit) == (url, commits["v2"])
+    # The catalogue's own URL, so its default ref too.
+    assert (pin.url, pin.ref, pin.commit) == (url, "v1", commits["v1"])
 
 
-def test_a_user_added_library_cannot_be_repointed(
-    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]], elsewhere: str
+def test_a_user_named_library_is_pinned_from_its_url(
+    store: LibraryStore, upstream: tuple[str, dict[str, str]]
 ) -> None:
     url, commits = upstream
-    store.install("mylib", url=url, ref="v1")
 
-    with pytest.raises(LibraryError, match="mylib"):
-        store.install("mylib", url=elsewhere, ref="v1")
+    pin = store.resolve("mylib", url=url, ref="v2")
 
-    assert read_pins(paths)["mylib"].url == url
-    # Its own URL still moves it to another ref.
-    assert store.install("mylib", url=url, ref="v2").commit == commits["v2"]
-
-
-def _hold_the_first_clone(
-    store: LibraryStore, monkeypatch: pytest.MonkeyPatch
-) -> tuple[threading.Event, threading.Event]:
-    """Park the first clone until released, so a second install can race it."""
-    started, release = threading.Event(), threading.Event()
-    clone = store._clone
-    calls: list[str] = []
-
-    def slow_clone(name: str, url: str, ref: str, pinned: Sequence[str] = ()) -> str:
-        calls.append(name)
-        if len(calls) == 1:
-            started.set()
-            assert release.wait(10)
-        return clone(name, url, ref, pinned)
-
-    monkeypatch.setattr(store, "_clone", slow_clone)
-    return started, release
-
-
-def test_concurrent_adds_of_one_new_name_cannot_both_bind_it(
-    store: LibraryStore,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-    elsewhere: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Both would pass the one-name-one-URL check before either had recorded a pin;
-    the second must wait for the first and then see its URL."""
-    url, _ = upstream
-    started, release = _hold_the_first_clone(store, monkeypatch)
-    errors: list[BaseException] = []
-
-    def add_first() -> None:
-        store.install("mylib", url=url, ref="v1")
-
-    def add_second() -> None:
-        try:
-            store.install("mylib", url=elsewhere, ref="v1")
-        except LibraryError as error:
-            errors.append(error)
-
-    first = threading.Thread(target=add_first)
-    first.start()
-    assert started.wait(10)
-    second = threading.Thread(target=add_second)
-    second.start()
-    second.join(0.5)
-    release.set()
-    first.join(10)
-    second.join(10)
-
-    assert [str(error) for error in errors] == [
-        f"'mylib' comes from {url}; add {elsewhere} under another name"
-    ]
-    assert read_pins(paths)["mylib"].url == url
-    # The per-name lock is dropped once nobody holds or waits for it, so the table
-    # does not grow with every name ever added -- or ever tried.
-    assert store._names == {}
-
-
-def test_the_lock_is_swapped_in_whole(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Renders read the lock without the install lock, so a write that fails part
-    way must leave the previous lock whole, and nothing staged behind."""
-    paths.models.mkdir(parents=True, exist_ok=True)
-    before = {"a": LibraryPin(url="https://example.invalid/a.git", ref="v1", commit="a" * 40)}
-    _write_pins(paths, before)
-
-    def fail(*_: object) -> None:
-        raise OSError("disk full")
-
-    monkeypatch.setattr("scadbuddy.library.libraries.os.replace", fail)
-    after = {"b": LibraryPin(url="https://example.invalid/b.git", ref="v2", commit="b" * 40)}
-    with pytest.raises(OSError, match="disk full"):
-        _write_pins(paths, after)
-
-    assert read_pins(paths) == before
-    assert [p.name for p in paths.models.iterdir() if p.name.startswith(".libraries-")] == []
-
-
-def test_a_git_that_times_out_is_killed_with_its_helpers(
-    paths: DataPaths, history: ModelHistory, tmp_path: Path
-) -> None:
-    """A clone runs git-remote-https as a child; a timeout must take it too, or a
-    tarpit host keeps it alive after the request has given up."""
-    child_pid = tmp_path / "child.pid"
-    fake_git = tmp_path / "git"
-    fake_git.write_text(
-        f"#!/bin/sh\nsleep 60 & echo $! > {child_pid}\nwait\n",
-        encoding="utf-8",
-    )
-    fake_git.chmod(0o755)
-    store = LibraryStore(paths, history, catalogue=(), git=str(fake_git), timeout=0.5)
-
-    with pytest.raises(LibraryFetchError, match="timed out"):
-        store._git("ls-remote", "--", "https://git.example/o/r.git")
-
-    pid = int(child_pid.read_text())
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if not _running(pid):
-            break
-        time.sleep(0.05)
-    else:
-        pytest.fail("the timed-out git's child is still running")
-
-
-def _running(pid: int) -> bool:
-    """A killed orphan whose new parent never reaps it (pytest as PID 1 in the test
-    image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:  # gone, or going: ENOENT or ESRCH mid-read
-        return False
-    return stat.rsplit(")", 1)[1].split()[0] != "Z"
-
-
-def test_a_refused_add_leaves_no_lock_behind(store: LibraryStore) -> None:
-    with pytest.raises(LibraryNotFoundError):
-        store.install("nothing-here")
-
-    assert store._names == {}
-
-
-def test_an_add_of_one_name_does_not_hold_up_another(
-    store: LibraryStore,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    url, commits = upstream
-    started, release = _hold_the_first_clone(store, monkeypatch)
-    first = threading.Thread(target=lambda: store.install("mylib", url=url, ref="v1"))
-    first.start()
-    assert started.wait(10)
-
-    try:
-        assert store.install("BOSL2").commit == commits["v1"]
-    finally:
-        release.set()
-        first.join(10)
-
-    assert set(read_pins(paths)) == {"BOSL2", "mylib"}
+    assert (pin.name, pin.url, pin.commit) == ("mylib", url, commits["v2"])
 
 
 def test_a_name_outside_the_catalogue_needs_a_url(store: LibraryStore) -> None:
     with pytest.raises(LibraryNotFoundError):
-        store.install("nothing-here")
+        store.resolve("nothing-here")
 
 
 def test_a_user_added_library_needs_a_ref(
@@ -413,25 +258,24 @@ def test_a_user_added_library_needs_a_ref(
 ) -> None:
     url, _ = upstream
     with pytest.raises(LibraryError, match="ref"):
-        store.install("mylib", url=url)
+        store.resolve("mylib", url=url)
 
 
 def test_only_the_allowed_transports_are_cloned(
     paths: DataPaths, history: ModelHistory, upstream: tuple[str, dict[str, str]]
 ) -> None:
     url, _ = upstream
-    https_only = LibraryStore(paths, history, catalogue=())
+    https_only = LibraryStore(paths, catalogue=())
 
     with pytest.raises(LibraryError, match="https"):
-        https_only.install("mylib", url=url, ref="v1")
-    assert not (paths.models / LOCKFILE_NAME).exists()
+        https_only.resolve("mylib", url=url, ref="v1")
 
 
 def _recording_git(store: LibraryStore, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, ...]]:
     """Every git call the store makes, each failing as an unreachable fetch would."""
     calls: list[tuple[str, ...]] = []
 
-    def git(*args: str) -> str:
+    def git(*args: str, watch: Path | None = None) -> str:
         calls.append(args)
         raise LibraryFetchError("unreachable")
 
@@ -450,25 +294,24 @@ def test_a_url_whose_host_is_not_public_is_refused_without_running_git(
     addresses: list[str],
 ) -> None:
     fake_dns["git.internal.example"] = addresses
-    https_only = LibraryStore(paths, history, catalogue=())
+    https_only = LibraryStore(paths, catalogue=())
     calls = _recording_git(https_only, monkeypatch)
 
     with pytest.raises(LibraryError, match="public"):
-        https_only.install("mylib", url="https://git.internal.example/o/r.git", ref="v1")
+        https_only.resolve("mylib", url="https://git.internal.example/o/r.git", ref="v1")
 
     assert calls == []
-    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
 @pytest.mark.usefixtures("fake_dns")
 def test_an_address_literal_that_is_not_public_is_refused(
     paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    https_only = LibraryStore(paths, history, catalogue=())
+    https_only = LibraryStore(paths, catalogue=())
     calls = _recording_git(https_only, monkeypatch)
 
     with pytest.raises(LibraryError, match="public"):
-        https_only.install("mylib", url="https://[::1]:8443/o/r.git", ref="v1")
+        https_only.resolve("mylib", url="https://[::1]:8443/o/r.git", ref="v1")
     assert calls == []
 
 
@@ -478,11 +321,11 @@ def test_an_address_literal_that_is_not_public_is_refused(
 def test_a_url_carrying_credentials_is_refused_without_quoting_them(
     paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch, url: str
 ) -> None:
-    https_only = LibraryStore(paths, history, catalogue=())
+    https_only = LibraryStore(paths, catalogue=())
     calls = _recording_git(https_only, monkeypatch)
 
     with pytest.raises(LibraryError, match="user name or password") as refused:
-        https_only.install("mylib", url=url, ref="v1")
+        https_only.resolve("mylib", url=url, ref="v1")
     assert "s3cret" not in str(refused.value) and "tok3n" not in str(refused.value)
     assert calls == []
 
@@ -491,11 +334,11 @@ def test_a_url_carrying_credentials_is_refused_without_quoting_them(
 def test_a_public_url_is_cloned_from_only_the_addresses_it_was_vetted_at(
     paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    https_only = LibraryStore(paths, history, catalogue=())
+    https_only = LibraryStore(paths, catalogue=())
     calls = _recording_git(https_only, monkeypatch)
 
     with pytest.raises(LibraryFetchError):
-        https_only.install("mylib", url="https://git.example/o/r.git", ref="v1")
+        https_only.resolve("mylib", url="https://git.example/o/r.git", ref="v1")
 
     (clone,) = calls
     assert clone[:2] == ("-c", f"http.curloptResolve=git.example:443:{PUBLIC_ADDRESS}")
@@ -511,7 +354,6 @@ def test_a_catalogue_url_is_trusted_as_it_is(
     fake_dns["git.internal.example"] = ["10.1.2.3"]
     curated = LibraryStore(
         paths,
-        history,
         catalogue=(
             CatalogueLibrary(
                 name="BOSL2",
@@ -525,7 +367,7 @@ def test_a_catalogue_url_is_trusted_as_it_is(
     calls = _recording_git(curated, monkeypatch)
 
     with pytest.raises(LibraryFetchError):
-        curated.install("BOSL2", url="https://GIT.internal.example/o/BOSL2/")
+        curated.resolve("BOSL2", url="https://GIT.internal.example/o/BOSL2/")
 
     (clone,) = calls
     assert "https://git.internal.example/o/BOSL2.git" in clone
@@ -538,109 +380,74 @@ def test_a_name_that_is_not_a_directory_name_is_refused(
 ) -> None:
     url, _ = upstream
     with pytest.raises(LibraryError):
-        store.install(name, url=url, ref="v1")
+        store.resolve(name, url=url, ref="v1")
 
 
 @pytest.mark.parametrize("ref", ["-upload-pack=x", "a..b", "v1 v2"])
 def test_a_ref_that_is_not_a_ref_is_refused(store: LibraryStore, ref: str) -> None:
     with pytest.raises(LibraryError):
-        store.install("BOSL2", ref=ref)
+        store.resolve("BOSL2", ref=ref)
 
 
-def _entry(**fields: str) -> str:
-    return json.dumps(
-        {"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40, **fields}}
+def test_a_git_that_times_out_is_killed_with_its_helpers(
+    paths: DataPaths, history: ModelHistory, tmp_path: Path
+) -> None:
+    """A clone runs git-remote-https as a child; a timeout must take it too, or a
+    tarpit host keeps it alive after the request has given up."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    fake_git.write_text(
+        f"#!/bin/sh\nsleep 60 & echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
     )
+    fake_git.chmod(0o755)
+    store = LibraryStore(paths, catalogue=(), git=str(fake_git), timeout=0.5)
+
+    with pytest.raises(LibraryFetchError, match="timed out"):
+        store._git("ls-remote", "--", "https://git.example/o/r.git")
+
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _running(pid):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the timed-out git's child is still running")
 
 
-@pytest.mark.parametrize(
-    ("body", "match"),
-    [
-        ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "v1"}}', "'BOSL2'"),
-        ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1"}}', "commit"),
-        (_entry(ref="a..b"), "ref"),
-        (_entry(ref="-x"), "ref"),
-        ("{not json", "not valid JSON"),
-        ("[]", "not a JSON object"),
-    ],
-)
-def test_a_hand_edited_lock_that_is_not_valid_is_refused_by_name(
-    paths: DataPaths, body: str, match: str
+def test_a_killed_git_that_is_never_reaped_does_not_hold_up_the_error(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    (paths.models / LOCKFILE_NAME).write_text(body, encoding="utf-8")
+    waits: list[float | None] = []
 
-    lock = read_lock(paths)
+    class Unreapable:
+        pid = 0
+        args = ("git",)
 
-    assert lock.pins == {}
-    with pytest.raises(LockfileError, match=match):
-        search_path(paths, ["BOSL2"], lock)
-    assert search_path(paths, [], lock) == ()
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired("git", timeout or 0)
 
+    monkeypatch.setattr("scadbuddy.library.libraries.os.killpg", lambda pid, sig: None)
 
-def test_a_bad_entry_fails_only_the_models_that_declare_it(
-    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
-) -> None:
-    url, commits = upstream
-    store.install("other", url=url, ref="v2")
-    lock_file = paths.models / LOCKFILE_NAME
-    written = json.loads(lock_file.read_text(encoding="utf-8"))
-    written["broken"] = {"url": url, "ref": "v1", "commit": "HEAD"}
-    lock_file.write_text(json.dumps(written), encoding="utf-8")
+    LibraryStore._kill(Unreapable())  # type: ignore[arg-type]
 
-    lock = read_lock(paths)
-
-    assert set(lock.pins) == {"other"}
-    assert search_path(paths, ["other"], lock) == (paths.libraries / "other" / commits["v2"],)
-    assert search_path(paths, [], lock) == ()
-    with pytest.raises(LockfileError, match="'broken'"):
-        search_path(paths, ["other", "broken"], lock)
+    assert waits == [KILL_WAIT]
 
 
-def test_adding_a_library_keeps_a_broken_entry_as_it_was_written(
-    store: LibraryStore, paths: DataPaths
-) -> None:
-    broken = {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "HEAD"}
-    (paths.models / LOCKFILE_NAME).write_text(json.dumps({"hand": broken}), encoding="utf-8")
-
-    store.install("BOSL2")
-
-    written = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert written["hand"] == broken
-    assert set(read_pins(paths)) == {"BOSL2"}
-
-
-def test_re_adding_a_broken_entry_fixes_it(
-    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
-) -> None:
-    url, commits = upstream
-    (paths.models / LOCKFILE_NAME).write_text(
-        json.dumps({"BOSL2": {"url": url, "ref": "v1", "commit": "HEAD"}}), encoding="utf-8"
-    )
-
-    store.install("BOSL2")
-
-    assert read_lock(paths).broken == {}
-    assert read_pins(paths)["BOSL2"].commit == commits["v1"]
-
-
-def test_an_unreadable_lock_is_not_overwritten_by_an_add(
-    store: LibraryStore, paths: DataPaths
-) -> None:
-    (paths.models / LOCKFILE_NAME).write_text("{not json", encoding="utf-8")
-
-    with pytest.raises(LockfileError, match="not valid JSON"):
-        store.install("BOSL2")
-
-    assert (paths.models / LOCKFILE_NAME).read_text(encoding="utf-8") == "{not json"
-
-
-@pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
-def test_a_pin_takes_a_sha1_or_sha256_commit(commit: str) -> None:
-    assert LibraryPin(url="https://x.invalid/b.git", ref="v1", commit=commit).commit == commit
+def _running(pid: int) -> bool:
+    """A killed orphan whose new parent never reaps it (pytest as PID 1 in the test
+    image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except OSError:  # gone, or going: ENOENT or ESRCH mid-read
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 def test_sweep_staging_leaves_the_checkouts(store: LibraryStore, paths: DataPaths) -> None:
-    store.install("BOSL2")
+    store.resolve("BOSL2")
     (paths.libraries / f"{STAGING_PREFIX}dead" / "BOSL2").mkdir(parents=True)
 
     assert store.sweep_staging() == [f"{STAGING_PREFIX}dead"]
@@ -671,80 +478,254 @@ def test_sweep_staging_goes_on_past_one_it_cannot_remove(
     assert "could not remove a staging clone" in caplog.text
 
 
+@pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
+def test_a_pin_takes_a_sha1_or_sha256_commit(commit: str) -> None:
+    assert LibraryPin(url="https://x.invalid/b.git", ref="v1", commit=commit).commit == commit
+
+
 def test_an_unknown_ref_leaves_nothing_behind(store: LibraryStore, paths: DataPaths) -> None:
     with pytest.raises(LibraryError, match="clone"):
-        store.install("BOSL2", ref="v9")
+        store.resolve("BOSL2", ref="v9")
 
-    assert not (paths.models / LOCKFILE_NAME).exists()
     assert list(paths.libraries.iterdir()) == []
 
 
-def test_search_path_is_only_what_the_model_declares(
-    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
+    store: LibraryStore, paths: DataPaths
+) -> None:
+    store.max_bytes = 1
+
+    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ bytes, over the 1 bytes"):
+        store.resolve("BOSL2")
+
+    assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
+    paths: DataPaths, tmp_path: Path
+) -> None:
+    """The cap stops the clone mid-transfer: an oversized repository never gets to
+    write its whole tree to the volume before it is refused."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    # A clone that never finishes: a child keeps appending to the checkout.
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'for last; do :; done\nmkdir -p "$last"\n'
+        '(while :; do head -c 65536 /dev/zero >> "$last/blob"; sleep 0.01; done) &\n'
+        f"echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    store = LibraryStore(paths, catalogue=(), git=str(fake_git), timeout=60, max_bytes=1_000_000)
+
+    started = time.monotonic()
+    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ MB, over the 1 MB"):
+        store._clone("Big", "https://git.example/o/big.git", "main")
+
+    assert time.monotonic() - started < 30
+    assert list(paths.libraries.iterdir()) == []
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _running(pid):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the oversized clone's writer is still running")
+
+
+def test_a_clone_within_the_size_cap_is_fetched(store: LibraryStore, paths: DataPaths) -> None:
+    store.max_bytes = 10_000_000
+
+    pin = store.resolve("BOSL2")
+
+    assert (paths.libraries / "BOSL2" / pin.commit / "BOSL2").is_dir()
+
+
+def test_the_size_cap_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_LIBRARY_MAX_BYTES", "1234")
+    state = build_state(Settings(data_dir=tmp_path, frontend_dir=Path("/nonexistent")))
+
+    assert state.libraries.max_bytes == 1234
+
+
+# ── a model's pins ────────────────────────────────────────────────────────────
+
+
+def test_pinning_writes_the_pin_into_that_model_alone(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
 ) -> None:
     url, commits = upstream
-    store.install("BOSL2")
-    store.install("other", url=url, ref="v2")
-    lock = read_lock(paths)
+    _create(catalogue, "widget")
+    _create(catalogue, "gadget")
 
-    assert search_path(paths, ["BOSL2"], lock) == (paths.libraries / "BOSL2" / commits["v1"],)
-    assert search_path(paths, [], lock) == ()
+    record = catalogue.pin_library("widget", store.resolve("BOSL2"))
+
+    pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
+    assert [library.model_dump() for library in record.libraries] == [pinned]
+    stored = json.loads(paths.model_meta("widget").read_text(encoding="utf-8"))
+    assert stored["libraries"] == [pinned]
+    assert catalogue.record("gadget").libraries == []
+    # One revision of that model, and nothing outside it.
+    latest = history.log(limit=1)[0]
+    assert latest.message == f"Pin BOSL2 to v1 ({commits['v1'][:7]}) for widget"
+    assert [change.path for change in latest.files] == ["widget/model.json"]
 
 
-def test_declaring_a_library_that_is_not_pinned_is_an_error(paths: DataPaths) -> None:
-    with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
-        search_path(paths, ["BOSL2"], Lock())
+def test_two_models_pin_one_library_at_two_refs(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    _create(catalogue, "widget")
+    _create(catalogue, "gadget")
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+    catalogue.pin_library("gadget", store.resolve("BOSL2", ref="v2"))
+
+    assert search_path(paths, declared_libraries(paths.model_dir("widget"))) == (
+        paths.libraries / "BOSL2" / commits["v1"],
+    )
+    assert search_path(paths, declared_libraries(paths.model_dir("gadget"))) == (
+        paths.libraries / "BOSL2" / commits["v2"],
+    )
+
+
+def test_re_pinning_replaces_the_entry_in_place(
+    store: LibraryStore, catalogue: Catalogue, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+    catalogue.pin_library("widget", store.resolve("mylib", url=url, ref="v1"))
+
+    record = catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
+
+    assert [(library.name, library.commit) for library in record.libraries] == [
+        ("BOSL2", commits["v2"]),
+        ("mylib", commits["v1"]),
+    ]
+
+
+def test_re_pinning_the_same_commit_is_not_a_revision(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory
+) -> None:
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+    head = history.head()
+
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+
+    assert history.head() == head
+
+
+def test_pinning_replaces_a_bare_name_from_before_per_model_pins(
+    store: LibraryStore, catalogue: Catalogue, paths: DataPaths
+) -> None:
+    _create(catalogue)
+    meta = catalogue.read_raw_meta("widget")
+    catalogue.write_raw_meta("widget", {**meta, "libraries": ["BOSL2", "BOSL2"]})
+
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+
+    stored = json.loads(paths.model_meta("widget").read_text(encoding="utf-8"))
+    assert [entry["name"] for entry in stored["libraries"]] == ["BOSL2"]
+
+
+def test_unpinning_takes_the_library_off_the_model(
+    store: LibraryStore, catalogue: Catalogue, paths: DataPaths, history: ModelHistory
+) -> None:
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+
+    record = catalogue.unpin_library("widget", "BOSL2")
+
+    assert record.libraries == []
+    assert search_path(paths, declared_libraries(paths.model_dir("widget"))) == ()
+    assert history.log(limit=1)[0].message == "Remove library BOSL2 from widget"
+    with pytest.raises(LibraryNotDeclaredError):
+        catalogue.unpin_library("widget", "BOSL2")
+
+
+def test_a_listing_is_not_stopped_by_an_entry_it_cannot_read(
+    catalogue: Catalogue, paths: DataPaths
+) -> None:
+    """The listing shows the pins it can read; the render is what refuses (below)."""
+    _create(catalogue)
+    good = {"name": "ok", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
+    catalogue.write_raw_meta(
+        "widget",
+        {"name": "Widget", "libraries": ["BOSL2", {"name": "bad", "commit": "HEAD"}, good]},
+    )
+
+    assert [library.name for library in catalogue.record("widget").libraries] == ["ok"]
+
+
+@pytest.mark.parametrize(
+    ("libraries", "match"),
+    [
+        (
+            [{"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "HEAD"}],
+            "'BOSL2'",
+        ),
+        (
+            [
+                {
+                    "name": "BOSL2",
+                    "url": "https://x.invalid/b.git",
+                    "ref": "a..b",
+                    "commit": "a" * 40,
+                }
+            ],
+            "ref",
+        ),
+        ([{"url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}], "name"),
+        ("BOSL2", "not a list"),
+    ],
+)
+def test_a_hand_edited_declaration_is_refused_by_the_render(
+    paths: DataPaths, tmp_path: Path, libraries: Any, match: str
+) -> None:
+    (tmp_path / "model.json").write_text(json.dumps({"libraries": libraries}), encoding="utf-8")
+
+    with pytest.raises(LibraryDeclarationError, match=match):
+        declared_libraries(tmp_path)
 
 
 def test_a_pin_whose_checkout_is_gone_is_an_error(
     store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
     _, commits = upstream
-    store.install("BOSL2")
-    (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad").unlink()
-    (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2").rename(paths.root / "moved")
+    pin = store.resolve("BOSL2")
+    shutil.rmtree(paths.libraries / "BOSL2" / commits["v1"] / "BOSL2")
 
+    with pytest.raises(LibraryNotInstalledError, match="pin it to this model again at 'v1'"):
+        search_path(paths, [pin])
+
+
+def test_a_bare_name_with_no_lockfile_is_an_error(paths: DataPaths) -> None:
     with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
-        search_path(paths, ["BOSL2"], read_lock(paths))
-
-
-def test_lock_at_reads_the_lock_as_it_was_at_a_revision(
-    store: LibraryStore, history: ModelHistory, upstream: tuple[str, dict[str, str]]
-) -> None:
-    _, commits = upstream
-    before_any = history.head()
-    assert before_any is not None
-    store.install("BOSL2")
-    first = history.head()
-    assert first is not None
-    store.install("BOSL2", ref="v2")
-
-    assert lock_at(history, before_any) == Lock()
-    assert lock_at(history, first).pins["BOSL2"].commit == commits["v1"]
+        search_path(paths, ["BOSL2"])
 
 
 def test_declared_libraries_reads_model_json(tmp_path: Path) -> None:
+    pin = {"name": "dotSCAD", "url": "https://x.invalid/d.git", "ref": "v1", "commit": "a" * 40}
     (tmp_path / "model.json").write_text(
-        json.dumps({"name": "x", "libraries": ["BOSL2", "dotSCAD"]}), encoding="utf-8"
+        json.dumps({"name": "x", "libraries": ["BOSL2", pin]}), encoding="utf-8"
     )
-    assert declared_libraries(tmp_path) == ["BOSL2", "dotSCAD"]
+    assert declared_libraries(tmp_path) == ["BOSL2", ModelLibrary.model_validate(pin)]
     assert declared_libraries(tmp_path / "missing") == []
 
 
-# ── a model and its pins, versioned together ──────────────────────────────────
-
-
-@pytest.fixture
-def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history)
-
-
-def _declare_bosl2(catalogue: Catalogue) -> None:
-    catalogue.create("widget", "use <BOSL2/std.scad>\nmarker();\n", ModelMeta(name="Widget"))
-    catalogue.update("widget", ModelPatch(libraries=["BOSL2"]))
-
-
-def test_restoring_a_revision_restores_its_pins(
+async def test_a_render_resolves_the_models_own_pins(
     store: LibraryStore,
     catalogue: Catalogue,
     history: ModelHistory,
@@ -752,60 +733,8 @@ def test_restoring_a_revision_restores_its_pins(
     upstream: tuple[str, dict[str, str]],
 ) -> None:
     _, commits = upstream
-    store.install("BOSL2")
-    _declare_bosl2(catalogue)
-    written_against = catalogue.version("widget")
-    assert written_against is not None
-    catalogue.write_source("widget", "use <BOSL2/std.scad>\nmarker();\ncube(3);\n")
-    store.install("BOSL2", ref="v2")
-
-    restored = history.restore(
-        "widget",
-        written_against,
-        also=lambda commit: restore_pins(history, paths, "widget", commit),
-    )
-
-    assert read_pins(paths)["BOSL2"].commit == commits["v1"]
-    # One revision: the model and the pin it goes with.
-    latest = history.log(limit=1)[0]
-    assert latest.commit == restored
-    assert sorted(change.path for change in latest.files) == [LOCKFILE_NAME, "widget/model.scad"]
-
-
-def test_restoring_leaves_pins_the_model_does_not_declare(
-    store: LibraryStore,
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    url, commits = upstream
-    store.install("BOSL2")
-    store.install("other", url=url, ref="v1")
-    _declare_bosl2(catalogue)
-    written_against = catalogue.version("widget")
-    assert written_against is not None
-    store.install("other", url=url, ref="v2")
-
-    history.restore(
-        "widget",
-        written_against,
-        also=lambda commit: restore_pins(history, paths, "widget", commit),
-    )
-
-    assert read_pins(paths)["other"].commit == commits["v2"]
-
-
-async def test_a_render_resolves_the_live_pins(
-    store: LibraryStore,
-    catalogue: Catalogue,
-    history: ModelHistory,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-) -> None:
-    _, commits = upstream
-    store.install("BOSL2")
-    _declare_bosl2(catalogue)
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
 
     source = await resolve_source("widget", None, paths=paths, history=history)
 
@@ -820,12 +749,11 @@ async def test_an_old_revision_renders_against_the_pins_it_was_written_with(
     upstream: tuple[str, dict[str, str]],
 ) -> None:
     _, commits = upstream
-    store.install("BOSL2")
-    _declare_bosl2(catalogue)
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
     written_against = catalogue.version("widget")
     assert written_against is not None
-    catalogue.write_source("widget", "use <BOSL2/std.scad>\nmarker();\ncube(3);\n")
-    store.install("BOSL2", ref="v2")
+    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
 
     old = await resolve_source("widget", written_against, paths=paths, history=history)
     live = await resolve_source("widget", None, paths=paths, history=history)
@@ -834,20 +762,223 @@ async def test_an_old_revision_renders_against_the_pins_it_was_written_with(
     assert live.library_path == (paths.libraries / "BOSL2" / commits["v2"],)
 
 
+def test_restoring_a_revision_restores_its_pins_and_no_others(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """#211: a restore moves the restored model's pins, never another model's."""
+    _, commits = upstream
+    _create(catalogue, "widget")
+    _create(catalogue, "gadget")
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
+    catalogue.pin_library("gadget", store.resolve("BOSL2", ref="v2"))
+    written_against = catalogue.version("widget")
+    assert written_against is not None
+    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
+
+    history.restore(
+        "widget",
+        written_against,
+        also=lambda commit: pin_restored_declaration(history, paths, "widget", commit),
+    )
+
+    assert [lib.commit for lib in catalogue.record("widget").libraries] == [commits["v1"]]
+    assert [lib.commit for lib in catalogue.record("gadget").libraries] == [commits["v2"]]
+
+
 def test_the_orphan_sweep_leaves_libraries_alone(
     store: LibraryStore,
     catalogue: Catalogue,
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
 ) -> None:
-    """Checkouts and the lockfile are not slug-keyed: the only model declaring a
-    library being gone must not sweep either."""
+    """Checkouts are not slug-keyed: the only model pinning a library being gone
+    must not sweep them -- an older revision may still render against it."""
     _, commits = upstream
-    store.install("BOSL2")
-    _declare_bosl2(catalogue)
+    _create(catalogue)
+    catalogue.pin_library("widget", store.resolve("BOSL2"))
     catalogue.delete("widget")
 
     catalogue.sweep_orphans()
 
     assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad").is_file()
-    assert read_pins(paths)["BOSL2"].commit == commits["v1"]
+
+
+# ── the legacy lockfile ───────────────────────────────────────────────────────
+
+
+def _write_legacy(
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    lock: dict[str, Any] | str,
+    **declared: list[str],
+) -> str:
+    """A models repository as it was before per-model pins: bare names in each
+    model, the pins in one shared lockfile. Returns that revision."""
+    for slug, names in declared.items():
+        _create(catalogue, slug)
+        catalogue.write_raw_meta(slug, {"name": slug.title(), "libraries": names})
+    body = lock if isinstance(lock, str) else json.dumps(lock, indent=2)
+    (paths.models / LOCKFILE_NAME).write_text(body, encoding="utf-8")
+    commit = history.commit("legacy", LOCKFILE_NAME, *declared)
+    assert commit is not None
+    return commit
+
+
+def _pin(store: LibraryStore, ref: str = "v1") -> dict[str, str]:
+    """A fetched pin as the legacy lockfile wrote it: no name."""
+    return store.resolve("BOSL2", ref=ref).model_dump(exclude={"name"})
+
+
+def test_the_migration_moves_each_pin_into_the_models_that_declare_it(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    pin = _pin(store)
+    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"], gadget=[])
+
+    migrated = migrate_lockfile(paths, history, ["widget", "gadget"])
+
+    assert migrated == ["widget"]
+    stored = json.loads(paths.model_meta("widget").read_text(encoding="utf-8"))
+    assert stored["libraries"] == [{"name": "BOSL2", **pin}]
+    assert not (paths.models / LOCKFILE_NAME).exists()
+    latest = history.log(limit=1)[0]
+    assert sorted(change.path for change in latest.files) == [LOCKFILE_NAME, "widget/model.json"]
+    # Nothing left to do on the next boot.
+    assert migrate_lockfile(paths, history, ["widget", "gadget"]) == []
+
+
+def test_the_migration_leaves_a_name_the_lock_cannot_pin(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    pin = _pin(store)
+    broken = {**pin, "commit": "HEAD"}
+    _write_legacy(
+        catalogue, history, paths, {"BOSL2": pin, "broken": broken}, widget=["BOSL2", "broken"]
+    )
+
+    migrate_lockfile(paths, history, ["widget"])
+
+    declared = declared_libraries(paths.model_dir("widget"))
+    assert declared == [ModelLibrary(name="BOSL2", **pin), "broken"]
+    with pytest.raises(LibraryNotInstalledError, match="'broken'"):
+        search_path(paths, declared)
+
+
+def test_an_unreadable_lockfile_is_not_migrated_or_removed(
+    catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    _write_legacy(catalogue, history, paths, "{not json", widget=["BOSL2"])
+
+    assert migrate_lockfile(paths, history, ["widget"]) == []
+
+    assert (paths.models / LOCKFILE_NAME).read_text(encoding="utf-8") == "{not json"
+    lock = read_lock(paths)
+    assert lock is not None
+    with pytest.raises(LibraryDeclarationError, match="not valid JSON"):
+        search_path(paths, ["BOSL2"], lock)
+
+
+async def test_a_revision_from_before_the_migration_renders_against_its_lockfile(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": _pin(store)}, widget=["BOSL2"])
+    migrate_lockfile(paths, history, ["widget"])
+    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
+
+    old = await resolve_source("widget", legacy, paths=paths, history=history)
+
+    assert old.library_path == (paths.libraries / "BOSL2" / commits["v1"],)
+
+
+def test_restoring_a_revision_from_before_the_migration_pins_it_in_the_model(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": _pin(store)}, widget=["BOSL2"])
+    migrate_lockfile(paths, history, ["widget"])
+    catalogue.pin_library("widget", store.resolve("BOSL2", ref="v2"))
+
+    history.restore(
+        "widget",
+        legacy,
+        also=lambda commit: pin_restored_declaration(history, paths, "widget", commit),
+    )
+
+    assert [lib.commit for lib in catalogue.record("widget").libraries] == [commits["v1"]]
+    # The lockfile stays gone: the restore is the model's alone.
+    assert not (paths.models / LOCKFILE_NAME).exists()
+
+
+def test_lock_at_reads_the_lock_as_it_was_at_a_revision(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    before_any = history.head()
+    assert before_any is not None
+    pin = _pin(store)
+    legacy = _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
+
+    assert lock_at(history, before_any) == Lock()
+    assert lock_at(history, legacy).pins["BOSL2"] == LibraryPin.model_validate(pin)
+
+
+def _builtin(paths: DataPaths, slug: str, libraries: list[Any]) -> str:
+    """A built-in's mirror, as the boot sync writes it from the image."""
+    builtin = f"builtin:{slug}"
+    paths.model_dir(builtin).mkdir(parents=True)
+    paths.model_source(builtin).write_text(SOURCE, encoding="utf-8")
+    meta = {"name": slug.title(), "libraries": libraries}
+    paths.model_meta(builtin).write_text(json.dumps(meta), encoding="utf-8")
+    return builtin
+
+
+def test_the_migration_never_writes_a_built_in_and_keeps_the_lock_it_needs(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """A built-in's model.json is the image's: the boot sync would put a rewrite
+    back, with the lockfile gone. So it is left as mirrored, and the lockfile stays
+    for its renders to read."""
+    _, commits = upstream
+    pin = _pin(store)
+    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
+    builtin = _builtin(paths, "kit", ["BOSL2"])
+    mirrored = paths.model_meta(builtin).read_text(encoding="utf-8")
+
+    migrated = migrate_lockfile(paths, history, ["widget", builtin])
+
+    assert migrated == ["widget"]
+    assert paths.model_meta(builtin).read_text(encoding="utf-8") == mirrored
+    assert (paths.models / LOCKFILE_NAME).is_file()
+    assert model_search_path(paths, builtin) == (paths.libraries / "BOSL2" / commits["v1"],)
+    # Its own model is migrated all the same, and a second boot changes nothing.
+    assert declared_libraries(paths.model_dir("widget")) == [ModelLibrary(name="BOSL2", **pin)]
+    assert migrate_lockfile(paths, history, ["widget", builtin]) == []
+
+
+def test_the_lock_goes_once_no_built_in_declares_by_name(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    pin = _pin(store)
+    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
+    builtin = _builtin(paths, "kit", [{"name": "BOSL2", **pin}])
+
+    migrate_lockfile(paths, history, ["widget", builtin])
+
+    assert not (paths.models / LOCKFILE_NAME).exists()

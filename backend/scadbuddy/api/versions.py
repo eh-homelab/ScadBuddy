@@ -26,7 +26,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     RevisionRange,
 )
-from scadbuddy.library.libraries import restore_pins
+from scadbuddy.library.libraries import pin_restored_declaration
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
@@ -249,15 +249,17 @@ def restore_version(
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
-        # The pins the revision rendered with come back in the same commit (#93).
-        history.restore(slug, resolved, also=lambda at: restore_pins(history, paths, slug, at))
+        # The revision's own pins come back with its `model.json`; one written
+        # before pins moved into the model gets the ones its lockfile gave it (#93).
+        history.restore(
+            slug, resolved, also=lambda at: pin_restored_declaration(history, paths, slug, at)
+        )
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    # The model's own latest revision, not the commit the restore made: when only
-    # the pins differed, that commit touches `libraries.lock` alone and the model
-    # stays at the revision it was restored to.
+    # The model's own latest revision: when nothing differed the restore made no
+    # commit, and the repository HEAD may belong to another model.
     revisions = history.log(slug, limit=1)
     if not revisions:  # pragma: no cover - defensive
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, "the restore left no revision")

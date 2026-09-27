@@ -20,6 +20,7 @@ from scadbuddy.api import (
     models,
     outputs,
     plates,
+    presets,
     printing,
     settings,
     upstream,
@@ -32,6 +33,8 @@ from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.history import GitError
+from scadbuddy.library.libraries import migrate_lockfile
 
 API_PREFIX = "/api/v1"
 
@@ -45,6 +48,7 @@ def _api_router() -> APIRouter:
     router.include_router(models.router)
     router.include_router(upstream.router)
     router.include_router(versions.router)
+    router.include_router(presets.router)
     router.include_router(jobs.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
@@ -107,6 +111,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # Pins from before they moved into each model (#93): once, then the shared
+    # lockfile is gone. It logs what it cannot record, so it never stops the boot.
+    try:
+        slugs = [record.slug for record in await asyncio.to_thread(state.catalogue.list_models)]
+        await asyncio.to_thread(migrate_lockfile, state.paths, state.history, slugs)
+    except (OSError, ValueError, GitError):
+        logger.exception("could not migrate the library lockfile")
     # A library clone the process died in the middle of. Nothing is cloning yet:
     # no request has been served.
     try:

@@ -26,6 +26,11 @@ describe('fitMessages', () => {
     expect(fitLabel(over)).toBe('Too big on X')
   })
 
+  it('states the overshoot in the display unit', () => {
+    const over = fit({ overshoots: [{ axis: 'X', size: 330.2, limit: 304.8 }] })
+    expect(fitMessages(over, 'in')).toEqual(['X is 1.00 in over the H2C (13.00 of 12.00 in)'])
+  })
+
   it('names every axis that does not fit', () => {
     const over = fit({
       overshoots: [

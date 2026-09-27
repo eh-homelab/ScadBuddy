@@ -70,9 +70,36 @@ COL = dict(body="#1E88E5", pattern="#FFEB3B", pattern2="#FFFFFF", name="#FFFFFF"
            launcher="#FB8C00", rack="#8E24AA")
 RIM_W, NAME_SIZE, H_RACK, ROOF, RING_RO = 2, 3.5, 6, 1.6, 12
 
+# DejaVu Sans Bold advance widths at size 10, read from model.scad.
+ADV10 = [float(x) for x in re.search(r"ADV10 = \[(.*?)\];", open("model.scad").read(),
+                                      re.S).group(1).split(",")]
+
+
+def letter_gaps(tris):
+    """Angular gaps (degrees) between neighbouring letters of the copy on the +y side.
+
+    Letters are the angular extents of the name's triangles, merged where
+    they overlap (the dot of an i joins its stem)."""
+    spans = []
+    for t in tris:
+        if min(v[1] for v in t) <= 0:
+            continue
+        a = [math.degrees(math.atan2(v[1], v[0])) for v in t]
+        spans.append([min(a), max(a)])
+    spans.sort()
+    merged = []
+    for a0, a1 in spans:
+        if merged and a0 <= merged[-1][1] + 1e-6:
+            merged[-1][1] = max(merged[-1][1], a1)
+        else:
+            merged.append([a0, a1])
+    return [b[0] - a[1] for a, b in zip(merged, merged[1:])]
+
+
 CASES = [
     ("defaults", {}),
     ("one-ufo-dots-point-name", dict(style="ufo_disc", pattern="dots", tip="point", name="MAYA")),
+    ("one-name-narrow-letters", dict(pattern="none", name="Oliver", name_color="#000000")),
     ("one-flower-rays", dict(style="flower", pattern="rays", pattern2_color="#EC407A")),
     ("one-small-fat-longname", dict(diameter=30, stem_d=12, stem_length=20, name="Maximilian12",
                                     pattern="rings")),
@@ -148,7 +175,9 @@ def geom(ov):
     r1 = R - RIM_W - 1
     if p["name"]:
         name_r = face_r - NAME_SIZE / 2
-        s = min(NAME_SIZE, math.pi * name_r * 0.8 / (len(p["name"]) * 0.78))
+        adv = sum(ADV10[ord(ch) - 32] if 32 <= ord(ch) <= 126 else ADV10[78 - 32]
+                  for ch in p["name"])
+        s = min(NAME_SIZE, math.pi * name_r * 0.8 * 10 / adv)
         name_ok = s >= 1.5 and name_r - s > r0 + 1
         if name_ok:
             r1 = name_r - s / 2 - 1.5
@@ -453,6 +482,14 @@ for name, ov in CASES:
         top_out = max(math.hypot(p[0], p[1]) for t in body["top"] for p in t)
         check(ring_in < top_out - 0.99 and ring_in > g["R"] - 2,
               "ring is captive: its ridge reaches r=%.2f inside the rim's r=%.2f" % (ring_in, top_out))
+
+    if name == "one-name-narrow-letters":
+        # Letters sit at their own advance widths, not a fixed pitch: the gap
+        # after the narrow l and i must match the others (arc length at r=R-5).
+        gaps = [math.radians(a) * (g["R"] - 5) for a in
+                letter_gaps(read_stl("%s/%s_c_%s.stl" % (OUT, name, "000000")))]
+        check(len(gaps) == len(ov["name"]) - 1 and max(gaps) - min(gaps) <= 0.6,
+              "%d letters, evenly spaced: gaps %s mm" % (len(ov["name"]), [round(x, 2) for x in gaps]))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

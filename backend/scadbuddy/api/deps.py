@@ -17,6 +17,7 @@ from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
@@ -42,6 +43,7 @@ class AppState:
     history: ModelHistory
     catalogue: Catalogue
     outputs: OutputStore
+    presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
     libraries: LibraryStore
@@ -55,9 +57,11 @@ class AppState:
     #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
     #: thread for up to the git timeout; uncapped, a burst of installs would hold the
     #: default executor that every other `to_thread` route shares. More than one, so
-    #: a long clone (NopSCADlib) doesn't hold up adding another library; the store's
-    #: per-name locks still order two adds of the same name. A queued install waits
-    #: on the loop, not in a thread.
+    #: a long clone (NopSCADlib) doesn't hold up adding another library. Nothing
+    #: orders two clones of the same library: each runs in full, and the one whose
+    #: commit is already checked out gives way to it (`LibraryStore._clone`); the pin
+    #: itself is written under the history's write lock. A queued install waits on
+    #: the loop, not in a thread.
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
@@ -89,13 +93,14 @@ def build_state(settings: Settings) -> AppState:
         # The outputs feed the catalogue's fallback thumbnail (#179).
         catalogue=Catalogue(paths, history, outputs),
         outputs=outputs,
+        presets=PresetStore(paths),
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        libraries=LibraryStore(paths, history),
+        libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
         queue=RenderQueue(config, paths, store=store, history=history, metrics=metrics),
         metrics=metrics,
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -152,6 +157,10 @@ def get_outputs(state: StateDep) -> OutputStore:
     return state.outputs
 
 
+def get_presets(state: StateDep) -> PresetStore:
+    return state.presets
+
+
 def get_settings_store(state: StateDep) -> SettingsStore:
     return state.settings_store
 
@@ -181,6 +190,7 @@ PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
+PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]

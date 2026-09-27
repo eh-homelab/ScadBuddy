@@ -20,7 +20,7 @@ text = "Basil"; // 20
 font = "Lobster Two:style=Bold"; // font
 
 // Letter height in mm; shrinks automatically if the name does not fit the label
-text_size = 12; // [6:1:25]
+text_size = 12; // [6:1:40]
 
 // How the letters are made
 text_style = "raised"; // [raised:Raised, inlay:Flush inlay]
@@ -81,7 +81,11 @@ rel = text_style == "raised" ? relief : min(relief, T * 0.4);
 corner_r = min(3, H / 4);
 sw = min(stake_w, W - 2 * corner_r);
 
-text_w = max(1, W - 2 * text_pad);
+// The arrow's fletching notch reaches H / 4 into the left end, so its text
+// box starts past the notch and is shifted right by half that.
+notch = style == "arrow_stake" ? H / 4 : 0;
+text_w = max(1, W - 2 * text_pad - notch);
+text_x = notch / 2;
 text_h = max(1, H - 2 * text_pad);
 
 // ---------------------------------------------------------------- outline
@@ -164,7 +168,7 @@ module fit_y(h) {
 module text_2d() {
     if (has_text)
         intersection() {
-            fit_y(text_h) fit_x(text_w)
+            translate([text_x, 0]) fit_y(text_h) fit_x(text_w)
                 text(text, size = text_size, font = font,
                      halign = "center", valign = "center");
             offset(delta = -1) body_2d();

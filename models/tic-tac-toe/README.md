@@ -90,8 +90,10 @@ is the cell less the line and a 2 mm wall each side.
 - **Printing:** the box prints open side up; the groove ceilings are 45°
   overhangs. The lid prints face up; its flange sits on the bed.
 
-At `size` 125 and up the box and lid side by side are wider than 250 mm, and
-the render echoes a `NOTE:`; print the lid on a second plate.
+The box and lid are laid out side by side with an 8 mm gap. At `size` 150
+that would be wider than the H2C's 300 mm (both nozzles), so the gap narrows
+(to 5.4-6.6 mm, depending on `clearance`) and the plate is at most 300 mm wide
+at every setting.
 
 ## Variations
 
@@ -111,12 +113,13 @@ the render echoes a `NOTE:`; print the lid on a second plate.
 ./verify.sh
 ```
 
-Renders seven cases in `scadbuddy-verify:local` (building it from
+Renders eight cases in `scadbuddy-verify:local` (building it from
 `openscad/openscad:dev` when it is missing): the defaults, the box, star and
 heart pieces on the board and in the box, the smallest and thinnest box with
-0.2 mm clearance, and the largest box and board with 0.8 mm clearance. For
+0.2 mm clearance, the largest box and board with 0.8 mm clearance, and the
+largest box with 0.2 mm clearance (the widest plate). For
 each it checks the four colour parts, that `Default` has no triangles, the
-plate's bounding box, and from one closed render per colour (the way
+plate's bounding box and that it is at most 300 mm wide, and from one closed render per colour (the way
 ScadBuddy builds its parts): the board's and grid's z ranges, the grid's span
 and inlay area, the flat board's volume (slab less nine wells and the grid),
 that every piece lies within `well - 2 × clearance`, and that no two pieces

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 from datetime import datetime
 
 from fastapi import APIRouter, Request, status
@@ -19,20 +20,28 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.versions import require_history
+from scadbuddy.core.config import Config
+from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
+from scadbuddy.library.history import (
+    COMMIT_ID_PATTERN,
+    GitError,
+    ModelHistory,
+    RevisionNotFoundError,
+)
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
     Job,
     JobNotFoundError,
     JobState,
+    ModelSource,
     PartInfo,
     QueueFullError,
     RenderQueue,
     resolve_source,
 )
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import CustomizerSchema, ParamValue
 
 router = APIRouter(tags=["jobs"])
 
@@ -118,6 +127,55 @@ def require_job(queue: RenderQueue, job_id: str) -> Job:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
 
 
+async def schema_of(
+    slug: str,
+    requested: str | None,
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+    config: Config,
+    version: str | None = None,
+) -> tuple[ModelSource, CustomizerSchema]:
+    """The source a render of ``slug`` at ``requested`` reads, and its schema.
+
+    The schema parameters are validated against has to be the schema of the revision
+    being rendered, not the one the model is currently at. `resolve_source` also hands
+    back which revision that is, so the job can be stamped without asking git again.
+    ``version`` is what the client asked for, for the 404's message.
+    """
+    try:
+        source = await resolve_source(slug, requested, paths=paths, history=history)
+        schema = await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(config)
+        )
+    except RevisionNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {version}") from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    except FileNotFoundError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
+        ) from None
+    return source, schema
+
+
+def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
+    """422 unless every one of ``params`` is a parameter of ``schema``, of its type."""
+    unknown = sorted(set(params) - {p.name for p in schema.parameters})
+    if unknown:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"unknown parameters: {', '.join(unknown)}",
+            parameters=unknown,
+        )
+    try:
+        build_defines(schema, params)
+    except UnknownParameterError as error:  # pragma: no cover - covered by the check above
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+
+
 @router.post(
     "/models/{slug}/render",
     response_model=RenderAccepted,
@@ -144,39 +202,10 @@ async def render_model(
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
-    try:
-        # The schema the parameters are validated against has to be the schema of
-        # the revision being rendered, not the one the model is currently at.
-        # `resolve_source` also hands back which revision that is, so the job can
-        # be stamped without asking git a second time.
-        source = await resolve_source(slug, requested, paths=paths, history=history)
-        schema = await cached_schema(
-            source.scad, source.schema_cache, config=source.configure(config)
-        )
-    except RevisionNotFoundError:
-        raise ApiError(
-            status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {body.version}"
-        ) from None
-    except GitError as error:
-        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    except FileNotFoundError:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
-        ) from None
-
-    unknown = sorted(set(body.params) - {p.name for p in schema.parameters})
-    if unknown:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"unknown parameters: {', '.join(unknown)}",
-            parameters=unknown,
-        )
-    try:
-        build_defines(schema, body.params)
-    except UnknownParameterError as error:  # pragma: no cover - covered by the check above
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    except ValueError as error:
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    source, schema = await schema_of(
+        slug, requested, paths=paths, history=history, config=config, version=body.version
+    )
+    require_valid_params(schema, body.params)
 
     # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
     # the queue accepts every render and works through them.

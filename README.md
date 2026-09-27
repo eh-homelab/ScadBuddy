@@ -21,6 +21,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 
 - **MakerWorld-parity customizer**: tabs from `/* [Group] */`, sliders, dropdowns,
   toggles, text limits, and `// color` / `// font` pickers.
+- **Presets**: save named parameter sets per template — built-ins too — and start
+  from one, changing only what differs this time (a name, a colour, a size). A
+  preset keeps only the values that differ from the defaults. A template can ship
+  its own read-only presets in a `presets.json` beside `model.scad`
+  (`{"presets": [{"name": "…", "params": {…}}]}`).
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -63,13 +68,18 @@ for the project picker).
   Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, settings, downloaded fonts and caches. Back up the volume.
+  outputs, saved presets (`presets/`, outside the git repository), settings,
+  downloaded fonts and caches. Back up the volume.
 - **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
-  `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary).
+  `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
+  `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
+  clone may take on the volume; the clone's size is measured while it runs, so it
+  can overshoot by roughly one poll interval's worth of transfer, 0.2 to 2 s,
+  before it is stopped).
   Each concurrent render or check is its own `openscad` process, and each open
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an

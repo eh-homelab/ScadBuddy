@@ -1,11 +1,11 @@
-"""The library routes (#93), and a model's libraries reaching its renders.
+"""The library routes (#93): the catalogue, pinning a library to one model, and
+that model's pins reaching its renders.
 
 The upstream is a local bare repository, so the clone is real and offline.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import threading
@@ -22,11 +22,9 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import scadbuddy.api.models as models_api
-import scadbuddy.library.libraries as libraries_module
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import ModelMeta, ModelRecord
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
@@ -55,7 +53,6 @@ def libraries_app(app: FastAPI, upstream: tuple[str, dict[str, str]]) -> FastAPI
     state: AppState = getattr(app.state, STATE_ATTR)
     store = LibraryStore(
         state.paths,
-        state.history,
         catalogue=(
             CatalogueLibrary(
                 name="BOSL2",
@@ -77,73 +74,136 @@ def lib_client(libraries_app: FastAPI) -> Iterator[TestClient]:
         yield test_client
 
 
-def add(client: TestClient, **body: Any) -> dict[str, Any]:
-    response = client.post("/api/v1/libraries", json=body)
-    assert response.status_code == 200, response.text
-    added: dict[str, Any] = response.json()
-    return added
-
-
-def create_model(client: TestClient) -> None:
-    response = client.post("/api/v1/models", json={"name": SLUG, "source": SOURCE})
+def create_model(client: TestClient, name: str = SLUG) -> dict[str, Any]:
+    response = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
     assert response.status_code == 201, response.text
+    created: dict[str, Any] = response.json()
+    return created
 
 
-def declare(client: TestClient, *names: str) -> dict[str, Any]:
-    response = client.patch(f"/api/v1/models/{SLUG}", json={"libraries": list(names)})
+def pin(client: TestClient, name: str, slug: str = SLUG, **body: Any) -> dict[str, Any]:
+    response = client.put(f"/api/v1/models/{slug}/libraries/{name}", json=body)
     assert response.status_code == 200, response.text
     record: dict[str, Any] = response.json()
     return record
 
 
-def test_the_catalogue_lists_what_can_be_added(lib_client: TestClient) -> None:
+def test_the_catalogue_lists_what_can_be_pinned(lib_client: TestClient) -> None:
     listed = lib_client.get("/api/v1/libraries").json()
 
-    assert [(entry["name"], entry["ref"], entry["curated"]) for entry in listed] == [
-        ("BOSL2", "v1", True)
+    assert listed == [
+        {
+            "name": "BOSL2",
+            "url": listed[0]["url"],
+            "ref": "v1",
+            "licence": "BSD-2-Clause",
+            "homepage": "https://example.invalid/bosl2",
+        }
     ]
-    assert listed[0]["pin"] is None
-    assert listed[0]["licence"] == "BSD-2-Clause"
 
 
-def test_adding_a_library_pins_it_in_the_models_repository(
+def test_pinning_a_library_records_it_in_that_model_alone(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
     url, commits = upstream
+    create_model(lib_client)
+    create_model(lib_client, "gadget")
 
-    added = add(lib_client, name="BOSL2")
+    record = pin(lib_client, "BOSL2")
 
-    assert added["pin"] == {"url": url, "ref": "v1", "commit": commits["v1"]}
-    lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert lock["BOSL2"]["commit"] == commits["v1"]
-    assert lib_client.get("/api/v1/libraries").json()[0]["pin"]["commit"] == commits["v1"]
+    pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
+    assert record["libraries"] == [pinned]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == [pinned]
+    assert lib_client.get("/api/v1/models/gadget").json()["libraries"] == []
+    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
-def test_bumping_the_ref_writes_the_new_commit_to_the_lock(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+def test_two_models_render_one_library_at_two_refs(
+    lib_client: TestClient,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, commits = upstream
-    add(lib_client, name="BOSL2")
+    create_model(lib_client)
+    create_model(lib_client, "gadget")
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", "gadget", ref="v2")
+    log = tmp_path / "openscadpath.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
 
-    bumped = add(lib_client, name="BOSL2", ref="v2")
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+    assert lib_client.get("/api/v1/models/gadget/schema").status_code == 200
 
-    assert bumped["pin"]["commit"] == commits["v2"]
-    lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert lock["BOSL2"]["ref"] == "v2"
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(paths.libraries / "BOSL2" / commits["v1"]),
+        str(paths.libraries / "BOSL2" / commits["v2"]),
+    ]
 
 
-def test_a_user_added_library_is_listed_after_the_catalogue(
+def test_a_library_is_pinned_by_url_under_any_name(
     lib_client: TestClient, upstream: tuple[str, dict[str, str]]
 ) -> None:
-    url, _ = upstream
+    url, commits = upstream
+    create_model(lib_client)
 
-    add(lib_client, name="mylib", url=url, ref="v2")
+    record = pin(lib_client, "mylib", url=url, ref="v2")
 
-    listed = lib_client.get("/api/v1/libraries").json()
-    assert [(entry["name"], entry["curated"]) for entry in listed] == [
-        ("BOSL2", True),
-        ("mylib", False),
+    assert [(lib["name"], lib["commit"]) for lib in record["libraries"]] == [
+        ("mylib", commits["v2"])
     ]
+
+
+def test_a_curated_name_can_be_pinned_from_a_fork(lib_client: TestClient, tmp_path: Path) -> None:
+    """One model's fork swaps nothing out from under any other."""
+    elsewhere, commits = make_library_upstream(tmp_path / "elsewhere", {"v1": "sphere(1);\n"})
+    create_model(lib_client)
+
+    record = pin(lib_client, "BOSL2", url=elsewhere, ref="v1")
+
+    assert record["libraries"][0]["url"] == elsewhere
+    assert record["libraries"][0]["commit"] == commits["v1"]
+
+
+def test_removing_a_library_takes_it_off_the_model(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+
+    removed = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2")
+    again = lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2")
+
+    assert removed.status_code == 200, removed.text
+    assert removed.json()["libraries"] == []
+    assert again.status_code == 404
+
+
+def test_a_built_in_takes_no_pins(lib_client: TestClient, libraries_app: FastAPI) -> None:
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        response = lib_client.put("/api/v1/models/builtin:anything/libraries/BOSL2", json={})
+
+    assert response.status_code == 403
+
+
+def test_pinning_to_a_model_that_does_not_exist_is_a_404_without_a_clone(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+
+    assert response.status_code == 404
+
+
+def test_the_metadata_patch_takes_no_libraries(lib_client: TestClient) -> None:
+    """A pin is a fetched commit; it is set by the pin route, never typed in."""
+    create_model(lib_client)
+
+    patched = lib_client.patch(f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]})
+
+    assert patched.status_code == 200
+    assert patched.json()["libraries"] == []
 
 
 def test_installs_in_flight_are_capped(
@@ -154,9 +214,9 @@ def test_installs_in_flight_are_capped(
     store = libraries_app.dependency_overrides[get_libraries]()
     lock = threading.Lock()
     running, most = 0, 0
-    real_install = store.install
+    real_resolve = store.resolve
 
-    def install(name: str, **kwargs: Any) -> Any:
+    def resolve(name: str, **kwargs: Any) -> Any:
         nonlocal running, most
         with lock:
             running += 1
@@ -164,59 +224,56 @@ def test_installs_in_flight_are_capped(
         time.sleep(0.2)
         with lock:
             running -= 1
-        return real_install(name, **kwargs)
+        return real_resolve(name, **kwargs)
 
-    monkeypatch.setattr(store, "install", install)
-    with ThreadPoolExecutor(INSTALL_CONCURRENCY + 2) as pool:
+    monkeypatch.setattr(store, "resolve", resolve)
+    slugs = [f"model-{index}" for index in range(INSTALL_CONCURRENCY + 2)]
+    for slug in slugs:
+        create_model(lib_client, slug)
+    with ThreadPoolExecutor(len(slugs)) as pool:
         codes = list(
             pool.map(
-                lambda _: lib_client.post("/api/v1/libraries", json={"name": "BOSL2"}).status_code,
-                range(INSTALL_CONCURRENCY + 2),
+                lambda slug: (
+                    lib_client.put(f"/api/v1/models/{slug}/libraries/BOSL2", json={}).status_code
+                ),
+                slugs,
             )
         )
 
-    assert codes == [200] * (INSTALL_CONCURRENCY + 2)
+    assert codes == [200] * len(slugs)
     assert most == INSTALL_CONCURRENCY
 
 
 def test_an_unknown_library_without_a_url_is_a_404(lib_client: TestClient) -> None:
-    response = lib_client.post("/api/v1/libraries", json={"name": "nothing"})
+    create_model(lib_client)
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/nothing", json={})
     assert response.status_code == 404
     assert response.headers["content-type"] == "application/problem+json"
+    assert "catalogue" in response.json()["detail"]
 
 
 def test_a_url_on_a_transport_that_is_not_allowed_is_a_422(lib_client: TestClient) -> None:
-    response = lib_client.post(
-        "/api/v1/libraries", json={"name": "mylib", "url": "ext::sh -c touch% /tmp/x", "ref": "v1"}
+    create_model(lib_client)
+    response = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "ext::sh -c touch% /tmp/x", "ref": "v1"},
     )
     assert response.status_code == 422
 
 
-def test_a_curated_name_with_another_url_is_a_422(
-    lib_client: TestClient, paths: DataPaths, tmp_path: Path
-) -> None:
-    elsewhere, _ = make_library_upstream(tmp_path / "elsewhere", {"v1": "sphere(1);\n"})
-
-    response = lib_client.post(
-        "/api/v1/libraries", json={"name": "BOSL2", "url": elsewhere, "ref": "v1"}
-    )
-
-    assert response.status_code == 422
-    assert "BOSL2" in response.json()["detail"]
-    assert not (paths.models / LOCKFILE_NAME).exists()
-
-
-def test_a_name_with_a_path_in_it_is_a_422(lib_client: TestClient) -> None:
-    response = lib_client.post("/api/v1/libraries", json={"name": "../up"})
+def test_a_name_that_is_not_a_directory_name_is_a_422(lib_client: TestClient) -> None:
+    create_model(lib_client)
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/.hidden", json={})
     assert response.status_code == 422
 
 
 def test_a_ref_with_dot_dot_is_refused_by_validation(
     lib_client: TestClient, libraries_app: FastAPI
 ) -> None:
+    create_model(lib_client)
     store = libraries_app.dependency_overrides[get_libraries]()
-    with patch.object(store, "install", side_effect=AssertionError("reached the service")):
-        response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "a..b"})
+    with patch.object(store, "resolve", side_effect=AssertionError("reached the service")):
+        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "a..b"})
 
     assert response.status_code == 422
     assert [error["loc"] for error in response.json()["errors"]] == [["body", "ref"]]
@@ -224,68 +281,36 @@ def test_a_ref_with_dot_dot_is_refused_by_validation(
 
 def test_the_schema_states_that_a_ref_has_no_dot_dot(lib_client: TestClient) -> None:
     schema = lib_client.get("/openapi.json").json()["components"]["schemas"]
-    ref = schema["LibraryAdd"]["properties"]["ref"]["anyOf"][0]
+    ref = schema["LibraryPinRequest"]["properties"]["ref"]["anyOf"][0]
 
     assert "(?!.*\\.\\.)" in ref["pattern"]
 
 
-def _create(client: TestClient, name: str, *libraries: str) -> None:
-    created = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
-    assert created.status_code == 201, created.text
-    declared = client.patch(f"/api/v1/models/{name}", json={"libraries": list(libraries)})
-    assert declared.status_code == 200, declared.text
-
-
-def test_a_bad_lock_entry_fails_only_the_models_that_declare_it(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+def test_a_bad_entry_in_model_json_is_a_409_for_that_model_only(
+    lib_client: TestClient, paths: DataPaths
 ) -> None:
-    url, _ = upstream
-    add(lib_client, name="BOSL2")
-    add(lib_client, name="other", url=url, ref="v2")
-    _create(lib_client, "good", "other")
-    _create(lib_client, "plain")
-    _create(lib_client, "bad", "BOSL2")
-    lock_file = paths.models / LOCKFILE_NAME
-    lock = json.loads(lock_file.read_text(encoding="utf-8"))
-    lock["BOSL2"]["commit"] = "HEAD"
-    lock_file.write_text(json.dumps(lock), encoding="utf-8")
+    create_model(lib_client)
+    create_model(lib_client, "plain")
+    pin(lib_client, "BOSL2")
+    meta_path = paths.model_meta(SLUG)
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["libraries"][0]["commit"] = "HEAD"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
 
-    assert lib_client.get("/api/v1/models/good/schema").status_code == 200
     assert lib_client.get("/api/v1/models/plain/schema").status_code == 200
-    assert lib_client.post("/api/v1/models/plain/render", json={"params": {}}).status_code == 202
-    schema = lib_client.get("/api/v1/models/bad/schema")
-    render = lib_client.post("/api/v1/models/bad/render", json={"params": {}})
-    declared = lib_client.patch("/api/v1/models/plain", json={"libraries": ["BOSL2"]})
+    # The listing still reads; the render is what refuses.
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 200
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
+    render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
 
-    for refused in (schema, render, declared):
+    for refused in (schema, render):
         assert refused.status_code == 409
         assert refused.headers["content-type"] == "application/problem+json"
-        assert refused.json()["title"] == "Invalid Library Lockfile"
-        assert "libraries.lock entry 'BOSL2' is not valid: commit:" in refused.json()["detail"]
-
-
-def test_a_bad_lock_entry_is_listed_as_broken(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
-) -> None:
-    url, _ = upstream
-    (paths.models / LOCKFILE_NAME).write_text(
-        json.dumps(
-            {
-                "BOSL2": {"url": url, "ref": "v1", "commit": "HEAD"},
-                "mylib": {"url": url, "ref": "a..b", "commit": "a" * 40},
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    response = lib_client.get("/api/v1/libraries")
-
-    assert response.status_code == 200
-    listed = {entry["name"]: entry for entry in response.json()}
-    assert listed["BOSL2"]["pin"] is None
-    assert "'BOSL2' is not valid: commit:" in listed["BOSL2"]["error"]
-    assert (listed["mylib"]["url"], listed["mylib"]["pin"]) == (url, None)
-    assert "'mylib' is not valid: ref:" in listed["mylib"]["error"]
+        assert refused.json()["title"] == "Invalid Library Declaration"
+        assert "library 'BOSL2' is not valid: commit:" in refused.json()["detail"]
+    # Pinning it again is the fix.
+    pin(lib_client, "BOSL2")
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
 
 
 def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: DataPaths) -> None:
@@ -316,8 +341,9 @@ def test_a_failed_staging_sweep_does_not_stop_the_boot(
 def test_a_ref_that_does_not_exist_upstream_is_a_502(
     lib_client: TestClient, caplog: pytest.LogCaptureFixture
 ) -> None:
+    create_model(lib_client)
     with caplog.at_level(logging.WARNING, logger="scadbuddy.library.libraries"):
-        response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "v9"})
+        response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={"ref": "v9"})
 
     assert response.status_code == 502
     detail = response.json()["detail"]
@@ -328,67 +354,45 @@ def test_a_ref_that_does_not_exist_upstream_is_a_502(
     assert "upstream origin" in stderr
     assert stderr not in detail
     assert "fatal" not in detail
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
+
+
+def test_a_clone_over_the_size_cap_is_a_422(libraries_app: FastAPI, lib_client: TestClient) -> None:
+    store: LibraryStore = libraries_app.dependency_overrides[get_libraries]()
+    store.max_bytes = 1
+    create_model(lib_client)
+
+    response = lib_client.put(f"/api/v1/models/{SLUG}/libraries/BOSL2", json={})
+
+    assert response.status_code == 422
+    assert ", over the 1 bytes" in response.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
 
 
 def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
     lib_client: TestClient,
     libraries_app: FastAPI,
-    paths: DataPaths,
     fake_dns: dict[str, list[str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    create_model(lib_client)
     fake_dns["git.internal.example"] = ["10.0.0.7"]
     store = libraries_app.dependency_overrides[get_libraries]()
     monkeypatch.setattr(store, "protocols", ("https",))
     monkeypatch.setattr(store, "_git", lambda *args: pytest.fail(f"git ran: {args}"))
 
-    response = lib_client.post(
-        "/api/v1/libraries",
-        json={"name": "mylib", "url": "https://git.internal.example/o/r.git", "ref": "v1"},
+    response = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://git.internal.example/o/r.git", "ref": "v1"},
     )
 
     assert response.status_code == 422
     assert "public" in response.json()["detail"]
-    assert not (paths.models / LOCKFILE_NAME).exists()
-
-
-def test_a_model_can_declare_only_a_library_that_is_pinned(lib_client: TestClient) -> None:
-    create_model(lib_client)
-
-    refused = lib_client.patch(f"/api/v1/models/{SLUG}", json={"libraries": ["BOSL2"]})
-    assert refused.status_code == 422
-    assert "BOSL2" in refused.json()["detail"]
-
-    add(lib_client, name="BOSL2")
-    assert declare(lib_client, "BOSL2")["libraries"] == ["BOSL2"]
-    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == ["BOSL2"]
-
-
-def test_the_schema_is_derived_with_only_the_declared_libraries(
-    lib_client: TestClient,
-    paths: DataPaths,
-    upstream: tuple[str, dict[str, str]],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    url, commits = upstream
-    add(lib_client, name="BOSL2")
-    add(lib_client, name="other", url=url, ref="v2")
-    create_model(lib_client)
-    declare(lib_client, "BOSL2")
-    log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
-
-    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-
-    assert log.read_text(encoding="utf-8").splitlines() == [
-        str(paths.libraries / "BOSL2" / commits["v1"])
-    ]
 
 
 @respx.mock
 @pytest.mark.usefixtures("fake_dns")
-def test_an_imported_model_declares_libraries_like_any_other(
+def test_an_imported_model_takes_pins_like_any_other(
     lib_client: TestClient,
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
@@ -396,19 +400,18 @@ def test_an_imported_model_declares_libraries_like_any_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#153's URL import goes through the same create path, so its model takes a
-    declaration and renders with exactly that library, keeping where it came from."""
+    pin and renders with exactly that library, keeping where it came from."""
     _, commits = upstream
     raw = "https://raw.githubusercontent.com/someone/models/main/widget.scad"
     respx.get(raw).mock(return_value=httpx.Response(200, text=SOURCE))
-    add(lib_client, name="BOSL2")
     imported = lib_client.post("/api/v1/models/import", json={"url": raw})
     assert imported.status_code == 201, imported.text
     log = tmp_path / "openscadpath.log"
     monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
 
-    record = declare(lib_client, "BOSL2")
+    record = pin(lib_client, "BOSL2")
 
-    assert (record["libraries"], record["origin_url"]) == (["BOSL2"], raw)
+    assert ([lib["name"] for lib in record["libraries"]], record["origin_url"]) == (["BOSL2"], raw)
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert log.read_text(encoding="utf-8").splitlines() == [
         str(paths.libraries / "BOSL2" / commits["v1"])
@@ -423,9 +426,8 @@ def test_the_editor_check_sees_the_models_libraries(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, commits = upstream
-    add(lib_client, name="BOSL2")
     create_model(lib_client)
-    declare(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2")
     log = tmp_path / "openscadpath.log"
     monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
 
@@ -438,13 +440,12 @@ def test_the_editor_check_sees_the_models_libraries(
     assert log.read_text(encoding="utf-8").splitlines() == [expected, expected]
 
 
-def test_a_declared_library_whose_checkout_is_gone_is_a_409(
+def test_a_pinned_library_whose_checkout_is_gone_is_a_409(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
     _, commits = upstream
-    add(lib_client, name="BOSL2")
     create_model(lib_client)
-    declare(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2")
     checkout = paths.libraries / "BOSL2" / commits["v1"]
     checkout.rename(paths.root / "elsewhere")
 
@@ -462,9 +463,8 @@ def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
     """The check takes its source from the body, so it wires the library path up on
     its own rather than through `resolve_source` -- and must fail the same way."""
     _, commits = upstream
-    add(lib_client, name="BOSL2")
     create_model(lib_client)
-    declare(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2")
     (paths.libraries / "BOSL2" / commits["v1"]).rename(paths.root / "elsewhere")
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
@@ -480,29 +480,10 @@ def _schema_runs(log: Path) -> int:
     return len(log.read_text(encoding="utf-8").splitlines()) if log.is_file() else 0
 
 
-def test_a_new_pin_re_derives_the_schema_of_models_that_declare_it(
+def test_a_new_pin_re_derives_the_schema(
     lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Same source, other library code: the cached schema is keyed on the pins too."""
-    add(lib_client, name="BOSL2")
-    create_model(lib_client)
-    declare(lib_client, "BOSL2")
-    log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
-    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-    assert _schema_runs(log) == 1
-
-    add(lib_client, name="BOSL2", ref="v2")
-    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-
-    assert _schema_runs(log) == 2
-
-
-def test_changing_the_declaration_re_derives_the_schema(
-    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    add(lib_client, name="BOSL2")
     create_model(lib_client)
     log = tmp_path / "invocations.log"
     monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
@@ -510,69 +491,78 @@ def test_changing_the_declaration_re_derives_the_schema(
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert _schema_runs(log) == 0
 
-    declare(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2")
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
     assert _schema_runs(log) == 1
 
-
-def test_restoring_old_pins_re_derives_the_schema(
-    lib_client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    add(lib_client, name="BOSL2")
-    create_model(lib_client)
-    current = declare(lib_client, "BOSL2")["version"]
-    add(lib_client, name="BOSL2", ref="v2")
-    log = tmp_path / "invocations.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_LOG", str(log))
+    pin(lib_client, "BOSL2", ref="v2")
     assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{current}/restore")
-    assert restored.status_code == 200, restored.text
-    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
-
     assert _schema_runs(log) == 2
 
 
-def test_restoring_a_revision_restores_its_pins(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+def test_restoring_a_revision_restores_its_pins_and_no_others(
+    lib_client: TestClient, upstream: tuple[str, dict[str, str]]
 ) -> None:
     _, commits = upstream
-    add(lib_client, name="BOSL2")
     create_model(lib_client)
-    written_against = declare(lib_client, "BOSL2")["version"]
+    create_model(lib_client, "gadget")
+    pin(lib_client, "BOSL2", "gadget", ref="v2")
+    written_against = pin(lib_client, "BOSL2")["version"]
     edited = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "cube(1);\n"})
     assert edited.status_code == 200, edited.text
-    add(lib_client, name="BOSL2", ref="v2")
+    pin(lib_client, "BOSL2", ref="v2")
 
     restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{written_against}/restore")
 
     assert restored.status_code == 200, restored.text
-    assert [change["path"] for change in restored.json()["files"]] == ["model.scad"]
-    lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert lock["BOSL2"]["commit"] == commits["v1"]
+    assert sorted(change["path"] for change in restored.json()["files"]) == [
+        "model.json",
+        "model.scad",
+    ]
+    model = lib_client.get(f"/api/v1/models/{SLUG}").json()
+    assert [lib["commit"] for lib in model["libraries"]] == [commits["v1"]]
+    gadget = lib_client.get("/api/v1/models/gadget").json()
+    assert [lib["commit"] for lib in gadget["libraries"]] == [commits["v2"]]
 
 
-def test_restoring_the_current_revision_still_restores_its_pins(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+# ── pins from before they moved into each model ───────────────────────────────
+
+
+def test_boot_moves_the_lockfile_into_the_models(
+    app: FastAPI, paths: DataPaths, tmp_path: Path
 ) -> None:
-    """The model is unchanged, so the revision touches only the lockfile -- and the
-    answer is still the revision the model is at, not a 500."""
-    _, commits = upstream
-    add(lib_client, name="BOSL2")
-    create_model(lib_client)
-    current = declare(lib_client, "BOSL2")["version"]
-    add(lib_client, name="BOSL2", ref="v2")
+    history: ModelHistory = getattr(app.state, STATE_ATTR).history
+    url, commits = make_library_upstream(tmp_path / "legacy", {"v1": "cube(1);\n"})
+    lock = {"BOSL2": {"url": url, "ref": "v1", "commit": commits["v1"]}}
+    (paths.model_dir(SLUG)).mkdir(parents=True)
+    (paths.model_source(SLUG)).write_text(SOURCE, encoding="utf-8")
+    paths.model_meta(SLUG).write_text(
+        json.dumps({"name": "Widget", "libraries": ["BOSL2"]}), encoding="utf-8"
+    )
+    history.ensure_repo()
+    (paths.models / LOCKFILE_NAME).write_text(json.dumps(lock), encoding="utf-8")
+    assert history.commit("legacy", LOCKFILE_NAME, SLUG) is not None
 
-    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{current}/restore")
+    with TestClient(app) as client:
+        record = client.get(f"/api/v1/models/{SLUG}").json()
 
-    assert restored.status_code == 200, restored.text
-    assert restored.json()["commit"] == current
-    lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
-    assert lock["BOSL2"]["commit"] == commits["v1"]
+    assert record["libraries"] == [{"name": "BOSL2", **lock["BOSL2"]}]
+    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
-# ── a dropped model.json's declaration (#179) ─────────────────────────────────
+def test_a_failed_migration_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch("scadbuddy.main.migrate_lockfile", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not migrate the library lockfile" in caplog.text
+
+
+# ── a dropped model.json's pins (#179) ────────────────────────────────────────
 
 
 def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Response:
@@ -586,104 +576,60 @@ def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Respons
     return response
 
 
-def test_a_dropped_model_json_can_declare_only_a_pinned_library(lib_client: TestClient) -> None:
-    """Held to what PATCH holds a declaration to, and nothing is created on a refusal."""
+def test_a_dropped_model_json_cannot_name_a_library_without_a_pin(
+    lib_client: TestClient,
+) -> None:
+    """A bare name has no shared lockfile left to resolve it; nothing is created."""
     refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+
     assert refused.status_code == 422
     assert refused.json()["libraries"] == ["BOSL2"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
-def test_a_dropped_model_json_declares_its_libraries_and_is_checked_with_them(
+def test_a_dropped_model_json_carries_its_pins_and_is_checked_with_them(
     lib_client: TestClient,
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, commits = upstream
-    add(lib_client, name="BOSL2")
+    url, commits = upstream
+    # Fetched onto this volume by another model's pin.
+    create_model(lib_client, "gadget")
+    pin(lib_client, "BOSL2", "gadget")
+    pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
     log = tmp_path / "openscadpath.log"
     monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
 
-    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2", "BOSL2"]})
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned, pinned]})
 
     assert created.status_code == 201, created.text
-    assert created.json()["libraries"] == ["BOSL2"]
-    # The parse check ran with the declared checkout, as every render will.
+    assert created.json()["libraries"] == [pinned]
+    # The parse check ran with the pinned checkout, as every render will.
     assert log.read_text(encoding="utf-8").splitlines() == [
         str(paths.libraries / "BOSL2" / commits["v1"])
     ]
 
 
-def test_a_dropped_model_json_cannot_declare_a_library_whose_lock_entry_is_broken(
-    lib_client: TestClient, paths: DataPaths
+def test_a_dropped_model_json_whose_checkout_is_not_here_is_a_409(
+    lib_client: TestClient,
 ) -> None:
-    """#216's check, on #179's create path as on PATCH: a hand-broken lock entry is
-    the 409 that every render of it would be, and nothing is created."""
-    add(lib_client, name="BOSL2")
-    lock_file = paths.models / LOCKFILE_NAME
-    lock = json.loads(lock_file.read_text(encoding="utf-8"))
-    lock["BOSL2"]["commit"] = "HEAD"
-    lock_file.write_text(json.dumps(lock), encoding="utf-8")
+    """The 409 every render of it would be, and nothing is created."""
+    pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
 
-    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned]})
 
     assert refused.status_code == 409, refused.text
-    assert "libraries.lock entry 'BOSL2' is not valid" in refused.json()["detail"]
+    assert "not on this volume" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
-def test_a_dropped_model_json_reads_the_lockfile_once(
-    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The pin check and the parse check's OPENSCADPATH share one read of it."""
-    add(lib_client, name="BOSL2")
-    reads: list[object] = []
-    real = libraries_module.read_lock
+def test_a_dropped_model_json_with_a_malformed_pin_is_a_422(lib_client: TestClient) -> None:
+    broken = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "HEAD"}
 
-    def counting(paths: DataPaths) -> Any:
-        reads.append(paths)
-        return real(paths)
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [broken]})
 
-    monkeypatch.setattr(models_api, "read_lock", counting)
-
-    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
-
-    assert created.status_code == 201, created.text
-    assert len(reads) == 1
-
-
-def test_a_create_given_libraries_but_no_lock_reads_it_off_the_event_loop(
-    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`_create` falls back to reading the lockfile itself when no caller passed
-    one, and that read is file I/O -- in a worker thread, never on the loop."""
-    add(lib_client, name="BOSL2")
-    state: AppState = getattr(libraries_app.state, STATE_ATTR)
-    real = libraries_module.read_lock
-    readers: list[int] = []
-
-    def recording(paths: DataPaths) -> Any:
-        readers.append(threading.get_ident())
-        return real(paths)
-
-    monkeypatch.setattr(models_api, "read_lock", recording)
-
-    async def create() -> tuple[int, ModelRecord]:
-        record = await models_api._create(
-            state.catalogue,
-            state.config,
-            asyncio.Semaphore(1),
-            slug=SLUG,
-            source=SOURCE,
-            meta=ModelMeta(name="Widget", libraries=["BOSL2"]),
-            force=False,
-        )
-        return threading.get_ident(), record
-
-    loop_thread, record = asyncio.run(create())
-
-    assert record.libraries == ["BOSL2"]
-    assert len(readers) == 1
-    assert readers[0] != loop_thread
+    assert refused.status_code == 422, refused.text
+    assert "'BOSL2' is not valid: commit:" in refused.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404

@@ -43,7 +43,7 @@ filament than the flat tags, which change colour on three (or six) layers only.
 |---|---|---|
 | `text` | `HDMI` | Label text, up to 16 characters. Empty leaves a blank single-colour label. |
 | `font` | `DejaVu Sans Mono:style=Bold` | Typeface (`// font`). |
-| `text_size` | `6` | Letter height. Text that does not fit the label face (1 mm margin) is cut off at the margin, not scaled — shorten it or reduce the size. |
+| `text_size` | `6` | Letter height in mm. Text that does not fit the label face (1 mm margin) shrinks until it does, so a long word on a short tag comes out small — lengthen `flag_len` to keep it legible. |
 | `flag_len` | `35` | Tag length beyond the clip, or the band's length along the cable for `wrap_band`. |
 | `flag_h` | `10` | Width of the label face: the tag's width across, or the band face's width. |
 | `style` | `flag` | `flag`, `double_sided`, `wrap_band` — see above. |
@@ -92,10 +92,13 @@ In general, with `r_out = (cable_d + 0.2)/2 + wall`:
 ```
 
 Renders the defaults, `double_sided`, `wrap_band`, empty text, a 15 mm cable
-tag and a 12 mm cable band, and checks each 3MF: the number of non-empty
+tag, a 12 mm cable band, and three over-sized texts (a 16-character word on a
+tag and on a band, 12 mm letters on a 6 mm face), and checks each 3MF: no
+OpenSCAD warnings, the number of non-empty
 materials (2, or 1 with no text), `Default` empty, the bounding box against the
 formulas above, z=0, the clip opening clear of geometry, and the text flush with
-the face its style puts it on (top only, top and bottom, or the band face).
+the face its style puts it on (top only, top and bottom, or the band face),
+inside the label face, and shrunk rather than cut off when it is too big.
 The 3MF parsing runs on the host with `python3` and the standard library only.
 
 ## Needs a test print

@@ -48,6 +48,8 @@ function headline(progress: PrintProgress): string {
       progress.copies === 1 ? 'copy' : 'copies'
     } queued`
   }
+  // An all-plates print is one queue item per plate, each followed on its own (#200).
+  if (progress.copies > 1) return `${progress.copies} plates queued`
   // The slice-and-queue route has no run: the queue item is the whole print, and until
   // the plate has sliced it does not exist yet.
   if (progress.queue_item_id === null || progress.queue_item_id === undefined) {
@@ -57,6 +59,7 @@ function headline(progress: PrintProgress): string {
 }
 
 function copyLabel(copy: CopyProgress): string {
+  if (copy.plate_id !== null && copy.plate_id !== undefined) return `Plate ${copy.plate_id}`
   // The queue route repeats through `quantity` and carries no `copy_index`, so there is
   // nothing to number: the entry itself is the identity.
   if (copy.copy_index === null || copy.copy_index === undefined) return 'Copy'

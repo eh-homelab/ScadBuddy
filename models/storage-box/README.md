@@ -15,7 +15,11 @@ ScadBuddy.
 ## Print layout
 
 Everything prints without supports, laid out left to right along X with a
-10 mm gap:
+10 mm gap. When that row is wider than the H2C's 300 mm (both nozzles; from
+about 145 mm inside length with a friction lid), the lid goes behind the box
+instead, 10 mm away in +Y, as long as that fits 300 × 320 mm. A box too big
+for either layout (both sides over about 150 mm) keeps the row and echoes a
+`NOTE:`: print the box and the lid on separate plates.
 
 | Part | Orientation |
 |---|---|
@@ -56,7 +60,7 @@ inside dimension. `round` is an ellipse (a circle when `inner_l = inner_w`).
 | `tolerance` | `0.25` | Clearance between lid and box, per side. |
 | `handle` | `none` | `none`, `knob` or `finger_notch` (see below). |
 | `lid_text` | empty | Text inlaid in the lid top, up to 24 characters. Empty means no text and no third colour. |
-| `lid_text_size` | `12` | Text height in mm. Text is clipped 1.5 mm inside the lid edge. |
+| `lid_text_size` | `12` | Text height in mm. Text wider than the lid shrinks to fit it (never grows): the lid top less 1.5 mm each side (70 % of it on hexagon and round lids), and on a sliding lid clear of the knob or thumb dimple. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for the lid text. |
 
 **Lid types**
@@ -72,7 +76,8 @@ inside dimension. `round` is an ellipse (a circle when `inner_l = inner_w`).
   longer in Y). The groove is `min(max(wall/2, tolerance + 0.4), wall − 0.4)`
   deep. **Rectangle and rounded only**: hexagon and round boxes have no
   straight long sides to run in, so choosing `sliding` with those shapes gives
-  a friction lid instead.
+  a friction lid instead. Dividers stop 0.5 mm under the plate so it slides
+  over them without rubbing.
 - `none` — just the box.
 
 **Handles**
@@ -117,13 +122,15 @@ own colour for three.
 ./verify.sh
 ```
 
-Renders the defaults and ten variations (every lid type, every shape, sliding
-lids in both orientations, the hexagon sliding fallback, three colours, the
-largest and smallest settings) and checks each 3MF: the expected number of
+Renders the defaults and fourteen variations (every lid type, every shape,
+sliding lids in both orientations, the hexagon sliding fallback, three colours,
+the largest and smallest settings, long lid text on a sliding and a knob lid,
+and two boxes wide enough that the lid goes behind them) and checks each 3MF: the expected number of
 non-empty materials, nothing left on `Default`, the bounding box exactly equal
 to what the parameters imply (the checker recomputes it), the plate on z = 0,
-and the lid text on the bed face of a flipped lid or flush with the top of a
-sliding lid. Output lands in `.verify/`. The 3MF parsing runs on the host with
+the plate within the 300 × 320 mm bed where any layout allows it, dividers
+0.5 mm under the lid, the lid text no wider than its room, and the lid text on
+the bed face of a flipped lid or flush with the top of a sliding lid. Output lands in `.verify/`. The 3MF parsing runs on the host with
 `python3` and the standard library only.
 
 ## Not yet print-tested
