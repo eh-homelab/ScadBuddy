@@ -20,7 +20,7 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import STATE_ATTR, AppState, get_libraries
+from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.libraries import LOCKFILE_NAME, CatalogueLibrary, LibraryStore
 from tests.conftest import make_library_upstream
@@ -136,7 +136,7 @@ def test_a_user_added_library_is_listed_after_the_catalogue(
     ]
 
 
-def test_installs_run_one_at_a_time(
+def test_installs_in_flight_are_capped(
     lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Each clone holds a worker thread for up to the git timeout; a burst of them
@@ -157,16 +157,16 @@ def test_installs_run_one_at_a_time(
         return real_install(name, **kwargs)
 
     monkeypatch.setattr(store, "install", install)
-    with ThreadPoolExecutor(3) as pool:
+    with ThreadPoolExecutor(INSTALL_CONCURRENCY + 2) as pool:
         codes = list(
             pool.map(
                 lambda _: lib_client.post("/api/v1/libraries", json={"name": "BOSL2"}).status_code,
-                range(3),
+                range(INSTALL_CONCURRENCY + 2),
             )
         )
 
-    assert codes == [200, 200, 200]
-    assert most == 1
+    assert codes == [200] * (INSTALL_CONCURRENCY + 2)
+    assert most == INSTALL_CONCURRENCY
 
 
 def test_an_unknown_library_without_a_url_is_a_404(lib_client: TestClient) -> None:

@@ -28,6 +28,9 @@ VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
+INSTALL_CONCURRENCY = 2
+
+
 @dataclass
 class AppState:
     settings: Settings
@@ -45,10 +48,15 @@ class AppState:
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
-    #: One library clone at a time. Each runs in a worker thread for up to the git
-    #: timeout; uncapped, a burst of installs would hold the default executor that
-    #: every other `to_thread` route shares. A queued install waits on the loop.
-    installs: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
+    #: thread for up to the git timeout; uncapped, a burst of installs would hold the
+    #: default executor that every other `to_thread` route shares. More than one, so
+    #: a long clone (NopSCADlib) doesn't hold up adding another library; the store's
+    #: per-name locks still order two adds of the same name. A queued install waits
+    #: on the loop, not in a thread.
+    installs: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
+    )
     openscad_version: str | None = field(default=None)
 
 

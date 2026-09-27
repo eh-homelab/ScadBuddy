@@ -317,7 +317,8 @@ class LibraryStore:
         # to until its pin is recorded: two adds of the same new name must not
         # both find it unbound. Per name rather than one lock for every add,
         # because a clone can take minutes (NopSCADlib) and adding BOSL2 should
-        # not queue behind it. Counted, so an entry goes once nobody holds or
+        # not queue behind it (the API caps clones in flight separately, see
+        # AppState.installs). Counted, so an entry goes once nobody holds or
         # waits for it and the table never outgrows the adds in flight.
         self._names: dict[str, _NameLock] = {}
         self._names_guard = threading.Lock()
