@@ -168,8 +168,9 @@ async def test_concurrency_is_capped_by_the_config(paths: DataPaths) -> None:
     queue = RenderQueue(replace(CONFIG, render_concurrency=2), paths, render=slow)
     await queue.start()
     try:
-        for _ in range(4):
-            await queue.submit("demo", {})
+        # Distinct parameters: identical waiting renders would coalesce into one job.
+        for n in range(4):
+            await queue.submit("demo", {"n": n})
         await asyncio.sleep(0.05)
         assert peak == 2
         release.set()
@@ -763,4 +764,81 @@ async def test_a_render_that_waited_out_a_removal_fails_cleanly(paths: DataPaths
             await task
 
     assert schema_reads == []
+    assert gate.leased(checkout) == []
+
+
+async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> None:
+    """A lapsed store lease retries the job while the first attempt may still run
+    (#241). The first finishing must not release the retry's hold on the checkout."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    release: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
+    rendering: dict[int, asyncio.Event] = {1: asyncio.Event(), 2: asyncio.Event()}
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        attempt = 2 if "attempt-2" in str(out) else 1
+        rendering[attempt].set()
+        await release[attempt].wait()
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=(), diagnostics=(), diagnostics_dropped=0)
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    def attempt(number: int) -> asyncio.Task[tuple[JobResult, list[str]]]:
+        return asyncio.create_task(
+            jobs.render_job(_job("r").claimed(number), config=CONFIG, paths=paths, checkouts=gate)
+        )
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        first, retry = attempt(1), attempt(2)
+        await asyncio.wait_for(rendering[1].wait(), 5)
+        await asyncio.wait_for(rendering[2].wait(), 5)
+        assert gate.leased(checkout) == ["r"]
+
+        release[1].set()
+        await first
+        assert gate.leased(checkout) == ["r"]  # the retry still reads it
+
+        release[2].set()
+        await retry
+    assert gate.leased(checkout) == []
+
+
+async def test_a_cancelled_render_releases_its_lease(paths: DataPaths) -> None:
+    """Shutdown cancels a worker mid-render; the checkout must not stay leased."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    started = asyncio.Event()
+
+    async def render(*args: object, **kwargs: object) -> object:
+        started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("unreachable")
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+    ):
+        task = asyncio.create_task(
+            jobs.render_job(_job("c"), config=CONFIG, paths=paths, checkouts=gate)
+        )
+        await asyncio.wait_for(started.wait(), 5)
+        assert gate.leased(checkout) == ["c"]
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
     assert gate.leased(checkout) == []

@@ -20,7 +20,9 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. The only place a real `openscad` exists is the image:
+PATH. Tests marked `requires_postgres` (the render queue's Postgres store) skip
+unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
+CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):

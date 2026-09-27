@@ -11,6 +11,10 @@ Assets are never pruned. An output's parameters point at one, and "re-render" an
 
 Nothing here ever becomes a path OpenSCAD sees. The render stages a copy under a
 name it generates (`render/jobs.py`); the original file name is display-only.
+
+A template's own sample files are the other thing a file parameter can name: the
+bare names `sample_files` lists from the model's directory. They are never copied
+anywhere -- OpenSCAD reads them where they are, as it does any bundled file.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import os
 import re
 import secrets
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -30,7 +34,9 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
-from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.library.catalogue import THUMBNAIL_NAME
+from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
+from scadbuddy.render.solids import WRAPPER_PREFIX
 
 AssetKind = Literal["svg", "png"]
 
@@ -48,6 +54,10 @@ MAX_PNG_PIXELS = 25_000_000
 MAX_NAME_CHARS = 200
 
 MEDIA_TYPES: dict[AssetKind, str] = {"svg": "image/svg+xml", "png": "image/png"}
+
+#: Files in a model's directory that are never offered as samples: the catalogue's
+#: cover image is a PNG beside every model, not a picture for its parameters.
+NOT_SAMPLES = frozenset({THUMBNAIL_NAME})
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 SVG_NS = "http://www.w3.org/2000/svg"
@@ -275,16 +285,77 @@ def _write_atomically(path: Path, payload: bytes) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def sample_files(model_dir: Path, accept: Sequence[str] = FILE_KINDS) -> list[str]:
+    """The sample files a template ships for a file parameter taking ``accept``.
+
+    A sample is a regular file directly in ``model_dir`` (never a subdirectory, never
+    a symlink, which could point anywhere) whose name is bare -- the rule the runner
+    enforces on every `file` value -- and whose extension is an accepted kind. The
+    render's staged uploads and wrappers, and the catalogue thumbnail, are not.
+    Sorted, so the list is stable.
+    """
+    kinds = {kind.lower() for kind in accept}
+    try:
+        entries = list(model_dir.iterdir())
+    except OSError:
+        return []
+    return sorted(
+        entry.name
+        for entry in entries
+        if is_bare_filename(entry.name)
+        and not entry.name.startswith(WRAPPER_PREFIX)
+        and entry.name not in NOT_SAMPLES
+        and entry.suffix.lower().lstrip(".") in kinds
+        and not entry.is_symlink()
+        and entry.is_file()
+    )
+
+
+def with_samples(schema: CustomizerSchema, model_dir: Path) -> CustomizerSchema:
+    """``schema`` with each `file` parameter's `samples` listed from ``model_dir``.
+
+    Done when the schema is served rather than when it is derived, because the cache
+    is keyed by the source's hash and a sample can be added or removed without it.
+    """
+    if not any(parameter.type == "file" for parameter in schema.parameters):
+        return schema
+    available = sample_files(model_dir)
+    return schema.model_copy(
+        update={
+            "parameters": [
+                parameter.model_copy(
+                    update={
+                        "samples": [
+                            name
+                            for name in available
+                            if Path(name).suffix.lower().lstrip(".") in parameter.accept
+                        ]
+                    }
+                )
+                if parameter.type == "file"
+                else parameter
+                for parameter in schema.parameters
+            ]
+        }
+    )
+
+
 def file_assets(
-    schema: CustomizerSchema, params: Mapping[str, ParamValue], store: AssetStore
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    store: AssetStore,
+    model_dir: Path,
 ) -> dict[str, AssetMeta]:
     """The uploaded asset behind each `file` parameter in ``params``.
 
-    A file parameter takes the empty string, the model's own default, or the id of
-    an asset in the store of a kind the parameter accepts -- nothing else, so no
-    client value can name a path. Raises ValueError, which a route answers with 422.
+    A file parameter takes the empty string, the model's own default, one of the
+    sample files in ``model_dir`` it accepts (`sample_files`), or the id of an asset
+    in the store of a kind the parameter accepts -- nothing else, so no client value
+    can name a path. A sample needs no asset; it is read where it is. Raises
+    ValueError, which a route answers with 422.
     """
     found: dict[str, AssetMeta] = {}
+    samples: dict[tuple[str, ...], list[str]] = {}
     for parameter in schema.parameters:
         if parameter.type != "file" or parameter.name not in params:
             continue
@@ -293,11 +364,16 @@ def file_assets(
             raise ValueError(f"parameter {parameter.name!r} expects an uploaded file id")
         if value in ("", parameter.initial):
             continue
+        accept = tuple(parameter.accept)
+        if accept not in samples:
+            samples[accept] = sample_files(model_dir, accept)
+        if value in samples[accept]:
+            continue
         try:
             meta = store.get(value)
         except AssetNotFoundError:
             raise ValueError(
-                f"parameter {parameter.name!r} is not an uploaded file: {value[:80]!r}"
+                f"parameter {parameter.name!r} is not an uploaded or sample file: {value[:80]!r}"
             ) from None
         if meta.kind not in parameter.accept:
             raise ValueError(

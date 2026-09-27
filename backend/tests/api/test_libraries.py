@@ -922,12 +922,12 @@ def test_a_checkout_a_render_is_reading_is_not_removed(
     checkout = paths.libraries / "BOSL2" / commits["v1"]
     state: AppState = getattr(libraries_app.state, STATE_ATTR)
     job_id = "a" * 32
-    state.checkouts.hold(job_id, [checkout])
+    lease = state.checkouts.hold(job_id, [checkout])
     assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
 
     whole = lib_client.delete("/api/v1/libraries/BOSL2")
     one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
-    state.checkouts.release(job_id)
+    state.checkouts.release(lease)
     after = lib_client.delete("/api/v1/libraries/BOSL2")
 
     for response in (whole, one):

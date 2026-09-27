@@ -219,7 +219,7 @@ def test_a_file_parameter_passes_a_bare_name(value: str) -> None:
     ["/etc/passwd", "../model.scad", "sub/dir.svg", "..", "a\\b.svg", ".hidden", "x\n.svg", 3],
 )
 def test_a_file_parameter_never_passes_a_path(value: object) -> None:
-    with pytest.raises(ValueError, match="expects an uploaded file"):
+    with pytest.raises(ValueError, match="expects an uploaded or sample file"):
         format_scad_value(FILE_PARAMETER, value)  # type: ignore[arg-type]
 
 

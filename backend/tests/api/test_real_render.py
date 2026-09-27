@@ -191,3 +191,32 @@ def test_a_file_openscad_cannot_open_is_a_warning_not_silence(client: TestClient
 
     assert job["status"] == "done", job["error"]
     assert "OpenSCAD could not open missing.svg; the model rendered without it" in job["warnings"]
+
+
+def test_a_sample_the_template_ships_is_rendered_into_every_part(
+    client: TestClient, data_dir: Path
+) -> None:
+    created = client.post("/api/v1/models", json={"name": "Sampled", "source": OVERLAY})
+    assert created.status_code == 201, created.text
+    model_dir = DataPaths(data_dir).model_dir("sampled")
+    (model_dir / "sample-triangle.svg").write_bytes(TRIANGLE_SVG)
+    schema = client.get("/api/v1/models/sampled/schema").json()
+    assert schema["parameters"][0]["samples"] == ["sample-triangle.svg"]
+
+    accepted = client.post(
+        "/api/v1/models/sampled/render", json={"params": {"overlay": "sample-triangle.svg"}}
+    )
+    assert accepted.status_code == 202, accepted.text
+    job = wait_for_job(client, accepted.json()["job_id"])
+
+    assert job["status"] == "done", job["error"]
+    assert job["colors"] == ["#FF0000", "#0000FF"]
+    assert job["warnings"] == []
+    assert [part["watertight"] for part in job["parts"]] == [True, True]
+    assert job["bbox_mm"]["size"] == [30.0, 30.0, 3.0]
+    # Read in place: nothing is staged for a sample, and the sample itself stays.
+    assert sorted(p.name for p in model_dir.iterdir() if not p.name.startswith(".")) == [
+        "model.json",
+        "model.scad",
+        "sample-triangle.svg",
+    ]

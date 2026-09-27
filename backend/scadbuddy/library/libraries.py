@@ -539,8 +539,11 @@ class CheckoutGate:
         self._condition = asyncio.Condition()
         self._pins = 0
         self._removing = False
-        #: holder (a job id) -> the checkout directories it reads.
-        self._leases: dict[str, tuple[Path, ...]] = {}
+        #: lease token -> (holder, the checkout directories it reads). Keyed by a
+        #: token, not the holder: two attempts at one job -- the first still running
+        #: after its store lease lapsed and the job was retried -- each hold their
+        #: own, and the first ending must not release the second's.
+        self._leases: dict[object, tuple[str, tuple[Path, ...]]] = {}
 
     @contextlib.asynccontextmanager
     async def pinning(self) -> AsyncIterator[None]:
@@ -573,27 +576,33 @@ class CheckoutGate:
         resolved is still there (:func:`require_checkouts`)."""
         async with self._condition:
             await self._condition.wait_for(lambda: not self._removing)
-            self.hold(holder, checkouts)
+            token = self.hold(holder, checkouts)
         try:
             yield
         finally:
-            self.release(holder)
+            # Whatever ends the attempt -- done, failed, cancelled by shutdown.
+            self.release(token)
 
-    def hold(self, holder: str, checkouts: Sequence[Path]) -> None:
-        """The synchronous half of :meth:`rendering`: record the lease as it stands."""
-        self._leases[holder] = tuple(checkouts)
+    def hold(self, holder: str, checkouts: Sequence[Path]) -> object:
+        """The synchronous half of :meth:`rendering`: record a lease as it stands,
+        and return the token that releases it."""
+        token = object()
+        self._leases[token] = (holder, tuple(checkouts))
+        return token
 
-    def release(self, holder: str) -> None:
-        self._leases.pop(holder, None)
+    def release(self, token: object) -> None:
+        self._leases.pop(token, None)
 
     def leased(self, directory: Path) -> list[str]:
         """The holders reading ``directory`` -- one checkout, or a library's
-        directory of them -- in the order they took their leases."""
-        return [
-            holder
-            for holder, checkouts in self._leases.items()
-            if any(path == directory or path.parent == directory for path in checkouts)
-        ]
+        directory of them -- each once, in the order they took their leases."""
+        return list(
+            dict.fromkeys(
+                holder
+                for holder, checkouts in self._leases.values()
+                if any(path == directory or path.parent == directory for path in checkouts)
+            )
+        )
 
 
 def require_checkouts(checkouts: Sequence[Path]) -> None:

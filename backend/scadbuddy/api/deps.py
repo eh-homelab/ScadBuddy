@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import Depends, Path, Request
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
@@ -19,7 +20,9 @@ from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
+from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -45,6 +48,7 @@ class AppState:
     fonts: FontService
     libraries: LibraryStore
     queue: RenderQueue
+    metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -75,6 +79,14 @@ def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
+    store: JobBackend = (
+        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
+        if settings.database_url
+        else JobStore(paths)
+    )
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
     return AppState(
@@ -93,7 +105,10 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        queue=RenderQueue(config, paths, history=history, checkouts=checkouts),
+        queue=RenderQueue(
+            config, paths, store=store, history=history, metrics=metrics, checkouts=checkouts
+        ),
+        metrics=metrics,
         checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),

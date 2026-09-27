@@ -356,6 +356,9 @@ normalised and overlaid:
   (`// font`) | `file` (`// file:svg,png`, §5.5) | `slider` (`number` with min
   and max).
 - `accept`: a `file` parameter's kinds, `["svg", "png"]` or a subset.
+- `samples`: a `file` parameter's sample files, the bare names of the files the
+  template ships in its own directory whose extension it accepts (§5.5). Listed on
+  every schema read, never cached with the schema.
 - `groups`: ordered list preserving first appearance; parameters in
   `/* [Hidden] */` are excluded (OpenSCAD convention), `/* [Global] */` shown
   on every tab.
@@ -375,7 +378,7 @@ when the source changes.
 | `select` | dropdown; option `name` is the label, `value` is passed to OpenSCAD |
 | `color` | colour picker; the value is passed as a `"#RRGGBB"` string |
 | `font` | free-text field with an installed-font datalist, plus a **Browse** button opening the Google Fonts picker (§5.4) |
-| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear** (§5.5) |
+| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear**; under it a row of thumbnails of the template's `samples`, one click to use one (§5.5) |
 
 ### 5.3 The page
 
@@ -497,6 +500,24 @@ string.
   working. The copies share the wrapper's prefix, so the source hash, the models
   repository's `.gitignore` and a duplicate's copy all skip them; they are deleted
   when the render ends, and each render gets its own.
+- **Samples.** A template can ship pictures for its file parameters beside its
+  source (`models/flexi-fabric/sample-overlay.svg`), and the viewer can pick one instead
+  of downloading and re-uploading it. The schema lists them per parameter as
+  `samples`: every regular file directly in the model's directory whose name is
+  bare (the runner's own rule: `[A-Za-z0-9_][A-Za-z0-9_.-]*`, no `..`, so no
+  dotfile and no subdirectory) and whose extension the parameter accepts. A
+  symlink is never one (it could point anywhere), nor are the render's staged
+  files and wrappers (`_scadbuddy_solid_*`) or the catalogue's `thumbnail.png`.
+  The list is built when the schema is served, not cached with it: the cache is
+  keyed by the source's hash, and a sample can come and go without the source
+  changing. A sample's value is its bare name; a render accepts it only while it
+  is in the list for that parameter, computed again from the directory of the
+  revision being rendered, and OpenSCAD reads it in place (nothing is staged).
+  `GET /models/{id}/samples/{name}` (`?version=` for an older revision) serves a
+  listed sample for the picker's thumbnails with the same `sandbox` CSP and
+  `nosniff` as an upload, but `Cache-Control: no-cache`, since an edit changes it
+  under the same URL; any other name is a 404. Provenance for a sample is its
+  name, so a re-render reproduces the output while the revision still ships it.
 - **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
   content hash; assets are never pruned, so a re-render and "Customize this
   version" reproduce the output.
@@ -525,8 +546,62 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 ### 6.1 Runner
 
-- One job at a time per worker; a small in-process queue (asyncio) with
-  `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
+- One job at a time per worker; `SCADBUDDY_RENDER_CONCURRENCY` (default 2) workers
+  per process, as asyncio tasks, over the job store below.
+- **Every render request is accepted by default.** `RenderQueue` runs
+  `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest job
+  first, and keeps latency down without refusing anything:
+  - **Supersede.** A render request may name the job it replaces
+    (`supersedes`); the preview's debounce sends its previous unsettled job, which
+    is dropped unrendered if no worker has taken it (failed as superseded).
+  - **Coalesce.** A request identical to a job still *waiting* (same model,
+    revision and parameters) is answered with that job. Never a running one: it
+    has already read its source, and an edit since would be served stale.
+  - **Deadline** (optional). A job that waited longer than
+    `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (default 0 = never) for a worker is failed
+    unrendered. Measured from the submit, so a retry after a lost worker counts
+    the first attempt's time too.
+- **Job store.** With `SCADBUDDY_DATABASE_URL` the queue is a Postgres table
+  (`render/pg_store.py`): workers claim with `FOR UPDATE SKIP LOCKED`; a partial
+  unique index on the render key over pending rows makes coalescing atomic
+  (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
+  heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
+  heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
+  jobs survive a restart. Migrations are append-only and applied at startup under
+  an advisory lock. Without a database URL the store is JSON files under `jobs/`
+  with the wait list in the process, and a restart fails unfinished jobs.
+  A retry renders into its own `attempt-N/` under the job's work directory, since a
+  lapsed lease does not prove the first worker died; only the attempt that still
+  holds the job can `finish` it, so the recorded result always names that
+  attempt's files. Multiple replicas on one queue additionally need a shared
+  (ReadWriteMany) data directory; the deployment in §9 is one replica on RWO.
+- **Admission (opt-in).** `SCADBUDDY_RENDER_QUEUE_MAX` (default 0 = no limit): set,
+  a request that would be a new job while that many already wait is refused with
+  503 and `Retry-After` (about one mean render). The check comes after a supersede
+  frees its place, a request that coalesces is never refused, and a refusal changes
+  nothing (the Postgres store rolls its transaction back). A soft limit across
+  replicas. The preview treats such a 503 as a wait, not a failure: it shows
+  "the render queue is full" and resubmits after `retry_after`, unless a newer
+  render supersedes it first.
+- SLO targets `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and
+  `SCADBUDDY_RENDER_LATENCY_SLO` (60 s) are exported as gauges for alerts to
+  compare against; they limit nothing.
+- `GET /metrics` (Prometheus text) reports queue depth, oldest wait and running jobs
+  (read from the store per scrape), submissions/coalesced/rejected/retried, jobs finished by
+  outcome
+  (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
+  submit-to-settled latency and per-stage time (`source`, `render`, `split`,
+  `solids`, `thumbnail`, `write`), and HTTP requests by route template.
+- Store health, for alerts: `scadbuddy_render_store_info{backend}` (`postgres` or
+  `files`) says where the queue is, and `scadbuddy_render_store_up` whether the last
+  scrape could read it. When a read fails, `store_up` goes to 0 and the queue
+  gauges keep their last good values rather than going absent, so an outage is
+  seen by `store_up`, not by the depth or stall rules.
+  `scadbuddy_render_store_errors_total{operation}` counts failed calls: `read`
+  (the scrape), `work` (claiming), `reap`, `heartbeat`. The app never falls back to
+  files on a database error: an unreachable database at startup fails the start.
+  The file store's read is in-process with no I/O, so without a database URL
+  `store_up` is always 1.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:
@@ -729,6 +804,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 
