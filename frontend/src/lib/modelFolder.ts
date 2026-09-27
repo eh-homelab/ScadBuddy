@@ -58,14 +58,24 @@ function pick(candidates: File[], preferred: string): File | undefined {
 export function classifyFiles(chosen: File[], folder?: string): Classified {
   const scad = pick(chosen.filter(isScad), 'model.scad')
   if (!scad) return { files: null, ignored: [...chosen].sort(byName).map(({ name }) => ({ name })) }
-  const meta = chosen.find((file) => lower(file) === 'model.json')
+  const meta = pick(
+    chosen.filter((file) => lower(file) === 'model.json'),
+    'model.json',
+  )
   const thumbnail = pick(chosen.filter(isPng), 'thumbnail.png')
   const readme = pick(chosen.filter(isMarkdown), 'readme.md')
   const used = new Set([scad, meta, thumbnail, readme])
+  // Two files can share a name from different folders of one drop: the winner is
+  // then named by its path, so the reason still says which one was used.
+  const named = (winner: File, loser: File) =>
+    winner.name === loser.name && winner.webkitRelativePath
+      ? winner.webkitRelativePath
+      : winner.name
   const reason = (file: File): string | undefined => {
-    if (isScad(file)) return `source is ${scad.name}`
-    if (thumbnail && isPng(file)) return `thumbnail is ${thumbnail.name}`
-    if (readme && isMarkdown(file)) return `README is ${readme.name}`
+    if (meta && lower(file) === 'model.json') return `metadata is ${named(meta, file)}`
+    if (isScad(file)) return `source is ${named(scad, file)}`
+    if (thumbnail && isPng(file)) return `thumbnail is ${named(thumbnail, file)}`
+    if (readme && isMarkdown(file)) return `README is ${named(readme, file)}`
     return undefined
   }
   const ignored = [...chosen]

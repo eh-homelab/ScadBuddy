@@ -94,6 +94,35 @@ describe('classifyFiles with no preferred name among several', () => {
     }
   })
 
+  it('picks the same model.json among several, whatever the order', () => {
+    const set = () => [
+      file('model.scad'),
+      file('Model.json', '{"name": "Capital"}'),
+      file('model.json', '{"name": "Lower"}'),
+    ]
+    const forward = classifyFiles(set())
+    const backward = classifyFiles(set().reverse())
+
+    for (const result of [forward, backward]) {
+      // Code-unit order: `M` before `m`.
+      expect(result.files?.meta?.name).toBe('Model.json')
+      expect(result.ignored).toEqual([{ name: 'model.json', reason: 'metadata is Model.json' }])
+    }
+  })
+
+  it('names the model.json it used by its path when two share a name', () => {
+    const set = () => [
+      inFolder('widget', 'model.scad'),
+      inFolder('widget', 'model.json'),
+      inFolder('widget/old', 'model.json'),
+    ]
+    for (const order of [set(), set().reverse()]) {
+      const { files, ignored } = classifyFiles(order, 'widget')
+      expect(files?.meta?.webkitRelativePath).toBe('widget/model.json')
+      expect(ignored).toEqual([{ name: 'model.json', reason: 'metadata is widget/model.json' }])
+    }
+  })
+
   it('picks the same source among several .scad files with no model.scad', () => {
     const scads = ['b.scad', 'a.scad', 'c.scad']
     expect(classifyFiles(scads.map((name) => file(name))).files?.scad.name).toBe('a.scad')
