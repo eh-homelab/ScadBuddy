@@ -295,17 +295,23 @@ class Catalogue:
                 id=upstream_id, path=model_path(upstream_id), base=base
             ).model_dump()
             meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            # Claim the slug with an empty directory first, as `create` does, and
+            # only then clear what an earlier model of this slug left behind: the
+            # copy must never be visible beside a previous occupant's schema cache,
+            # outputs or revisions.
             try:
-                # Onto an empty directory it succeeds, as `create`'s mkdir would;
-                # onto a populated one it fails.
+                target.mkdir()
+            except FileExistsError:
+                raise ModelExistsError(slug) from None
+            self._clear_derived(slug)
+            # Onto the empty directory just made, the rename replaces it whole.
+            try:
                 staged.rename(target)
             except OSError:
-                if target.exists():
-                    raise ModelExistsError(slug) from None
+                target.rmdir()
                 raise
         finally:
             _remove_tree(staging)
-        self._clear_derived(slug)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         return self.record(slug)
 

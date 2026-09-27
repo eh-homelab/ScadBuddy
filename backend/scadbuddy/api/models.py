@@ -518,7 +518,7 @@ class DuplicateRequest(BaseModel):
         "derived from `name` as `POST /models` derives it, and records the template it "
         "came from as `upstream`, with `base` the upstream's current revision. One "
         "revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, "
-        "outputs) are not copied."
+        "outputs, revisions) are not copied."
     ),
 )
 def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep) -> ModelRecord:

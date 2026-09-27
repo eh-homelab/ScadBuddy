@@ -180,7 +180,7 @@ export interface paths {
         put?: never;
         /**
          * Duplicate a template
-         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs) are not copied.
+         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.
          */
         post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
         delete?: never;
