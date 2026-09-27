@@ -564,3 +564,25 @@ describe('mock API: presets keep the server limits', () => {
     ).resolves.toMatchObject({ name: 'Renamed' })
   })
 })
+
+describe('mock API: preset values are checked as the server checks them', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses a value of the wrong type for a known parameter', async () => {
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { text_size: 'big' } }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { keyring_hole: 'yes' } }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses a dropdown value that is not one of its options', async () => {
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { hole_side: 'bottom' } }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.createPreset('name-keychain', { name: 'Good', params: { hole_side: 'top' } }),
+    ).resolves.toMatchObject({ params: { hole_side: 'top' } })
+  })
+})

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
@@ -82,21 +83,6 @@ def _remove_tree(path: Path) -> bool:
             logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
             return False
     return True
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Swap ``data`` in at ``path``: a reader sees the old file or the new one, never
-    a torn one. The temp file is in the same directory, so ``os.replace`` stays on one
-    filesystem and stays atomic. :class:`FileNotFoundError` when the directory is gone.
-    """
-    handle, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
-    try:
-        with os.fdopen(handle, "wb") as writer:
-            writer.write(data)
-        os.replace(staged, path)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
 
 
 def _still_there(path: Path) -> bool:
@@ -364,7 +350,7 @@ class Catalogue:
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
         try:
-            _write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
+            write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -601,7 +587,7 @@ class Catalogue:
         """
         self._require(slug)
         try:
-            _write_atomic(self.paths.model_dir(slug) / name, payload)
+            write_atomic(self.paths.model_dir(slug) / name, payload)
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -665,7 +651,7 @@ class Catalogue:
         # and swapping inside it then fail rather than recreate it, and the
         # failure is the same 404 the delete itself would give.
         try:
-            _write_atomic(self.paths.model_source(slug), source.encode())
+            write_atomic(self.paths.model_source(slug), source.encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
@@ -746,7 +732,7 @@ class Catalogue:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _write_atomic(target, content)
+                    write_atomic(target, content)
             self._advance_base(slug, upstream, revision)
             plans.append(plan)
 

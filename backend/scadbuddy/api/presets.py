@@ -51,6 +51,17 @@ async def _require_valid(
     a render makes, so a preset saved here never fails the render it is applied to."""
     _, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
     require_valid_params(schema, params)
+    # Stricter than a render, which takes any value of the right type: a preset is
+    # kept and replayed, so it holds only what the dropdown itself could pick.
+    by_name = {parameter.name: parameter for parameter in schema.parameters}
+    for name, value in params.items():
+        options = [option.value for option in by_name[name].options]
+        if options and value not in options:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"{value!r} is not one of the options of {name!r}",
+                parameters=[name],
+            )
 
 
 def _unreadable(error: InvalidPresetsFileError) -> ApiError:

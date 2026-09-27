@@ -26,8 +26,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
-from scadbuddy.library.catalogue import _write_atomic
 from scadbuddy.render.schema import ParamValue
 
 logger = logging.getLogger(__name__)
@@ -185,7 +185,7 @@ class PresetStore:
             path.unlink(missing_ok=True)
             return
         payload: dict[str, Any] = stored.model_dump(mode="json")
-        _write_atomic(path, (json.dumps(payload, indent=2) + "\n").encode())
+        write_atomic(path, (json.dumps(payload, indent=2) + "\n").encode())
 
     @staticmethod
     def _view(preset: _StoredPreset) -> ParamPreset:

@@ -11,8 +11,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import scadbuddy.api.presets as presets_api
 from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
 from scadbuddy.library.presets import MAX_PRESET_NAME
+from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 
 BUILTIN = "builtin:keychain"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
@@ -78,6 +80,33 @@ def test_a_preset_is_checked_as_a_render_is(client: TestClient, model: str) -> N
     wrong_type = client.post(_url(model), json={"name": "X", "params": {"width": "wide"}})
     assert wrong_type.status_code == 422
     assert client.get(_url(model)).json() == []
+
+
+def test_a_dropdown_value_has_to_be_one_of_its_options(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake openscad exports no dropdown, so the schema is given one here.
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(
+                name="style",
+                type="select",
+                initial="flat",
+                options=[Option(name="Flat", value="flat"), Option(name="Wavy", value="wavy")],
+            )
+        ]
+    )
+
+    async def with_a_dropdown(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
+        return None, schema
+
+    monkeypatch.setattr(presets_api, "schema_of", with_a_dropdown)
+    refused = client.post(_url(model), json={"name": "X", "params": {"style": "zigzag"}})
+    assert refused.status_code == 422
+    assert refused.json()["parameters"] == ["style"]
+    saved = _save(client, model, "Wavy", {"style": "wavy"})
+    update = client.patch(_url(model, saved["id"]), json={"params": {"style": "zigzag"}})
+    assert update.status_code == 422
 
 
 def test_names_are_unique_per_template_ignoring_case(client: TestClient, model: str) -> None:

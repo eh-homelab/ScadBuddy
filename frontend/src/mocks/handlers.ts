@@ -474,12 +474,40 @@ function presetRefusal(
       `a preset name is at most ${MAX_PRESET_NAME} characters`,
     )
   }
-  const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
-  const unknown = Object.keys(params).filter((key) => !known.has(key))
+  const byName = new Map((state.schemas[slug]?.parameters ?? []).map((p) => [p.name, p]))
+  const unknown = Object.keys(params).filter((key) => !byName.has(key))
   if (unknown.length > 0) {
     return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
       parameters: unknown,
     })
+  }
+  // Then each value's type, as `build_defines` checks it, and a dropdown's options, as
+  // the preset routes check them.
+  for (const [key, value] of Object.entries(params)) {
+    const param = byName.get(key)!
+    const options = (param.options ?? []).map((option) => option.value)
+    const expected =
+      param.type === 'boolean'
+        ? 'boolean'
+        : ['string', 'color', 'font'].includes(param.type) ||
+            (param.type === 'select' && options.some((option) => typeof option === 'string'))
+          ? 'string'
+          : 'number'
+    if (typeof value !== expected) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${key}' expects a ${expected}, got ${JSON.stringify(value)}`,
+      )
+    }
+    if (options.length > 0 && !options.includes(value)) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `${JSON.stringify(value)} is not one of the options of '${key}'`,
+        { parameters: [key] },
+      )
+    }
   }
   // After the values, as the server checks them: they are validated in the route,
   // and only then does the store count the presets and compare the names.
