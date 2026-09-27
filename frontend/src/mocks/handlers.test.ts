@@ -3,6 +3,7 @@ import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
+import { MAX_PRESET_NAME, MAX_PRESETS, setMockPresets } from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -521,5 +522,39 @@ describe('mock API: delete a template duplicates track (#223)', () => {
     await api.deleteModel('name-keychain', true)
     const gone: unknown = await api.getModel('name-keychain').catch((caught: unknown) => caught)
     expect(gone).toMatchObject({ status: 404 })
+  })
+})
+
+describe('mock API: presets keep the server limits', () => {
+  it('refuses a name longer than the server takes', async () => {
+    const long = 'x'.repeat(MAX_PRESET_NAME + 1)
+    await expect(api.createPreset('name-keychain', { name: long, params: {} })).rejects.toMatchObject(
+      { status: 422 },
+    )
+    const saved = await api.createPreset('name-keychain', {
+      name: 'x'.repeat(MAX_PRESET_NAME),
+      params: {},
+    })
+    await expect(
+      api.updatePreset('name-keychain', saved.id, { name: long }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses a new preset once a template keeps as many as the server allows', async () => {
+    const existing = Array.from({ length: MAX_PRESETS }, (_, index) => ({
+      id: `${index}`.padStart(32, '0'),
+      name: `Preset ${index}`,
+      origin: 'mine' as const,
+      params: {},
+    }))
+    setMockPresets('name-keychain', existing)
+    const refused = api.createPreset('name-keychain', { name: 'One too many', params: {} })
+    await expect(refused).rejects.toBeInstanceOf(ApiError)
+    await expect(refused).rejects.toMatchObject({ status: 409 })
+    // Editing one that is already there is still fine.
+    const first = existing[0]!
+    await expect(
+      api.updatePreset('name-keychain', first.id, { name: 'Renamed' }),
+    ).resolves.toMatchObject({ name: 'Renamed' })
   })
 })

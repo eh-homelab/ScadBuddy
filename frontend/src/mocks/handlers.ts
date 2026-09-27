@@ -126,6 +126,11 @@ export function resetMockState(): void {
   state.seq = 0
 }
 
+/** Replaces a template's presets, so a test can start at a state that is slow to build. */
+export function setMockPresets(slug: string, presets: ParamPreset[]): void {
+  state.presets[slug] = presets
+}
+
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
@@ -450,6 +455,10 @@ function refuseBuiltin(slug: string) {
     : undefined
 }
 
+/** `library/presets.py`'s limits: the longest name, and the most presets a template keeps. */
+export const MAX_PRESET_NAME = 80
+export const MAX_PRESETS = 200
+
 /** Why a preset save is refused, as the server words it, or undefined. */
 function presetRefusal(
   slug: string,
@@ -458,6 +467,17 @@ function presetRefusal(
   own: string | null,
 ) {
   if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  if (name.length > MAX_PRESET_NAME) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `a preset name is at most ${MAX_PRESET_NAME} characters`,
+    )
+  }
+  const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
+  if (own === null && saved.length >= MAX_PRESETS) {
+    return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
+  }
   const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
   const unknown = Object.keys(params).filter((key) => !known.has(key))
   if (unknown.length > 0) {
