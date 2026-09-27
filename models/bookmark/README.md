@@ -268,7 +268,7 @@ tie bars; ScadBuddy renders once more per colour for the closed parts.
 ## Verifying
 
 ```bash
-./verify.sh                      # 33 cases, about 80 s
+./verify.sh                      # 33 cases
 ONLY='corner|missing' ./verify.sh    # a subset by name regex
 ```
 
