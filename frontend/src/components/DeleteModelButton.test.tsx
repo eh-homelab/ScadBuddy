@@ -4,6 +4,7 @@ import { Route, Routes } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { CataloguePage } from '../pages/CataloguePage'
 import { server } from '../mocks/server'
+import { api } from '../api/client'
 import { renderPage } from '../test/utils'
 import { DeleteModelButton } from './DeleteModelButton'
 
@@ -71,5 +72,22 @@ describe('DeleteModelButton', () => {
       expect(screen.getByRole('button', { name: 'Delete model' })).toBeEnabled(),
     )
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('says which duplicates lose their upstream, and deletes on a second confirm (#157)', async () => {
+    await api.duplicateModel('name-keychain', 'Keychain for Nova')
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      '1 template is a duplicate of this one',
+    )
+    await user.click(await screen.findByRole('button', { name: 'Delete anyway' }))
+
+    expect(await screen.findByRole('heading', { name: 'Keychain for Nova' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Name Keychain' })).not.toBeInTheDocument()
+    expect((await api.getModel('keychain-for-nova')).upstream_state).toBe('gone')
   })
 })

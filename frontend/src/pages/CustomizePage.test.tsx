@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Job, PipelineChoices, Plate } from '../api/types'
 import {
   BUILTIN_SLUG,
@@ -12,6 +13,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
@@ -848,5 +850,27 @@ describe('CustomizePage', () => {
     render()
     expect(await screen.findByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
     expect(screen.queryByTestId('duplicated-from')).not.toBeInTheDocument()
+  })
+
+  it('takes an upstream update from its header badge (#160)', async () => {
+    await duplicateWithUpdate()
+    const { user } = render(`/m/${COPY}`)
+
+    await user.click(await screen.findByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog', { name: 'Update available' })
+    await within(dialog).findByTestId('merge-result')
+    await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Update available' })).not.toBeInTheDocument(),
+    )
+    expect(await api.getSource(COPY)).toBe(theirs)
+  })
+
+  it('shows no update badge on a model that is not a duplicate (#160)', async () => {
+    render()
+    await screen.findByRole('button', { name: 'Duplicate' })
+    expect(screen.queryByTestId('update-badge')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('upstream-gone')).not.toBeInTheDocument()
   })
 })

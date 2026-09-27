@@ -49,6 +49,8 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  UpstreamMerge,
+  UpstreamStatus,
   UrlImport,
   VersionDiff,
 } from './types'
@@ -177,7 +179,32 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
+  /** `force` deletes a template that duplicates still track; they report it `gone` (#157). */
+  deleteModel: (slug: string, force = false) =>
+    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
+
+  /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
+  getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
+
+  /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
+  mergeUpstream: (slug: string) =>
+    request<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+
+  dismissUpstream: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+
+  detachUpstream: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+
+  /**
+   * Saves the resolution of a conflicted upstream merge: the same write as
+   * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
+   */
+  resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
+    request<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, force, message: null }),
+    }),
 
   modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
 
