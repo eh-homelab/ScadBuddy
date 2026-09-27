@@ -398,7 +398,7 @@ def test_a_readme_can_be_set_read_replaced_and_removed(client: TestClient) -> No
     served = client.get(f"/api/v1/models/{SLUG}/readme")
     assert served.status_code == 200
     assert served.text == "# Widget\n\nPrints flat.\n"
-    assert served.headers["content-type"].startswith("text/markdown")
+    assert served.headers["content-type"] == "text/markdown; charset=utf-8"
 
     assert _put_readme(client, "# Widget v2\n").status_code == 200
     assert client.get(f"/api/v1/models/{SLUG}/readme").text == "# Widget v2\n"

@@ -3133,7 +3133,6 @@ export interface operations {
                 };
                 content: {
                     "text/markdown": string;
-                    "text/plain": string;
                 };
             };
             /** @description Validation Error */

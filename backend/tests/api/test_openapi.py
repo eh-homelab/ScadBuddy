@@ -72,3 +72,19 @@ def test_the_pasted_source_body_is_a_named_schema(tmp_path: Path) -> None:
     body = schema["paths"]["/api/v1/models"]["post"]["requestBody"]["content"]
     assert body["application/json"]["schema"] == {"$ref": "#/components/schemas/PastedSource"}
     assert schema["components"]["schemas"]["PastedSource"]["required"] == ["name", "source"]
+
+
+def test_the_new_model_file_routes_document_only_what_they_answer(tmp_path: Path) -> None:
+    """#179: a response class with a media type of its own adds it to the documented
+    200 beside the declared one, so a route could claim a type it never sends."""
+    paths = json.loads(export(tmp_path / "openapi.json").read_text(encoding="utf-8"))["paths"]
+
+    def success_types(path: str, method: str) -> set[str]:
+        return set(paths[path][method]["responses"]["200"]["content"])
+
+    assert success_types("/api/v1/models/{slug}/readme", "get") == {"text/markdown"}
+    assert success_types("/api/v1/models/{slug}/thumbnail", "get") == {"image/png"}
+    assert success_types("/api/v1/models/{slug}/source", "get") == {"text/plain"}
+    for path in ("/api/v1/models/{slug}/readme", "/api/v1/models/{slug}/thumbnail"):
+        for method in ("put", "delete"):
+            assert success_types(path, method) == {"application/json"}, (method, path)

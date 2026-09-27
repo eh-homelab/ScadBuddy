@@ -5555,11 +5555,6 @@
                 "schema": {
                   "type": "string"
                 }
-              },
-              "text/plain": {
-                "schema": {
-                  "type": "string"
-                }
               }
             },
             "description": "Successful Response"

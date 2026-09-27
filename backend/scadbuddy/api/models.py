@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
@@ -723,11 +723,14 @@ def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 @router.get(
     "/models/{slug}/readme",
-    response_class=PlainTextResponse,
+    # `Response`, not `PlainTextResponse`: a response class with a media type of its
+    # own adds it to the documented 200 beside `text/markdown`, which is all this
+    # route ever answers.
+    response_class=Response,
     responses={200: {"content": {"text/markdown": {"schema": {"type": "string"}}}}},
     summary="Model README",
 )
-def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> PlainTextResponse:
+def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
     require_model_exists(catalogue, slug)
     try:
         text = catalogue.read_readme(slug)
@@ -735,7 +738,7 @@ def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> PlainTextResponse:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README") from None
-    return PlainTextResponse(text, media_type="text/markdown; charset=utf-8")
+    return Response(text, media_type="text/markdown; charset=utf-8")
 
 
 @router.put(
