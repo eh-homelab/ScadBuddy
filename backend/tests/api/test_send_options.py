@@ -15,6 +15,9 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.api.test_send import (
     API,
     PRESETS,
@@ -387,13 +390,17 @@ def test_the_targeted_printers_override_still_takes_the_queue_path(
 
 
 @respx.mock
-def test_a_models_own_pipeline_is_the_one_read(client: TestClient, model: str) -> None:
-    """#86 lets a model default to its own pipeline; the send must follow that one."""
+def test_a_models_own_pipeline_is_the_one_read(
+    client: TestClient, model: str, paths: DataPaths, settings: Settings
+) -> None:
+    """#86 lets a model default to its own pipeline; the send must follow that one.
+
+    Setting it is no longer reachable through the API — the picker's routes are gone
+    with it (spec 2026-09-27 §4) — so this is legacy stored data now, seeded directly
+    the way an existing ``settings.json`` still carries it.
+    """
     configure(client, pipeline_id=4)
-    assert (
-        client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}).status_code
-        == 200
-    )
+    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
     remember(client, "global", {"timelapse": False})
     output_id = make_output(client, model)
     upload_route()

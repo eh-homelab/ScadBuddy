@@ -1,8 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { MemoryRouter } from 'react-router'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { api, ApiError } from '../api/client'
 import type { Output, PrintRunResult } from '../api/types'
+import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -11,136 +13,322 @@ import { PrintPicker } from './PrintPicker'
 
 const output = fixtures.outputs[0] as Output
 
-function open(onRan: (result: PrintRunResult) => void = vi.fn()) {
+function renderPicker(
+  props: {
+    onRan?: (result: PrintRunResult) => void
+    onPrinterModel?: (model: string | null) => void
+  } = {},
+) {
   return renderPage(
     <PrintPicker
       open
       slug="name-keychain"
       output={{ ...output, library_file_id: undefined, pipeline_run_id: undefined }}
       onClose={vi.fn()}
-      onRan={onRan}
+      onRan={props.onRan ?? vi.fn()}
+      onPrinterModel={props.onPrinterModel}
     />,
   )
 }
 
-// A pipeline's accessible name is its whole card — name, target, bed type and presets —
-// so these match on the part that is unique to one row.
-const TEXTURED = /Textured PEI · 0\.20 mm/
-const DRAFT = /Draft · 0\.28 mm/
-const ANY_H2C = /Any H2C/
-
-/** The panel lists pipelines, then checks eligibility, so wait for both to land. */
-async function listed() {
-  await screen.findByRole('radio', { name: TEXTURED })
-  await waitFor(() => expect(screen.getAllByText(/^(ready|not ready)$/).length).toBeGreaterThan(0))
+/** The dialog has read its choices once the nozzle step is on screen. */
+async function loaded() {
+  await screen.findByRole('group', { name: /nozzles/i })
+  await screen.findByTestId('filament-slot-1')
 }
 
-function row(name: RegExp) {
-  return screen.getByRole('radio', { name }).closest('li') as HTMLElement
+/** Every request body of one kind, in order. */
+function watch(method: string, suffix: string) {
+  const bodies: Record<string, unknown>[] = []
+  const urls: string[] = []
+  server.events.on('request:start', async ({ request }) => {
+    const path = new URL(request.url).pathname
+    if (request.method === method && path.endsWith(suffix)) {
+      urls.push(request.url)
+      if (method !== 'GET') bodies.push((await request.clone().json()) as Record<string, unknown>)
+    }
+  })
+  return { bodies, urls }
 }
+
+beforeEach(() => resetMockState())
+afterEach(() => {
+  server.events.removeAllListeners()
+  vi.restoreAllMocks()
+})
 
 describe('PrintPicker', () => {
-  beforeEach(() => resetMockState())
-
-  it('lists each pipeline with its target, bed type and presets', async () => {
-    open()
-    await listed()
-
-    const textured = row(TEXTURED)
-    expect(textured).toHaveTextContent('3DP-31B-598')
-    expect(textured).toHaveTextContent('Textured PEI Plate')
-    // The nozzle diameter lives in the process preset's name, which is why it is shown.
-    expect(textured).toHaveTextContent('0.20mm Standard @BBL H2C')
-    // A printer_class target reads as the class, not as a printer.
-    expect(row(ANY_H2C)).toHaveTextContent('any H2C')
+  it('opens on the choices, with Simple mode and no pipeline list', async () => {
+    renderPicker()
+    expect(await screen.findByRole('group', { name: /nozzles/i })).toBeInTheDocument()
+    expect(screen.queryByTestId('run-pipeline')).toBeNull()
+    expect(screen.queryByText(/pipeline/i)).toBeNull()
   })
 
-  it('shows the per-slot issues inline for a pipeline that is not ready', async () => {
-    open()
-    await listed()
-
-    const draft = row(DRAFT)
-    expect(draft).toHaveTextContent('not ready')
-    // slot_index is 0-based on the wire and 1-based for a human.
-    expect(draft).toHaveTextContent('filament type mismatch (slot 1): expected ABS, found PLA')
-    // slot_index: null is a whole-plate issue and gets no slot number.
-    expect(draft).toHaveTextContent('nozzle diameter mismatch')
-    expect(within(draft).getByText(/nozzle diameter mismatch/)).not.toHaveTextContent('slot')
+  it('sends the choices and the spool plan in one run request', async () => {
+    const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
+    renderPicker()
+    fireEvent.click(await screen.findByRole('radio', { name: /0\.2 mm/i }))
+    fireEvent.click(screen.getByRole('radio', { name: /Fine/ }))
+    fireEvent.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(run).toHaveBeenCalled())
+    const [, body] = run.mock.calls[0]!
+    expect(body.choices).toMatchObject({ nozzles: [{ size: '0.2' }, { size: '0.2' }], tier: 'fine' })
+    expect(body.filament_plan.slots?.length).toBeGreaterThan(0)
+    expect(body).not.toHaveProperty('pipeline_id')
   })
 
-  it('preselects the model default and falls back to the global one', async () => {
-    open()
-    await listed()
-    // fixtures.settings.pipeline_id is 1 and no model default is set yet.
-    expect(screen.getByRole('radio', { name: TEXTURED })).toBeChecked()
-  })
-
-  it('asks which printer only when the pipeline targets a printer class', async () => {
-    const { user } = open()
-    await listed()
-
-    expect(screen.queryByLabelText('Printer')).not.toBeInTheDocument()
-    // A specific_printer target needs no question — it names the printer it derived.
-    expect(screen.getByText(/from the pipeline/)).toHaveTextContent('3DP-31B-598')
-
-    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
-
-    const printer = await screen.findByLabelText('Printer')
-    expect(printer).toHaveValue('')
-    expect(screen.getByTestId('run-pipeline')).toBeDisabled()
-  })
-
-  it('narrows a printer-class report to the printer that was chosen', async () => {
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
-
-    // `ok: true` under printer_class means at least ONE printer passes; printer 2 does not,
-    // and its reasons are in printer_reports rather than the empty top-level `issues`.
-    await user.selectOptions(await screen.findByLabelText('Printer'), '2')
-    await waitFor(() =>
-      expect(screen.getByTestId('issues-3')).toHaveTextContent('ams slot empty (slot 2)'),
+  it('disables Print and names the slot when a spool has no preset for the size', async () => {
+    vi.spyOn(api, 'runPrint').mockRejectedValue(
+      new ApiError(422, 'Generic TPU has no slicer preset for a 0.2 mm nozzle. Pick one under Advanced.'),
     )
-    expect(row(ANY_H2C)).toHaveTextContent('not ready')
-
-    await user.selectOptions(screen.getByLabelText('Printer'), '1')
-    await waitFor(() => expect(screen.queryByTestId('issues-3')).not.toBeInTheDocument())
-    expect(row(ANY_H2C)).toHaveTextContent('ready')
+    renderPicker()
+    fireEvent.click(await screen.findByRole('radio', { name: /0\.2 mm/i }))
+    fireEvent.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByText(/no slicer preset for a 0\.2 mm nozzle/)).toBeInTheDocument()
+    // Still open, and Print waits for a change rather than repeating the same refusal.
+    expect(screen.getByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+    fireEvent.click(screen.getByRole('radio', { name: /0\.4 mm/i }))
+    expect(screen.queryByText(/no slicer preset for a 0\.2 mm nozzle/)).toBeNull()
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
   })
 
-  it('runs the selected pipeline with the copies asked for and reports the queue entries', async () => {
+  it('shows the Advanced process list and per-slot preset override only when toggled', async () => {
+    renderPicker()
+    expect(screen.queryByLabelText(/process/i)).toBeNull()
+    fireEvent.click(await screen.findByRole('switch', { name: /advanced/i }))
+    expect(screen.getByLabelText(/process/i)).toBeInTheDocument()
+  })
+
+  it('sends the whole run request, with the plan the server suggested', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    expect(bodies).toHaveLength(1)
+    expect(bodies[0]).toEqual({
+      printer_id: 1,
+      filament_plan: {
+        slots: [
+          { slot_id: 1, spool_id: 21 },
+          { slot_id: 2, spool_id: 27 },
+        ],
+        force_colour_match: false,
+      },
+      choices: {
+        nozzles: [
+          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'standard' },
+        ],
+        tier: 'standard',
+        process_name: null,
+        bed_type: 'Textured PEI Plate',
+        filament_overrides: {},
+      },
+      plate_id: 1,
+      all_plates: false,
+      project_id: null,
+      options: {},
+    })
+  })
+
+  it('sends a named process and a per-slot preset in Advanced mode', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.selectOptions(screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
+    // Only the presets the chosen size takes are on offer.
+    const override = screen.getByLabelText('Preset for slot 1')
+    expect(within(override).queryByText(/0\.2 nozzle/)).toBeNull()
+    await user.selectOptions(override, 'cloud:GFSB00_22')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    expect(bodies[0]).toMatchObject({
+      choices: {
+        tier: null,
+        process_name: '0.24mm Standard @BBL H2C',
+        filament_overrides: { '1': { source: 'cloud', id: 'GFSB00_22' } },
+      },
+    })
+  })
+
+  it('drops the per-slot presets when the nozzle size changes', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    expect(bodies[0]).toMatchObject({ choices: { filament_overrides: {} } })
+  })
+
+  it('shows the run’s warnings once the print is queued', async () => {
+    vi.spyOn(api, 'runPrint').mockResolvedValue({
+      ...queuedResult,
+      warnings: [
+        {
+          kind: 'hf-unsupported',
+          message:
+            "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet.",
+        },
+        {
+          kind: 'plate-differs',
+          message: "The 3DP-31B-598's last print used Engineering Plate. Swap to Textured PEI Plate.",
+        },
+      ],
+    })
     const onRan = vi.fn()
-    const { user } = open(onRan)
-    await listed()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
-    await user.clear(screen.getByLabelText('Copies'))
-    await user.type(screen.getByLabelText('Copies'), '2')
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    expect(await screen.findByText(/Pipeline run/)).toHaveTextContent('2 copies')
-    // Which printer each copy landed on is Bambuddy's answer, from run.jobs[].
-    expect(screen.getByTestId('run-jobs')).toHaveTextContent('Copy 1 on 3DP-31B-598')
+    const warnings = await screen.findByTestId('run-warnings')
+    expect(warnings).toHaveTextContent('High Flow presets')
+    expect(warnings).toHaveTextContent('Swap to Textured PEI Plate')
+    expect(screen.getByTestId('queued-items')).toHaveTextContent('Sliced and queued for 3DP-31B-598')
     expect(onRan).toHaveBeenCalledTimes(1)
   })
 
-  it('leaves copies to the remembered quantity until the box is set', async () => {
-    const bodies: Record<string, unknown>[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && request.url.endsWith('/run')) {
-        bodies.push((await request.clone().json()) as Record<string, unknown>)
-      }
-    })
-    const { user } = open()
-    await listed()
+  it('shows why the dialog cannot open when the choices cannot be read', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json(
+          { type: 'about:blank', title: 'Bad Gateway', status: 502, detail: 'Bambuddy refused the API key' },
+          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    renderPicker()
 
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-    server.events.removeAllListeners()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy refused the API key')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
+  })
+})
 
-    expect(bodies).toHaveLength(1)
-    expect(bodies[0]).not.toHaveProperty('copies')
+describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
+  it('offers no per-slot preset override until Advanced is on', async () => {
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.queryByLabelText('Preset for slot 1')).toBeNull()
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    expect(screen.getByLabelText('Preset for slot 1')).toBeInTheDocument()
   })
 
+  it('puts the Advanced switch before the controls it reveals, and describes it', async () => {
+    renderPicker()
+    await loaded()
+
+    const toggle = screen.getByRole('switch', { name: /advanced/i })
+    const nozzles = screen.getByRole('group', { name: /nozzles/i })
+    expect(toggle.compareDocumentPosition(nozzles) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(toggle).toHaveAccessibleDescription(/any process/i)
+  })
+
+  it('leaving Advanced resets both flows, the process and the slot presets', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+    await user.click(screen.getByRole('radio', { name: 'Left High Flow' }))
+    await user.click(screen.getByRole('radio', { name: 'Right High Flow' }))
+    await user.selectOptions(screen.getByLabelText('Process'), '0.24mm Standard @BBL H2C')
+    await user.selectOptions(screen.getByLabelText('Preset for slot 1'), 'cloud:GFSB00_22')
+    await user.click(screen.getByRole('switch', { name: /advanced/i }))
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).toMatchObject({
+      choices: {
+        nozzles: [
+          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'standard' },
+        ],
+        tier: 'standard',
+        process_name: null,
+        filament_overrides: {},
+      },
+    })
+  })
+
+  it('leaves Print enabled to retry after a refusal that is not a 422', async () => {
+    const run = vi
+      .spyOn(api, 'runPrint')
+      .mockRejectedValueOnce(new ApiError(502, 'Bambuddy did not answer in time.'))
+      .mockResolvedValueOnce(queuedResult)
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bambuddy did not answer in time.')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(run).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('PrintPicker · Printer', () => {
+  it('asks which printer only when there is more than one, and re-reads for the one chosen', async () => {
+    const { urls } = watch('GET', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.getByLabelText('Printer')).toHaveValue('1')
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(urls.at(-1)).toContain('printer_id=2'))
+  })
+
+  it('does not ask which printer when there is only one', async () => {
+    server.use(
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({ ...choicesView, printers: choicesView.printers!.slice(0, 1) }),
+      ),
+    )
+    renderPicker()
+    await loaded()
+    expect(screen.queryByLabelText('Printer')).toBeNull()
+  })
+
+  it('reports the chosen printer’s model so the preview can draw its plate', async () => {
+    const onPrinterModel = vi.fn()
+    renderPicker({ onPrinterModel })
+    await loaded()
+    await waitFor(() => expect(onPrinterModel).toHaveBeenLastCalledWith('H2C'))
+  })
+})
+
+describe('PrintPicker · Plate type', () => {
+  it('opens on the plate the server resolved and remembers the one printed on', async () => {
+    const { bodies, urls } = watch('PUT', '/bed-type')
+    const { user } = renderPicker()
+    await loaded()
+
+    expect(screen.getByLabelText('Plate')).toHaveValue('Textured PEI Plate')
+    await user.selectOptions(screen.getByLabelText('Plate'), 'Engineering Plate')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    await waitFor(() => expect(bodies).toHaveLength(1))
+
+    expect(urls[0]).toContain('/print/printers/1/bed-type')
+    expect(bodies[0]).toEqual({ bed_type: 'Engineering Plate' })
+  })
+})
+
+describe('PrintPicker · Copies', () => {
   /** Remembers print options the way Settings does, so the GET and the run both see them. */
   async function remember(scope: 'global' | 'printer' | 'model', options: object, key?: string) {
     await fetch('/api/v1/settings/print-options', {
@@ -150,619 +338,240 @@ describe('PrintPicker', () => {
     })
   }
 
-  it('shows the remembered quantity the run will use before Run (#145)', async () => {
+  it('leaves copies to the remembered quantity until the box is set', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(bodies[0]).not.toHaveProperty('copies')
+  })
+
+  it('sends the copies asked for and reports them', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.type(screen.getByLabelText('Copies'), '2')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    expect(await screen.findByTestId('queued-items')).toHaveTextContent('2 copies')
+    expect(bodies[0]).toMatchObject({ copies: 2 })
+  })
+
+  it('shows the remembered quantity the run will use (#145)', async () => {
     await remember('global', { quantity: 3 })
-    const { user } = open()
-    await listed()
+    const { user } = renderPicker()
+    await loaded()
 
     const box = screen.getByLabelText('Copies')
     await waitFor(() => expect(box).toHaveAttribute('placeholder', '3'))
-    // Still unset: leaving it blank is what lets the remembered quantity through.
     expect(box).toHaveValue(null)
     expect(screen.getByTestId('remembered-copies')).toHaveTextContent('3 remembered')
-    // The low-filament check reckons with the copies that will actually print.
-    expect(await screen.findByTestId('filament-slot-1')).toHaveTextContent('for 3 copies')
+    expect(screen.getByTestId('filament-slot-1')).toHaveTextContent('for 3 copies')
 
     await user.type(box, '2')
     expect(screen.queryByTestId('remembered-copies')).not.toBeInTheDocument()
     expect(screen.getByTestId('filament-slot-1')).toHaveTextContent('for 2 copies')
   })
 
-  it('lets the pipeline printer\'s remembered quantity beat the global one', async () => {
+  it('lets the chosen printer’s remembered quantity beat the global one', async () => {
     await remember('global', { quantity: 2 })
     await remember('printer', { quantity: 4 }, '1')
-    open()
-    await listed()
+    renderPicker()
+    await loaded()
     await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '4'))
   })
 
-  it('lets the model\'s remembered quantity beat the printer\'s', async () => {
+  it('lets the model’s remembered quantity beat the printer’s', async () => {
     await remember('printer', { quantity: 4 }, '1')
     await remember('model', { quantity: 5 }, 'name-keychain')
-    open()
-    await listed()
+    renderPicker()
+    await loaded()
     await waitFor(() => expect(screen.getByLabelText('Copies')).toHaveAttribute('placeholder', '5'))
   })
+})
 
-  it('asks for the options of the pipeline about to run, not the model default', async () => {
-    const reads: string[] = []
-    server.events.on('request:start', ({ request }) => {
-      if (request.method === 'GET' && request.url.includes('/settings/print-options')) {
-        reads.push(request.url)
-      }
-    })
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
-    await waitFor(() => expect(reads.some((url) => url.includes('pipeline_id=3'))).toBe(true))
-    server.events.removeAllListeners()
-    expect(reads.every((url) => url.includes('slug=name-keychain'))).toBe(true)
+describe('PrintPicker · Options', () => {
+  it('offers the print options and sends this print’s overrides with the run', async () => {
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByText('Options'))
+    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+
+    expect(bodies[0]).toMatchObject({ options: { timelapse: true } })
+    expect(bodies[0]).not.toHaveProperty('copies')
   })
 
-  it('reports the copies the queue route queued (#148)', async () => {
-    await remember('global', { quantity: 3 })
-    const { user } = open()
-    await listed()
-    await screen.findByTestId('filament-slot-1')
+  it('keeps the Copies box and the Quantity row one value', async () => {
+    const { user } = renderPicker()
+    await loaded()
 
-    await user.click(screen.getByTestId('use-exact-filaments'))
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    expect(await screen.findByTestId('queued-items')).toHaveTextContent('3 copies')
-  })
-
-  it('only offers force once the issues have been shown', async () => {
-    const { user } = open()
-    await listed()
-
-    // The ready pipeline shows nothing to override.
-    expect(screen.queryByTestId('force')).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('radio', { name: DRAFT }))
-
-    expect(await screen.findByTestId('force')).toBeInTheDocument()
-  })
-
-  it('surfaces a refused run and then runs it with force', async () => {
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByRole('radio', { name: DRAFT }))
-
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    const alert = await screen.findByRole('alert')
-    // Bambuddy's own report, listed rather than paraphrased.
-    expect(alert).toHaveTextContent('filament type mismatch (slot 1)')
-
-    await user.click(screen.getByTestId('force'))
-    expect(screen.getByTestId('run-pipeline')).toHaveTextContent('Run anyway')
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    expect(await screen.findByText(/Pipeline run/)).toBeInTheDocument()
-    expect(screen.getByText(/eligibility check overridden/)).toBeInTheDocument()
-  })
-
-  it('remembers the pipeline for this model when asked to', async () => {
-    const writes = watchDefaultWrites()
-    const { user } = open()
-    await listed()
-
-    // No model default yet, so ticking the box is a real change and is written.
-    await user.click(screen.getByLabelText(/Always use this pipeline/))
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-
-    expect(writes).toEqual([{ pipeline_id: 1 }])
-  })
-
-  /** The model already prints with pipeline 2 (Draft); 1 (Textured) is the global fallback. */
-  function withModelDefault(pipelineId: number | null = 2) {
-    server.use(
-      http.get('/api/v1/print/models/:slug/pipelines', () =>
-        HttpResponse.json({
-          pipelines: fixtures.pipelineViews,
-          printers: fixtures.targets.printers,
-          model_pipeline_id: pipelineId,
-          global_pipeline_id: 1,
-          default_pipeline_id: pipelineId ?? 1,
-        }),
-      ),
-    )
-  }
-
-  /** Every `PUT /print/models/{slug}/pipeline` body, in order. */
-  function watchDefaultWrites(): { pipeline_id: number | null }[] {
-    const writes: { pipeline_id: number | null }[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'PUT' && request.url.endsWith('/pipeline')) {
-        writes.push((await request.clone().json()) as { pipeline_id: number | null })
-      }
-    })
-    return writes
-  }
-
-  it('does not re-point an existing model default at whatever is selected next', async () => {
-    withModelDefault(2)
-    const writes = watchDefaultWrites()
-    const { user } = open()
-    await listed()
-
-    // Opened on its default, so the box reflects that this pipeline *is* the default.
-    expect(screen.getByRole('radio', { name: DRAFT })).toBeChecked()
-    expect(screen.getByLabelText(/Always use this pipeline/)).toBeChecked()
-
-    await user.click(screen.getByRole('radio', { name: TEXTURED }))
-
-    // Switching for one print must not carry the tick — and so must not silently make
-    // the newly chosen pipeline the model's default.
-    expect(screen.getByLabelText(/Always use this pipeline/)).not.toBeChecked()
-
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-
-    // And it must not CLEAR the default either: printing something else once says nothing
-    // about what this model should default to, so the stored default is left alone.
-    expect(writes).toEqual([])
-  })
-
-  it('clears the default only when the user unticks the pipeline that is the default', async () => {
-    withModelDefault(2)
-    const writes = watchDefaultWrites()
-    const { user } = open()
-    await listed()
-    expect(screen.getByRole('radio', { name: DRAFT })).toBeChecked()
-
-    // Deliberately unticking the box on the pipeline that *is* the default is the one
-    // gesture that means "stop defaulting to this".
-    await user.click(screen.getByLabelText(/Always use this pipeline/))
-    await user.click(screen.getByTestId('force'))
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-
-    expect(writes).toEqual([{ pipeline_id: null }])
-  })
-
-  it('writes the default only when the tick actually changes it', async () => {
-    withModelDefault(2)
-    const writes = watchDefaultWrites()
-    const { user } = open()
-    await listed()
-
-    // Ticked and unchanged on the pipeline that already is the default: nothing to write.
-    await user.click(screen.getByTestId('force'))
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-
-    expect(writes).toEqual([])
-  })
-
-  it('ignores an eligibility answer that arrives after the output has changed', async () => {
-    // The panel is never unmounted (ActionBar always renders it), so a slow check for one
-    // output could otherwise overwrite a newer one's badges.
-    let call = 0
-    server.use(
-      http.post('/api/v1/print/outputs/:id/eligibility', async () => {
-        call += 1
-        const slow = call === 1
-        if (slow) await delay(400)
-        return HttpResponse.json({
-          library_file_id: 8801,
-          reports: [
-            {
-              pipeline_id: 1,
-              report: slow
-                ? // The stale answer: pipeline 1 is NOT ready for the older output.
-                  {
-                    ok: false,
-                    target_kind: 'specific_printer',
-                    target_printer_id: 1,
-                    target_printer_name: '3DP-31B-598',
-                    target_model_class: null,
-                    issues: [{ kind: 'stale_answer', slot_index: null }],
-                    printer_reports: [],
-                  }
-                : fixtures.eligibilityReports[1],
-            },
-          ],
-        })
-      }),
-    )
-
-    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
-    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
-    const { rerender } = renderPage(
-      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
-    )
-    await screen.findByRole('radio', { name: TEXTURED })
-    // Switch outputs while the first check is still in flight.
-    rerender(
-      <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />,
-    )
-
-    await waitFor(() => expect(row(TEXTURED)).toHaveTextContent('ready'))
-    // Long enough for the superseded request to land if it were going to be applied.
-    await new Promise((resolve) => setTimeout(resolve, 500))
-    expect(screen.queryByText(/stale answer/)).not.toBeInTheDocument()
-    expect(row(TEXTURED)).not.toHaveTextContent('not ready')
-  })
-
-  it('marks a pipeline Bambuddy could not judge as unchecked, not as blocked', async () => {
-    server.use(
-      http.post('/api/v1/print/outputs/:id/eligibility', () =>
-        HttpResponse.json({
-          library_file_id: 8801,
-          reports: [
-            { pipeline_id: 1, report: null, error: 'Bambuddy answered 500: the slicer fell over' },
-            { pipeline_id: 2, report: fixtures.eligibilityReports[2] },
-          ],
-        }),
-      ),
-    )
-    open()
-    await screen.findByRole('radio', { name: TEXTURED })
-
-    // The row that could not be answered says so, and claims neither state.
-    expect(await screen.findByTestId('uncheckable-1')).toHaveTextContent('the slicer fell over')
-    expect(row(TEXTURED)).not.toHaveTextContent('ready')
-    // The one that did answer is unaffected — a single failure does not blank the picker.
-    expect(row(DRAFT)).toHaveTextContent('not ready')
-    // And an unanswered check is not grounds for offering `force`: nothing was shown to
-    // override, so Run just gets Bambuddy's own verdict.
-    expect(screen.queryByTestId('force')).not.toBeInTheDocument()
-  })
-
-  it('reports a failure that hit every pipeline once, not once per row', async () => {
-    // A bad API key or an unreachable Bambuddy fails every check with the same message;
-    // repeating it per row says nothing extra and buries the actual problem.
-    const detail = "Bambuddy refused the API key. The key needs the 'Manage Queue' scope"
-    server.use(
-      http.post('/api/v1/print/outputs/:id/eligibility', () =>
-        HttpResponse.json({
-          library_file_id: 8801,
-          reports: fixtures.pipelineViews.map((pipeline) => ({
-            pipeline_id: pipeline.id,
-            report: null,
-            error: detail,
-          })),
-        }),
-      ),
-    )
-    open()
-    await screen.findByRole('radio', { name: TEXTURED })
-
-    expect(await screen.findByTestId('eligibility-unavailable')).toHaveTextContent(detail)
-    // Said once, not three times.
-    expect(screen.queryByTestId('uncheckable-1')).not.toBeInTheDocument()
-    expect(screen.queryByTestId('uncheckable-2')).not.toBeInTheDocument()
-    // And nothing claims to be ready or blocked off the back of an answer nobody got.
-    expect(screen.queryByText(/^(ready|not ready)$/)).not.toBeInTheDocument()
-  })
-
-  it('still shows a blank reason as unchecked rather than as nothing at all', async () => {
-    server.use(
-      http.post('/api/v1/print/outputs/:id/eligibility', () =>
-        HttpResponse.json({
-          library_file_id: 8801,
-          // The backend rejects a blank reason, so this is the belt to that braces: the
-          // row is decided by whether a REPORT arrived, not by the error string's truth.
-          reports: [
-            { pipeline_id: 1, report: null, error: '' },
-            { pipeline_id: 2, report: fixtures.eligibilityReports[2] },
-          ],
-        }),
-      ),
-    )
-    open()
-    await screen.findByRole('radio', { name: TEXTURED })
-
-    expect(await screen.findByTestId('uncheckable-1')).toBeInTheDocument()
-    expect(row(TEXTURED)).toHaveTextContent('not checked')
-    expect(row(TEXTURED)).not.toHaveTextContent(/^ready/)
-  })
-
-  it('says so when Bambuddy has no pipelines at all', async () => {
-    server.use(
-      http.get('/api/v1/print/models/:slug/pipelines', () =>
-        HttpResponse.json({
-          pipelines: [],
-          printers: [],
-          model_pipeline_id: null,
-          global_pipeline_id: null,
-          default_pipeline_id: null,
-        }),
-      ),
-    )
-    open()
-
-    expect(await screen.findByText(/no slicer pipelines yet/)).toBeInTheDocument()
-    expect(screen.getByTestId('run-pipeline')).toBeDisabled()
+    await user.type(screen.getByLabelText('Copies'), '3')
+    await user.click(screen.getByText('Options'))
+    expect(await screen.findByLabelText('Quantity')).toHaveValue(3)
   })
 })
 
-describe('PrintPicker · New pipeline', () => {
-  beforeEach(() => resetMockState())
-
-  it('builds one from a printer, process and per-colour filament preset plus a bed type', async () => {
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByTestId('new-pipeline'))
-
-    // Process and filament stay empty until a printer preset is named: unfiltered they are
-    // thousands of rows on a real Bambuddy.
-    const process = await screen.findByLabelText('Process preset')
-    expect(process).toBeDisabled()
-
-    await user.selectOptions(
-      screen.getByLabelText('Printer preset'),
-      'cloud:GM041', // Bambu Lab H2C 0.4 nozzle
-    )
-    await waitFor(() => expect(screen.getByLabelText('Process preset')).toBeEnabled())
-    // Only the 0.4-nozzle process preset is compatible with that printer preset.
-    expect(
-      screen.getByRole('option', { name: '0.20mm Standard @BBL H2C' }),
-    ).toBeInTheDocument()
-    expect(
-      screen.queryByRole('option', { name: /0.08mm High Quality/ }),
-    ).not.toBeInTheDocument()
-
-    await user.selectOptions(screen.getByLabelText('Process preset'), 'cloud:GP252')
-    // One filament select per colour of the output, in slot order.
-    await user.selectOptions(screen.getByLabelText('Filament for slot 1'), 'cloud:GFSA05_22')
-    await user.selectOptions(screen.getByLabelText('Filament for slot 2'), 'local:2')
-    await user.selectOptions(screen.getByLabelText('Bed type'), 'Textured PEI Plate')
-
-    const create = screen.getByRole('button', { name: 'Create pipeline' })
-    expect(create).toBeEnabled()
-    await user.click(create)
-
-    // Back to the list, with the new pipeline selected and re-checked for eligibility.
-    const created = await screen.findByRole('radio', {
-      name: /Bambu Lab H2C 0.4 nozzle · 0.20mm Standard/,
-    })
-    expect(created).toBeChecked()
-  })
-
-  it('keeps Create disabled until every slot has a filament preset', async () => {
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByTestId('new-pipeline'))
-    await user.selectOptions(await screen.findByLabelText('Printer preset'), 'cloud:GM041')
-    await waitFor(() => expect(screen.getByLabelText('Process preset')).toBeEnabled())
-    await user.selectOptions(screen.getByLabelText('Process preset'), 'cloud:GP252')
-
-    // The output has two colours; Bambuddy rejects a short filament list (minItems: 1,
-    // and one per slot is what makes the plate slice).
-    await user.selectOptions(screen.getByLabelText('Filament for slot 1'), 'cloud:GFSA05_22')
-
-    expect(screen.getByRole('button', { name: 'Create pipeline' })).toBeDisabled()
-  })
-})
-
-describe('PrintPicker · Filaments', () => {
-  beforeEach(() => resetMockState())
-
-  /** Every `POST /print/outputs/{id}/run` body, in order. */
-  function watchRuns(): Record<string, unknown>[] {
-    const bodies: Record<string, unknown>[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && request.url.includes('/run')) {
-        bodies.push((await request.clone().json()) as Record<string, unknown>)
-      }
-    })
-    return bodies
-  }
-
-  it('shows one slot per plate colour, pre-selected from the server’s suggestion', async () => {
-    open()
-    await listed()
-
-    const slot = await screen.findByTestId('filament-slot-1')
-    expect(within(slot).getByTestId('spool-21')).toBeChecked()
-    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
-  })
-
-  it('keeps the #86 request shape while the plan is still the suggested one', async () => {
-    const runs = watchRuns()
-    const { user } = open()
-    await listed()
-    await screen.findByTestId('filament-slot-1')
-
-    // The box is off and nothing has been moved, so this must stay a pipeline run —
-    // Bambuddy's own fan-out across the pipeline's printers is the default behaviour.
-    expect(screen.getByTestId('use-exact-filaments')).not.toBeChecked()
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-
-    expect(runs).toHaveLength(1)
-    expect(runs[0]).not.toHaveProperty('filament_plan')
-    expect(runs[0]).not.toHaveProperty('printer_id')
-  })
-
-  it('sends the plan and reports the queue entries once the user asks for these spools', async () => {
-    const runs = watchRuns()
-    const { user } = open()
-    await listed()
-    await screen.findByTestId('filament-slot-1')
-
-    await user.click(screen.getByTestId('use-exact-filaments'))
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    // `run` is null on this route, so the success panel reports the queue entries the
-    // slice produced rather than a pipeline run that does not exist.
-    const queued = await screen.findByTestId('queued-items')
-    expect(queued).toHaveTextContent('Sliced and queued for 3DP-31B-598')
-    expect(queued).toHaveTextContent('Slice job')
-    expect(screen.queryByText(/Pipeline run/)).not.toBeInTheDocument()
-
-    expect(runs[0]).toMatchObject({
-      printer_id: 1,
-      plate_id: 1,
-      filament_plan: {
-        slots: [
-          { slot_id: 1, spool_id: 21 },
-          { slot_id: 2, spool_id: 27 },
-        ],
-        force_colour_match: false,
-      },
-    })
-  })
-
-  it('treats moving a slot as the same request, without the box', async () => {
-    const runs = watchRuns()
-    const { user } = open()
-    await listed()
-
-    const slot = await screen.findByTestId('filament-slot-2')
-    await user.click(within(slot).getByTestId('spool-22'))
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByTestId('queued-items')
-
-    expect(runs[0]).toMatchObject({
-      printer_id: 1,
-      filament_plan: { slots: expect.arrayContaining([{ slot_id: 2, spool_id: 22 }]) },
-    })
-  })
-
-  it('says so rather than going quiet when the inventory cannot be read', async () => {
+describe('PrintPicker · Projects', () => {
+  it('files the print under the chosen project once the queue entries are known', async () => {
+    const { bodies } = watch('POST', '/project')
     server.use(
-      http.get('/api/v1/print/outputs/:id/filaments', () =>
-        HttpResponse.json(
-          {
-            type: 'about:blank',
-            title: 'Bad Gateway',
-            status: 502,
-            detail: "Bambuddy refused the API key when asked for the spool inventory",
-          },
-          { status: 502, headers: { 'Content-Type': 'application/problem+json' } },
-        ),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
       ),
     )
-    open()
-    await listed()
+    const { user } = renderPicker()
+    await loaded()
 
-    expect(await screen.findByTestId('filaments-unavailable')).toHaveTextContent(
-      'refused the API key',
-    )
-    // The pipeline still runs; the picker is an addition to #86, not a gate on it.
-    expect(screen.getByTestId('run-pipeline')).toBeEnabled()
-  })
-})
+    await user.selectOptions(await screen.findByTestId('project-select'), '2')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
-describe('PrintPicker · Nozzles', () => {
-  beforeEach(() => resetMockState())
-
-  it('shows the chosen printer’s mounted nozzles beside the pipeline’s', async () => {
-    const reads: string[] = []
-    server.events.on('request:start', ({ request }) => {
-      if (request.url.includes('/filaments')) reads.push(request.url)
-    })
-    open()
-    await listed()
-
-    const nozzles = await screen.findByTestId('nozzles')
-    server.events.removeAllListeners()
-    // The pipeline's nozzle is the one the pipelines read already named, passed back.
-    expect(reads.at(-1)).toContain('nozzle_diameter=0.4')
-    expect(nozzles).toHaveTextContent('3DP-31B-598 has 0.2 mm (HS00) and 0.4 mm (HS01) mounted')
-    expect(nozzles).toHaveTextContent('this pipeline slices for 0.4 mm')
-    expect(screen.queryByTestId('nozzle-warnings')).not.toBeInTheDocument()
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toEqual({ project_id: 2, queue_item_ids: [4471] })
   })
 
-  it('warns before Run when the pipeline’s nozzle is not mounted, without blocking it', async () => {
-    const message = 'This pipeline slices for a 0.4 mm nozzle, but 3DP-31B-598 has 0.2 mm mounted.'
+  it('does not file a print that was sent without a project', async () => {
+    const { bodies } = watch('POST', '/project')
     server.use(
-      http.get('/api/v1/print/outputs/:id/filaments', () =>
-        HttpResponse.json({
-          ...fixtures.filamentOptions,
-          nozzles: [{ nozzle_type: 'HS00', nozzle_diameter: '0.2' }],
-          warnings: [{ kind: 'nozzle-mismatch', slot_id: null, message }],
-        }),
+      http.get('/api/v1/print/outputs/:id/progress', () =>
+        HttpResponse.json({ ...fixtures.queuedSliceProgress, settled: true }),
       ),
     )
-    open()
-    await listed()
+    const { user } = renderPicker()
+    await loaded()
 
-    expect(await screen.findByTestId('nozzle-warnings')).toHaveTextContent(message)
-    expect(screen.getByTestId('run-pipeline')).toBeEnabled()
-  })
-
-  it('shows no nozzles for a printer class until a printer is chosen', async () => {
-    const { user } = open()
-    await listed()
-    await screen.findByTestId('nozzles')
-
-    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
-    await waitFor(() => expect(screen.queryByTestId('nozzles')).not.toBeInTheDocument())
-
-    await user.selectOptions(await screen.findByLabelText('Printer'), '1')
-    expect(await screen.findByTestId('nozzles')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
+    expect(bodies).toEqual([])
   })
 })
 
 describe('PrintPicker · Remembered choices', () => {
-  beforeEach(() => resetMockState())
-
-  async function put(path: string, body: object) {
-    await fetch(`/api/v1/print/models/name-keychain/${path}`, {
+  async function putChoices(body: object) {
+    await fetch('/api/v1/print/models/name-keychain/choices', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
   }
 
-  it('reopens on the printer and spools this model last printed with', async () => {
-    await put('pipeline', { pipeline_id: 3 })
-    await put('choices', { printer_id: 2, filament_plan: [{ slot_id: 2, spool_id: 22 }] })
-    open()
+  it('reopens on the spools this model last printed with', async () => {
+    await putChoices({ printer_id: 1, filament_plan: [{ slot_id: 2, spool_id: 22 }] })
+    renderPicker()
+    await loaded()
 
-    expect(await screen.findByRole('radio', { name: ANY_H2C })).toBeChecked()
-    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
-    const slot = await screen.findByTestId('filament-slot-2')
-    expect(within(slot).getByTestId('spool-22')).toBeChecked()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22')).toBeChecked()
     // A slot with nothing remembered still opens on the auto-match.
     expect(within(screen.getByTestId('filament-slot-1')).getByTestId('spool-21')).toBeChecked()
   })
 
-  it('falls back to the auto-match for a remembered spool no longer in the inventory', async () => {
-    await put('choices', { printer_id: null, filament_plan: [{ slot_id: 2, spool_id: 999 }] })
-    open()
-    await listed()
+  it('reopens on the nozzle size and quality this model last printed with', async () => {
+    await putChoices({
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+      tier: 'fine',
+      process_name: null,
+    })
+    renderPicker()
+    await loaded()
 
-    const slot = await screen.findByTestId('filament-slot-2')
-    expect(within(slot).getByTestId('spool-27')).toBeChecked()
+    expect(screen.getByRole('radio', { name: /0\.2 mm/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Fine/ })).toBeChecked()
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'false')
   })
 
-  it('remembers the class printer and the spools it printed with', async () => {
-    const saved: unknown[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'PUT' && request.url.endsWith('/choices')) {
-        saved.push(await request.clone().json())
-      }
+  it('reopens in Advanced on a remembered process', async () => {
+    await putChoices({
+      printer_id: 1,
+      filament_plan: [],
+      nozzles: [
+        { size: '0.4', flow: 'high_flow' },
+        { size: '0.4', flow: 'standard' },
+      ],
+      tier: null,
+      process_name: '0.24mm Standard @BBL H2C',
     })
-    const { user } = open()
-    await listed()
-    await user.click(screen.getByRole('radio', { name: ANY_H2C }))
-    await user.selectOptions(await screen.findByLabelText('Printer'), '2')
+    renderPicker()
+    await loaded()
+
+    expect(screen.getByRole('switch', { name: /advanced/i })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.getByLabelText('Process')).toHaveValue('0.24mm Standard @BBL H2C')
+    expect(screen.getByRole('radio', { name: 'Left High Flow' })).toBeChecked()
+  })
+
+  it('opens on 0.4 mm and Standard when nothing is remembered', async () => {
+    renderPicker()
+    await loaded()
+    expect(screen.getByRole('radio', { name: /0\.4 mm/ })).toBeChecked()
+    expect(screen.getByRole('radio', { name: /Standard — / })).toBeChecked()
+  })
+
+  it('falls back to the auto-match for a remembered spool no longer in the inventory', async () => {
+    await putChoices({ printer_id: null, filament_plan: [{ slot_id: 2, spool_id: 999 }] })
+    renderPicker()
+    await loaded()
+    expect(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-27')).toBeChecked()
+  })
+
+  it('remembers the nozzle size and quality it printed with', async () => {
+    const { bodies } = watch('PUT', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/ }))
+    await user.click(screen.getByRole('radio', { name: /Fine/ }))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    await waitFor(() => expect(bodies).toHaveLength(1))
+
+    expect(bodies[0]).toMatchObject({
+      printer_id: 1,
+      nozzles: [
+        { size: '0.2', flow: 'standard' },
+        { size: '0.2', flow: 'standard' },
+      ],
+      tier: 'fine',
+      process_name: null,
+    })
+  })
+
+  it('remembers the printer and the spools it printed with', async () => {
+    const { bodies } = watch('PUT', '/choices')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.selectOptions(screen.getByLabelText('Printer'), '2')
+    await waitFor(() => expect(screen.getByLabelText('Printer')).toHaveValue('2'))
     const slot = await screen.findByTestId('filament-slot-2')
     await user.click(within(slot).getByTestId('spool-22'))
-    await user.click(screen.getByTestId('run-pipeline'))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
-    server.events.removeAllListeners()
+    await waitFor(() => expect(bodies).toHaveLength(1))
 
-    expect(saved).toEqual([
-      {
-        printer_id: 2,
-        filament_plan: expect.arrayContaining([
-          { slot_id: 1, spool_id: 21 },
-          { slot_id: 2, spool_id: 22 },
-        ]),
-      },
-    ])
+    expect(bodies[0]).toEqual({
+      printer_id: 2,
+      filament_plan: expect.arrayContaining([
+        { slot_id: 1, spool_id: 21 },
+        { slot_id: 2, spool_id: 22 },
+      ]),
+      nozzles: [
+        { size: '0.4', flow: 'standard' },
+        { size: '0.4', flow: 'standard' },
+      ],
+      tier: 'standard',
+      process_name: null,
+    })
   })
-})
-
-describe('PrintPicker · Remembered choices, failing to save', () => {
-  beforeEach(() => resetMockState())
 
   it('still prints when the choices cannot be saved', async () => {
     server.use(
@@ -774,11 +583,10 @@ describe('PrintPicker · Remembered choices, failing to save', () => {
       ),
     )
     const onRan = vi.fn()
-    const { user } = open(onRan)
-    await listed()
-    const slot = await screen.findByTestId('filament-slot-2')
-    await user.click(within(slot).getByTestId('spool-22'))
-    await user.click(screen.getByTestId('run-pipeline'))
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(within(screen.getByTestId('filament-slot-2')).getByTestId('spool-22'))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
 
     expect(await screen.findByTestId('queued-items')).toBeInTheDocument()
     expect(onRan).toHaveBeenCalledTimes(1)
@@ -786,192 +594,14 @@ describe('PrintPicker · Remembered choices, failing to save', () => {
   })
 })
 
-describe('PrintPicker · Options', () => {
-  beforeEach(() => resetMockState())
-
-  it('offers the print options and sends this print’s overrides with the run', async () => {
-    const runs: Record<string, unknown>[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && request.url.endsWith('/run')) {
-        runs.push((await request.clone().json()) as Record<string, unknown>)
-      }
-    })
-    const { user } = open()
-    await listed()
-
-    await user.click(screen.getByText('Options'))
-    await user.selectOptions(await screen.findByLabelText('Timelapse'), 'true')
-    await user.click(screen.getByTestId('run-pipeline'))
-    await waitFor(() => expect(runs).toHaveLength(1))
-    server.events.removeAllListeners()
-
-    expect(runs[0]).toMatchObject({ options: { timelapse: true } })
-    expect(runs[0]).not.toHaveProperty('copies')
-  })
-
-  it('keeps the Copies box and the Quantity row one value', async () => {
-    const { user } = open()
-    await listed()
-
-    await user.type(screen.getByLabelText('Copies'), '3')
-    await user.click(screen.getByText('Options'))
-    expect(await screen.findByLabelText('Quantity')).toHaveValue(3)
-  })
-})
-
-describe('PrintPicker · Projects', () => {
-  beforeEach(() => resetMockState())
-
-  /**
-   * #79 — the run cannot file itself. `jobs[].queue_entry_id` is null when Bambuddy
-   * answers 202, so the ids only exist once the progress read (#89) has them, and the
-   * attach is a call of its own made from what that read reported.
-   */
-  it('files the print under the chosen project once the queue entries are known', async () => {
-    const attaches: Record<string, unknown>[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && request.url.endsWith('/project')) {
-        attaches.push((await request.clone().json()) as Record<string, unknown>)
-      }
-    })
-    server.use(
-      http.get('/api/v1/print/outputs/:id/progress', () =>
-        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
-      ),
-    )
-    const { user } = open()
-    await listed()
-
-    await user.selectOptions(await screen.findByTestId('project-select'), '2')
-    await user.click(screen.getByTestId('run-pipeline'))
-
-    await waitFor(() => expect(attaches).toHaveLength(1))
-    expect(attaches[0]).toEqual({ project_id: 2, queue_item_ids: [4472, 4473] })
-  })
-
-  it('does not file a print that was sent without a project', async () => {
-    const attaches: string[] = []
-    server.events.on('request:start', ({ request }) => {
-      if (request.method === 'POST' && request.url.endsWith('/project')) attaches.push(request.url)
-    })
-    server.use(
-      http.get('/api/v1/print/outputs/:id/progress', () =>
-        HttpResponse.json({ ...fixtures.pipelineProgress, settled: true }),
-      ),
-    )
-    const { user } = open()
-    await listed()
-
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-    await waitFor(() => expect(screen.getByTestId('print-progress')).toBeInTheDocument())
-
-    expect(attaches).toEqual([])
-  })
-})
-
-describe('PrintPicker · Plate', () => {
-  beforeEach(() => resetMockState())
-
-  /** Every run body, and every plate remembered for a printer, in order. */
-  function watch() {
-    const runs: Record<string, unknown>[] = []
-    const remembered: { url: string; body: unknown }[] = []
-    server.events.on('request:start', async ({ request }) => {
-      if (request.method === 'POST' && request.url.endsWith('/run')) {
-        runs.push((await request.clone().json()) as Record<string, unknown>)
-      }
-      if (request.method === 'PUT' && request.url.endsWith('/bed-type')) {
-        remembered.push({ url: request.url, body: await request.clone().json() })
-      }
-    })
-    return { runs, remembered }
-  }
-
-  it('offers the plate types the printer takes, opening on the pipeline’s own', async () => {
-    open()
-    await listed()
-
-    const select = await screen.findByLabelText('Plate type')
-    expect(select).toHaveValue('Textured PEI Plate')
-    // The H2C's Bambu Studio profile refuses the Cool and Smooth PEI plates.
-    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'Engineering Plate',
-      'Textured PEI Plate',
-      'Bambu Cool Plate SuperTack',
-    ])
-    expect(screen.queryByTestId('bed-type-warning')).not.toBeInTheDocument()
-  })
-
-  it('keeps a pipeline run while the plate type is the pipeline’s own', async () => {
-    const { runs } = watch()
-    const { user } = open()
-    await listed()
-    await screen.findByLabelText('Plate type')
-
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByText(/Pipeline run/)
-    server.events.removeAllListeners()
-
-    expect(runs[0]).not.toHaveProperty('bed_type')
-    expect(runs[0]).not.toHaveProperty('printer_id')
-  })
-
-  it('slices for another plate type on the printer and remembers it for that printer', async () => {
-    const { runs, remembered } = watch()
-    const { user } = open()
-    await listed()
-
-    await user.selectOptions(await screen.findByLabelText('Plate type'), 'Supertack Plate')
-    expect(screen.getByTestId('bed-type-route')).toHaveTextContent(
-      'sliced and queued for 3DP-31B-598',
-    )
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByTestId('queued-items')
-    await waitFor(() => expect(remembered).toHaveLength(1))
-    server.events.removeAllListeners()
-
-    expect(runs[0]).toMatchObject({ bed_type: 'Supertack Plate', printer_id: 1, plate_id: 1 })
-    expect(remembered[0]?.url).toContain('/print/printers/1/bed-type')
-    expect(remembered[0]?.body).toEqual({ bed_type: 'Supertack Plate' })
-  })
-
-  it('opens on the plate this printer last printed with', async () => {
-    await fetch('/api/v1/print/printers/1/bed-type', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ bed_type: 'Engineering Plate' }),
-    })
-    open()
-    await listed()
-
-    expect(await screen.findByLabelText('Plate type')).toHaveValue('Engineering Plate')
-  })
-
-  it('warns before Run when the plate type is not one the printer takes', async () => {
-    const { user } = open()
-    await listed()
-
-    // The Draft pipeline slices for a Cool Plate, which the H2C profile refuses.
-    await user.click(screen.getByRole('radio', { name: DRAFT }))
-
-    expect(await screen.findByTestId('bed-type-warning')).toHaveTextContent(
-      'Cool Plate is not a plate the H2C takes',
-    )
-    expect(screen.getByLabelText('Plate type')).toHaveValue('Cool Plate')
-    await user.selectOptions(screen.getByLabelText('Plate type'), 'Textured PEI Plate')
-    expect(screen.queryByTestId('bed-type-warning')).not.toBeInTheDocument()
-  })
-
+describe('PrintPicker · Plates of a 3MF', () => {
   it('does not ask which plate of a one-plate output to print', async () => {
-    open()
-    await listed()
-    await screen.findByLabelText('Plate type')
-
+    renderPicker()
+    await loaded()
     expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
-  it('offers each plate of a multi-plate output, and all of them', async () => {
+  it('offers each plate of a multi-plate output, reading that plate’s slots', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>
         HttpResponse.json([
@@ -980,13 +610,10 @@ describe('PrintPicker · Plate', () => {
         ]),
       ),
     )
-    const reads: string[] = []
-    const { runs } = watch()
-    server.events.on('request:start', ({ request }) => {
-      if (request.url.includes('/filaments')) reads.push(request.url)
-    })
-    const { user } = open()
-    await listed()
+    const reads = watch('GET', '/filaments')
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
 
     const plates = await screen.findByTestId('plate-choice')
     expect(within(plates).getByRole('img', { name: 'Plate 2' })).toHaveAttribute(
@@ -994,13 +621,33 @@ describe('PrintPicker · Plate', () => {
       expect.stringContaining(`/outputs/${output.id}/plates/2/thumbnail`),
     )
     await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
-    // The slots are the chosen plate's.
-    await waitFor(() => expect(reads.at(-1)).toContain('plate_id=2'))
-    await user.click(screen.getByTestId('run-pipeline'))
+    await waitFor(() => expect(reads.urls.at(-1)).toContain('plate_id=2'))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
     await screen.findByTestId('queued-items')
-    server.events.removeAllListeners()
 
-    expect(runs[0]).toMatchObject({ plate_id: 2, all_plates: false })
+    expect(bodies[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  it('queues every plate when asked for all of them', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+
+    expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
   })
 
   it("drops the previous output's plates while the next output's load", async () => {
@@ -1019,39 +666,12 @@ describe('PrintPicker · Plate', () => {
       <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await screen.findByTestId('plate-choice')
-    await screen.findByLabelText('Plate type')
 
-    // Inside the router `renderPage` wraps it in, or the picker would remount afresh.
     rerender(
       <MemoryRouter>
         <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
       </MemoryRouter>,
     )
-    await screen.findByLabelText('Plate type')
-
-    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
-  })
-
-  it('queues every plate as its own item when asked for all of them', async () => {
-    server.use(
-      http.get('/api/v1/outputs/:id/plates', () =>
-        HttpResponse.json([
-          { index: 1, has_thumbnail: false },
-          { index: 2, has_thumbnail: false },
-        ]),
-      ),
-    )
-    const { runs } = watch()
-    const { user } = open()
-    await listed()
-
-    await user.click(
-      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
-    )
-    await user.click(screen.getByTestId('run-pipeline'))
-    await screen.findByTestId('queued-items')
-    server.events.removeAllListeners()
-
-    expect(runs[0]).toMatchObject({ all_plates: true })
+    await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
   })
 })

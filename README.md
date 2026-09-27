@@ -31,9 +31,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
   plate cover images and a layout sized for the target printer's plate.
 - **Send to Bambuddy**: upload to a library folder, or slice and queue it.
-- **Print picker**: run one of Bambuddy's slicer pipelines, or create a new one. It
-  shows eligibility per pipeline, and lets you set copies, a project, filaments per
-  colour from spool inventory, and print options.
+- **Print picker**: spool-first — pick spools, nozzle size, a quality tier and a plate,
+  and ScadBuddy derives the printer, process and filament presets and slices and queues
+  through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
+  nozzle flow, the full process list and a per-slot filament preset override. Also lets
+  you set copies, a project, and print options.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,

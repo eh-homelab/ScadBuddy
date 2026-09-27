@@ -92,6 +92,18 @@ class LocalPresetCatalogue(BambuddyModel):
     process: list[LocalPreset] = Field(default_factory=list)
 
 
+class LocalPresetCreate(BambuddyModel):
+    """``POST /api/v1/local-presets/`` — a preset created by hand rather than imported.
+
+    ``setting`` is the preset JSON as Bambu Studio would store it; Bambuddy keeps it
+    verbatim and resolves ``inherits`` at slice time.
+    """
+
+    name: str
+    preset_type: Literal["filament", "printer", "process"]
+    setting: dict[str, Any]
+
+
 class Printer(BambuddyModel):
     """``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
 
@@ -105,6 +117,23 @@ class Printer(BambuddyModel):
     model: str | None = None
     is_active: bool = True
     nozzle_count: int | None = None
+
+
+class Archive(BambuddyModel):
+    """A row of ``GET /api/v1/archives/`` — one past print (or upload).
+
+    ``bed_type`` is the plate the file was sliced for. An upload that never printed has
+    ``printer_id: null``; only rows with a printer are evidence of what was on its bed.
+    """
+
+    id: int
+    printer_id: int | None = None
+    status: str | None = None
+    bed_type: str | None = None
+    print_name: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    created_at: datetime | None = None
 
 
 class NozzleInfo(BambuddyModel):
@@ -133,6 +162,22 @@ class SlotChoice(BaseModel):
 
     slot_id: int
     spool_id: int
+
+
+NozzleSize = Literal["0.2", "0.4", "0.6", "0.8"]
+FlowType = Literal["standard", "high_flow"]
+Tier = Literal["fine", "standard", "draft"]
+
+
+class NozzleChoice(BaseModel):
+    """One extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4).
+
+    Here rather than in ``resolver`` so the settings store can remember it per model
+    without importing the resolver (which reaches the client, which imports the store).
+    """
+
+    size: NozzleSize
+    flow: FlowType = "standard"
 
 
 class AmsTray(BambuddyModel):

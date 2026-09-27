@@ -3,10 +3,10 @@ import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Job, PipelineChoices, Plate } from '../api/types'
+import type { ChoicesView, Job, Plate } from '../api/types'
+import { choicesView } from '../mocks/choices'
 import {
   BUILTIN_SLUG,
-  pipelineViews,
   printOptions,
   settings as settingsFixture,
   targets,
@@ -690,25 +690,19 @@ describe('CustomizePage', () => {
   })
 
   it('follows the printer chosen in the print picker, and warns when the model does not fit (#81)', async () => {
-    // The Draft pipeline aims at a second printer, an A1 mini, so switching pipelines
-    // switches printers — and plates.
+    // A second printer, an A1 mini: choosing it in the print dialog switches plates.
     server.use(
-      http.get('/api/v1/print/models/:slug/pipelines', () =>
-        HttpResponse.json({
-          pipelines: pipelineViews.map((pipeline) =>
-            pipeline.id === 2
-              ? { ...pipeline, target_printer_id: 2, target_printer_name: 'Mini', printer_ids: [2] }
-              : pipeline,
-          ),
+      http.get('/api/v1/print/outputs/:id/choices', ({ request }) => {
+        const asked = new URL(request.url).searchParams.get('printer_id')
+        return HttpResponse.json({
+          ...choicesView,
+          printer_id: asked === null ? 1 : Number(asked),
           printers: [
             targets.printers![0]!,
             { id: 2, name: 'Mini', model: 'A1M', is_active: true, nozzle_count: 1 },
           ],
-          model_pipeline_id: null,
-          global_pipeline_id: 1,
-          default_pipeline_id: 1,
-        } satisfies PipelineChoices),
-      ),
+        } satisfies ChoicesView)
+      }),
     )
     const { user } = render()
     await firstRender()
@@ -716,7 +710,7 @@ describe('CustomizePage', () => {
     await user.click(screen.getByTestId('generate'))
     await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
 
-    // The default pipeline targets the H2C.
+    // The dialog opens on the H2C.
     await user.click(screen.getByTestId('print'))
     const dialog = await screen.findByRole('dialog', { name: 'Print' })
     await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('H2C 330 × 320'))
@@ -741,7 +735,7 @@ describe('CustomizePage', () => {
     await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const again = await screen.findByRole('dialog', { name: 'Print' })
-    await user.click(await within(again).findByRole('radio', { name: /Draft/ }))
+    await user.selectOptions(await within(again).findByLabelText('Printer'), '2')
 
     await waitFor(() => expect(screen.getByTestId('plate')).toHaveTextContent('A1 mini 180 × 180'))
     expect(screen.getByTestId('plate-fit')).toHaveTextContent(/X is 132\.1 mm over the A1 mini/)

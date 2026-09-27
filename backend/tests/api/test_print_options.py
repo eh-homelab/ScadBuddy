@@ -9,6 +9,9 @@ import httpx
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.bambuddy.conftest import recording
 
 ROUTE = "/api/v1/settings/print-options"
@@ -169,17 +172,19 @@ def test_remembering_an_option_never_needs_a_reachable_bambuddy(client: TestClie
 
 @respx.mock
 def test_a_models_own_pipeline_decides_the_printer_the_scope_keys_on(
-    client: TestClient, model: str
+    client: TestClient, model: str, paths: DataPaths, settings: Settings
 ) -> None:
-    """#86 lets a model default to its own pipeline, which may aim elsewhere."""
+    """#86 lets a model default to its own pipeline, which may aim elsewhere.
+
+    Setting a model's own pipeline is no longer reachable through the API — the
+    picker's routes are gone with it (spec 2026-09-27 §4) — so this is legacy stored
+    data now. Seeded directly, the way an existing ``settings.json`` still carries it.
+    """
     client.put(
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
     )
-    assert (
-        client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}).status_code
-        == 200
-    )
+    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
     respx.get("https://bambuddy.test/api/v1/slicer-pipelines/9").mock(
         return_value=httpx.Response(
             200, json={**recording("slicer-pipeline.json"), "id": 9, "target_printer_id": 3}

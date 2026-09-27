@@ -32,6 +32,7 @@ from fastapi import status
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
+    Archive,
     AvailableFilament,
     EligibilityReport,
     EligibilityRequest,
@@ -41,7 +42,9 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     InventoryRemain,
     LibraryFile,
+    LocalPreset,
     LocalPresetCatalogue,
+    LocalPresetCreate,
     Pipeline,
     PipelineCreate,
     PipelineList,
@@ -261,6 +264,16 @@ class BambuddyClient:
         )
         return LocalPresetCatalogue.model_validate(response.json())
 
+    async def create_local_preset(self, preset: LocalPresetCreate) -> LocalPreset:
+        response = await self._send(
+            "POST",
+            "/local-presets/",
+            scope=Scope.MANAGE_LIBRARY,
+            what="create a local preset",
+            json=preset.model_dump(mode="json"),
+        )
+        return LocalPreset.model_validate(response.json())
+
     # --- inventory -----------------------------------------------------------
 
     async def spools(self, *, include_archived: bool = False) -> list[Spool]:
@@ -337,6 +350,19 @@ class BambuddyClient:
             params={"plate_id": plate_id} if plate_id is not None else None,
         )
         return FilamentRequirements.model_validate(response.json())
+
+    async def archives(self, *, printer_id: int, limit: int = 20) -> list[Archive]:
+        """This printer's recent archives. Bambuddy's order is not documented, so callers
+        sort; ``limit`` keeps the read small."""
+        what = "list the archives"
+        response = await self._send(
+            "GET",
+            "/archives/",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"printer_id": printer_id, "limit": limit},
+        )
+        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
 
     # --- library -------------------------------------------------------------
 

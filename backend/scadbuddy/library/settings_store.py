@@ -6,7 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.models import PresetRef, SlotChoice
+from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
 from scadbuddy.core.settings import Settings
 
@@ -41,10 +41,17 @@ class ModelPrintChoices(BaseModel):
     one case the picker asks. ``filament_plan`` is only a plan the user moved off the
     auto-match: a spool no longer in the inventory is dropped by the picker, which then
     falls back to the auto-match for that slot.
+
+    ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
+    (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
+    written before them still loads; an empty ``nozzles`` means the dialog's default.
     """
 
     printer_id: int | None = None
     filament_plan: list[SlotChoice] = Field(default_factory=list)
+    nozzles: list[NozzleChoice] = Field(default_factory=list, max_length=2)
+    tier: Tier | None = None
+    process_name: str | None = Field(default=None, max_length=200)
 
 
 class StoredSettings(BambuddyIds):
@@ -194,7 +201,7 @@ class SettingsStore:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
         settings = self.load()
         remembered = dict(settings.model_print_choices)
-        if choices.printer_id is None and not choices.filament_plan:
+        if choices == ModelPrintChoices():
             remembered.pop(slug, None)
         else:
             remembered[slug] = choices

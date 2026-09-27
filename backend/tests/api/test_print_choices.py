@@ -1,0 +1,181 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import httpx
+import respx
+from fastapi.testclient import TestClient
+
+from scadbuddy.core.settings import Settings
+from scadbuddy.library.settings_store import SettingsStore
+from tests.api.test_print import printers_route
+from tests.api.test_print_filaments import inventory_routes, prepared
+from tests.api.test_send import BASE, upload_route
+from tests.bambuddy.conftest import recording
+
+API = f"{BASE}/api/v1"
+
+
+def h2c_presets() -> None:
+    respx.get(f"{API}/slicer/presets").mock(
+        return_value=httpx.Response(200, json=recording("slicer-presets-h2c.json"))
+    )
+    respx.get(f"{API}/local-presets/").mock(
+        return_value=httpx.Response(200, json=recording("local-presets.json"))
+    )
+
+
+@respx.mock
+def test_choices_offer_every_size_the_rack_and_the_last_plate(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(
+        return_value=httpx.Response(200, json=recording("printer-status-rack.json"))
+    )
+    respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(200, json=recording("archives.json"))
+    )
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1").json()
+
+    assert body["nozzle_sizes"] == ["0.2", "0.4", "0.6", "0.8"]
+    assert {(n["size"], n["flow"]) for n in body["installed"]} >= {("0.2", "standard")}
+    assert body["tiers"]["0.2"][0] == {
+        "tier": "fine",
+        "process_name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
+    }
+    assert "0.08mm High Quality @BBL H2C" in body["processes"]["0.4"]
+    assert body["last_bed_type"] == "Textured PEI Plate"
+    assert body["filaments"]["slots"]
+
+
+@respx.mock
+def test_an_offline_printer_still_opens_the_dialog(client: TestClient, model: str) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+    response = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1")
+
+    assert response.status_code == 200
+    assert response.json()["installed"] == []
+    assert response.json()["bed_type"] == "Textured PEI Plate"
+
+
+@respx.mock
+def test_choices_list_the_filament_presets_each_nozzle_size_takes(
+    client: TestClient, model: str
+) -> None:
+    """Task 9 R5 — Advanced mode's per-slot override picks from these."""
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices?printer_id=1").json()
+
+    by_size = body["filament_presets"]
+    assert set(by_size) == {"0.2", "0.4", "0.6", "0.8"}
+    names_02 = [row["name"] for row in by_size["0.2"]]
+    assert "Bambu ABS @BBL H2C 0.2 nozzle" in names_02
+    assert "Bambu ABS @BBL H2C" not in names_02
+    # A user's own (OrcaSlicer-imported) profile is offered too.
+    assert "Cookiecad PETG Magic Dark Magic (3DFP 7JdoWkaDB) @H2C 0.2n" in names_02
+    # One row per name: the cloud and standard tiers list the same preset twice, and the
+    # cloud ref is the one the resolver itself prefers.
+    assert len(names_02) == len(set(names_02))
+    abs_02 = next(row for row in by_size["0.2"] if row["name"] == "Bambu ABS @BBL H2C 0.2 nozzle")
+    assert abs_02["ref"] == {"source": "cloud", "id": "GFSB00_23"}
+    # Fix round 1 #7 — the dialog reads only the name and the ref.
+    assert {key for row in by_size["0.4"] for key in row} == {"ref", "name"}
+
+
+@respx.mock
+def test_choices_carry_what_this_model_last_printed_with(client: TestClient, model: str) -> None:
+    """The dialog reopens on the remembered spools; only the run writes them."""
+    client.put(
+        f"/api/v1/print/models/{model}/choices",
+        json={"printer_id": 1, "filament_plan": [{"slot_id": 1, "spool_id": 22}]},
+    )
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
+
+    assert body["model_choices"] == {
+        "printer_id": 1,
+        "filament_plan": [{"slot_id": 1, "spool_id": 22}],
+        "nozzles": [],
+        "tier": None,
+        "process_name": None,
+    }
+
+
+@respx.mock
+def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
+    client: TestClient, model: str
+) -> None:
+    """Spec §7 — the dialog reopens on the last choices for this model."""
+    remembered = {
+        "printer_id": 1,
+        "filament_plan": [],
+        "nozzles": [{"size": "0.2", "flow": "standard"}, {"size": "0.2", "flow": "high_flow"}],
+        "tier": None,
+        "process_name": "0.06mm Fine @BBL H2C 0.2 nozzle",
+    }
+    assert client.put(f"/api/v1/print/models/{model}/choices", json=remembered).json() == (
+        remembered
+    )
+    output_id = prepared(client, model)
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
+
+    assert body["model_choices"] == remembered
+
+
+def test_a_settings_file_from_before_the_dialog_choices_still_loads(
+    client: TestClient, model: str, data_dir: Path
+) -> None:
+    """Existing settings.json rows carry only the printer and spools."""
+    (data_dir / "settings.json").write_text(
+        json.dumps(
+            {
+                "model_print_choices": {
+                    model: {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    loaded = SettingsStore(data_dir / "settings.json", Settings()).load()
+
+    choices = loaded.model_print_choices[model]
+    assert choices.printer_id == 2
+    assert choices.nozzles == []
+    assert choices.tier is None
+    assert choices.process_name is None
