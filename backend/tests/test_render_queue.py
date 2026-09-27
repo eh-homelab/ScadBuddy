@@ -28,8 +28,9 @@ from scadbuddy.render.jobs import (
     PartInfo,
     QueueFullError,
     RenderQueue,
+    attempt_work_dir,
 )
-from scadbuddy.render.pg_store import MIGRATIONS, PostgresJobStore
+from scadbuddy.render.pg_store import MIGRATIONS, TWIN_QUEUED_ERROR, PostgresJobStore
 
 CONFIG = Config(
     data_dir=Path("/unused"),
@@ -225,6 +226,21 @@ async def test_resubmitting_the_render_it_supersedes_keeps_that_job(
     gate.release.set()
     await queue.join()
     assert queue.store.read(first.id).state == "done"
+
+
+async def test_a_job_of_another_model_is_never_superseded(make_queue: QueueFactory) -> None:
+    """A stale job id from another model's page, or another client's, drops nothing."""
+    gate = Gate()
+    queue = await make_queue(gate)
+    await _occupy_the_worker(queue, gate)
+
+    theirs = await queue.submit("other", {"n": 1})
+    await queue.submit("demo", {"n": 2}, supersedes=theirs.id)
+    gate.release.set()
+    await queue.join()
+
+    assert queue.store.read(theirs.id).state == "done"
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_finished_total", outcome="superseded") == 0
 
 
 async def test_every_render_is_accepted_however_deep_the_queue(
@@ -483,6 +499,34 @@ def test_a_lost_worker_s_job_is_requeued_then_failed(pg_conninfo: str, paths: Da
 
 
 @pytest.mark.requires_postgres
+def test_a_twin_in_the_queue_fails_one_row_not_the_whole_reap(
+    pg_conninfo: str, paths: DataPaths
+) -> None:
+    """Requeueing a job whose identical render is already pending would violate the
+    pending-key index: that row fails as interrupted, and the rest of the pass
+    still requeues."""
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        twin_of, other = _job(n=1), _job(n=2)
+        for job in (twin_of, other):
+            store.submit(job, render_key("demo", job.params, None))
+        assert store.claim() is not None
+        assert store.claim() is not None  # both lose their worker
+        twin = _job(n=1)
+        store.submit(twin, render_key("demo", twin.params, None))
+
+        reaped = store.reap(lease=0.0001, max_attempts=3)
+
+        assert [j.id for j in reaped.requeued] == [other.id]
+        assert [j.id for j in reaped.failed] == [twin_of.id]
+        assert store.read(twin_of.id).error == TWIN_QUEUED_ERROR
+        assert store.read(other.id).state == "pending"
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
 def test_a_reaped_worker_cannot_overwrite_the_retry(pg_conninfo: str, paths: DataPaths) -> None:
     store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
     store.open()
@@ -557,3 +601,15 @@ def test_every_outcome_series_exists_before_the_first_job() -> None:
 def test_queue_settings_are_validated_by_name(field: str, value: float, env: str) -> None:
     with pytest.raises(ValueError, match=env):
         Config(**{field: value})  # type: ignore[arg-type]
+
+
+def test_a_retry_renders_into_a_directory_of_its_own(paths: DataPaths) -> None:
+    """A lapsed lease does not prove the first worker died, so the retry must not
+    write into the files it may still be writing."""
+    job = _job(n=1)
+    first = attempt_work_dir(paths, job.claimed(1))
+    retry = attempt_work_dir(paths, job.claimed(2))
+
+    assert first == paths.job_work_dir(job.id)
+    assert retry != first
+    assert retry.is_relative_to(paths.job_work_dir(job.id))  # deleted with the job

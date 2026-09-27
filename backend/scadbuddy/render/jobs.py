@@ -328,6 +328,21 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
         shutil.rmtree(staging, ignore_errors=True)
 
 
+def attempt_work_dir(paths: DataPaths, job: Job) -> Path:
+    """Where this attempt at ``job`` writes its files.
+
+    A retry gets a directory of its own. A job is only retried when its worker's
+    lease lapsed, and a lapsed lease does not prove the worker died -- a stalled
+    event loop or a partition from the database looks the same -- so the first
+    attempt may still be writing `model.3mf` when the retry starts. Separate
+    directories mean neither can splice into the other's files, and the result
+    that `finish` records (only the attempt still holding the job) names its own.
+    The first attempt keeps the plain layout; `JobStore.delete` removes them all.
+    """
+    base = paths.job_work_dir(job.id)
+    return base if job.attempt <= 1 else base / f"attempt-{job.attempt}"
+
+
 async def render_job(
     job: Job,
     *,
@@ -345,20 +360,20 @@ async def render_job(
     # render newer source while claiming the older revision.
     with stage("source"):
         source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
-    scad = source.scad
-    # #90 stamps the model's own commit id, which `provenance.source_version` was
-    # written to accept (a free string, never a structured field). The content hash
-    # remains the answer when there is no repository to name a revision -- and it
-    # hashes what was actually rendered, which for an old revision is its export,
-    # not the live model directory. Reads every file under it; off the loop, like
-    # the other two.
-    version = source.version
-    config = source.configure(config)
-    with stage("source"):
+        scad = source.scad
+        # #90 stamps the model's own commit id, which `provenance.source_version`
+        # was written to accept (a free string, never a structured field). The
+        # content hash remains the answer when there is no repository to name a
+        # revision -- and it hashes what was actually rendered, which for an old
+        # revision is its export, not the live model directory. Reads every file
+        # under it; off the loop, like the other two. One timed stage for all of
+        # it: resolving the source and deriving its schema are the same step.
+        version = source.version
+        config = source.configure(config)
         if version is None:
             version = await asyncio.to_thread(source_version, scad.parent)
         schema = await cached_schema(scad, source.schema_cache, config=config)
-    work = paths.job_work_dir(job.id)
+    work = attempt_work_dir(paths, job)
     work.mkdir(parents=True, exist_ok=True)
 
     with stage("render"):

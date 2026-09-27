@@ -1,104 +1,102 @@
-import { act, renderHook } from "@testing-library/react";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-  type MockInstance,
-} from "vitest";
-import { api } from "../api/client";
-import type { Job } from "../api/types";
-import { useRenderJob } from "./useRenderJob";
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
+import { api } from '../api/client'
+import type { Job, RenderAccepted } from '../api/types'
+import { useRenderJob } from './useRenderJob'
 
-const JOB_A = "a".repeat(32);
-const JOB_B = "b".repeat(32);
-const JOB_C = "c".repeat(32);
+const JOB_A = 'a'.repeat(32)
+const JOB_B = 'b'.repeat(32)
+const JOB_C = 'c'.repeat(32)
 
-function job(id: string, status: Job["status"]): Job {
+function job(id: string, status: Job['status']): Job {
   return {
     id,
-    slug: "demo",
+    slug: 'demo',
     status,
-    created_at: "2026-09-27T00:00:00Z",
+    created_at: '2026-09-27T00:00:00Z',
     params: {},
     log_tail: [],
-  } as Job;
+  } as Job
+}
+
+function accepted(id: string): RenderAccepted {
+  return { job_id: id, status_url: `/api/v1/jobs/${id}` }
+}
+
+/** A submit this test answers by hand, so its answer can land after the next one. */
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((settle) => {
+    resolve = settle
+  })
+  return { promise, resolve }
 }
 
 async function settle() {
   await act(async () => {
-    await vi.advanceTimersByTimeAsync(0);
-  });
+    await vi.advanceTimersByTimeAsync(0)
+  })
 }
 
-describe("useRenderJob", () => {
-  let submit: MockInstance<typeof api.render>;
-  let read: MockInstance<typeof api.getJob>;
-  const ids = [JOB_A, JOB_B, JOB_C];
+type Props = { slug: string; params: Record<string, number>; version?: string }
+
+function mount(initialProps: Props) {
+  return renderHook(({ slug, params, version }: Props) => useRenderJob(slug, params, version), {
+    initialProps,
+  })
+}
+
+describe('useRenderJob', () => {
+  let submit: MockInstance<typeof api.render>
 
   beforeEach(() => {
-    vi.useFakeTimers();
-    let next = 0;
-    submit = vi.spyOn(api, "render").mockImplementation(async () => {
-      const id = ids[next++]!;
-      return { job_id: id, status_url: `/api/v1/jobs/${id}` };
-    });
-    read = vi.spyOn(api, "getJob");
-  });
+    vi.useFakeTimers()
+    let next = 0
+    const ids = [JOB_A, JOB_B, JOB_C]
+    submit = vi.spyOn(api, 'render').mockImplementation(async () => accepted(ids[next++]!))
+    vi.spyOn(api, 'getJob').mockImplementation(async (id) => job(id, 'pending'))
+  })
 
   afterEach(() => {
-    vi.useRealTimers();
-    vi.restoreAllMocks();
-  });
+    vi.useRealTimers()
+    vi.restoreAllMocks()
+  })
 
-  it("tells the server which unfinished render a new one replaces", async () => {
-    read.mockImplementation(async (id) => job(id, "pending"));
-    const { rerender } = renderHook(
-      ({ params }) => useRenderJob("demo", params),
-      {
-        initialProps: { params: { n: 1 } },
-      },
-    );
-    await settle();
-    rerender({ params: { n: 2 } });
-    await settle();
+  it('tells the server which render a new one replaces', async () => {
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    rerender({ slug: 'demo', params: { n: 2 } })
+    await settle()
 
-    expect(submit).toHaveBeenNthCalledWith(
-      1,
-      "demo",
-      { n: 1 },
-      undefined,
-      undefined,
-    );
-    expect(submit).toHaveBeenNthCalledWith(
-      2,
-      "demo",
-      { n: 2 },
-      undefined,
-      JOB_A,
-    );
-  });
+    expect(submit).toHaveBeenNthCalledWith(1, 'demo', { n: 1 }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, JOB_A)
+  })
 
-  it("supersedes nothing once the last render has settled", async () => {
-    read.mockImplementation(async (id) => job(id, "done"));
-    const { rerender } = renderHook(
-      ({ params }) => useRenderJob("demo", params),
-      {
-        initialProps: { params: { n: 1 } },
-      },
-    );
-    await settle();
-    rerender({ params: { n: 2 } });
-    await settle();
+  it('supersedes a render whose answer arrives after the next one was asked for', async () => {
+    const first = deferred<RenderAccepted>()
+    submit.mockImplementationOnce(() => first.promise)
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    rerender({ slug: 'demo', params: { n: 2 } })
+    await settle()
+    // The second submit waits for the first's job id rather than going without it.
+    expect(submit).toHaveBeenCalledTimes(1)
 
-    expect(submit).toHaveBeenNthCalledWith(
-      2,
-      "demo",
-      { n: 2 },
-      undefined,
-      undefined,
-    );
-  });
-});
+    first.resolve(accepted(JOB_A))
+    await settle()
+
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, JOB_A)
+  })
+
+  it('never supersedes a render of another model or revision', async () => {
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    rerender({ slug: 'other', params: { n: 1 } })
+    await settle()
+    rerender({ slug: 'other', params: { n: 1 }, version: 'f'.repeat(40) })
+    await settle()
+
+    expect(submit).toHaveBeenNthCalledWith(2, 'other', { n: 1 }, undefined, undefined)
+    expect(submit).toHaveBeenNthCalledWith(3, 'other', { n: 1 }, 'f'.repeat(40), undefined)
+  })
+})

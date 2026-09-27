@@ -82,8 +82,11 @@ for the project picker).
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.
   - `SCADBUDDY_DATABASE_URL` (libpq URL): keep the queue in Postgres. Accepted
-    renders then survive a restart, and replicas share one queue. Unset, it lives
-    in `/data/jobs` and this process, and a restart fails what was unfinished.
+    renders then survive a restart. Unset, it lives in `/data/jobs` and this
+    process, and a restart fails what was unfinished. Several replicas can share
+    one queue only if they also share `/data` (a ReadWriteMany volume): a job's
+    files are written there by whichever replica renders it. On a ReadWriteOnce
+    PVC run one replica, as the design does.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
     startup.
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer

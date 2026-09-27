@@ -118,9 +118,10 @@ class JobBackend(Protocol):
     ) -> Submitted:
         """Queue ``job`` -- or answer with the pending job whose key is ``key``.
 
-        ``supersedes`` names a job this one replaces. If it is still pending, one
-        claim on it is released, and it is failed as superseded when that was the
-        last. When it is itself this render, it is simply returned.
+        ``supersedes`` names a job this one replaces. If it is still pending and
+        renders the same model, one claim on it is released, and it is failed as
+        superseded when that was the last; a job of another model is left alone.
+        When it is itself this render, it is simply returned.
 
         ``max_pending`` > 0 refuses a NEW job with `QueueFullError` once that many
         wait, counted after the supersede frees its place. A submit answered by
@@ -250,6 +251,10 @@ class JobStore:
     ) -> Submitted:
         with self._lock:
             previous = self._waiting.get(supersedes) if supersedes is not None else None
+            if previous is not None and previous.job.slug != job.slug:
+                # Only a job of the same model: a job id from another model's page
+                # (or another client) is never this submit's to drop.
+                previous = None
             if previous is not None and previous.key == key:
                 return Submitted(previous.job, coalesced=True)
             if max_pending and key not in self._by_key:
@@ -258,7 +263,7 @@ class JobStore:
                 depth = len(self._waiting) - (1 if frees else 0)
                 if depth >= max_pending:
                     raise QueueFullError(depth)
-            superseded = self._release(supersedes) if supersedes is not None else None
+            superseded = self._release(previous.job.id) if previous is not None else None
             existing = self._by_key.get(key)
             if existing is not None:
                 waiting = self._waiting[existing]

@@ -564,7 +564,7 @@ dependencies = [
     { name = "networkx" },
     { name = "numpy" },
     { name = "prometheus-client" },
-    { name = "psycopg", extra = ["binary"] },
+    { name = "psycopg" },
     { name = "psycopg-pool" },
     { name = "pydantic" },
     { name = "pydantic-settings" },
@@ -576,6 +576,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "mypy" },
+    { name = "psycopg", extra = ["binary"] },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "respx" },
@@ -591,7 +592,7 @@ requires-dist = [
     { name = "networkx", specifier = ">=3.4" },
     { name = "numpy", specifier = ">=2.1" },
     { name = "prometheus-client", specifier = ">=0.21" },
-    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
+    { name = "psycopg", specifier = ">=3.2" },
     { name = "psycopg-pool", specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.9" },
     { name = "pydantic-settings", specifier = ">=2.6" },
@@ -603,6 +604,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "mypy", specifier = ">=1.13" },
+    { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pytest", specifier = ">=8.3" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
     { name = "respx", specifier = ">=0.22" },

@@ -24,6 +24,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from psycopg import Connection
+from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
@@ -168,27 +169,33 @@ class PostgresJobStore:
                 (lease,),
             ).fetchall()
             for row in stale:
-                twin = conn.execute(
-                    "SELECT 1 FROM render_jobs WHERE state = 'pending' AND render_key = %s",
-                    (row["render_key"],),
+                error = LOST_WORKER_ERROR
+                if row["attempts"] < max_attempts:
+                    # Tried, not checked first: an identical render already pending
+                    # (or submitted concurrently) makes the requeue violate the
+                    # pending-key unique index, and a SELECT beforehand would only
+                    # narrow that race, not close it. The savepoint confines the
+                    # violation to this row instead of rolling back the whole pass.
+                    try:
+                        with conn.transaction():
+                            back = conn.execute(
+                                "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
+                                " heartbeat_at = NULL, claims = 1 WHERE id = %s RETURNING *",
+                                (row["id"],),
+                            ).fetchone()
+                    except UniqueViolation:
+                        error = TWIN_QUEUED_ERROR
+                    else:
+                        assert back is not None
+                        requeued.append(_job(back))
+                        continue
+                dead = conn.execute(
+                    "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
+                    " error = %s WHERE id = %s RETURNING *",
+                    (error, row["id"]),
                 ).fetchone()
-                if row["attempts"] < max_attempts and twin is None:
-                    back = conn.execute(
-                        "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                        " heartbeat_at = NULL, claims = 1 WHERE id = %s RETURNING *",
-                        (row["id"],),
-                    ).fetchone()
-                    assert back is not None
-                    requeued.append(_job(back))
-                else:
-                    error = TWIN_QUEUED_ERROR if twin is not None else LOST_WORKER_ERROR
-                    dead = conn.execute(
-                        "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
-                        " error = %s WHERE id = %s RETURNING *",
-                        (error, row["id"]),
-                    ).fetchone()
-                    assert dead is not None
-                    failed.append(_job(dead))
+                assert dead is not None
+                failed.append(_job(dead))
         return Reaped(requeued=requeued, failed=failed)
 
     def submit(
@@ -202,9 +209,12 @@ class PostgresJobStore:
         superseded: Job | None = None
         with self._pool.connection() as conn, conn.transaction():
             if supersedes is not None:
+                # Only a job of the same model: a job id from another model's page
+                # (or another client) is never this submit's to drop.
                 previous = conn.execute(
-                    "SELECT * FROM render_jobs WHERE id = %s AND state = 'pending' FOR UPDATE",
-                    (supersedes,),
+                    "SELECT * FROM render_jobs WHERE id = %s AND state = 'pending'"
+                    " AND slug = %s FOR UPDATE",
+                    (supersedes, job.slug),
                 ).fetchone()
                 if previous is not None and previous["render_key"] == key:
                     return Submitted(_job(previous), coalesced=True)

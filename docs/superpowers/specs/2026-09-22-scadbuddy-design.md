@@ -484,6 +484,11 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   jobs survive a restart. Migrations are append-only and applied at startup under
   an advisory lock. Without a database URL the store is JSON files under `jobs/`
   with the wait list in the process, and a restart fails unfinished jobs.
+  A retry renders into its own `attempt-N/` under the job's work directory, since a
+  lapsed lease does not prove the first worker died; only the attempt that still
+  holds the job can `finish` it, so the recorded result always names that
+  attempt's files. Multiple replicas on one queue additionally need a shared
+  (ReadWriteMany) data directory; the deployment in §9 is one replica on RWO.
 - **Admission (opt-in).** `SCADBUDDY_RENDER_QUEUE_MAX` (default 0 = no limit): set,
   a request that would be a new job while that many already wait is refused with
   503 and `Retry-After` (about one mean render). The check comes after a supersede

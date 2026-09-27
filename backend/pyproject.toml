@@ -12,7 +12,7 @@ dependencies = [
     "numpy>=2.1",
     "prometheus-client>=0.21",
     "psycopg-pool>=3.2",
-    "psycopg[binary]>=3.2",
+    "psycopg>=3.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.20",
@@ -29,6 +29,11 @@ packages = ["scadbuddy"]
 
 [dependency-groups]
 dev = [
+    # The wheel with its own libpq, for developing and testing without one on the
+    # system. Production uses plain `psycopg` against the image's apt-managed
+    # libpq5 (Dockerfile), so libpq/OpenSSL security fixes arrive with the OS
+    # packages rather than with a Python wheel release.
+    "psycopg[binary]>=3.2",
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
