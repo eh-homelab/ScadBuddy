@@ -552,7 +552,10 @@ class RenderQueue:
         supersedes: str | None = None,
     ) -> Job:
         """Queue a render, or hand back the waiting job that already is this render.
-        Never refused.
+
+        Raises `QueueFullError` when SCADBUDDY_RENDER_QUEUE_MAX (`render_queue_max`)
+        is set and that many renders already wait; callers turn it into a 503.
+        With the default of 0 it never raises.
 
         ``supersedes`` names the job this submit replaces; it is dropped if no worker
         has taken it yet."""
