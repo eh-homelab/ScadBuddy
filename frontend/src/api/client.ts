@@ -11,8 +11,8 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
-  LibraryAdd,
-  LibraryEntry,
+  CatalogueLibrary,
+  LibraryPinRequest,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -168,7 +168,7 @@ export const api = {
       signal,
     }),
 
-  /** Metadata, and since #93 the libraries the model renders with. */
+  /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
     request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
@@ -432,12 +432,21 @@ export const api = {
 
   listPlates: () => request<PlateCatalogue>('/plates'),
 
-  /** #93 — the curated catalogue plus anything added by URL, each with its pin. */
-  listLibraries: () => request<LibraryEntry[]>('/libraries'),
+  /** #93 — the curated catalogue: libraries the server knows, each with a suggested ref. */
+  listLibraries: () => request<CatalogueLibrary[]>('/libraries'),
 
-  /** Clones the library at `ref` server-side and pins it in `libraries.lock`. */
-  addLibrary: (body: LibraryAdd) =>
-    request<LibraryEntry>('/libraries', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * Clones the library at `ref` server-side and pins the resolved commit into this
+   * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   */
+  pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
+    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  unpinModelLibrary: (slug: string, name: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
 
   getSettings: () => request<Settings>('/settings'),
 

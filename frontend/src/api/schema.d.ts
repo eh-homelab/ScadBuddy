@@ -96,14 +96,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Libraries and their pins */
+        /**
+         * The library catalogue
+         * @description Libraries ScadBuddy knows how to fetch, each with the ref it suggests. Any other can be pinned to a model by URL.
+         */
         get: operations["list_libraries_api_v1_libraries_get"];
         put?: never;
-        /**
-         * Add a library, or pin it to another ref
-         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.
-         */
-        post: operations["add_library_api_v1_libraries_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -208,6 +207,30 @@ export interface paths {
          */
         post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/libraries/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Pin a library to a model, or re-pin it at another ref
+         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in this model's `model.json`, as one revision of the model. The model renders against that pin from then on; no other model moves.
+         */
+        put: operations["pin_library_api_v1_models__slug__libraries__name__put"];
+        post?: never;
+        /**
+         * Remove a library from a model
+         * @description The checkout stays on the volume: an older revision may still pin it.
+         */
+        delete: operations["unpin_library_api_v1_models__slug__libraries__name__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1217,6 +1240,22 @@ export interface components {
             /** Variants */
             variants?: components["schemas"]["FontVariant"][];
         };
+        /**
+         * CatalogueLibrary
+         * @description One library ScadBuddy knows how to fetch, and the ref it suggests.
+         */
+        CatalogueLibrary: {
+            /** Homepage */
+            homepage: string;
+            /** Licence */
+            licence: string;
+            /** Name */
+            name: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /** CheckRequest */
         CheckRequest: {
             /**
@@ -1612,13 +1651,8 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
-        /** LibraryAdd */
-        LibraryAdd: {
-            /**
-             * Name
-             * @description The directory `use <NAME/...>` names
-             */
-            name: string;
+        /** LibraryPinRequest */
+        LibraryPinRequest: {
             /**
              * Ref
              * @description A tag or branch to pin; the catalogue's default when omitted
@@ -1629,43 +1663,6 @@ export interface components {
              * @description An https git URL; the catalogue's when omitted
              */
             url?: string | null;
-        };
-        /**
-         * LibraryEntry
-         * @description The catalogue and the lockfile, joined: what can be added, and what is.
-         */
-        LibraryEntry: {
-            /** Curated */
-            curated: boolean;
-            /**
-             * Error
-             * @description Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again
-             */
-            error?: string | null;
-            /** Homepage */
-            homepage?: string | null;
-            /** Licence */
-            licence?: string | null;
-            /** Name */
-            name: string;
-            pin?: components["schemas"]["LibraryPin"] | null;
-            /** Ref */
-            ref: string;
-            /** Url */
-            url: string;
-        };
-        /**
-         * LibraryPin
-         * @description One entry of ``libraries.lock``: where it came from, what was asked for, what
-         *     that resolved to.
-         */
-        LibraryPin: {
-            /** Commit */
-            commit: string;
-            /** Ref */
-            ref: string;
-            /** Url */
-            url: string;
         };
         /**
          * LoadedAt
@@ -1723,12 +1720,27 @@ export interface components {
              */
             theirs: string;
         };
+        /**
+         * ModelLibrary
+         * @description One entry of a model's ``libraries``: a library pinned for that model.
+         */
+        ModelLibrary: {
+            /** Commit */
+            commit: string;
+            /**
+             * Name
+             * @description The directory `use <NAME/...>` names
+             */
+            name: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /** ModelPatch */
         ModelPatch: {
             /** Description */
             description?: string | null;
-            /** Libraries */
-            libraries?: string[] | null;
             /** Name */
             name?: string | null;
             /** Tags */
@@ -1761,7 +1773,7 @@ export interface components {
             /** Has Thumbnail */
             has_thumbnail: boolean;
             /** Libraries */
-            libraries?: string[];
+            libraries?: components["schemas"]["ModelLibrary"][];
             /** Name */
             name: string;
             /**
@@ -3211,40 +3223,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LibraryEntry"][];
-                };
-            };
-        };
-    };
-    add_library_api_v1_libraries_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["LibraryAdd"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryEntry"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["CatalogueLibrary"][];
                 };
             };
         };
@@ -3491,6 +3470,76 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    pin_library_api_v1_models__slug__libraries__name__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryPinRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unpin_library_api_v1_models__slug__libraries__name__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };

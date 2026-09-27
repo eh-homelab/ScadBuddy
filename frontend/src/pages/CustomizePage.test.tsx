@@ -477,7 +477,7 @@ describe('CustomizePage', () => {
     )
   })
 
-  it('re-reads the schema and re-renders once the model libraries are saved (#93)', async () => {
+  it('re-reads the schema and re-renders once the model libraries change (#93)', async () => {
     const seen = watchRequests()
     const renders = watchRenders()
     const { user } = render()
@@ -486,8 +486,12 @@ describe('CustomizePage', () => {
     const before = { schema: schemaReads(), renders: renders.length }
 
     await user.click(screen.getByRole('button', { name: 'Libraries' }))
-    await user.click(await screen.findByRole('checkbox', { name: /BOSL2/ }))
-    await user.click(screen.getByRole('button', { name: 'Save' }))
+    const bosl2 = await screen.findByRole('listitem', { name: 'BOSL2' })
+    await user.click(within(bosl2).getByRole('button', { name: 'Add' }))
+    await screen.findByRole('list', { name: 'Pinned libraries' })
+    // Not under the open dialog: re-reading the schema re-mounts the page.
+    expect(schemaReads()).toBe(before.schema)
+    await user.click(screen.getByRole('button', { name: 'Done' }))
 
     await waitFor(() => expect(schemaReads()).toBe(before.schema + 1))
     await waitFor(() => expect(renders.length).toBe(before.renders + 1), { timeout: 4000 })
