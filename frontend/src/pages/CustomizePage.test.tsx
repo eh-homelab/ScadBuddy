@@ -91,7 +91,7 @@ describe('CustomizePage', () => {
     expect(await within(dialog).findByLabelText('Name')).toHaveValue('Name Keychain')
   })
 
-  it('takes a rename from Edit details into the page without a reload (#179)', async () => {
+  it('takes a rename from Edit details into the heading and Duplicate without a reload (#179)', async () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Edit details' }))
     const details = screen.getByRole('dialog', { name: 'Edit details' })
@@ -101,7 +101,8 @@ describe('CustomizePage', () => {
     await user.click(within(details).getByRole('button', { name: 'Save' }))
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
 
-    // Duplicate's prefill is the model's name, from the record this page holds.
+    // The still-open page's heading and Duplicate's prefill both take the new name.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Keyring')
     await user.click(screen.getByRole('button', { name: 'Duplicate' }))
     const duplicate = screen.getByRole('dialog', { name: /^Duplicate / })
     expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
