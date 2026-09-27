@@ -939,3 +939,31 @@ def test_one_template_that_cannot_be_linked_does_not_stop_the_rest(
     assert [getattr(record, "slug", None) for record in caplog.records if record.exc_info] == [
         "tag"
     ]
+
+
+def test_a_linked_seeded_template_takes_a_built_in_update(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    catalogue.write_source("name-keychain", KEYCHAIN.replace('"hi"', '"mine"'))
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+    catalogue.link_seeded()
+    _bundle(image, "name-keychain", KEYCHAIN.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.state == "update"
+    assert status.preview is not None and status.preview.clean
+
+    record, plan = catalogue.merge_upstream("name-keychain")
+
+    assert plan.conflicts == 0
+    assert catalogue.paths.model_source("name-keychain").read_text(encoding="utf-8") == (
+        KEYCHAIN.replace('"hi"', '"mine"').replace("size = 10", "size = 12")
+    )
+    assert record.upstream is not None
+    assert record.upstream.path == "_builtin/name-keychain"
+    assert record.upstream.base == status.revision
+    assert catalogue.upstream_status("name-keychain").state == "current"

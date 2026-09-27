@@ -178,7 +178,7 @@ class Catalogue:
             logger.exception("could not record a revision", extra={"revision_message": message})
             return None
 
-    def _commit_change(self, message: str, slug: str, change: Callable[[], None]) -> None:
+    def _commit_change(self, message: str, change: Callable[[], None], *slugs: str) -> str | None:
         """Run ``change`` -- a read-modify-write of the template's files -- and commit it,
         both under the history's write lock, so no other catalogue commit's change
         lands between its read and its write and is lost.
@@ -188,7 +188,7 @@ class Catalogue:
         """
         if self.history is None or not self.history.available:
             change()
-            return
+            return None
         changed = False
 
         def run() -> None:
@@ -197,11 +197,12 @@ class Catalogue:
             changed = True
 
         try:
-            self.history.commit(message, slug, prepare=run)
+            return self.history.commit(message, *slugs, prepare=run)
         except (GitError, OSError):
             if not changed:
                 raise
             logger.exception("could not record a revision", extra={"revision_message": message})
+            return None
 
     def version(self, slug: str) -> str | None:
         if self.history is None or not self.history.available:
@@ -420,7 +421,7 @@ class Catalogue:
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw)
 
-        self._commit_change(f"Update {slug} metadata", slug, change)
+        self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
 
     def write_source(
@@ -464,7 +465,7 @@ class Catalogue:
             self._replace_source(slug, source)
             self._advance_base(slug, upstream, base)
 
-        self._commit_change(message or f"Merge {upstream_id} into {slug}", slug, resolve)
+        self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
 
     def _replace_source(self, slug: str, source: str) -> None:
@@ -558,7 +559,7 @@ class Catalogue:
             self._advance_base(slug, upstream, revision)
             plans.append(plan)
 
-        self._commit_change(f"Merge {upstream_id} into {slug}", slug, merge)
+        self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
         return self.record(slug), plans[0]
 
     def dismiss_upstream(self, slug: str) -> ModelRecord:
@@ -571,7 +572,7 @@ class Catalogue:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to dismiss", state)
             self._write_upstream(slug, upstream.model_copy(update={"dismissed": revision}))
 
-        self._commit_change(f"Dismiss {upstream_id} update in {slug}", slug, dismiss)
+        self._commit_change(f"Dismiss {upstream_id} update in {slug}", dismiss, slug)
         return self.record(slug)
 
     def detach_upstream(self, slug: str) -> ModelRecord:
@@ -586,7 +587,7 @@ class Catalogue:
                 )
             self._write_upstream(slug, None)
 
-        self._commit_change(f"Detach {slug} from {upstream_id}", slug, detach)
+        self._commit_change(f"Detach {slug} from {upstream_id}", detach, slug)
         return self.record(slug)
 
     def duplicates_of(self, model_id: str) -> list[str]:
@@ -789,31 +790,46 @@ class Catalogue:
         except OSError:
             logger.exception("could not link seeded templates to their built-ins")
             return None
-        linked: list[str] = []
+        seeds: dict[str, str] = {}
         for slug in candidates:
             try:
-                raw = self.read_raw_meta(slug)
-                if raw.get("upstream") is not None:
+                if self.read_raw_meta(slug).get("upstream") is not None:
                     continue
                 base = self.history.seed_commit(slug)
-                if base is None:
-                    logger.info(
-                        "not linking a template to its built-in: it was not seeded",
-                        extra={"slug": slug},
-                    )
-                    continue
-                raw["upstream"] = Upstream(
-                    id=f"{BUILTIN_PREFIX}{slug}", path=slug, base=base
-                ).model_dump()
-                self.write_raw_meta(slug, raw)
-            except (GitError, OSError, ValueError, ModelNotFoundError):
+            except (GitError, OSError, ValueError):
                 logger.exception("could not link a seeded template", extra={"slug": slug})
                 continue
-            linked.append(slug)
-        if not linked:
+            if base is None:
+                logger.info(
+                    "not linking a template to its built-in: it was not seeded",
+                    extra={"slug": slug},
+                )
+                continue
+            seeds[slug] = base
+        if not seeds:
             return None
-        commit = self._commit(LINK_MESSAGE, *linked)
-        logger.info("linked seeded templates to their built-ins", extra={"slugs": linked})
+        linked: list[str] = []
+
+        def link() -> None:
+            # Re-read under the write lock: the read-modify-write of each
+            # `model.json` is atomic with the commit, as every other one is.
+            for slug, base in seeds.items():
+                try:
+                    raw = self.read_raw_meta(slug)
+                    if raw.get("upstream") is not None:
+                        continue
+                    raw["upstream"] = Upstream(
+                        id=f"{BUILTIN_PREFIX}{slug}", path=model_path(slug), base=base
+                    ).model_dump()
+                    self.write_raw_meta(slug, raw)
+                except (OSError, ValueError, ModelNotFoundError):
+                    logger.exception("could not link a seeded template", extra={"slug": slug})
+                    continue
+                linked.append(slug)
+
+        commit = self._commit_change(LINK_MESSAGE, link, *seeds)
+        if linked:
+            logger.info("linked seeded templates to their built-ins", extra={"slugs": linked})
         return commit
 
     def _replace_builtin(self, source: Path, target: Path) -> None:
