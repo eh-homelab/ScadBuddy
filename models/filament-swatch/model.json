@@ -1,0 +1,6 @@
+{
+  "name": "Filament Swatch Card",
+  "description": "A swatch card for cataloguing spools: colour name, brand, material and print temperature debossed or inlaid into the face, a row of stepped windows from 0.2 mm up in 0.2 mm increments, each labelled with its thickness, and an optional hole for a swatch ring. Landscape or portrait. Debossed prints in one filament; inlaid adds the lettering on extruder 2.",
+  "tags": ["swatch", "filament", "organisation", "text"],
+  "source": "inspired by Printables Filament swatch customizer"
+}

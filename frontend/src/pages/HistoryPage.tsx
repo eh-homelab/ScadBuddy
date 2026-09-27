@@ -163,7 +163,17 @@ function OutputRow({
           </div>
           <p className="sb-num mt-1 text-[12px] text-muted">
             {output.bbox_mm ? formatBbox(output.bbox_mm) : 'No dimensions recorded'}
-            {output.queue_item_id && (
+            {(output.plates ?? []).length > 1 &&
+              (output.plates ?? []).map((plate) => (
+                <BambuddyId
+                  key={plate.queue_item_id}
+                  className="ml-2 text-ok"
+                  href={bambuddyUrl && `${bambuddyUrl}/queue/${plate.queue_item_id}`}
+                >
+                  plate {plate.plate_id} queued #{plate.queue_item_id}
+                </BambuddyId>
+              ))}
+            {output.queue_item_id && (output.plates ?? []).length <= 1 && (
               <BambuddyId
                 className="ml-2 text-ok"
                 href={bambuddyUrl && `${bambuddyUrl}/queue/${output.queue_item_id}`}

@@ -18,6 +18,7 @@ from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PLATE_THUMBNAIL_SMALL,
     PLATE_TOP,
+    plates_of,
     replate_3mf,
     write_bambu_3mf,
 )
@@ -433,3 +434,53 @@ class TestBambuProjectIdentity:
             settings = json.loads(archive.read("Metadata/project_settings.config"))
         assert settings["printable_height"] == "325"
         assert all(key in settings for key in self.REQUIRED)
+
+
+class TestPlatesOf:
+    """#83: which plates a 3MF carries, and which of them have a cover image."""
+
+    def test_a_written_3mf_is_one_plate_with_its_cover(self, written: Path) -> None:
+        [plate] = plates_of(written)
+        assert (plate.index, plate.thumbnail) == (1, PLATE_THUMBNAIL)
+
+    def test_a_3mf_written_without_covers_has_no_thumbnail(self, tmp_path: Path) -> None:
+        [plate] = plates_of(_write(tmp_path / "bare.3mf", covers=False))
+        assert (plate.index, plate.thumbnail) == (1, None)
+
+    def test_every_plate_of_a_multi_plate_project_is_listed(self, tmp_path: Path) -> None:
+        path = add_plate(_write(tmp_path / "two.3mf", covers=False), 2, thumbnail=b"png")
+        assert [(plate.index, plate.thumbnail) for plate in plates_of(path)] == [
+            (1, None),
+            (2, "Metadata/plate_2.png"),
+        ]
+
+    def test_a_plate_without_a_plater_id_is_a_malformed_3mf(self, tmp_path: Path) -> None:
+        path = _write(tmp_path / "bad.3mf", covers=False)
+        with zipfile.ZipFile(path) as archive:
+            entries = {name: archive.read(name) for name in archive.namelist()}
+        config = entries["Metadata/model_settings.config"].decode("utf-8")
+        entries["Metadata/model_settings.config"] = config.replace(
+            "</config>", " <plate>\n </plate>\n</config>"
+        ).encode("utf-8")
+        with zipfile.ZipFile(path, "w") as archive:
+            for name, payload in entries.items():
+                archive.writestr(name, payload)
+        with pytest.raises(ValueError, match="plater_id"):
+            plates_of(path)
+
+
+def add_plate(path: Path, index: int, *, thumbnail: bytes | None = None) -> Path:
+    """Add a ``<plate>`` to a written 3MF, the way Bambu Studio lists a second plate."""
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    cover = f"Metadata/plate_{index}.png"
+    extra = f'  <metadata key="thumbnail_file" value="{cover}"/>\n' if thumbnail else ""
+    plate = f' <plate>\n  <metadata key="plater_id" value="{index}"/>\n{extra} </plate>\n</config>'
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    entries["Metadata/model_settings.config"] = config.replace("</config>", plate).encode("utf-8")
+    if thumbnail:
+        entries[cover] = thumbnail
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+    return path

@@ -1,0 +1,6 @@
+{
+  "name": "Storage Box with Lid",
+  "description": "A parametric box in four footprints (rectangle, rounded, hexagon, round) with optional grid dividers and a friction, sliding dovetail or snap-fit lid. Box and lid print side by side without supports; optional lid text is inlaid in a third colour. Defaults give an 80 x 60 x 40 mm inside rounded box with a friction lid.",
+  "tags": ["box", "storage", "lid", "organiser"],
+  "source": "inspired by Printables Rugged Box (Parametric) and MakerWorld Parametric Box with Lid / Box with Slide Lid"
+}

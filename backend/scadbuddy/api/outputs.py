@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import zipfile
+from pathlib import Path
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, File, Response, UploadFile, status
@@ -27,6 +29,7 @@ from scadbuddy.library.outputs import (
     OutputStore,
     download_filename,
 )
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["outputs"])
@@ -40,6 +43,13 @@ class OutputSummary(OutputMeta):
 
 class OutputDetail(OutputSummary):
     params: dict[str, ParamValue] = Field(default_factory=dict)
+
+
+class OutputPlate(BaseModel):
+    """One plate of the output's 3MF (#83): the ``plate_id`` a print of it queues."""
+
+    index: int
+    has_thumbnail: bool
 
 
 class CreateOutputRequest(BaseModel):
@@ -200,6 +210,48 @@ def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileRe
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     return FileResponse(path, media_type="image/png")
+
+
+def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
+    path = outputs.directory(output_id) / MODEL_NAME
+    if not path.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF")
+    return path
+
+
+@router.get(
+    "/outputs/{output_id}/plates", response_model=list[OutputPlate], summary="The 3MF's plates"
+)
+def get_output_plates(output_id: OutputIdPath, outputs: OutputsDep) -> list[OutputPlate]:
+    """What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
+    always one plate, which the picker does not ask about."""
+    require_output(outputs, output_id)
+    return [
+        OutputPlate(index=plate.index, has_thumbnail=plate.thumbnail is not None)
+        for plate in plates_of(_model_3mf(outputs, output_id))
+    ]
+
+
+@router.get(
+    "/outputs/{output_id}/plates/{index}/thumbnail",
+    response_class=Response,
+    responses={200: {"content": {"image/png": {}}}},
+    summary="A plate's cover image",
+)
+def get_output_plate_thumbnail(
+    output_id: OutputIdPath, index: int, outputs: OutputsDep
+) -> Response:
+    """The plate's own cover from inside the 3MF, the one Bambu Studio would show."""
+    require_output(outputs, output_id)
+    path = _model_3mf(outputs, output_id)
+    cover = next(
+        (plate.thumbnail for plate in plates_of(path) if plate.index == index and plate.thumbnail),
+        None,
+    )
+    if cover is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
+    with zipfile.ZipFile(path) as archive:
+        return Response(archive.read(cover), media_type="image/png")
 
 
 @router.put(

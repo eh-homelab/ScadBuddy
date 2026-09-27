@@ -1,0 +1,6 @@
+{
+  "name": "Whistle",
+  "description": "A pea-less referee-style whistle that prints lying on its side with no supports: a 1.2 mm windway (never under 1 mm), an open window with a bevelled labium edge, and a round chamber. Three shapes, a scale factor, a lanyard loop, and an optional name inlaid flush in the side. The whistle prints on extruder 1, the name on extruder 2.",
+  "tags": ["toy", "kids", "whistle", "keychain", "two-colour"],
+  "source": "inspired by Printables \"Flat Pocket Whistle\" (Jonas Daehnert, 99,539 downloads) and \"Ultra Compact Mini Whistle 100 dB on your Keychain\" (Franken 3D, 68,836 downloads)"
+}

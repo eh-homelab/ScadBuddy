@@ -34,6 +34,10 @@ def openscad_binary() -> str | None:
     return shutil.which(load_config().openscad)
 
 
+def openscad_lsp_binary() -> str | None:
+    return shutil.which(load_config().openscad_lsp)
+
+
 def git_binary() -> str | None:
     """`git` is baked into every image stage, so this skip is dead where CI runs
     the suite -- it is a developer convenience, not a supported configuration."""
@@ -81,6 +85,12 @@ def installed_font_families() -> str:
 def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad") and openscad_binary() is None:
         pytest.skip("openscad is not on PATH")
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_openscad_lsp(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_openscad_lsp") and openscad_lsp_binary() is None:
+        pytest.skip("openscad-lsp is not on PATH")
 
 
 @pytest.fixture(autouse=True)

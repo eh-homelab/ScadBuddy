@@ -10,7 +10,9 @@ from scadbuddy.core.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
+    DEFAULT_LSP_SESSIONS,
     DEFAULT_OPENSCAD,
+    DEFAULT_OPENSCAD_LSP,
     DEFAULT_RENDER_CONCURRENCY,
     DEFAULT_RENDER_TIMEOUT,
     Config,
@@ -34,6 +36,8 @@ class Settings(BaseSettings):
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
+    openscad_lsp: str = DEFAULT_OPENSCAD_LSP
+    lsp_sessions: int = DEFAULT_LSP_SESSIONS
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -73,6 +77,8 @@ class Settings(BaseSettings):
             job_ttl=self.job_ttl,
             google_fonts_api_key=self.google_fonts_api_key,
             fonts_catalogue_ttl=self.fonts_catalogue_ttl,
+            openscad_lsp=self.openscad_lsp,
+            lsp_sessions=self.lsp_sessions,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:
