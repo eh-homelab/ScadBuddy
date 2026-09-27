@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
@@ -31,6 +32,8 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
+from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -49,9 +52,6 @@ if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
     # `render.provenance`, so a runtime import here would be circular.
     from scadbuddy.library.outputs import OutputStore
-
-    # And `library.previews` imports this module's `_write_atomic`.
-    from scadbuddy.library.previews import PreviewStore
 
 logger = logging.getLogger(__name__)
 
@@ -88,21 +88,6 @@ def _remove_tree(path: Path) -> bool:
     return True
 
 
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Swap ``data`` in at ``path``: a reader sees the old file or the new one, never
-    a torn one. The temp file is in the same directory, so ``os.replace`` stays on one
-    filesystem and stays atomic. :class:`FileNotFoundError` when the directory is gone.
-    """
-    handle, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
-    try:
-        with os.fdopen(handle, "wb") as writer:
-            writer.write(data)
-        os.replace(staged, path)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
-
-
 def _still_there(path: Path) -> bool:
     """Whether ``path`` is still present; one that cannot even be checked counts as present."""
     try:
@@ -121,6 +106,10 @@ class SidecarNotFoundError(KeyError):
 
 class ModelExistsError(ValueError):
     pass
+
+
+class LibraryNotDeclaredError(KeyError):
+    """The model has no library of that name to remove."""
 
 
 class InvalidModelMetaError(ValueError):
@@ -146,9 +135,24 @@ class ModelMeta(BaseModel):
     #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
     #: never clobbers it.
     upstream: Upstream | None = None
-    # The third-party libraries (#93) this model renders with: the only ones on
-    # its OPENSCADPATH, each at the commit `libraries.lock` pins.
-    libraries: list[str] = Field(default_factory=list)
+    #: The third-party libraries (#93) this model renders with, each pinned for this
+    #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
+    #: a fetched commit, set by `pin_library`, never typed in.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
+
+    @field_validator("libraries", mode="before")
+    @classmethod
+    def _readable_pins(cls, value: Any) -> Any:
+        """Only the entries that are pins. A bare name from before per-model pins,
+        or a hand-edited entry, must not stop the model listing; its render says
+        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        if not isinstance(value, list):
+            return []
+        readable: list[ModelLibrary] = []
+        for entry in value:
+            with contextlib.suppress(ValidationError):
+                readable.append(ModelLibrary.model_validate(entry))
+        return readable
 
 
 #: The model.json fields with a default and no `None` of their own: a `null` for
@@ -179,7 +183,6 @@ class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
-    libraries: list[str] | None = None
 
     @field_validator("name")
     @classmethod
@@ -423,7 +426,7 @@ class Catalogue:
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
         try:
-            _write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
+            write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -621,6 +624,48 @@ class Catalogue:
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
 
+    def pin_library(self, slug: str, library: ModelLibrary) -> ModelRecord:
+        """Pin ``library`` for this model: in place of any entry of the same name,
+        or at the end. One revision of the model; no other model moves."""
+        self._require(slug)
+
+        def change() -> None:
+            raw = self.read_raw_meta(slug)
+            current = raw.get("libraries")
+            entries: list[Any] = list(current) if isinstance(current, list) else []
+            # Where the old entry was, so a re-pin is a one-line diff; any duplicate a
+            # hand edit left goes with it.
+            index = next(
+                (i for i, entry in enumerate(entries) if entry_name(entry) == library.name),
+                len(entries),
+            )
+            entries = [entry for entry in entries if entry_name(entry) != library.name]
+            entries.insert(index, library.model_dump())
+            raw["libraries"] = entries
+            self.write_raw_meta(slug, raw)
+
+        message = f"Pin {library.name} to {library.ref} ({library.commit[:7]}) for {slug}"
+        self._commit_change(message, change, slug)
+        return self.record(slug)
+
+    def unpin_library(self, slug: str, name: str) -> ModelRecord:
+        """Take ``name`` off this model's libraries. :class:`KeyError` when the
+        model does not declare it."""
+        self._require(slug)
+
+        def change() -> None:
+            raw = self.read_raw_meta(slug)
+            current = raw.get("libraries")
+            entries: list[Any] = list(current) if isinstance(current, list) else []
+            kept = [entry for entry in entries if entry_name(entry) != name]
+            if len(kept) == len(entries):
+                raise LibraryNotDeclaredError(name)
+            raw["libraries"] = kept
+            self.write_raw_meta(slug, raw)
+
+        self._commit_change(f"Remove library {name} from {slug}", change, slug)
+        return self.record(slug)
+
     def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
         """Set or replace the model's own thumbnail, as one revision. A default-render
         preview has nothing left to stand in for, so it goes."""
@@ -664,7 +709,7 @@ class Catalogue:
         """
         self._require(slug)
         try:
-            _write_atomic(self.paths.model_dir(slug) / name, payload)
+            write_atomic(self.paths.model_dir(slug) / name, payload)
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -728,7 +773,7 @@ class Catalogue:
         # and swapping inside it then fail rather than recreate it, and the
         # failure is the same 404 the delete itself would give.
         try:
-            _write_atomic(self.paths.model_source(slug), source.encode())
+            write_atomic(self.paths.model_source(slug), source.encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
@@ -809,7 +854,7 @@ class Catalogue:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _write_atomic(target, content)
+                    write_atomic(target, content)
             self._advance_base(slug, upstream, revision)
             plans.append(plan)
 
@@ -922,10 +967,13 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
         roots = (
             self.paths.outputs,
             self.paths.model_revisions,
-            self.paths.schema_cache,
+            *keyed_by_file,
             self.paths.previews,
         )
         for root in roots:
@@ -935,7 +983,7 @@ class Catalogue:
                 for entry in root.iterdir():
                     if root in (self.paths.outputs, self.paths.model_revisions):
                         candidates.append((entry.name, entry))
-                    elif (root == self.paths.schema_cache and entry.suffix == ".json") or (
+                    elif (root in keyed_by_file and entry.suffix == ".json") or (
                         root == self.paths.previews
                         and entry.suffix in (".png", ".json")
                         # A dotfile is an atomic write's temp file, still in flight.
@@ -987,6 +1035,8 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
+            # Not derived, but the previous model's: its saved presets.
+            self.paths.model_presets(slug),
             self.paths.model_preview(slug),
             self.paths.model_preview_record(slug),
         ):

@@ -23,9 +23,8 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ValidationError
 
+from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import _write_atomic
-from scadbuddy.library.libraries import declared_libraries
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +43,8 @@ class PreviewRecord(BaseModel):
 
 def source_key(paths: DataPaths, slug: str) -> str | None:
     """What a default render of ``slug`` depends on: its ``model.scad`` and the
-    libraries its ``model.json`` declares. None when the model has no source.
+    libraries its ``model.json`` declares, pins included -- so re-pinning a library
+    renders it again. None when the model has no source.
 
     Not the model's revision: that moves on a README or metadata edit too, which
     would re-render a picture that cannot have changed.
@@ -54,13 +54,13 @@ def source_key(paths: DataPaths, slug: str) -> str | None:
     except FileNotFoundError:
         return None
     try:
-        libraries = declared_libraries(paths.model_dir(slug))
+        meta = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+        libraries = meta.get("libraries") if isinstance(meta, dict) else None
     except (OSError, ValueError):
-        # A model.json that cannot be read renders with no libraries, as every
-        # render of it would fail anyway.
-        libraries = []
+        # No model.json, or one that cannot be read: nothing declared to depend on.
+        libraries = None
     digest = hashlib.sha256(source)
-    digest.update(b"\0" + json.dumps(sorted(libraries)).encode())
+    digest.update(b"\0" + json.dumps(libraries, sort_keys=True).encode())
     return digest.hexdigest()
 
 
@@ -116,7 +116,7 @@ class PreviewStore:
             if wanted is not None and not wanted():
                 return False
             self.paths.previews.mkdir(parents=True, exist_ok=True)
-            _write_atomic(self.paths.model_preview(slug), png)
+            write_atomic(self.paths.model_preview(slug), png)
             self._write_record(slug, PreviewRecord(key=key, ok=True, rendered_at=_now()))
             return True
 
@@ -156,7 +156,7 @@ class PreviewStore:
 
     def _write_record(self, slug: str, record: PreviewRecord) -> None:
         payload = json.dumps(record.model_dump(mode="json"), indent=2) + "\n"
-        _write_atomic(self.paths.model_preview_record(slug), payload.encode())
+        write_atomic(self.paths.model_preview_record(slug), payload.encode())
 
 
 def _now() -> datetime:

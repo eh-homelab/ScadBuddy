@@ -51,6 +51,8 @@ CASES=(
     'heart-hole-noborder|shape="heart" hanger="hole" border=false'
     'heart-small-loop|shape="heart" size=40 thickness=2'
     'disc-inlay-noborder|shape="snowflake_disc" text_style="inlay" border=false year="2026"'
+    'disc-hole|shape="snowflake_disc" hanger="hole"'
+    'disc-small-hole-inlay|shape="snowflake_disc" hanger="hole" size=40 text_style="inlay"'
     'bauble-big-longname|size=120 thickness=6 text_size=30 name="Maximilianus"'
     'star-empty|shape="star" name="" hanger="hole" border=false'
 )
@@ -144,6 +146,29 @@ def expected(p):
     return width, height, top, has_text, has_accent
 
 
+def components(tris):
+    # Connected pieces of a triangle soup, joined through shared vertices.
+    parent = {}
+
+    def find(x):
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    key = lambda v: tuple(round(c, 3) for c in v)
+    for tri in tris:
+        a = find(key(tri[0]))
+        for v in tri[1:]:
+            b = find(key(v))
+            if a != b:
+                parent[b] = a
+    groups = {}
+    for tri in tris:
+        groups.setdefault(find(key(tri[0])), []).append(tri)
+    return list(groups.values())
+
+
 def mesh_volume(tris):
     v = 0.0
     for a, b, c in tris:
@@ -218,6 +243,23 @@ for case in CASES:
             lo, hi = (t, t + RELIEF) if p["text_style"] == "raised" else (t - min(1.0, t / 2), t)
             check(name, abs(min(pz) - lo) <= TOL and abs(max(pz) - hi) <= TOL,
                   "text spans z %.2f .. %.2f (%s)" % (lo, hi, p["text_style"]))
+    if p["shape"] == "snowflake_disc" and "accent" in parts:
+        # Every snowflake must be whole: a hole that clips one leaves a sliver.
+        S = p["size"]
+        flake_r = 0.055 * S
+        flakes = []
+        for comp in components(parts["accent"]):
+            cx = [v[0] for tri in comp for v in tri]
+            cy = [v[1] for tri in comp for v in tri]
+            # Skip the hanger's ring: centred on x=0 above the disc centre.
+            if abs(max(cx) + min(cx)) < 0.2 and min(cy) > S / 2:
+                continue
+            if max(cx) - min(cx) < 3 * flake_r:
+                flakes.append(max(cx) - min(cx))
+        want = 11 if p["hanger"] == "hole" else 12
+        check(name, len(flakes) == want, "%d snowflakes (got %d)" % (want, len(flakes)))
+        check(name, all(abs(w - 2 * flake_r) <= 0.05 for w in flakes),
+              "every snowflake whole, %.2f mm wide (got %s)" % (2 * flake_r, sorted(round(w, 2) for w in flakes)))
     check(name, abs(total - whole) <= max(0.5, 0.002 * whole),
           "colours do not overlap: parts %.1f mm3 vs whole %.1f mm3" % (total, whole))
 
