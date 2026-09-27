@@ -553,6 +553,10 @@ describe('mock API: presets keep the server limits', () => {
     const refused = api.createPreset('name-keychain', { name: 'One too many', params: {} })
     await expect(refused).rejects.toBeInstanceOf(ApiError)
     await expect(refused).rejects.toMatchObject({ status: 409 })
+    // A bad value is refused first, as the server validates it before counting.
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { nope: 1 } }),
+    ).rejects.toMatchObject({ status: 422 })
     // Editing one that is already there is still fine.
     const first = existing[0]!
     await expect(

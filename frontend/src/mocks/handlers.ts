@@ -474,16 +474,18 @@ function presetRefusal(
       `a preset name is at most ${MAX_PRESET_NAME} characters`,
     )
   }
-  const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
-  if (own === null && saved.length >= MAX_PRESETS) {
-    return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
-  }
   const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
   const unknown = Object.keys(params).filter((key) => !known.has(key))
   if (unknown.length > 0) {
     return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
       parameters: unknown,
     })
+  }
+  // After the values, as the server checks them: they are validated in the route,
+  // and only then does the store count the presets and compare the names.
+  const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
+  if (own === null && saved.length >= MAX_PRESETS) {
+    return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
   }
   const clash = (state.presets[slug] ?? []).some(
     (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
