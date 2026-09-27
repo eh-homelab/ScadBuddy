@@ -328,6 +328,25 @@ async def test_every_plate_is_polled_not_only_the_last(bambuddy: BambuddyClient)
 
 
 @respx.mock
+async def test_a_plate_running_outranks_an_earlier_plate_still_queued(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Plates go to different printers and start out of order. The print reads as its
+    most advanced plate, not as whichever unsettled plate comes first."""
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "pending"})
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "printing"})
+    )
+    progress = await progress_for(bambuddy, plates_meta())
+    assert progress is not None
+    assert progress.settled is False
+    assert progress.stage == "running"
+
+
+@respx.mock
 async def test_plates_are_polled_together_and_reported_in_plate_order(
     bambuddy: BambuddyClient,
 ) -> None:

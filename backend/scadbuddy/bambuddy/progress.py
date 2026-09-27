@@ -277,6 +277,10 @@ async def _queued_progress(
     return from_queue(item, slice_job=slice_job, slice_job_id=slice_job_id, bambuddy_url=url)
 
 
+#: How far along an unsettled plate is; a slicing plate already reads as ``running``.
+_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "pending": 1, "queued": 2, "running": 3}
+
+
 def from_plates(
     plates: list[PrintProgress],
     plate_ids: list[int],
@@ -299,7 +303,13 @@ def from_plates(
         ]
         detail += [copy.model_copy(update={"plate_id": plate_id}) for copy in copies]
     failed = next((plate for plate in plates if plate.stage == "failed"), None)
-    unsettled = next((plate for plate in plates if not plate.settled), None)
+    # Plates settle out of order across printers, so the print reads as its most advanced
+    # unsettled plate: one running (or still slicing) outranks one waiting in the queue.
+    unsettled = max(
+        (plate for plate in plates if not plate.settled),
+        key=lambda plate: _UNSETTLED_RANK.get(plate.stage, 0),
+        default=None,
+    )
     if failed is not None:
         stage: Stage = "failed"
     elif unsettled is not None:
