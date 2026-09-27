@@ -51,10 +51,10 @@ render() {
     printf '    %.1f s\n' "$(echo "$t1 - $t0" | bc)"
 }
 
-# Distinct colours in the variations so each piece is its own material and can
-# be measured on its own.
+# A distinct cap colour in the variations so each piece is its own material and
+# can be measured on its own. The text keeps its #FFFFFF default, which is the
+# colour the checks below look it up by.
 C='cap_color="#FF8800"'
-T='cap_text_color="#FFFFFF"'
 
 render defaults
 render slot_text "$C" 'cap_text="CABLES"'
