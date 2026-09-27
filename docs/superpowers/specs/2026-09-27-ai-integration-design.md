@@ -36,7 +36,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | D1 | **Harness: Claude Agent SDK, TypeScript** | Loads Claude plugins natively; has sessions with resume/fork and a pluggable `SessionStore`, in-process custom tools, permission callbacks and hooks (§3.1) | Vercel AI SDK loop and Mastra: both multi-provider, neither loads Claude plugins |
 | D2 | **Claude only, to start** | The harness supports nothing else (§3.1). Credentials: an Anthropic API key, or a gateway base URL plus credential | claude.ai subscription login (not allowed, §3.1); non-Claude models through a gateway (not supported, §3.1) |
 | D3 | **One tool registry, two projections** | A tool is defined once and served in-process to the harness and over `/mcp` to external agents, so the surfaces cannot drift | Deriving tools mechanically from `openapi.json` (route-shaped rather than task-shaped; no risk tiers) |
-| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI env vars | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
+| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (three infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
 | D6 | **MCP auth modes `bearer` (default), `disabled`, later `oidc`** | Bearer now, OIDC per the MCP authorization spec later (#262), and an explicit off switch for trusted LANs | Hard-requiring auth; forking the code path per mode |
 | D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web | Leaving Claude Code's built-in tools available |
@@ -71,7 +71,15 @@ dependency of `agent/`.
   support `resume` (by id) and `forkSession`. "Session files are local to the machine
   that created them"; to resume elsewhere, "Attach a `sessionStore` / `session_store`
   adapter so the SDK mirrors transcripts to your own backend". `listSessions`,
-  `getSessionMessages`, `renameSession` and `tagSession` exist. [Sessions][sdk-sessions]
+  `getSessionMessages`, `renameSession` and `tagSession` exist. With a store, "The
+  store lookup key derives from the working directory, so resume from a `cwd` matching
+  the original run's" (§6 therefore gives every session a stable service-owned `cwd`).
+  [Sessions][sdk-sessions]
+- Measured in PR #319 on `@anthropic-ai/claude-agent-sdk` 0.3.283: the bundled Claude
+  Code binary prints `2.1.283 (Claude Code)` on stdout for `--version` and exits 0, so
+  the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
+  `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
+  filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -102,9 +110,7 @@ dependency of `agent/`.
 
 | Item | Where it matters | Verified by |
 |---|---|---|
-| The `SessionStore` interface in the pinned TypeScript SDK version, and whether the store is keyed by `cwd` | §6 | #300 |
-| How the bundled Claude Code CLI reports its version, so the build can assert it the way the Dockerfile asserts `OPENSCAD_VERSION` | §4.4 | #261 |
-| Which `settingSources` value loads nothing from the host | §4.4 | #255 |
+| The exact `SessionStore` adapter interface in the pinned TypeScript SDK version (the `cwd` keying is in §3.1) | §6 | #300 |
 | Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
@@ -121,10 +127,18 @@ browser (SPA, maybe inside the Bambuddy iframe)
   │  https / wss (one origin)
   ▼
 ingress ──/api/v1/*, /──────────────▶ backend (Python, uvicorn)  ◀── Bambuddy (httpx, key server-side)
-   │                                     ▲   │ NOTIFY
-   ├──/mcp, /api/v1/ai/*, /api/v1/ws ─▶ agent (Node 24, Agent SDK) ──LISTEN── Postgres (#241)
+   │                                     ▲        │
+   │                                     │        │ pg_notify
+   │                                     │        ▼
+   │                                     │   Postgres (#241)
+   │                                     │        │
+   │                                     │        │ LISTEN
+   │                                     │        ▼
+   ├──/mcp, /api/v1/ai/*, /api/v1/ws ─▶ agent (Node 24, Agent SDK)
    │                                     │ openapi-fetch → backend on localhost
 external MCP clients ───────────────────┘
+
+(There is no direct backend→agent event channel: events go backend → Postgres → agent, §7.)
 ```
 
 ### 4.1 Process layout: sidecar (recommended)
@@ -140,7 +154,11 @@ in one image. That is not recommended, and is left out unless someone needs it.
 ### 4.2 Routing: at the ingress (recommended)
 
 The ingress routes `/mcp`, `/api/v1/ai/*` and the realtime socket `/api/v1/ws` to the
-agent container, and everything else to the backend. Routing at the ingress avoids a
+agent container, and everything else to the backend. `/api/v1/ai/*` and `/api/v1/ws`
+are sub-paths of the backend's `/api/v1/*`, so **the agent's paths must take precedence**:
+longest-prefix match, or explicit rule priority. A "first rule starting with `/api/v1/`"
+setup would silently send the agent's routes to the backend. The ingress manifest gets a
+test request per agent path. Routing at the ingress avoids a
 uvicorn passthrough, which risks buffering SSE. `/api/v1/ws` lives in the agent service
 because it already holds the database listener (§7) and the browser-bridge pairing
 (#254).
@@ -362,9 +380,11 @@ agent service:
 - sessions (§6), MCP subscriptions, and the resumability event log;
 - the audit log.
 
-There are **no AI env vars**. The only variables the agent reads are
-`SCADBUDDY_DATABASE_URL` (shared with #241), the backend URL, and the key-encryption
-key file below.
+There are **no AI-*configuration* env vars**: providers, credentials, auth mode,
+tokens and plugins are all configured in Settings. Three **infrastructure bootstrap**
+variables still reach the agent container, because Settings itself needs them to exist:
+`SCADBUDDY_DATABASE_URL` (shared with #241), the backend URL (`SCADBUDDY_BACKEND_URL`,
+named in PR #319), and the key-encryption key file below.
 
 **Encryption at rest (recommended):** envelope encryption.
 
