@@ -1685,10 +1685,12 @@ export const handlers = [
       library_folder_id?: number | null
       pipeline_id?: number | null
       printer_id?: number | null
+      display_unit?: Settings['display_unit'] | null
     }
     state.settings = {
       ...state.settings,
       ...body,
+      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
       has_api_key:
         body.bambuddy_api_key === undefined
           ? state.settings.has_api_key

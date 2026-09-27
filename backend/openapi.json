@@ -4642,6 +4642,21 @@
             ],
             "title": "Default Plate"
           },
+          "display_unit": {
+            "anyOf": [
+              {
+                "enum": [
+                  "mm",
+                  "in"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Display Unit"
+          },
           "filament_presets": {
             "anyOf": [
               {
@@ -4759,6 +4774,15 @@
               }
             ],
             "title": "Default Plate"
+          },
+          "display_unit": {
+            "default": "mm",
+            "enum": [
+              "mm",
+              "in"
+            ],
+            "title": "Display Unit",
+            "type": "string"
           },
           "filament_presets": {
             "items": {

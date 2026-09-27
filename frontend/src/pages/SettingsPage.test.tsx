@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { server } from '../mocks/server'
+import { getDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { SettingsPage } from './SettingsPage'
 
@@ -112,6 +113,27 @@ describe('SettingsPage', () => {
     await waitFor(() => expect(put).toHaveBeenCalled())
     expect(put.mock.calls[0]?.[0]).toMatchObject({ default_plate: 'A1 mini' })
     expect(await api.getPlate(null)).toMatchObject({ name: 'A1 mini' })
+    put.mockRestore()
+  })
+
+  it('saves the display unit and switches every open view to it', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    const select = screen.getByLabelText('Show dimensions in')
+    expect(select).toHaveValue('mm')
+    expect(screen.getByRole('option', { name: '256 × 256 mm' })).toBeInTheDocument()
+
+    await user.selectOptions(select, 'in')
+    // The plate list follows the picker before the save, so the choice can be judged.
+    expect(screen.getByRole('option', { name: '10.08 × 10.08 in' })).toBeInTheDocument()
+    expect(getDisplayUnit()).toBe('mm')
+
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(getDisplayUnit()).toBe('in'))
+    expect(put.mock.calls[0]?.[0]).toMatchObject({ display_unit: 'in' })
+    expect((await api.getSettings()).display_unit).toBe('in')
     put.mockRestore()
   })
 
