@@ -360,7 +360,7 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
     pipelines_route()
     printers_route()
     output_id = make_output(client, model)
-    upload_route()
+    upload = upload_route()
     _drop_plates(_output_3mf(paths, output_id))
     queue = queue_route()
 
@@ -370,6 +370,7 @@ def test_all_plates_of_a_3mf_that_lists_none_is_refused(
 
     assert answer.status_code == 422
     assert "no plates" in answer.json()["detail"]
+    assert not upload.called
     assert not queue.called
 
 

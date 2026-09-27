@@ -637,6 +637,19 @@ async def run_for_output(
             "no slicer pipeline is set for this model and there is no default, "
             "so there is nothing to print with"
         )
+    plate_ids = (
+        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
+        if request.all_plates
+        else [request.plate_id]
+    )
+    if not plate_ids:
+        # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
+        # to queue, and every route below reads the first plate's outcome. Read
+        # from the local 3MF before anything touches Bambuddy.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This output's 3MF lays out no plates, so there is nothing to print.",
+        )
     # Placed for the pipeline being run, which ``request.pipeline_id`` may have
     # overridden — not for whatever the settings would have defaulted to.
     target = await target_for(client, settings, meta.slug, pipeline_id=pipeline_id)
@@ -660,18 +673,6 @@ async def run_for_output(
         settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
-    plate_ids = (
-        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
-        if request.all_plates
-        else [request.plate_id]
-    )
-    if not plate_ids:
-        # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
-        # to queue, and every route below reads the first plate's outcome.
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "This output's 3MF lays out no plates, so there is nothing to print.",
-        )
     plate_chosen = request.bed_type is not None or plate_ids != [1]
 
     if request.filament_plan is None and not plate_chosen and not print_options.beyond_pipeline():
