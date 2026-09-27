@@ -17,24 +17,31 @@ never holds memory or back-pressures a render worker. Events are ids-only, so a
 consumer that sees ``dropped`` grow resyncs by re-reading, which is what #266's
 ``resync`` answer is for.
 
-The Postgres seam (#241)
+On Postgres (#241, #264)
 ------------------------
-#241 gave the render queue a Postgres store (``SCADBUDDY_DATABASE_URL``). A
-``PgNotifyEventBus`` on that database, not built yet, implements the same
-:class:`EventBus` protocol:
+With ``SCADBUDDY_DATABASE_URL`` set, ``build_state`` uses
+:class:`~scadbuddy.core.pg_events.PgNotifyEventBus` instead, behind the same
+:class:`EventBus` protocol; without it, this in-process bus, so the UI works with no
+database (#266's "without the database"). The Postgres bus:
 
-- ``publish`` sends ``pg_notify(PG_CHANNEL, encode_event(event))`` and does **not**
-  deliver locally -- the process hears its own NOTIFY like every other replica,
-  so each subscriber sees each event exactly once whichever replica published it;
-- one ``LISTEN PG_CHANNEL`` connection per process decodes each payload with
-  :func:`decode_event` and hands it to an embedded :class:`InProcessEventBus`, whose
+- appends each event to the ``events`` log table and sends
+  ``pg_notify(PG_CHANNEL, encode_event(event))`` in **one transaction**, so no event
+  is heard before its log row is readable, and a job change's event commits (or
+  rolls back) with the change itself;
+- does **not** deliver locally -- the process hears its own NOTIFY like every other
+  replica, so each subscriber sees each event exactly once whichever replica
+  published it;
+- decodes each payload heard on its process's one LISTEN connection (shared with the
+  render queue's wake-ups, `scadbuddy.core.pg_listener`) with :func:`decode_event`
+  into an embedded :class:`InProcessEventBus`, whose
   :meth:`~InProcessEventBus.subscribe` it exposes unchanged;
-- ``build_state`` picks it when a database URL is configured and keeps this one
-  otherwise, so the UI works with no database (#266's "without the database").
+- delivers :class:`BusResync` (``bus.resync``) to every subscription when that
+  connection comes back after a drop, since what was NOTIFYed meanwhile is lost;
+- replays the log after a ``seq`` (``Last-Event-ID``, #264's MCP resumability and
+  #266's WebSocket), pruned by ``SCADBUDDY_EVENT_LOG_RETENTION_*``.
 
-Payloads are ids only, far under NOTIFY's 8000-byte limit. The event log for
-``Last-Event-ID`` resumption (#251) belongs to that backend too, keyed by
-:attr:`BaseEvent.id`.
+Payloads are ids only, far under NOTIFY's 8000-byte limit; one over half of it is
+refused and logged. The details are in `scadbuddy.core.pg_events`.
 """
 
 from __future__ import annotations
@@ -165,6 +172,24 @@ class SettingsChanged(BaseEvent):
     section: SettingsSection
 
 
+#: The resync marker's kind. Every subscription receives it, whatever its filter.
+RESYNC_KIND = "bus.resync"
+
+
+class BusResync(BaseEvent):
+    """Events may have been missed: re-read whatever you follow.
+
+    Never published by a state change and never sent over NOTIFY: the Postgres bus
+    delivers it locally when its LISTEN connection comes back after a drop, since
+    whatever was NOTIFYed while it was down reached nobody in this process. It goes
+    to every subscription, whatever kinds it filters on. ``last_event_id`` is the
+    last event this process received before the gap, or ``None``: a consumer may
+    replay the event log after it rather than re-read everything."""
+
+    kind: Literal["bus.resync"] = "bus.resync"
+    last_event_id: str | None = None
+
+
 Event = Annotated[
     JobEvent
     | ModelEvent
@@ -175,7 +200,8 @@ Event = Annotated[
     | PrintEvent
     | LibraryChanged
     | FontInstalled
-    | SettingsChanged,
+    | SettingsChanged
+    | BusResync,
     Field(discriminator="kind"),
 ]
 
@@ -236,7 +262,8 @@ class Subscription:
         return self._closed
 
     def wants(self, event: Event) -> bool:
-        return self.kinds is None or event.kind in self.kinds
+        # A resync concerns every kind: a filtered subscriber missed its own too.
+        return self.kinds is None or event.kind in self.kinds or event.kind == RESYNC_KIND
 
     def offer(self, event: Event) -> None:
         """Hand ``event`` over from any thread. Never blocks, never raises."""

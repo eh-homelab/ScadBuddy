@@ -201,6 +201,8 @@ def test_every_kind_from_the_spec_is_known() -> None:
         "library.changed",
         "font.installed",
         "settings.changed",
+        # Not a state change: the Postgres bus's marker for a listener gap.
+        "bus.resync",
     } == EVENT_KINDS
 
 

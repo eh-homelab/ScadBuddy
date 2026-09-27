@@ -20,6 +20,7 @@ from scadbuddy.core.events import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
@@ -57,8 +58,8 @@ class AppState:
     fonts: FontService
     libraries: LibraryStore
     queue: RenderQueue
-    #: Where every state change is published (spec §7). In-process today; the
-    #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
+    #: Where every state change is published (spec §7): `PgNotifyEventBus` on
+    #: #241's database when one is configured, `InProcessEventBus` otherwise.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
@@ -113,16 +114,33 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
-    store: JobBackend = (
-        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
-        if settings.database_url
-        else JobStore(paths)
-    )
+    # Nothing connects here: the job pool opens in `RenderQueue.start` and the event
+    # bus's in `PgNotifyEventBus.start`, both from the lifespan.
+    store: JobBackend
+    events: EventBus
+    if settings.database_url:
+        pg_store = PostgresJobStore(
+            settings.database_url, paths, pool_size=settings.database_pool_size
+        )
+        # One LISTEN connection per process: the bus shares the render queue's.
+        pg_events = PgNotifyEventBus(
+            settings.database_url,
+            listener=pg_store.pg_listener,
+            metrics=metrics,
+            retention=EventLogRetention(
+                seconds=settings.event_log_retention_seconds,
+                rows=settings.event_log_retention_rows,
+            ),
+        )
+        # Job events commit with the job change that they describe.
+        pg_store.events = pg_events
+        store, events = pg_store, pg_events
+    else:
+        # No database: the UI keeps working, events reach this process only.
+        store, events = JobStore(paths), InProcessEventBus()
     outputs = OutputStore(paths)
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(paths, history, outputs)

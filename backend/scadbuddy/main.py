@@ -32,6 +32,7 @@ from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import GitError
@@ -129,6 +130,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    # After the queue, whose store migrated the database: the bus writes the event
+    # log. What was published before now (the built-in sync's commits) waited.
+    if isinstance(state.events, PgNotifyEventBus):
+        await state.events.start()
     logger.info(
         "scadbuddy started",
         extra={

@@ -100,6 +100,19 @@ for the project picker).
     PVC run one replica, as the design does.
     `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
     startup.
+  - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
+    Postgres too: each change is appended to an `events` table and sent with
+    `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
+    hear it once over the same `LISTEN` connection the render queue uses. After
+    that connection drops and comes back, subscribers get a `bus.resync` event.
+    The table keeps events for `Last-Event-ID` replay:
+    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
+    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
+    replica every 5 minutes. Unset, events stay in the process as before.
+    `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
+    `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
+    `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
+    database, so give each deployment its own database, not just its own schema.
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
     than this for a worker, unrendered.
   - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
@@ -133,6 +146,11 @@ ScadBuddy runs on the homelab cluster from
 (`applications/scadbuddy/scadbuddy.yaml`, deployed by ArgoCD). That manifest
 pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
+
+With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
+database at startup (migration 2 adds the `events` log). The event log's retention
+is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
+(see the render queue settings above); the defaults need no manifest change.
 
 ```mermaid
 flowchart LR

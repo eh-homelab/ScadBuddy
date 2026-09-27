@@ -644,15 +644,19 @@ class RenderQueue:
         except QueueFullError as error:
             self.metrics.render_rejected.inc()
             raise QueueFullError(error.depth, self.retry_after()) from None
+        # A store that `announces_jobs` published pending/superseded in the submit's
+        # own transaction; otherwise they go out now, after the change.
+        own = not self.store.announces_jobs
         if submitted.superseded is not None:
-            self._settled(submitted.superseded, "superseded")
+            self._settled(submitted.superseded, "superseded", announce=own)
         if submitted.coalesced:
             # The answer is a job already waiting, whose `job.pending` went out when
             # it was submitted: nothing about it changed.
             self.metrics.render_coalesced.inc()
         else:
             self.metrics.render_submitted.inc()
-            self._announce(submitted.job, "job.pending")
+            if own:
+                self._announce(submitted.job, "job.pending")
             self._wakeup.set()
         return submitted.job
 
@@ -698,10 +702,12 @@ class RenderQueue:
         await asyncio.to_thread(self.store.prune, self.config.job_ttl)
         await asyncio.to_thread(prune_revision_exports, self.paths, self.config.job_ttl)
 
-    def _settled(self, job: Job, outcome: RenderOutcome) -> None:
+    def _settled(self, job: Job, outcome: RenderOutcome, *, announce: bool = True) -> None:
         """Every way a job leaves the queue comes through here: done, failed,
-        expired, superseded, and failed by the reaper."""
-        self._announce(job, OUTCOME_EVENT_KINDS[outcome])
+        expired, superseded, and failed by the reaper. ``announce`` is False when the
+        store already published the event in the transaction that settled it."""
+        if announce:
+            self._announce(job, OUTCOME_EVENT_KINDS[outcome])
         self.metrics.render_finished.labels(outcome).inc()
         self.metrics.job_latency.labels(outcome).observe(
             max(0.0, ((job.finished_at or _now()) - job.created_at).total_seconds())
@@ -771,17 +777,24 @@ class RenderQueue:
                 logger.exception("could not reap render jobs with expired leases")
                 self.metrics.store_errors.labels("reap").inc()
             else:
+                own = not self.store.announces_jobs
                 for job in reaped.requeued:
                     logger.warning("requeued a render whose worker stopped", extra={"job": job.id})
                     self.metrics.render_retried.inc()
                     # Waiting again: `job.running` follows when a worker retakes it.
-                    self._announce(job, "job.pending")
+                    if own:
+                        self._announce(job, "job.pending")
                 if reaped.requeued:
                     self._wakeup.set()
                 for job in reaped.failed:
                     logger.warning("failed a render whose worker stopped", extra={"job": job.id})
-                    self._settled(job, "failed")
+                    self._settled(job, "failed", announce=own)
             await asyncio.sleep(interval)
+
+    async def _finish(self, job: Job, outcome: RenderOutcome) -> bool:
+        return await asyncio.to_thread(
+            self.store.finish, job, announce=OUTCOME_EVENT_KINDS[outcome]
+        )
 
     async def _heartbeat(self, job: Job) -> None:
         interval = self.config.render_lease_timeout / 3
@@ -807,11 +820,19 @@ class RenderQueue:
                 "SCADBUDDY_RENDER_QUEUE_TIMEOUT; the server is busy, try again"
             )
             job.finished_at = _now()
-            if await asyncio.to_thread(self.store.finish, job):
-                self._settled(job, "expired")
+            if await self._finish(job, "expired"):
+                self._settled(job, "expired", announce=not self.store.announces_jobs)
             return
 
-        self._announce(job, "job.running")
+        if self.store.announces_jobs:
+            # Committed before the render starts, so it is logged -- and heard --
+            # ahead of the finish's event; the bus's outbox could let it lag behind.
+            try:
+                await asyncio.to_thread(self.store.announce, job, "job.running")
+            except Exception:
+                logger.exception("could not announce a running job", extra={"job": job.id})
+        else:
+            self._announce(job, "job.running")
         outcome: RenderOutcome
         started = time.monotonic()
         heartbeat = asyncio.create_task(self._heartbeat(job))
@@ -839,8 +860,8 @@ class RenderQueue:
         self.metrics.render_duration.labels(outcome).observe(elapsed)
         self._render_estimate += RENDER_ESTIMATE_WEIGHT * (elapsed - self._render_estimate)
         job.finished_at = _now()
-        if await asyncio.to_thread(self.store.finish, job):
-            self._settled(job, outcome)
+        if await self._finish(job, outcome):
+            self._settled(job, outcome, announce=not self.store.announces_jobs)
         else:
             logger.warning(
                 "a render finished after its lease was reaped; the retry's result stands",

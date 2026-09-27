@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
 
+from scadbuddy.core.events import JobKind
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.job_models import now as _now
@@ -105,6 +106,20 @@ class JobBackend(Protocol):
     #: What `scadbuddy_render_store_info` reports this store as.
     backend: str
 
+    @property
+    def announces_jobs(self) -> bool:
+        """True when the store publishes the ``job.*`` events of its own changes --
+        submit (pending, superseded), reap (pending, failed) and finish -- inside the
+        transaction that makes them (Postgres with an event bus attached). The
+        render queue then leaves those to it, and sends ``job.running`` through
+        `announce` so that it cannot overtake the ``job.done`` behind it."""
+        ...
+
+    def announce(self, job: Job, kind: JobKind) -> None:
+        """Publish ``kind`` for ``job`` now, in a transaction of its own, returning
+        once it is committed. Only called when `announces_jobs`."""
+        ...
+
     def open(self) -> None:
         """Connect, and bring the schema up to date where there is one."""
 
@@ -163,9 +178,12 @@ class JobBackend(Protocol):
         """Renew the lease on a job `claim` handed out."""
         ...
 
-    def finish(self, job: Job) -> bool:
+    def finish(self, job: Job, *, announce: JobKind | None = None) -> bool:
         """Record a claimed job's final state. False if this worker no longer holds
-        it (its lease expired and it was requeued), in which case nothing changes."""
+        it (its lease expired and it was requeued), in which case nothing changes.
+
+        ``announce`` is the event the change is; a store that `announces_jobs`
+        publishes it in the same transaction, and the others ignore it."""
         ...
 
     def read(self, job_id: str) -> Job:
@@ -350,7 +368,14 @@ class JobStore:
     def heartbeat(self, job: Job) -> None:
         pass
 
-    def finish(self, job: Job) -> bool:
+    @property
+    def announces_jobs(self) -> bool:
+        return False  # no transactions: the render queue publishes every job event
+
+    def announce(self, job: Job, kind: JobKind) -> None:
+        raise NotImplementedError("the file store has no event bus of its own")
+
+    def finish(self, job: Job, *, announce: JobKind | None = None) -> bool:
         with self._lock:
             self._running.discard(job.id)
             self.write(job)
