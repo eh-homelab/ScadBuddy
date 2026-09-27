@@ -120,13 +120,28 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body.tags).toEqual(['json'])
   })
 
-  it('keeps a whitespace description as given, and reads whitespace tags as none', async () => {
+  it('treats a whitespace-only description or tags field as absent too', async () => {
     const { body } = await upload(
-      { description: '  ', tags: '  ' },
+      { description: '  ', tags: ' \t ' },
       { description: 'From JSON', tags: ['json'] },
     )
-    expect(body.description).toBe('  ')
+    expect(body.description).toBe('From JSON')
+    expect(body.tags).toEqual(['json'])
+  })
+
+  it('keeps a non-blank form description exactly as given', async () => {
+    const { body } = await upload({ description: '  From form  ' }, { description: 'From JSON' })
+    expect(body.description).toBe('  From form  ')
+  })
+
+  it('lets an explicit empty tag list clear the model.json tags', async () => {
+    const { body } = await upload({ tags: '[]' }, { tags: ['json'] })
     expect(body.tags).toEqual([])
+  })
+
+  it('gives the defaults for blank fields without a model.json', async () => {
+    const { body } = await upload({ description: '   ', tags: '   ' })
+    expect(body).toMatchObject({ description: '', tags: [] })
   })
 
   it('refuses tags that start as a JSON array but are not valid JSON', async () => {

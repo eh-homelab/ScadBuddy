@@ -86,12 +86,16 @@ def require_model_exists(catalogue: Catalogue, slug: str) -> None:
 
 
 def _parse_tags(raw: str | None) -> list[str] | None:
-    """Tags arrive as a JSON array or a comma-separated list, whichever the form sends."""
+    """Tags arrive as a JSON array or a comma-separated list, whichever the form sends.
+
+    None when the field is missing or blank, so it falls through to the model.json
+    (#179); an explicit `[]` is still an empty list.
+    """
     if raw is None:
         return None
     text = raw.strip()
     if not text:
-        return []
+        return None
     if text.startswith("["):
         try:
             decoded = json.loads(text)
@@ -250,7 +254,12 @@ async def create_model(
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
     meta: Annotated[
         UploadFile | None,
-        File(description="Optional model.json; the name, description and tags fields win"),
+        File(
+            description=(
+                "Optional model.json. A non-blank name, description or tags form field "
+                "wins over it; a missing or blank one falls through to it"
+            )
+        ),
     ] = None,
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
@@ -352,7 +361,10 @@ async def create_model(
         meta=base.model_copy(
             update={
                 "name": _first_name(name, base.name, slug),
-                "description": description if description is not None else base.description,
+                # Blank is absent, as for the name; a non-blank one is kept as given.
+                "description": description
+                if description is not None and description.strip()
+                else base.description,
                 "tags": parsed_tags if parsed_tags is not None else base.tags,
                 "origin_url": None,
             }

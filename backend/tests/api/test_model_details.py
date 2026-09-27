@@ -614,6 +614,53 @@ def test_a_form_name_wins_over_the_model_json_name_and_is_stored_stripped(
     assert body["name"] == "From Form"
 
 
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"description": ""},
+        {"tags": ""},
+        {"description": "   "},
+        {"tags": "   "},
+        {"description": " \t ", "tags": " \t "},
+    ],
+)
+def test_a_blank_description_or_tags_field_falls_through_to_the_model_json(
+    client: TestClient, fields: dict[str, str]
+) -> None:
+    """Blank is absent for every detail, as for the name: a form that sends an empty
+    field alongside a dropped model.json must not wipe what the file says."""
+    body = _create_with_meta(
+        client, {"name": "Widget", "description": "From JSON", "tags": ["json"]}, data=fields
+    )
+    assert (body["description"], body["tags"]) == ("From JSON", ["json"])
+
+
+def test_a_non_blank_description_and_tags_win_and_the_description_is_kept_as_given(
+    client: TestClient,
+) -> None:
+    body = _create_with_meta(
+        client,
+        {"name": "Widget", "description": "From JSON", "tags": ["json"]},
+        data={"description": "  From form  ", "tags": "a, b"},
+    )
+    assert (body["description"], body["tags"]) == ("  From form  ", ["a", "b"])
+
+
+def test_an_explicit_empty_tag_list_still_clears_the_model_json_tags(client: TestClient) -> None:
+    body = _create_with_meta(client, {"name": "Widget", "tags": ["json"]}, data={"tags": "[]"})
+    assert body["tags"] == []
+
+
+def test_blank_fields_without_a_model_json_give_the_defaults(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+        data={"description": "   ", "tags": "   "},
+    )
+    assert response.status_code == 201
+    assert (response.json()["description"], response.json()["tags"]) == ("", [])
+
+
 def test_a_model_json_name_is_stored_stripped(client: TestClient) -> None:
     assert _create_with_meta(client, {"name": "  Widget  "})["name"] == "Widget"
 

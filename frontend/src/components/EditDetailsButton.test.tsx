@@ -129,6 +129,50 @@ describe('EditDetailsButton', () => {
     expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ has_readme: false })
   })
 
+  it('leaves a stored whitespace-only README alone when only the name changes', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/readme', () =>
+        HttpResponse.text('  \n\t\n', {
+          headers: { 'Content-Type': 'text/markdown; charset=utf-8' },
+        }),
+      ),
+    )
+    const removeReadme = vi.spyOn(api, 'removeReadme')
+    const setReadme = vi.spyOn(api, 'setReadme')
+    const updateModel = vi.spyOn(api, 'updateModel')
+    const { dialog, user, onSaved } = await open()
+    expect(within(dialog).getByLabelText('README')).toHaveValue('  \n\t\n')
+
+    await user.clear(within(dialog).getByLabelText('Name'))
+    await user.type(within(dialog).getByLabelText('Name'), 'Keyring')
+    expect(within(dialog).queryByTestId('readme-state')).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(updateModel).toHaveBeenCalledExactlyOnceWith('name-keychain', { name: 'Keyring' })
+    expect(removeReadme).not.toHaveBeenCalled()
+    expect(setReadme).not.toHaveBeenCalled()
+  })
+
+  it('removes a stored whitespace-only README only when asked to', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/readme', () =>
+        HttpResponse.text('   ', { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } }),
+      ),
+    )
+    const removeReadme = vi.spyOn(api, 'removeReadme')
+    const { dialog, user, onSaved } = await open()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove README' }))
+    expect(within(dialog).getByTestId('readme-state')).toHaveTextContent(
+      'Saving will remove the README',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(removeReadme).toHaveBeenCalledExactlyOnceWith('name-keychain')
+  })
+
   it('offers Remove README, which empties it and says so', async () => {
     const { dialog, user } = await open()
 

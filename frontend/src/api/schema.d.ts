@@ -990,7 +990,7 @@ export interface components {
             file?: string | null;
             /**
              * Meta
-             * @description Optional model.json; the name, description and tags fields win
+             * @description Optional model.json. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
              */
             meta?: string | null;
             /** Name */

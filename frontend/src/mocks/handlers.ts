@@ -227,7 +227,8 @@ function formText(form: FormData, name: string): string | undefined {
 function parseFormTags(raw: string | undefined): string[] | undefined | string {
   if (raw === undefined) return undefined
   const text = raw.trim()
-  if (!text) return []
+  // Blank is absent, so the model.json's tags stand; an explicit `[]` still clears.
+  if (!text) return undefined
   if (text.startsWith('[')) {
     let decoded: unknown
     try {
@@ -241,6 +242,11 @@ function parseFormTags(raw: string | undefined): string[] | undefined | string {
     .split(',')
     .map((tag) => tag.trim())
     .filter(Boolean)
+}
+
+/** The value unless it is blank or only whitespace, which counts as absent. */
+function nonBlank(value: string | undefined): string | undefined {
+  return value?.trim() ? value : undefined
 }
 
 /** `_first_name`: the first candidate that is not blank, stripped; the slug never is. */
@@ -364,7 +370,8 @@ export const handlers = [
     const model: ModelSummary = {
       slug,
       name: firstName(formText(form, 'name'), metaFields?.name, slug),
-      description: formText(form, 'description') ?? metaFields?.description ?? '',
+      // Blank is absent, as for the name; a non-blank description is kept as given.
+      description: nonBlank(formText(form, 'description')) ?? metaFields?.description ?? '',
       tags: tagsField ?? metaFields?.tags ?? [],
       updated_at: new Date().toISOString(),
       has_thumbnail: thumbnailPart !== null,

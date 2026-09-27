@@ -29,14 +29,17 @@ function parseTags(text: string): string[] {
 }
 
 /**
- * What a save does to the README. Blank or whitespace-only text is never written
- * as a file: it removes the README a model has, and is nothing on one without.
+ * What a save does to the README. Text left as it was is nothing. Otherwise blank
+ * or whitespace-only text is never written as a file: it removes the README a model
+ * has, and is nothing on one without.
  */
 function readmeChange(
   text: string,
   saved: string,
   hasReadme: boolean,
 ): 'set' | 'remove' | 'none' {
+  // Untouched is untouched, even when what is stored is itself only whitespace.
+  if (text === saved) return 'none'
   if (text.trim() === '') return hasReadme ? 'remove' : 'none'
   return text !== saved ? 'set' : 'none'
 }
@@ -302,7 +305,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 Only whitespace, so no README is saved.
               </p>
             )}
-            {model.has_readme && !readmeBlank && (
+            {model.has_readme && readme !== '' && (
               <Button size="sm" variant="ghost" className="w-fit" onClick={() => setReadme('')}>
                 Remove README
               </Button>
