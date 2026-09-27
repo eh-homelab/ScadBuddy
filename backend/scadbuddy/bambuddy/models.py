@@ -92,18 +92,6 @@ class LocalPresetCatalogue(BambuddyModel):
     process: list[LocalPreset] = Field(default_factory=list)
 
 
-class LocalPresetCreate(BambuddyModel):
-    """``POST /api/v1/local-presets/`` — a preset created by hand rather than imported.
-
-    ``setting`` is the preset JSON as Bambu Studio would store it; Bambuddy keeps it
-    verbatim and resolves ``inherits`` at slice time.
-    """
-
-    name: str
-    preset_type: Literal["filament", "printer", "process"]
-    setting: dict[str, Any]
-
-
 class Printer(BambuddyModel):
     """``GET /api/v1/printers/`` and ``GET /api/v1/printers/{id}`` — the same shape.
 

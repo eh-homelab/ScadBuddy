@@ -205,8 +205,18 @@ def resolve(
         idx = slot.slot_id - 1
         option = by_id.get(plan.spool_for(slot.slot_id) or -1)
         colours[idx] = (option.colour if option else slot.colour) or "#FFFFFF"
+        if option is None:
+            # Not a preset problem, so Advanced cannot fix it: the slot needs a spool.
+            errors.append(
+                FilamentWarning(
+                    kind="no-choice",
+                    slot_id=slot.slot_id,
+                    message=f"Slot {slot.slot_id} has no spool chosen.",
+                )
+            )
+            continue
         ref = choices.filament_overrides.get(slot.slot_id)
-        if ref is None and option is not None:
+        if ref is None:
             own = [
                 row.slicer_filament
                 for row in spool_presets.get(option.spool_id, [])
@@ -237,14 +247,13 @@ def resolve(
                         )
                     )
         if ref is None:
-            what = _label(option) if option else f"Slot {slot.slot_id}"
             errors.append(
                 FilamentWarning(
                     kind="no-preset",
                     slot_id=slot.slot_id,
                     message=(
-                        f"{what} has no slicer preset for a {size} mm nozzle. Pick one under "
-                        "Advanced."
+                        f"{_label(option)} has no slicer preset for a {size} mm nozzle. "
+                        "Pick one under Advanced."
                     ),
                 )
             )

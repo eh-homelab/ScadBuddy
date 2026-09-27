@@ -7712,7 +7712,7 @@
     },
     "/api/v1/print/outputs/{output_id}/filaments": {
       "get": {
-        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not. It is also what reads the\nmounted nozzles (#78).",
+        "description": "Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).\n\nOne route rather than three calls from the browser, because the join is the part\nwith the traps in it: ``/inventory/assignments`` covers every printer while\n``inventory-remain`` covers one, ``remain: -1`` means unknown and so does\n``used_grams: 0``.\n\n``printer_id`` is what turns \"the inventory\" into \"the inventory, and where it is on\nthis printer\": without one the spools are still listed, with their last known\nassignment, but the reconciled remaining weights are not. It is also what reads the\nmounted nozzles (#78).\n\n``all_plates`` answers for an all-plates print: one row per slot any plate uses, in\nplace of ``plate_id``'s, so a slot only a later plate uses still gets a spool.",
         "operationId": "get_filaments_api_v1_print_outputs__output_id__filaments_get",
         "parameters": [
           {
@@ -7750,6 +7750,16 @@
               "minimum": 1,
               "title": "Plate Id",
               "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "all_plates",
+            "required": false,
+            "schema": {
+              "default": false,
+              "title": "All Plates",
+              "type": "boolean"
             }
           }
         ],
@@ -8121,7 +8131,7 @@
         "operationId": "get_print_options_api_v1_settings_print_options_get",
         "parameters": [
           {
-            "description": "The model about to be printed, whose own pipeline may differ",
+            "description": "The model about to be printed",
             "in": "query",
             "name": "slug",
             "required": false,
@@ -8134,7 +8144,7 @@
                   "type": "null"
                 }
               ],
-              "description": "The model about to be printed, whose own pipeline may differ",
+              "description": "The model about to be printed",
               "title": "Slug"
             }
           },

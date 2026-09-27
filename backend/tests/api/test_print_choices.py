@@ -179,3 +179,81 @@ def test_a_settings_file_from_before_the_dialog_choices_still_loads(
     assert choices.nozzles == []
     assert choices.tier is None
     assert choices.process_name is None
+
+
+# --- final review 2: a remembered printer that is no longer active ---------------------
+
+
+def other_printers_route() -> respx.Route:
+    """Printer 1 (the recording) plus an inactive printer 7."""
+    rows = [
+        *recording("printers.json"),
+        {"id": 7, "name": "Retired", "model": "H2C", "is_active": False},
+    ]
+    return respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=rows))
+
+
+def printer_1_hardware() -> None:
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    respx.get(f"{API}/archives/").mock(return_value=httpx.Response(200, json=[]))
+
+
+@respx.mock
+def test_a_remembered_printer_no_longer_active_falls_through_to_an_active_one(
+    client: TestClient, model: str
+) -> None:
+    client.put(f"/api/v1/print/models/{model}/choices", json={"printer_id": 7})
+    output_id = prepared(client, model)
+    upload_route()
+    other_printers_route()
+    inventory_routes()
+    h2c_presets()
+    printer_1_hardware()
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
+
+    assert body["printer_id"] == 1
+    assert [row["id"] for row in body["printers"]] == [1]
+
+
+@respx.mock
+def test_a_settings_printer_that_is_gone_falls_through_to_the_first_active_one(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": BASE, "bambuddy_api_key": "s3cret", "printer_id": 42},
+    )
+    upload_route()
+    printers_route()
+    inventory_routes()
+    h2c_presets()
+    printer_1_hardware()
+
+    body = client.get(f"/api/v1/print/outputs/{output_id}/choices").json()
+
+    assert body["printer_id"] == 1
+
+
+def test_a_single_remembered_nozzle_is_read_as_both_sides(
+    client: TestClient, model: str, data_dir: Path
+) -> None:
+    """Final review 10: the dialog has two sides, so a remembered choice is none or two.
+    One entry (hand-edited, or an older writer) means that nozzle on both sides."""
+    one = {"nozzles": [{"size": "0.6", "flow": "standard"}]}
+
+    saved = client.put(f"/api/v1/print/models/{model}/choices", json=one).json()
+
+    both = [{"size": "0.6", "flow": "standard"}, {"size": "0.6", "flow": "standard"}]
+    assert saved["nozzles"] == both
+    (data_dir / "settings.json").write_text(
+        json.dumps({"model_print_choices": {model: one}}), encoding="utf-8"
+    )
+    loaded = SettingsStore(data_dir / "settings.json", Settings()).load()
+    assert [n.model_dump() for n in loaded.model_print_choices[model].nozzles] == both
+
+
+def test_more_than_two_remembered_nozzles_are_refused(client: TestClient, model: str) -> None:
+    three = {"nozzles": [{"size": "0.4"}] * 3}
+    assert client.put(f"/api/v1/print/models/{model}/choices", json=three).status_code == 422

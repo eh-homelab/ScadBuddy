@@ -25,6 +25,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentWarning,
     across_plates,
     check,
+    every_plate,
     gather_options,
     queue_filaments,
 )
@@ -36,7 +37,7 @@ from scadbuddy.bambuddy.hardware import (
 )
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.resolver import PrintChoices, Resolved, resolve
+from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices, Resolved, resolve
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     request_scope,
@@ -133,8 +134,13 @@ async def filament_options_for_output(
     *,
     printer_id: int | None = None,
     plate_id: int = 1,
+    all_plates: bool = False,
 ) -> FilamentOptions:
     """The filament step's whole payload for one output (#87).
+
+    ``all_plates`` answers for every plate of the output at once — one row per slot any
+    plate uses, in place of ``plate_id``'s own — which is what an all-plates print
+    needs a spool for.
 
     Uploads the 3MF if Bambuddy has not got it: the plate's slots are read out of a
     *library file*, so there is no answer before one exists. An output is immutable,
@@ -145,13 +151,22 @@ async def filament_options_for_output(
     the step still opens, with no mounted nozzles to compare against.
     """
     meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
-    options = await gather_options(
-        client,
-        library_file_id=library_file_id,
-        printer_id=printer_id,
-        plate_id=plate_id,
-        fallback_colours=list(meta.colors),
+    plate_ids = (
+        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)] or [1]
+        if all_plates
+        else [plate_id]
     )
+    read = [
+        await gather_options(
+            client,
+            library_file_id=library_file_id,
+            printer_id=printer_id,
+            plate_id=plate,
+            fallback_colours=list(meta.colors),
+        )
+        for plate in plate_ids
+    ]
+    options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
     try:
@@ -196,6 +211,7 @@ async def run_for_output(
         raise not_configured(
             "no printer is chosen and none is configured, so there is nothing to print on"
         )
+    await _require_resolvable_printer(client, printer_id)
     choices = request.choices
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
@@ -315,6 +331,24 @@ async def run_for_output(
     )
 
 
+async def _require_resolvable_printer(client: BambuddyClient, printer_id: int) -> None:
+    """A 422 before anything is uploaded or sliced when the resolver cannot serve this
+    printer: one Bambuddy does not list, or any model but the H2C, whose presets are the
+    only ones the resolver knows (``PRINTER_MODEL``)."""
+    printer = next((row for row in await client.printers() if row.id == printer_id), None)
+    if printer is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"Bambuddy has no printer {printer_id}. Pick another printer.",
+        )
+    if (printer.model or "").upper() != PRINTER_MODEL:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"ScadBuddy can only choose slicer presets for a Bambu Lab {PRINTER_MODEL} so "
+            f"far, and {printer.name}'s model is {printer.model or 'not reported'}.",
+        )
+
+
 async def _hardware_warnings(
     client: BambuddyClient,
     printer_id: int,
@@ -333,7 +367,7 @@ async def _hardware_warnings(
         logger.info("printer status unreadable; no nozzle is warned about")
         installed = []
     try:
-        last = last_bed_type(await client.archives(printer_id=printer_id))
+        last = last_bed_type(await client.archives(printer_id=printer_id), printer_id=printer_id)
     except (ApiError, ValueError):
         logger.info("archives unreadable; the plate is not compared with the last print")
         last = None

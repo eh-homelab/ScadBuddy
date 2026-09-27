@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import json
-
 import httpx
 import pytest
 import respx
@@ -18,7 +16,6 @@ from scadbuddy.bambuddy.errors import (
     Scope,
 )
 from scadbuddy.bambuddy.models import (
-    LocalPresetCreate,
     PipelineRunRequest,
     PresetRef,
     PrinterStatus,
@@ -327,27 +324,6 @@ async def test_archives_are_read_for_one_printer(bambuddy: BambuddyClient) -> No
     assert route.calls.last.request.url.params["limit"] == "5"
     assert rows and all(row.printer_id == 1 for row in rows)
     assert rows[0].bed_type == "Textured PEI Plate"
-
-
-@respx.mock
-async def test_creating_a_local_preset_posts_name_type_and_setting(
-    bambuddy: BambuddyClient,
-) -> None:
-    route = respx.post(f"{API}/local-presets/").mock(
-        return_value=httpx.Response(
-            200,
-            json={"id": 91, "name": "X", "preset_type": "printer", "source": "manual"},
-        )
-    )
-    made = await bambuddy.create_local_preset(
-        LocalPresetCreate(name="X", preset_type="printer", setting={"inherits": "Y"})
-    )
-    assert made.id == 91
-    assert json.loads(route.calls.last.request.content) == {
-        "name": "X",
-        "preset_type": "printer",
-        "setting": {"inherits": "Y"},
-    }
 
 
 def test_the_rack_recording_parses_every_slot() -> None:

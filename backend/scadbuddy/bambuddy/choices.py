@@ -101,10 +101,17 @@ async def choices_for_output(
 ) -> ChoicesView:
     printers = [row for row in await client.printers() if row.is_active]
     remembered = settings.model_print_choices.get(meta.slug)
+    active = {row.id for row in printers}
+
+    def still_active(candidate: int | None) -> int | None:
+        # A remembered or configured printer that was removed or deactivated would open
+        # the dialog on a printer it does not list, with no way to pick another.
+        return candidate if candidate in active else None
+
     printer_id = (
         printer_id
-        or (remembered.printer_id if remembered else None)
-        or settings.printer_id
+        or still_active(remembered.printer_id if remembered else None)
+        or still_active(settings.printer_id)
         or (printers[0].id if printers else None)
     )
     status: PrinterStatus | None = None
@@ -129,7 +136,7 @@ async def choices_for_output(
         )
         for size in SIZES
     }
-    last = last_bed_type(archives)
+    last = last_bed_type(archives, printer_id=printer_id) if printer_id is not None else None
     bed = (
         last
         or (settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None)

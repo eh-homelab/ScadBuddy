@@ -35,12 +35,35 @@ def test_the_newest_print_that_ran_names_the_plate_and_uploads_do_not_count() ->
             id=3, printer_id=None, status="archived", bed_type="Engineering Plate", created_at=at(9)
         ),
     ]
-    assert last_bed_type(rows) == "Textured PEI Plate"
+    assert last_bed_type(rows, printer_id=1) == "Textured PEI Plate"
+
+
+def test_another_printers_newer_print_does_not_name_this_printers_plate() -> None:
+    """Final review 8: the archive read is filtered by printer, but the plate must not
+    depend on that — a row from another printer is ignored explicitly."""
+    rows = [
+        Archive(
+            id=1,
+            printer_id=1,
+            status="completed",
+            bed_type="Cool Plate",
+            started_at=datetime(2026, 9, 27, 1, tzinfo=UTC),
+        ),
+        Archive(
+            id=2,
+            printer_id=2,
+            status="completed",
+            bed_type="Engineering Plate",
+            started_at=datetime(2026, 9, 27, 9, tzinfo=UTC),
+        ),
+    ]
+    assert last_bed_type(rows, printer_id=1) == "Cool Plate"
+    assert last_bed_type(rows, printer_id=3) is None
 
 
 def test_no_archives_names_no_plate() -> None:
     """Review focus 5."""
-    assert last_bed_type([]) is None
+    assert last_bed_type([], printer_id=1) is None
 
 
 def test_a_different_plate_is_a_swap_reminder_and_the_same_one_is_not() -> None:

@@ -43,8 +43,11 @@ def installed_nozzles(status: PrinterStatus | None) -> list[InstalledNozzle]:
     ]
 
 
-def last_bed_type(archives: list[Archive]) -> str | None:
-    ran = [row for row in archives if row.printer_id is not None and row.status in _RAN]
+def last_bed_type(archives: list[Archive], *, printer_id: int) -> str | None:
+    """The plate of ``printer_id``'s newest print that actually ran. The archive read is
+    already filtered by printer; checking the id again keeps a row from another printer
+    from ever naming this one's plate."""
+    ran = [row for row in archives if row.printer_id == printer_id and row.status in _RAN]
 
     def when(row: Archive) -> datetime:
         return row.started_at or row.completed_at or row.created_at or datetime.min

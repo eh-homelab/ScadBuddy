@@ -42,9 +42,7 @@ from scadbuddy.bambuddy.models import (
     FolderCreate,
     InventoryRemain,
     LibraryFile,
-    LocalPreset,
     LocalPresetCatalogue,
-    LocalPresetCreate,
     Pipeline,
     PipelineCreate,
     PipelineList,
@@ -263,16 +261,6 @@ class BambuddyClient:
             "GET", "/local-presets/", scope=Scope.MANAGE_LIBRARY, what="list the local presets"
         )
         return LocalPresetCatalogue.model_validate(response.json())
-
-    async def create_local_preset(self, preset: LocalPresetCreate) -> LocalPreset:
-        response = await self._send(
-            "POST",
-            "/local-presets/",
-            scope=Scope.MANAGE_LIBRARY,
-            what="create a local preset",
-            json=preset.model_dump(mode="json"),
-        )
-        return LocalPreset.model_validate(response.json())
 
     # --- inventory -----------------------------------------------------------
 

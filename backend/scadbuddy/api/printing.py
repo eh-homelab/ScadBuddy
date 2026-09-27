@@ -137,6 +137,7 @@ async def get_filaments(
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
+    all_plates: Annotated[bool, Query()] = False,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
 
@@ -149,6 +150,9 @@ async def get_filaments(
     this printer": without one the spools are still listed, with their last known
     assignment, but the reconciled remaining weights are not. It is also what reads the
     mounted nozzles (#78).
+
+    ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
+    place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -160,6 +164,7 @@ async def get_filaments(
             settings,
             printer_id=printer_id,
             plate_id=plate_id,
+            all_plates=all_plates,
         )
 
 

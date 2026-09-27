@@ -510,7 +510,7 @@ async def _queue_send(
     cannot carry any of them, so a send that has one takes the slice-and-queue route
     using that same pipeline's presets and target.
     """
-    # The model's own default pipeline wins over the global one (#86).
+    # The Settings pipeline; a legacy per-model one is no longer read.
     pipeline_id = settings.pipeline_for(meta.slug)
     # The printer the *option scopes* key on; see below, where conflating it with the
     # queue item's target pinned a printer-class pipeline to one printer.

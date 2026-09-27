@@ -53,8 +53,12 @@ def hardware_routes(printer_id: int = 1) -> None:
 
 
 def run_routes(*, printer_id: int = 1) -> None:
-    """Everything a run reads before it slices, except the upload."""
-    printers_route()
+    """Everything a run reads before it slices, except the upload. ``printer_id`` is
+    listed as an H2C alongside the recorded printer, since the run refuses any other."""
+    rows = recording("printers.json")
+    if all(row["id"] != printer_id for row in rows):
+        rows.append({**rows[0], "id": printer_id, "name": f"H2C {printer_id}"})
+    respx.get(f"{API}/printers/").mock(return_value=httpx.Response(200, json=rows))
     inventory_routes(printer_id=printer_id)
     h2c_presets()
     spool_preset_routes()
@@ -469,3 +473,156 @@ def test_the_chosen_nozzle_is_stated_in_the_upload_and_a_change_re_uploads(
 
     assert upload.call_count == 2, "the 0.4 run reused a file stating the 0.2 nozzle"
     assert _uploaded_nozzle(upload) == ["0.4"]
+
+
+# --- final review 1: a slot only a later plate uses ------------------------------------
+
+
+def split_plates_routes() -> None:
+    """Plate 1 uses only slot 1 and plate 2 only slot 2, answered by the ``plate_id``
+    each read asks for rather than by call order."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        plate = int(request.url.params.get("plate_id", "1"))
+        base = recording("filament-requirements.json")
+        for filament in base["filaments"]:
+            filament["used_in_plate"] = filament["slot_id"] == plate
+        return httpx.Response(200, json={**base, "plate_id": plate})
+
+    respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
+        side_effect=answer
+    )
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+
+
+def two_plate_output(client: TestClient, model: str, paths: DataPaths) -> str:
+    configure(client)
+    output_id = make_output(client, model)
+    [output_3mf] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(output_3mf, 2)
+    return output_id
+
+
+@respx.mock
+def test_the_all_plates_filament_read_offers_every_plates_slots(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Spec §2 step 1: one row per colour in the model. Plate 1 alone would never show
+    slot 2, which only plate 2 uses."""
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    split_plates_routes()
+    hardware_routes()
+
+    one = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1").json()
+    every = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    ).json()
+
+    assert [slot["slot_id"] for slot in one["slots"]] == [1]
+    assert [slot["slot_id"] for slot in every["slots"]] == [1, 2]
+    assert {choice["slot_id"] for choice in every["suggested"]} == {1, 2}
+
+
+@respx.mock
+def test_all_plates_with_no_spool_for_a_later_plates_slot_is_a_422_naming_it(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json=run_request(
+            all_plates=True,
+            filament_plan={"slots": [{"slot_id": 1, "spool_id": 9}]},
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == "Plate 2: Slot 2 has no spool chosen."
+    assert not sliced.called
+
+
+@respx.mock
+def test_all_plates_with_every_slot_chosen_slices_each_plate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_plate_output(client, model, paths)
+    upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    sliced = slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(all_plates=True)
+    )
+
+    assert response.status_code == 200, response.text
+    bodies = [json.loads(call.request.content) for call in sliced.calls]
+    assert [slice_body["plate"] for slice_body in bodies] == [1, 2]
+
+
+# --- final review 2: the run refuses a printer it cannot resolve presets for ----------
+
+
+@respx.mock
+def test_a_printer_bambuddy_does_not_know_is_a_422_before_anything_is_uploaded(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload = upload_route()
+    run_routes()
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request(printer_id=7))
+
+    assert response.status_code == 422, response.text
+    assert "printer 7" in response.json()["detail"]
+    assert not upload.called
+    assert not sliced.called
+
+
+@respx.mock
+def test_a_printer_that_is_not_an_h2c_is_a_422_before_anything_is_sliced(
+    client: TestClient, model: str
+) -> None:
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": 1, "name": "Workshop", "model": "X1C", "is_active": True}]
+        )
+    )
+    sliced = slice_routes()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"] == (
+        "ScadBuddy can only choose slicer presets for a Bambu Lab H2C so far, and "
+        "Workshop's model is X1C."
+    )
+    assert not sliced.called

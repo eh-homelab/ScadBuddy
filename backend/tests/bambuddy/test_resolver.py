@@ -237,6 +237,27 @@ def test_tpu_at_0_2_is_a_slot_error_not_a_guess() -> None:
     assert [(e.kind, e.slot_id) for e in resolved.errors] == [("no-preset", 1)]
 
 
+def test_a_used_slot_with_no_spool_chosen_says_so_rather_than_pointing_at_advanced() -> None:
+    """Final review 1: a slot only a later plate uses had no picker row, so it arrived
+    with no spool. The old "no slicer preset ... Pick one under Advanced." was advice
+    Advanced could not act on; the error names the real gap."""
+    built = FilamentOptions(
+        library_file_id=41,
+        slots=[SlotNeed(slot_id=1, colour="#FFFFFF"), SlotNeed(slot_id=2, colour="#FF1493")],
+        spools=[BASIC],
+    )
+    resolved = resolve(
+        built,
+        FilamentPlan(slots=[SlotChoice(slot_id=1, spool_id=1)]),
+        PrintChoices(nozzles=[NozzleChoice(size="0.2")]),
+        recorded(),
+        {},
+    )
+    assert [(e.kind, e.slot_id, e.message) for e in resolved.errors] == [
+        ("no-choice", 2, "Slot 2 has no spool chosen.")
+    ]
+
+
 def test_mixed_sizes_are_always_an_error() -> None:
     """Addendum R9: no ``allow_mixed_sizes`` escape hatch — Bambuddy can't slice it."""
     nozzles = [NozzleChoice(size="0.2"), NozzleChoice(size="0.4")]

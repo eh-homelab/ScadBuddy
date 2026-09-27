@@ -405,7 +405,24 @@ def across_plates(plates: list[FilamentOptions]) -> FilamentOptions:
             elif slot.used_grams is not None:
                 total = (seen.used_grams or 0.0) + slot.used_grams
                 slots[slot.slot_id] = seen.model_copy(update={"used_grams": total})
-    return plates[0].model_copy(update={"slots": list(slots.values())})
+    return plates[0].model_copy(update={"slots": sorted(slots.values(), key=_slot_order)})
+
+
+def _slot_order(slot: SlotNeed) -> int:
+    return slot.slot_id
+
+
+def every_plate(plates: list[FilamentOptions]) -> FilamentOptions:
+    """The filament step for an all-plates print: one row per slot any plate uses.
+
+    :func:`across_plates` with the opening selection and its warnings recomputed over
+    the union, so a slot only a later plate uses is offered and pre-selected too (spec
+    §2 step 1) rather than reaching the run with no spool.
+    """
+    merged = across_plates(plates)
+    merged.suggested = suggest(merged.slots, merged.spools, printer_id=merged.printer_id)
+    merged.warnings = check(merged, FilamentPlan(slots=merged.suggested), copies=1)
+    return merged
 
 
 def _slot_warnings(

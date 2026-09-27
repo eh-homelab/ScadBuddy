@@ -390,14 +390,13 @@ def test_the_targeted_printers_override_still_takes_the_queue_path(
 
 
 @respx.mock
-def test_a_models_own_pipeline_is_the_one_read(
+def test_a_models_stored_pipeline_is_ignored_for_the_settings_one(
     client: TestClient, model: str, paths: DataPaths, settings: Settings
 ) -> None:
-    """#86 lets a model default to its own pipeline; the send must follow that one.
-
-    Setting it is no longer reachable through the API — the picker's routes are gone
-    with it (spec 2026-09-27 §4) — so this is legacy stored data now, seeded directly
-    the way an existing ``settings.json`` still carries it.
+    """Final review 3: a per-model pipeline (#86) can no longer be set or seen — its
+    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale entry in an
+    existing ``settings.json`` must not quietly override the one Settings shows. It stays
+    stored, unread.
     """
     configure(client, pipeline_id=4)
     SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
@@ -411,8 +410,8 @@ def test_a_models_own_pipeline_is_the_one_read(
 
     client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
 
-    assert model_pipeline.called
-    assert not global_pipeline.called
+    assert global_pipeline.called
+    assert not model_pipeline.called
 
 
 @respx.mock

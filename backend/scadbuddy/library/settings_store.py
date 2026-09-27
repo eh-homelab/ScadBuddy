@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from typing import Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
@@ -53,6 +53,12 @@ class ModelPrintChoices(BaseModel):
     tier: Tier | None = None
     process_name: str | None = Field(default=None, max_length=200)
 
+    @field_validator("nozzles")
+    @classmethod
+    def _both_sides(cls, nozzles: list[NozzleChoice]) -> list[NozzleChoice]:
+        """None or two: the dialog has two sides, so one entry means it on both."""
+        return [nozzles[0], nozzles[0].model_copy()] if len(nozzles) == 1 else nozzles
+
 
 class StoredSettings(BambuddyIds):
     """Bambuddy connection details. The API key never leaves the server."""
@@ -72,10 +78,10 @@ class StoredSettings(BambuddyIds):
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
 
-    #: Model slug -> the pipeline that model prints with, which wins over
-    #: ``pipeline_id``. Deliberately not part of :class:`SettingsPatch`: a patch
-    #: replaces a whole value, while a per-model default has to be settable one model
-    #: at a time, so :meth:`SettingsStore.set_model_pipeline` is the only way in.
+    #: Model slug -> the pipeline that model once printed with (#86). Kept so an
+    #: existing ``settings.json`` still loads and round-trips, but no longer read: its
+    #: routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here can
+    #: be neither seen nor changed and must not override the Settings pipeline.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
     #: Model slug -> the rest of what the picker chose, set one model at a time for the
     #: same reason (:meth:`SettingsStore.set_model_choices`).
@@ -92,8 +98,12 @@ class StoredSettings(BambuddyIds):
     last_project_id: int | None = None
 
     def pipeline_for(self, slug: str) -> int | None:
-        """This model's own pipeline, else the global fallback (#86)."""
-        return self.model_pipelines.get(slug, self.pipeline_id)
+        """The pipeline the send bar runs for ``slug``: the Settings one, for every model.
+
+        ``model_pipelines`` is deliberately not consulted — see its note.
+        """
+        del slug
+        return self.pipeline_id
 
     # #88 — remembered print options, least to most specific. All three start empty, so
     # a ScadBuddy that has never been told otherwise queues with Bambuddy's own
