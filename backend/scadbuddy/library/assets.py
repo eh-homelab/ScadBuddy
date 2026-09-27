@@ -196,6 +196,9 @@ def normalise_png(data: bytes) -> tuple[bytes, int, int]:
             picture = image if image.mode in ("L", "LA", "RGB", "RGBA") else image.convert("RGBA")
             if max(width, height) > MAX_PNG_SIDE:
                 picture.thumbnail((MAX_PNG_SIDE, MAX_PNG_SIDE), Image.Resampling.LANCZOS)
+            # PNG save writes an ICC profile (iCCP) from `info` unasked, and that
+            # chunk carries arbitrary bytes; only transparency is pixel data.
+            picture.info = {k: v for k, v in picture.info.items() if k == "transparency"}
             out = io.BytesIO()
             picture.save(out, format="PNG")
             return out.getvalue(), picture.width, picture.height
