@@ -19,6 +19,32 @@ async function rows(): Promise<HTMLElement[]> {
 }
 
 describe('VersionsPage', () => {
+  it('says so when the model record fails to load, and a retry brings Restore back', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        fail
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+    await rows()
+
+    const alert = screen.getByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+
+    const restored = await rows()
+    expect(
+      await within(restored[1] as HTMLElement).findByRole('button', { name: 'Restore this version' }),
+    ).toBeEnabled()
+    expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
+  })
+
   it('lists every revision newest first, with its message and changed files', async () => {
     render()
     const listed = await rows()

@@ -753,6 +753,31 @@ describe('CustomizePage', () => {
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
   })
 
+  it('says so when the model record fails to load, and a retry brings the write actions back', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        fail
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
+  })
+
   it('offers no write action on a built-in template, and says why (#184)', async () => {
     render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
     expect(await screen.findByTestId('builtin-badge')).toHaveTextContent(

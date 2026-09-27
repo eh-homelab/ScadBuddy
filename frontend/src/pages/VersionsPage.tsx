@@ -123,6 +123,17 @@ export function VersionsPage() {
           )}
         </div>
 
+        {modelState.error && (
+          <div role="alert" className="mb-3 rounded-[6px] border border-warn/40 bg-warn/8 p-3">
+            <p className="text-[12px] text-warn">
+              Could not load this model&apos;s details: {modelState.error.message}
+            </p>
+            <Button size="sm" className="mt-2" onClick={modelState.reload}>
+              Try again
+            </Button>
+          </div>
+        )}
+
         {error && (
           <p role="alert" className="mb-3 rounded-[6px] bg-warn/10 px-3 py-2 text-[12px] text-warn">
             {error}

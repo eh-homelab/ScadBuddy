@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api } from '../api/client'
 import { SourceWorkbench } from '../components/SourceWorkbench'
+import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { useAsync } from '../lib/useAsync'
@@ -43,6 +44,19 @@ export function EditSourcePage() {
         <Link to="/" className="mt-4 inline-block text-[13px] text-accent underline">
           Back to models
         </Link>
+      </div>
+    )
+  }
+
+  // Whether the source may be saved is the record's to say; without it, nothing is offered.
+  if (model.error) {
+    return (
+      <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
+        <h1 className="text-[15px] font-medium">Could not load this model</h1>
+        <p className="mt-2 text-[13px] text-muted">{model.error.message}</p>
+        <Button size="sm" className="mt-4" onClick={model.reload}>
+          Try again
+        </Button>
       </div>
     )
   }

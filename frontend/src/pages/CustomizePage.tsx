@@ -6,6 +6,7 @@ import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
+import { Button } from '../components/ui/Button'
 
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
@@ -177,7 +178,7 @@ export function CustomizePage() {
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
@@ -246,6 +247,21 @@ export function CustomizePage() {
           </Link>
           {origin === 'mine' && <DeleteModelButton slug={slug} name={schema.title ?? slug} />}
         </div>
+      </div>
+
+      {/* The write actions wait on the record, so a failed fetch has to say so. */}
+      <div>
+        {modelState.error && (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
+          >
+            <span>Could not load this model&apos;s details: {modelState.error.message}</span>
+            <Button size="sm" onClick={modelState.reload}>
+              Try again
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">

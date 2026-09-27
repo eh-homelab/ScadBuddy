@@ -115,6 +115,30 @@ describe('EditSourcePage', () => {
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
   })
 
+  it('says so when the model record fails to load, and a retry brings Save back', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        fail
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = renderEdit()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
+    // Enabled once the parse check on open has settled.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save source' })).toBeEnabled())
+    expect(screen.queryByText('Could not load this model')).not.toBeInTheDocument()
+  })
+
   it('shows a built-in template read-only, with nothing to save (#184)', async () => {
     renderEdit(encodeURIComponent(BUILTIN_SLUG))
     const editor = await screen.findByLabelText('OpenSCAD source')
