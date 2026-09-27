@@ -274,9 +274,10 @@ TEXT_PAD = 2;         // clear space around the text
 // File guard: only a bare file name in the model's directory is read.
 // ===========================================================================
 
-function has_dotdot(f) = len(f) > 1 && len([for (i = [0 : len(f) - 2]) if (f[i] == "." && f[i + 1] == ".") 1]) > 0;
+// No "/" or "\\" means no directory part, so ".." can only traverse as the
+// whole name, and the leading-dot rule refuses that (and dotfiles).
 function safe_file(f) = is_string(f) && f != "" && len(search("/", f)) == 0 && len(search("\\", f)) == 0
-                        && f[0] != "." && !has_dotdot(f);
+                        && f[0] != ".";
 
 if (mask_file != "" && !safe_file(mask_file))
     echo(str("NOTE: mask_file \"", mask_file, "\" ignored - only a bare file name in the model's directory is accepted"));
