@@ -33,7 +33,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.history import MAX_SUBJECT, GitError
-from scadbuddy.library.libraries import model_search_path, read_pins
+from scadbuddy.library.libraries import model_search_path, read_lock
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -509,8 +509,10 @@ def patch_model(
     if patch.libraries is not None:
         # Only a pinned library can be declared: the render has nothing to put on
         # OPENSCADPATH for any other (#93).
-        pinned = read_pins(paths)
-        missing = [name for name in patch.libraries if name not in pinned]
+        lock = read_lock(paths)
+        # A library whose lock entry is broken is refused as it would fail every
+        # render (LockfileError); one with no entry at all needs adding first.
+        missing = [name for name in patch.libraries if lock.pin(name) is None]
         if missing:
             raise ApiError(
                 status.HTTP_422_UNPROCESSABLE_CONTENT,

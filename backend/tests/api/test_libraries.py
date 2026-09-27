@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -22,7 +23,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.libraries import LOCKFILE_NAME, CatalogueLibrary, LibraryStore
+from scadbuddy.library.libraries import (
+    LOCKFILE_NAME,
+    STAGING_PREFIX,
+    CatalogueLibrary,
+    LibraryStore,
+)
 from tests.conftest import make_library_upstream
 
 pytestmark = pytest.mark.requires_git
@@ -199,6 +205,108 @@ def test_a_curated_name_with_another_url_is_a_422(
 def test_a_name_with_a_path_in_it_is_a_422(lib_client: TestClient) -> None:
     response = lib_client.post("/api/v1/libraries", json={"name": "../up"})
     assert response.status_code == 422
+
+
+def test_a_ref_with_dot_dot_is_refused_by_validation(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "install", side_effect=AssertionError("reached the service")):
+        response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "a..b"})
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "ref"]]
+
+
+def test_the_schema_states_that_a_ref_has_no_dot_dot(lib_client: TestClient) -> None:
+    schema = lib_client.get("/openapi.json").json()["components"]["schemas"]
+    ref = schema["LibraryAdd"]["properties"]["ref"]["anyOf"][0]
+
+    assert "(?!.*\\.\\.)" in ref["pattern"]
+
+
+def _create(client: TestClient, name: str, *libraries: str) -> None:
+    created = client.post("/api/v1/models", json={"name": name, "source": SOURCE})
+    assert created.status_code == 201, created.text
+    declared = client.patch(f"/api/v1/models/{name}", json={"libraries": list(libraries)})
+    assert declared.status_code == 200, declared.text
+
+
+def test_a_bad_lock_entry_fails_only_the_models_that_declare_it(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, _ = upstream
+    add(lib_client, name="BOSL2")
+    add(lib_client, name="other", url=url, ref="v2")
+    _create(lib_client, "good", "other")
+    _create(lib_client, "plain")
+    _create(lib_client, "bad", "BOSL2")
+    lock_file = paths.models / LOCKFILE_NAME
+    lock = json.loads(lock_file.read_text(encoding="utf-8"))
+    lock["BOSL2"]["commit"] = "HEAD"
+    lock_file.write_text(json.dumps(lock), encoding="utf-8")
+
+    assert lib_client.get("/api/v1/models/good/schema").status_code == 200
+    assert lib_client.get("/api/v1/models/plain/schema").status_code == 200
+    assert lib_client.post("/api/v1/models/plain/render", json={"params": {}}).status_code == 202
+    schema = lib_client.get("/api/v1/models/bad/schema")
+    render = lib_client.post("/api/v1/models/bad/render", json={"params": {}})
+    declared = lib_client.patch("/api/v1/models/plain", json={"libraries": ["BOSL2"]})
+
+    for refused in (schema, render, declared):
+        assert refused.status_code == 409
+        assert refused.headers["content-type"] == "application/problem+json"
+        assert refused.json()["title"] == "Invalid Library Lockfile"
+        assert "libraries.lock entry 'BOSL2' is not valid: commit:" in refused.json()["detail"]
+
+
+def test_a_bad_lock_entry_is_listed_as_broken(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, _ = upstream
+    (paths.models / LOCKFILE_NAME).write_text(
+        json.dumps(
+            {
+                "BOSL2": {"url": url, "ref": "v1", "commit": "HEAD"},
+                "mylib": {"url": url, "ref": "a..b", "commit": "a" * 40},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = lib_client.get("/api/v1/libraries")
+
+    assert response.status_code == 200
+    listed = {entry["name"]: entry for entry in response.json()}
+    assert listed["BOSL2"]["pin"] is None
+    assert "'BOSL2' is not valid: commit:" in listed["BOSL2"]["error"]
+    assert (listed["mylib"]["url"], listed["mylib"]["pin"]) == (url, None)
+    assert "'mylib' is not valid: ref:" in listed["mylib"]["error"]
+
+
+def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: DataPaths) -> None:
+    staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
+    staging.mkdir(parents=True)
+    (staging / "std.scad").write_text("cube(1);\n", encoding="utf-8")
+    checkout = paths.libraries / "BOSL2" / ("a" * 40) / "BOSL2"
+    checkout.mkdir(parents=True)
+
+    with TestClient(app):
+        pass
+
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+    assert checkout.is_dir()
+
+
+def test_a_failed_staging_sweep_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch.object(LibraryStore, "sweep_staging", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not sweep library staging clones" in caplog.text
 
 
 def test_a_ref_that_does_not_exist_upstream_is_a_502(

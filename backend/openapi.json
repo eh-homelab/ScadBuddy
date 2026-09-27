@@ -1348,7 +1348,7 @@
           "ref": {
             "anyOf": [
               {
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+                "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
                 "type": "string"
               },
               {
@@ -1384,6 +1384,18 @@
           "curated": {
             "title": "Curated",
             "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again",
+            "title": "Error"
           },
           "homepage": {
             "anyOf": [
@@ -1443,10 +1455,12 @@
         "description": "One entry of ``libraries.lock``: where it came from, what was asked for, what\nthat resolved to.",
         "properties": {
           "commit": {
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
             "title": "Commit",
             "type": "string"
           },
           "ref": {
+            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
             "title": "Ref",
             "type": "string"
           },

@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.history import (
@@ -66,10 +66,12 @@ logger = logging.getLogger(__name__)
 LOCKFILE_NAME = "libraries.lock"
 #: A directory name OpenSCAD can `use <NAME/...>`: no separators, no dot-files.
 NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
-#: A branch or tag, never with a leading dash (it would read as an option). `..`
-#: is refused on top of this: git refuses it in a ref anyway, and the pattern has
-#: to stay free of look-arounds to double as the API's own validation.
-REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+#: A branch or tag, never with a leading dash (it would read as an option) and
+#: never with `..` (git refuses it in a ref anyway). The look-ahead needs Python's
+#: `re`: a pydantic model using this sets ``regex_engine="python-re"``.
+REF_PATTERN = r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+#: A full SHA-1 or SHA-256 object name, as `git rev-parse HEAD` prints it.
+COMMIT_PATTERN = r"^[0-9a-f]{40}([0-9a-f]{24})?$"
 # A clone crosses the network, unlike every other git call here, and NopSCADlib
 # is large; a stalled one still has to give its executor slot back.
 CLONE_TIMEOUT = 300.0
@@ -91,9 +93,12 @@ class LibraryPin(BaseModel):
     """One entry of ``libraries.lock``: where it came from, what was asked for, what
     that resolved to."""
 
+    # REF_PATTERN refuses `..` with a look-ahead, which pydantic's default engine lacks.
+    model_config = ConfigDict(regex_engine="python-re")
+
     url: str
-    ref: str
-    commit: str
+    ref: str = Field(pattern=REF_PATTERN)
+    commit: str = Field(pattern=COMMIT_PATTERN)
 
 
 class LibraryEntry(BaseModel):
@@ -106,6 +111,11 @@ class LibraryEntry(BaseModel):
     homepage: str | None = None
     curated: bool
     pin: LibraryPin | None = None
+    error: str | None = Field(
+        default=None,
+        description="Why its `libraries.lock` entry is unusable (a hand edit); models "
+        "declaring it cannot render until it is added again",
+    )
 
 
 #: The curated catalogue. Refs are the latest release tag when this was written
@@ -165,47 +175,112 @@ class LibraryNotInstalledError(LookupError):
     """A model declares a library that has no pin, or whose checkout is gone."""
 
 
+class LockfileError(RuntimeError):
+    """``libraries.lock`` is not what ScadBuddy writes: a hand edit, most likely."""
+
+
 # ── the lockfile ──────────────────────────────────────────────────────────────
 
 
-def _parse_lock(raw: str) -> dict[str, LibraryPin]:
-    loaded: Any = json.loads(raw)
+@dataclass(frozen=True)
+class Lock:
+    """``libraries.lock``, parsed entry by entry.
+
+    A hand-edited entry that is not a valid pin is kept out of ``pins`` and held
+    in ``broken`` by name, so it fails only the models that declare it; every
+    other pin still renders. A file that is not a JSON object at all has no names
+    to hold apart: ``unreadable`` says why, and it fails every model declaring
+    any library.
+    """
+
+    pins: dict[str, LibraryPin] = field(default_factory=dict)
+    #: name -> (why it is not valid, the entry as written).
+    broken: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    unreadable: str | None = None
+
+    def pin(self, name: str) -> LibraryPin | None:
+        """``name``'s pin, ``None`` when it has none, or :class:`LockfileError`
+        when its entry -- or the whole file -- cannot be read."""
+        if self.unreadable is not None:
+            raise LockfileError(self.unreadable)
+        if name in self.broken:
+            raise LockfileError(self.broken[name][0])
+        return self.pins.get(name)
+
+
+def _parse_lock(raw: str) -> Lock:
+    try:
+        loaded: Any = json.loads(raw)
+    except json.JSONDecodeError as error:
+        return Lock(unreadable=f"{LOCKFILE_NAME} is not valid JSON: {error}")
     if not isinstance(loaded, dict):
-        return {}
-    return {name: LibraryPin.model_validate(pin) for name, pin in loaded.items()}
+        return Lock(unreadable=f"{LOCKFILE_NAME} is not a JSON object")
+    pins: dict[str, LibraryPin] = {}
+    broken: dict[str, tuple[str, Any]] = {}
+    for name, pin in loaded.items():
+        try:
+            pins[name] = LibraryPin.model_validate(pin)
+        except ValidationError as error:
+            # Named, so whoever edited the file by hand can find the entry.
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in detail['loc']) or 'entry'}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            broken[name] = (f"{LOCKFILE_NAME} entry {name!r} is not valid: {problems}", pin)
+    return Lock(pins=pins, broken=broken)
 
 
-def _lock_body(pins: Mapping[str, LibraryPin]) -> str:
-    # Sorted, so a pin change is a one-entry diff in the history.
-    return json.dumps({name: pins[name].model_dump() for name in sorted(pins)}, indent=2) + "\n"
-
-
-def read_pins(paths: DataPaths) -> dict[str, LibraryPin]:
+def read_lock(paths: DataPaths) -> Lock:
     """The lockfile as it is now: what a render of a live model uses."""
     lock = paths.models / LOCKFILE_NAME
     if not lock.is_file():
-        return {}
+        return Lock()
     return _parse_lock(lock.read_text(encoding="utf-8"))
 
 
-def pins_at(history: ModelHistory, commit: str) -> dict[str, LibraryPin]:
+def read_pins(paths: DataPaths) -> dict[str, LibraryPin]:
+    """The valid pins of the lockfile as it is now."""
+    return read_lock(paths).pins
+
+
+def lock_at(history: ModelHistory, commit: str) -> Lock:
     """The lockfile as it was at ``commit``: what that revision rendered with."""
     try:
         raw = history.show(commit, LOCKFILE_NAME)
     except RevisionNotFoundError:
         # Older than the first pin.
-        return {}
+        return Lock()
     return _parse_lock(raw.decode("utf-8"))
 
 
-def _write_pins(paths: DataPaths, pins: Mapping[str, LibraryPin]) -> None:
+def _update_pins(paths: DataPaths, changes: Mapping[str, LibraryPin]) -> None:
+    """Write ``changes`` over the lock as it is now. A broken entry that is not
+    among them is written back as it was: fixing it is its editor's call, not a
+    side effect of adding something else. A lock that is not JSON at all is
+    refused rather than overwritten."""
+    lock = read_lock(paths)
+    if lock.unreadable is not None:
+        raise LockfileError(lock.unreadable)
+    kept = {name: raw for name, (_, raw) in lock.broken.items() if name not in changes}
+    _write_pins(paths, {**lock.pins, **changes}, kept)
+
+
+def _lock_body(pins: Mapping[str, LibraryPin], kept: Mapping[str, Any]) -> str:
+    entries: dict[str, Any] = {**kept, **{name: pin.model_dump() for name, pin in pins.items()}}
+    # Sorted, so a pin change is a one-entry diff in the history.
+    return json.dumps({name: entries[name] for name in sorted(entries)}, indent=2) + "\n"
+
+
+def _write_pins(
+    paths: DataPaths, pins: Mapping[str, LibraryPin], kept: Mapping[str, Any] | None = None
+) -> None:
     """Swap the lock in whole. Renders, checks and edits read it without the
     install lock; `write_text` truncates first, and a reader in that window would
     fail on a torn file. A temp file beside it keeps `os.replace` atomic."""
     handle, staged = tempfile.mkstemp(dir=paths.models, prefix=".libraries-", suffix=".lock")
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as writer:
-            writer.write(_lock_body(pins))
+            writer.write(_lock_body(pins, kept or {}))
         os.replace(staged, paths.models / LOCKFILE_NAME)
     except BaseException:
         Path(staged).unlink(missing_ok=True)
@@ -229,18 +304,18 @@ def declared_libraries(model_dir: Path) -> list[str]:
     return _libraries_of(json.loads(meta.read_text(encoding="utf-8")))
 
 
-def search_path(
-    paths: DataPaths, declared: Sequence[str], pins: Mapping[str, LibraryPin]
-) -> tuple[Path, ...]:
+def search_path(paths: DataPaths, declared: Sequence[str], lock: Lock) -> tuple[Path, ...]:
     """The ``OPENSCADPATH`` for a model: one checkout per library it declares.
 
     A declared library with no pin, or whose checkout is not on the volume, is an
     error rather than a silent omission: OpenSCAD only WARNs on a missing ``use``,
-    so leaving it off would render a model with half its geometry missing.
+    so leaving it off would render a model with half its geometry missing. So is
+    one whose lock entry is not valid (:class:`LockfileError`); an entry the model
+    does not declare is never looked at.
     """
     directories: list[Path] = []
     for name in declared:
-        pin = pins.get(name)
+        pin = lock.pin(name)
         if pin is None:
             raise LibraryNotInstalledError(f"{name!r} is declared but has no pin; add it first")
         directory = paths.libraries / name / pin.commit
@@ -255,7 +330,7 @@ def search_path(
 
 def model_search_path(paths: DataPaths, slug: str) -> tuple[Path, ...]:
     """:func:`search_path` for a live model: its declaration, the lockfile as it is."""
-    return search_path(paths, declared_libraries(paths.model_dir(slug)), read_pins(paths))
+    return search_path(paths, declared_libraries(paths.model_dir(slug)), read_lock(paths))
 
 
 def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str) -> list[str]:
@@ -270,11 +345,11 @@ def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str
         meta = json.loads(history.show(commit, f"{slug}/{MODEL_META_NAME}"))
     except RevisionNotFoundError:
         return []
-    old = pins_at(history, commit)
+    old = lock_at(history, commit).pins
     wanted = {name: old[name] for name in _libraries_of(meta) if name in old}
     if not wanted:
         return []
-    _write_pins(paths, {**read_pins(paths), **wanted})
+    _update_pins(paths, wanted)
     return [LOCKFILE_NAME]
 
 
@@ -336,18 +411,65 @@ class LibraryStore:
         self._names: dict[str, _NameLock] = {}
         self._names_guard = threading.Lock()
 
+    def sweep_staging(self) -> list[str]:
+        """Remove the staging clones an install killed mid-clone left behind.
+
+        Only safe while no install can run -- at boot, before the first request --
+        since a live clone is in one of these too.
+        """
+        root = self.paths.libraries
+        if not root.is_dir():
+            return []
+        removed: list[str] = []
+        for entry in sorted(root.iterdir()):
+            if not entry.name.startswith(STAGING_PREFIX):
+                continue
+            # One that cannot go must not keep the rest; as the catalogue's
+            # sweeps, log it and move on.
+            try:
+                shutil.rmtree(entry)
+            except OSError:
+                logger.exception("could not remove a staging clone", extra={"entry": entry.name})
+                continue
+            removed.append(entry.name)
+        return removed
+
     def entries(self) -> list[LibraryEntry]:
-        pins = read_pins(self.paths)
+        lock = read_lock(self.paths)
+        if lock.unreadable is not None:
+            # No entry can be told apart from another; the catalogue still lists,
+            # and adding to it says why it cannot.
+            logger.warning("unreadable lockfile", extra={"reason": lock.unreadable})
+        errors = {name: reason for name, (reason, _) in lock.broken.items()}
         listed = [
-            LibraryEntry(**entry.model_dump(), curated=True, pin=pins.get(entry.name))
+            LibraryEntry(
+                **entry.model_dump(),
+                curated=True,
+                pin=lock.pins.get(entry.name),
+                error=errors.get(entry.name),
+            )
             for entry in self.catalogue.values()
         ]
-        listed += [
+        added = [
             LibraryEntry(name=name, url=pin.url, ref=pin.ref, curated=False, pin=pin)
-            for name, pin in sorted(pins.items())
+            for name, pin in lock.pins.items()
             if name not in self.catalogue
         ]
-        return listed
+        for name, (reason, raw) in lock.broken.items():
+            if name in self.catalogue:
+                continue
+            # Listed as broken rather than dropped, so it can be seen and re-added.
+            written = raw if isinstance(raw, dict) else {}
+            added.append(
+                LibraryEntry(
+                    name=name,
+                    url=str(written.get("url", "")),
+                    ref=str(written.get("ref", "")),
+                    curated=False,
+                    error=reason,
+                )
+            )
+        return listed + sorted(added, key=lambda entry: entry.name)
 
     def install(self, name: str, *, url: str | None = None, ref: str | None = None) -> LibraryPin:
         """Clone ``name`` at ``ref`` and pin it to the commit that resolved to.
@@ -379,8 +501,18 @@ class LibraryStore:
         # the one it was first added from otherwise. Every model declaring it
         # trusts that upstream, so a different URL under the same name would
         # silently swap the code they render with.
-        recorded = read_pins(self.paths).get(name)
+        lock = read_lock(self.paths)
+        if lock.unreadable is not None:
+            # Refused before the clone: the pin could not be written anyway.
+            raise LockfileError(lock.unreadable)
+        recorded = lock.pins.get(name)
         bound = known.url if known is not None else recorded.url if recorded else None
+        if bound is None and name in lock.broken:
+            # Re-adding is how a broken entry is fixed, but it stays bound to the
+            # upstream it names, if it still names one.
+            written = lock.broken[name][1]
+            if isinstance(written, dict) and isinstance(written.get("url"), str):
+                bound = written["url"]
         if url is None:
             if bound is None:
                 raise LibraryNotFoundError(name)
@@ -524,7 +656,7 @@ class LibraryStore:
 
     def _record(self, name: str, pin: LibraryPin) -> None:
         def write() -> None:
-            _write_pins(self.paths, {**read_pins(self.paths), name: pin})
+            _update_pins(self.paths, {name: pin})
 
         if not self.history.available:
             with self._lock:
@@ -540,6 +672,6 @@ class LibraryStore:
             # renders read the lockfile, not HEAD, and a lost revision is the smaller
             # harm than telling the client an add failed that did not. A failure
             # before `write` (the lock wait) left the old pin, and that one raises.
-            if read_pins(self.paths).get(name) != pin:
+            if read_lock(self.paths).pins.get(name) != pin:
                 raise
             logger.exception("could not record a revision", extra={"revision_message": message})
