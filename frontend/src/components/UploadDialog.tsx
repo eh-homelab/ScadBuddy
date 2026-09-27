@@ -7,6 +7,7 @@ import {
   folderOf,
   isMarkdown,
   readMetaName,
+  metaProblem,
   readmeProblem,
   thumbnailProblem,
   uploadFilename,
@@ -62,18 +63,23 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
     const tooLarge = picked.thumbnail ? thumbnailProblem(picked.thumbnail) : null
     // Its README too, against the limit every write path holds a README to.
     const tooLong = picked.readme ? readmeProblem(await picked.readme.text()) : null
+    // And its model.json, against the server's cap -- checked before it is read.
+    const metaTooLarge = picked.meta ? metaProblem(picked.meta) : null
     const leftOut = [
+      metaTooLarge && `${metaTooLarge} ${picked.meta?.name} was left out.`,
       tooLarge && `${tooLarge} ${picked.thumbnail?.name} was left out.`,
       tooLong && `${tooLong} ${picked.readme?.name} was left out.`,
     ].filter(Boolean)
     setError(leftOut.length > 0 ? leftOut.join(' ') : null)
+    const meta = metaTooLarge ? undefined : picked.meta
     setFiles({
       ...picked,
+      meta,
       thumbnail: tooLarge ? undefined : picked.thumbnail,
       readme: tooLong ? undefined : picked.readme,
     })
     setIgnored(unused)
-    setMetaName(await readMetaName(picked.meta))
+    setMetaName(await readMetaName(meta))
   }
 
   async function attach(kind: 'thumbnail' | 'readme', file: File | undefined) {

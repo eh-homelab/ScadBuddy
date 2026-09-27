@@ -203,6 +203,39 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body.detail).toBe('tags is not valid JSON')
   })
 
+  /** A readable model.json of exactly `size` bytes; JSON allows trailing spaces. */
+  function metaOf(size: number): string {
+    const body = JSON.stringify({ name: 'Widget' })
+    return body + ' '.repeat(size - body.length)
+  }
+
+  async function uploadMeta(meta: string) {
+    const response = await fetch('/api/v1/models', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart([
+        { name: 'file', value: 'cube(10);\n', filename: 'widget.scad' },
+        { name: 'meta', value: meta, filename: 'model.json' },
+      ]),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('takes a model.json of exactly MAX_META_BYTES', async () => {
+    const { status, body } = await uploadMeta(metaOf(64 * 1024))
+    expect(status).toBe(201)
+    expect(body.name).toBe('Widget')
+  })
+
+  it('refuses a model.json one byte over the cap, as _read_meta_part does, and creates nothing', async () => {
+    const { status, body } = await uploadMeta(metaOf(64 * 1024 + 1))
+    expect(status).toBe(422)
+    expect(body.detail).toBe(
+      'the model.json is too large: 65537 bytes, and a model.json is at most 65536 bytes (64 KiB)',
+    )
+    expect((await api.listModels()).some((model) => model.slug === 'widget')).toBe(false)
+  })
+
   async function uploadThumbnail(thumbnail: Uint8Array) {
     const response = await fetch('/api/v1/models', {
       method: 'POST',

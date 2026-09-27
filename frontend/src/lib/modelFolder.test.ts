@@ -4,6 +4,7 @@ import {
   droppedFiles,
   folderOf,
   MAX_README_CHARS,
+  metaProblem,
   readMetaName,
   readmeProblem,
   thumbnailProblem,
@@ -141,6 +142,14 @@ describe('thumbnailProblem', () => {
     expect(thumbnailProblem(png(2 * 1024 * 1024))).toBeNull()
     expect(thumbnailProblem(png(2 * 1024 * 1024 + 1))).toBe('The thumbnail must be 2 MiB or smaller.')
     expect(thumbnailProblem(file('cover.jpg'))).toBe('The thumbnail must be a PNG.')
+  })
+})
+
+describe('metaProblem', () => {
+  it('takes a model.json up to 64 KiB, the server\'s MAX_META_BYTES', () => {
+    const meta = (size: number) => new File([new Uint8Array(size)], 'model.json')
+    expect(metaProblem(meta(64 * 1024))).toBeNull()
+    expect(metaProblem(meta(64 * 1024 + 1))).toBe('The model.json must be 64 KiB or smaller.')
   })
 })
 

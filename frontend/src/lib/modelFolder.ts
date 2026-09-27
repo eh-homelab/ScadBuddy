@@ -49,6 +49,17 @@ export function thumbnailProblem(file: File): string | null {
   return null
 }
 
+/** The server's `MAX_META_BYTES`: a model.json is small metadata, about 1 KiB bundled. */
+export const MAX_META_BYTES = 64 * 1024
+/** The limit as people read it, derived like the thumbnail's. */
+export const MAX_META_SIZE = `${MAX_META_BYTES / 1024} KiB`
+
+/** Why a file cannot be a model's model.json, or null when it can. */
+export function metaProblem(file: File): string | null {
+  if (file.size > MAX_META_BYTES) return `The model.json must be ${MAX_META_SIZE} or smaller.`
+  return null
+}
+
 /** The server's `MAX_SOURCE_CHARS`, which caps a README on every write path. */
 export const MAX_README_CHARS = 1_000_000
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import itertools
 import json
 import shutil
+import threading
 import zipfile
 from collections.abc import Callable
 from typing import Any
@@ -13,6 +14,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+import scadbuddy.api.models as models_api
 from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES, _mib
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
@@ -911,11 +913,15 @@ def _refused_without_a_model(response: httpx.Response, client: TestClient) -> di
 
 
 def test_a_deeply_nested_model_json_is_a_422_not_a_500(client: TestClient) -> None:
+    # Under MAX_META_BYTES, so it is the parse that refuses it and not the cap:
+    # 30,000 levels is still far past the recursion limit.
+    deep = "[" * 30_000 + "]" * 30_000
+    assert len(deep) <= models_api.MAX_META_BYTES
     response = client.post(
         "/api/v1/models",
         files={
             "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
-            "meta": ("model.json", DEEP.encode(), "application/json"),
+            "meta": ("model.json", deep.encode(), "application/json"),
         },
     )
     assert _refused_without_a_model(response, client)["detail"] == (
@@ -1053,3 +1059,81 @@ def test_an_invalid_model_json_on_disk_costs_only_its_own_model(
     assert body["title"] == "Invalid Model Metadata"
     assert "model.json of 'broken' is not valid" in body["detail"]
     assert named in body["detail"]
+
+
+# ── the model.json cap ────────────────────────────────────────────────────────
+
+
+def _meta_of_size(size: int) -> bytes:
+    """A valid model.json of exactly ``size`` bytes: JSON allows trailing whitespace."""
+    body = json.dumps({"name": "Widget"}).encode()
+    return body + b" " * (size - len(body))
+
+
+def _upload_meta(client: TestClient, meta: bytes) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", meta, "application/json"),
+        },
+    )
+    return response
+
+
+def test_the_model_json_cap_is_sized_for_a_real_one() -> None:
+    assert models_api.MAX_META_BYTES == 64 * 1024
+    assert models_api.MAX_META_SIZE == "64 KiB"
+
+
+def test_a_model_json_at_the_cap_is_accepted(client: TestClient) -> None:
+    response = _upload_meta(client, _meta_of_size(models_api.MAX_META_BYTES))
+    assert response.status_code == 201, response.text
+    assert response.json()["name"] == "Widget"
+
+
+def test_a_model_json_one_byte_over_the_cap_is_a_422_naming_it(client: TestClient) -> None:
+    size = models_api.MAX_META_BYTES + 1
+    response = _upload_meta(client, _meta_of_size(size))
+    assert _refused_without_a_model(response, client)["detail"] == (
+        f"the model.json is too large: {size} bytes, "
+        "and a model.json is at most 65536 bytes (64 KiB)"
+    )
+
+
+def test_an_oversized_model_json_is_refused_before_it_is_parsed(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    parsed: list[bytes] = []
+    real = models_api._read_meta_file
+
+    def recording(payload: bytes, slug: str) -> Any:
+        parsed.append(payload)
+        return real(payload, slug)
+
+    monkeypatch.setattr(models_api, "_read_meta_file", recording)
+
+    response = _upload_meta(client, b"{" * (models_api.MAX_META_BYTES + 1))
+
+    _refused_without_a_model(response, client)
+    assert parsed == []
+
+
+def test_a_model_json_is_parsed_off_the_event_loop(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    threads: list[threading.Thread] = []
+    real = models_api._read_meta_file
+
+    def recording(payload: bytes, slug: str) -> Any:
+        threads.append(threading.current_thread())
+        return real(payload, slug)
+
+    monkeypatch.setattr(models_api, "_read_meta_file", recording)
+
+    response = _upload_meta(client, _meta_of_size(100))
+
+    assert response.status_code == 201, response.text
+    # The TestClient's loop runs in its portal thread; `to_thread` is a pool worker.
+    assert len(threads) == 1
+    assert threads[0].name.startswith("asyncio_")

@@ -107,6 +107,21 @@ def _mib(size: int) -> str:
 #: The thumbnail limit as people read it, derived so no message can drift from it.
 MAX_THUMBNAIL_SIZE = _mib(MAX_THUMBNAIL_BYTES)
 
+#: The cap on a multipart create's `meta` part, the model's model.json. It is small
+#: metadata -- name, description, tags, libraries, attribution -- and the largest
+#: bundled one is about 1 KiB, so 64 KiB leaves room for a long description while
+#: refusing a part large enough to make decoding and parsing it cost real time.
+MAX_META_BYTES = 64 * 1024
+
+
+def _kib(size: int) -> str:
+    """``size`` bytes in KiB, for a message: `64 KiB`."""
+    return f"{size / 1024:g} KiB"
+
+
+#: The model.json limit as people read it, derived like the thumbnail's.
+MAX_META_SIZE = _kib(MAX_META_BYTES)
+
 #: What the multipart branch will read a body from. `text/*` at large is NOT accepted:
 #: the route documents `text/plain`, and silently treating `text/html` as OpenSCAD
 #: source is a wider contract than anything here promises.
@@ -328,8 +343,9 @@ async def create_model(
         UploadFile | None,
         File(
             description=(
-                "Optional model.json. A non-blank name, description or tags form field "
-                "wins over it; a missing or blank one falls through to it"
+                f"Optional model.json, at most {MAX_META_SIZE}. A non-blank name, "
+                "description or tags form field wins over it; a missing or blank one "
+                "falls through to it"
             )
         ),
     ] = None,
@@ -417,7 +433,7 @@ async def create_model(
 
     # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
     # directory lands with the same metadata its bundled built-in has.
-    base = _read_meta_file(await meta.read(), slug) if meta is not None else ModelMeta(name=slug)
+    base = await _read_meta_part(meta, slug) if meta is not None else ModelMeta(name=slug)
     # A model.json may declare libraries (#93); held to what PATCH holds it to. The
     # lockfile is read once, here, and the parse check's path is built from it too.
     lock = await asyncio.to_thread(read_lock, catalogue.paths) if base.libraries else None
@@ -505,6 +521,24 @@ def _readme_text(payload: bytes) -> str:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
         ) from None
+
+
+async def _read_meta_part(meta: UploadFile, slug: str) -> ModelMeta:
+    """A ``model.json`` part, held to `MAX_META_BYTES` before any of it is decoded.
+
+    Reads at most one byte past the cap, so an oversized part is never pulled into
+    memory whole; the decode and parse then run off the event loop, as JSON of any
+    size is CPU work this handler must not stall every other request behind.
+    """
+    payload = await meta.read(MAX_META_BYTES + 1)
+    if len(payload) > MAX_META_BYTES:
+        size = meta.size if meta.size is not None else len(payload)
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the model.json is too large: {size} bytes, "
+            f"and a model.json is at most {MAX_META_BYTES} bytes ({MAX_META_SIZE})",
+        )
+    return await asyncio.to_thread(_read_meta_file, payload, slug)
 
 
 def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:

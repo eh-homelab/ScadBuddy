@@ -600,21 +600,10 @@ class Catalogue:
         must fail with the delete's 404 rather than recreate the directory.
         """
         self._require(slug)
-        directory = self.paths.model_dir(slug)
         try:
-            handle, staged = tempfile.mkstemp(dir=directory, prefix=".sidecar-")
+            _write_atomic(self.paths.model_dir(slug) / name, payload)
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
-        try:
-            with os.fdopen(handle, "wb") as writer:
-                writer.write(payload)
-            os.replace(staged, directory / name)
-        except FileNotFoundError:
-            Path(staged).unlink(missing_ok=True)
-            raise ModelNotFoundError(slug) from None
-        except BaseException:
-            Path(staged).unlink(missing_ok=True)
-            raise
 
     def _remove_sidecar(self, slug: str, name: str) -> None:
         self._require(slug)

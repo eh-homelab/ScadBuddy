@@ -167,6 +167,54 @@ describe('UploadDialog', () => {
     expect(upload.mock.calls[0]?.[1]?.thumbnail).toBeUndefined()
   })
 
+  it('leaves out a model.json over 64 KiB, chosen or in a folder', async () => {
+    const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
+    const { dialog, user } = render()
+    /** A readable model.json of exactly `size` bytes; JSON allows trailing spaces. */
+    const metaOf = (size: number, name: string) => {
+      const body = JSON.stringify({ name })
+      return new File([body + ' '.repeat(size - body.length)], 'model.json')
+    }
+
+    await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), [
+      file('widget.scad'),
+      metaOf(64 * 1024 + 1, 'Too Big'),
+    ])
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The model.json must be 64 KiB or smaller. model.json was left out.',
+    )
+    expect(within(dialog).getByTestId('upload-meta')).toHaveTextContent('Named after the file')
+
+    await user.upload(within(dialog).getByLabelText('Model folder'), [
+      inFolder('widget', 'model.scad'),
+      Object.defineProperty(metaOf(64 * 1024 + 1, 'Too Big'), 'webkitRelativePath', {
+        value: 'widget/model.json',
+      }),
+    ])
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The model.json must be 64 KiB or smaller. model.json was left out.',
+    )
+    expect(within(dialog).getByTestId('upload-meta')).toHaveTextContent('Named after the file')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce())
+    expect(upload.mock.calls[0]?.[1]?.meta).toBeUndefined()
+  })
+
+  it('keeps a model.json of exactly 64 KiB', async () => {
+    const { dialog, user } = render()
+    const body = JSON.stringify({ name: 'At The Cap' })
+    const atCap = new File([body + ' '.repeat(64 * 1024 - body.length)], 'model.json')
+
+    await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), [
+      file('widget.scad'),
+      atCap,
+    ])
+
+    expect(await within(dialog).findByTestId('upload-meta')).toHaveTextContent('At The Cap')
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
   it('refuses a README over the server limit, attached or in a folder', async () => {
     const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
     const { dialog, user } = render()

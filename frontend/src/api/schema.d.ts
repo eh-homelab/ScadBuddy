@@ -1189,7 +1189,7 @@ export interface components {
             file?: string | null;
             /**
              * Meta
-             * @description Optional model.json. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
+             * @description Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
              */
             meta?: string | null;
             /** Name */

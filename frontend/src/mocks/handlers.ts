@@ -40,7 +40,12 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_SIZE } from '../lib/modelFolder'
+import {
+  MAX_META_BYTES,
+  MAX_META_SIZE,
+  MAX_THUMBNAIL_BYTES,
+  MAX_THUMBNAIL_SIZE,
+} from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
@@ -530,6 +535,15 @@ export const handlers = [
     // As `_read_meta_file`: a model.json that is not JSON, or not an object, is a 422.
     let metaFields: { name?: string; description?: string; tags?: string[] } | null = null
     if (meta) {
+      // As `_read_meta_part`: the cap is checked before the part is decoded.
+      if (meta.size > MAX_META_BYTES) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `the model.json is too large: ${meta.size} bytes, ` +
+            `and a model.json is at most ${MAX_META_BYTES} bytes (${MAX_META_SIZE})`,
+        )
+      }
       let parsed: unknown
       try {
         parsed = JSON.parse(await meta.text())
