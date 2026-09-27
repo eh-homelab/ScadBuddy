@@ -175,6 +175,15 @@ class LibraryNotFoundError(KeyError):
     """Not in the catalogue, and no URL was given to pin it from."""
 
 
+class LibraryCheckoutNotFoundError(KeyError):
+    """No checkout of that library (at that commit) is on the volume."""
+
+
+def _require_name(name: str) -> None:
+    if not re.fullmatch(NAME_PATTERN, name):
+        raise LibraryError(f"{name!r} is not a usable library name")
+
+
 class LibraryNotInstalledError(LookupError):
     """A model declares a library that has no pin, or whose checkout is gone."""
 
@@ -562,6 +571,54 @@ class LibraryStore:
 
     def entries(self) -> list[CatalogueLibrary]:
         return list(self.catalogue.values())
+
+    def installed(self, name: str | None = None) -> list[tuple[str, str]]:
+        """``(name, commit)`` for every checkout on the volume, or ``name``'s alone.
+        Only complete ones: a staging clone is not a checkout yet."""
+        root = self.paths.libraries
+        if not root.is_dir():
+            return []
+        if name is not None:
+            _require_name(name)
+        found: list[tuple[str, str]] = []
+        for library in sorted(root.iterdir()):
+            if library.name.startswith(STAGING_PREFIX) or not library.is_dir():
+                continue
+            if name is not None and library.name != name:
+                continue
+            if not re.fullmatch(NAME_PATTERN, library.name):
+                continue
+            found.extend(
+                (library.name, checkout.name)
+                for checkout in sorted(library.iterdir())
+                if re.fullmatch(COMMIT_PATTERN, checkout.name)
+                and (checkout / library.name).is_dir()
+            )
+        return found
+
+    def remove(self, name: str, commit: str | None = None) -> list[str]:
+        """Delete ``name``'s checkout at ``commit``, or every checkout of it, from the
+        volume. Returns the commits removed; :class:`LibraryCheckoutNotFoundError`
+        when there was none.
+
+        Knows nothing of which models pin what: the caller checks that first. Each
+        checkout is moved aside before it is deleted, so a render never reads one
+        half gone -- it finds it whole, or finds it missing and says so.
+        """
+        _require_name(name)
+        if commit is not None and not re.fullmatch(COMMIT_PATTERN, commit):
+            raise LibraryError(f"{commit!r} is not a full commit id")
+        commits = [c for _, c in self.installed(name) if commit is None or c == commit]
+        if not commits:
+            raise LibraryCheckoutNotFoundError(name if commit is None else f"{name}@{commit}")
+        library = self.paths.libraries / name
+        for found in commits:
+            doomed = self.paths.libraries / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
+            os.replace(library / found, doomed)
+            shutil.rmtree(doomed, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            library.rmdir()  # only when it emptied
+        return commits
 
     def resolve(self, name: str, *, url: str | None = None, ref: str | None = None) -> ModelLibrary:
         """Clone ``name`` at ``ref`` and return the pin: the commit that resolved to.

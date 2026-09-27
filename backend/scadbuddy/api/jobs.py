@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import datetime
+from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, Request, status
+from fastapi import APIRouter, Query, Request, Response, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -29,7 +31,8 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.diagnostics import Diagnostic
+from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
     Job,
     JobState,
@@ -40,10 +43,27 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.render.thumbnail import (
+    MAX_VIEW_SIZE,
+    MIN_VIEW_SIZE,
+    PLATE_PNG_SIZE,
+    ViewName,
+    render_view,
+)
 
 router = APIRouter(tags=["jobs"])
 
 GLB_MEDIA_TYPE = "model/gltf-binary"
+PNG_MEDIA_TYPE = "image/png"
+
+ViewSize = Annotated[
+    int,
+    Query(
+        ge=MIN_VIEW_SIZE,
+        le=MAX_VIEW_SIZE,
+        description="Edge of the square PNG, in pixels",
+    ),
+]
 
 
 class RenderRequest(BaseModel):
@@ -76,6 +96,21 @@ class JobStatus(BaseModel):
     colors: list[str] | None = None
     warnings: list[str] | None = None
     parts: list[PartInfo] | None = None
+    #: OpenSCAD's ERROR/WARNING lines, parsed, on a failed job as well as a done one.
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
+
+
+class ModelDiagnostics(BaseModel):
+    """What the latest settled render of a model reported (#252)."""
+
+    model_config = ConfigDict(protected_namespaces=())
+
+    job_id: str
+    status: JobState
+    model_version: str | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
 
 def _job_status(job: Job, preview_url: str | None) -> JobStatus:
@@ -96,6 +131,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         colors=result.colors if result else None,
         warnings=result.warnings if result else None,
         parts=result.parts if result else None,
+        diagnostics=job.diagnostics,
     )
 
 
@@ -225,3 +261,88 @@ def get_job_preview(job_id: JobIdPath, queue: QueueDep, paths: PathsDep) -> File
     if not preview.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for job {job_id!r} is gone")
     return FileResponse(preview, media_type=GLB_MEDIA_TYPE)
+
+
+@router.get(
+    "/models/{slug}/diagnostics",
+    response_model=ModelDiagnostics,
+    summary="Diagnostics of the latest render",
+    description=(
+        "OpenSCAD's warnings and errors, with the file and line each names, from the "
+        "model's most recently settled render (done or failed). A 404 when no render of "
+        "it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`."
+    ),
+)
+async def get_model_diagnostics(
+    slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep
+) -> ModelDiagnostics:
+    require_model_exists(catalogue, slug)
+    # Reads every job file on the PVC; off the loop.
+    job = await asyncio.to_thread(queue.store.latest_finished, slug)
+    if job is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no finished render of {slug!r} is on record")
+    return ModelDiagnostics(
+        job_id=job.id,
+        status=job.state,
+        model_version=job.model_version,
+        finished_at=job.finished_at,
+        error=job.error,
+        diagnostics=job.diagnostics,
+    )
+
+
+def _draw_view(glb: Path, view: ViewName, size: int) -> bytes | None:
+    parts = read_glb(glb)
+    return render_view(parts, view, size) if parts else None
+
+
+async def preview_view(
+    glb: Path, view: ViewName, size: int, *, config: Config, owner: str
+) -> Response:
+    """``glb`` drawn from ``view`` as a PNG, with the plate cover's rasteriser.
+
+    Off the loop and under the render budget, for the reasons `plate_thumbnails`
+    gives: it is seconds of numpy on a large mesh, and has no child to kill.
+    """
+    if not glb.is_file():
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} is gone")
+    try:
+        png = await asyncio.wait_for(
+            asyncio.to_thread(_draw_view, glb, view, size), timeout=config.render_timeout
+        )
+    except TimeoutError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            f"drawing the {view} view took longer than {config.render_timeout:g}s",
+        ) from None
+    if png is None:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"the preview for {owner} has no geometry")
+    return Response(png, media_type=PNG_MEDIA_TYPE, headers={"Cache-Control": "no-store"})
+
+
+@router.get(
+    "/jobs/{job_id}/views/{view}.png",
+    response_class=Response,
+    responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
+    summary="Render job preview from a named view",
+    description=(
+        "The job's preview mesh drawn from `view` (iso, front, back, left, right, top, "
+        "bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer."
+    ),
+)
+async def get_job_view(
+    job_id: JobIdPath,
+    view: ViewName,
+    queue: QueueDep,
+    paths: PathsDep,
+    config: ConfigDep,
+    size: ViewSize = PLATE_PNG_SIZE,
+) -> Response:
+    job = require_job(queue, job_id)
+    if job.result is None:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"job {job_id!r} is {job.state} and has no preview"
+        )
+    return await preview_view(
+        paths.root / job.result.preview_glb, view, size, config=config, owner=f"job {job_id!r}"
+    )

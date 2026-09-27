@@ -425,12 +425,46 @@ class Catalogue:
     def _has_history(self) -> bool:
         return self.history is not None and self.history.available
 
+    def slugs(self) -> list[str]:
+        """Every template id, mine then the built-ins, without building records."""
+        return _templates_in(self.paths.models) + [
+            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
+        ]
+
+    def library_users(self, name: str, commit: str | None = None) -> list[str]:
+        """The models whose live ``model.json`` pins ``name`` (at ``commit``).
+
+        Read leniently and counted conservatively, because the answer decides
+        whether a checkout may be deleted: an entry that only names the library --
+        a bare name from before per-model pins, or a hand edit with no readable
+        commit -- counts at every commit, and a ``model.json`` that is not JSON
+        counts when its text mentions the name at all.
+        """
+        users: list[str] = []
+        for slug in self.slugs():
+            try:
+                raw = self.read_raw_meta(slug)
+            except InvalidModelMetaError:
+                with contextlib.suppress(OSError):
+                    if name in self.paths.model_meta(slug).read_text(errors="replace"):
+                        users.append(slug)
+                continue
+            entries = raw.get("libraries")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if entry_name(entry) != name:
+                    continue
+                pinned = entry.get("commit") if isinstance(entry, dict) else None
+                if commit is None or not isinstance(pinned, str) or pinned == commit:
+                    users.append(slug)
+                    break
+        return users
+
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one."""
-        slugs = _templates_in(self.paths.models) + [
-            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
-        ]
+        slugs = self.slugs()
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()

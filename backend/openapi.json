@@ -1308,6 +1308,32 @@
         "title": "InstalledFamily",
         "type": "object"
       },
+      "InstalledLibrary": {
+        "description": "One checkout on the volume, and the models whose live pins read it.",
+        "properties": {
+          "commit": {
+            "title": "Commit",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "used_by": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Used By",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name",
+          "commit"
+        ],
+        "title": "InstalledLibrary",
+        "type": "object"
+      },
       "JobStatus": {
         "properties": {
           "bbox_mm": {
@@ -1338,6 +1364,13 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
           },
           "error": {
             "anyOf": [
@@ -1511,6 +1544,25 @@
         "title": "LibraryPinRequest",
         "type": "object"
       },
+      "LibraryRepinRequest": {
+        "properties": {
+          "ref": {
+            "anyOf": [
+              {
+                "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The tag or branch to pin; the ref already pinned when omitted, which moves a branch pin to where that branch is now",
+            "title": "Ref"
+          }
+        },
+        "title": "LibraryRepinRequest",
+        "type": "object"
+      },
       "LoadedAt": {
         "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.\n\nPurely a label. It is not an address: nothing here turns it into a tray number.",
         "properties": {
@@ -1603,6 +1655,72 @@
           "clean"
         ],
         "title": "MergePreview",
+        "type": "object"
+      },
+      "ModelDiagnostics": {
+        "description": "What the latest settled render of a model reported (#252).",
+        "properties": {
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/Diagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "finished_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished At"
+          },
+          "job_id": {
+            "title": "Job Id",
+            "type": "string"
+          },
+          "model_version": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Model Version"
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "done",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "job_id",
+          "status"
+        ],
+        "title": "ModelDiagnostics",
         "type": "object"
       },
       "ModelLibrary": {
@@ -5814,6 +5932,78 @@
         ]
       }
     },
+    "/api/v1/jobs/{job_id}/views/{view}.png": {
+      "get": {
+        "description": "The job's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer.",
+        "operationId": "get_job_view_api_v1_jobs__job_id__views__view__png_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "job_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Job Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "view",
+            "required": true,
+            "schema": {
+              "enum": [
+                "iso",
+                "front",
+                "back",
+                "left",
+                "right",
+                "top",
+                "bottom"
+              ],
+              "title": "View",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Edge of the square PNG, in pixels",
+            "in": "query",
+            "name": "size",
+            "required": false,
+            "schema": {
+              "default": 512,
+              "description": "Edge of the square PNG, in pixels",
+              "maximum": 1024,
+              "minimum": 64,
+              "title": "Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Render job preview from a named view",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/libraries": {
       "get": {
         "description": "Libraries ScadBuddy knows how to fetch, each with the ref it suggests. Any other can be pinned to a model by URL.",
@@ -5835,6 +6025,90 @@
           }
         },
         "summary": "The library catalogue",
+        "tags": [
+          "libraries"
+        ]
+      }
+    },
+    "/api/v1/libraries/installed": {
+      "get": {
+        "description": "Every library checkout on the data volume, with the models whose live pins read it. One no model uses can be removed.",
+        "operationId": "list_installed_libraries_api_v1_libraries_installed_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/InstalledLibrary"
+                  },
+                  "title": "Response List Installed Libraries Api V1 Libraries Installed Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Library checkouts on the volume",
+        "tags": [
+          "libraries"
+        ]
+      }
+    },
+    "/api/v1/libraries/{name}": {
+      "delete": {
+        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.",
+        "operationId": "remove_library_api_v1_libraries__name__delete",
+        "parameters": [
+          {
+            "description": "The directory `use <NAME/...>` names",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "The directory `use <NAME/...>` names",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only this checkout; every one when omitted",
+            "in": "query",
+            "name": "commit",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only this checkout; every one when omitted",
+              "title": "Commit"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a library's checkouts from the volume",
         "tags": [
           "libraries"
         ]
@@ -6334,6 +6608,51 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/diagnostics": {
+      "get": {
+        "description": "OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently settled render (done or failed). A 404 when no render of it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`.",
+        "operationId": "get_model_diagnostics_api_v1_models__slug__diagnostics_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelDiagnostics"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Diagnostics of the latest render",
+        "tags": [
+          "jobs"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/duplicate": {
       "post": {
         "description": "Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied; the presets saved on it are.",
@@ -6441,6 +6760,71 @@
           }
         },
         "summary": "Remove a library from a model",
+        "tags": [
+          "libraries"
+        ]
+      },
+      "patch": {
+        "description": "Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library.",
+        "operationId": "repin_library_api_v1_models__slug__libraries__name__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The directory `use <NAME/...>` names",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "The directory `use <NAME/...>` names",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryRepinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Re-pin a model's library from the upstream it already pins",
         "tags": [
           "libraries"
         ]
@@ -8201,6 +8585,78 @@
           }
         },
         "summary": "Upload the canvas capture",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
+    "/api/v1/outputs/{output_id}/views/{view}.png": {
+      "get": {
+        "description": "The saved output's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG.",
+        "operationId": "get_output_view_api_v1_outputs__output_id__views__view__png_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "view",
+            "required": true,
+            "schema": {
+              "enum": [
+                "iso",
+                "front",
+                "back",
+                "left",
+                "right",
+                "top",
+                "bottom"
+              ],
+              "title": "View",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Edge of the square PNG, in pixels",
+            "in": "query",
+            "name": "size",
+            "required": false,
+            "schema": {
+              "default": 512,
+              "description": "Edge of the square PNG, in pixels",
+              "maximum": 1024,
+              "minimum": 64,
+              "title": "Size",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Output preview from a named view",
         "tags": [
           "outputs"
         ]

@@ -251,3 +251,46 @@ async def test_a_run_reports_every_file_it_could_not_open(tmp_path: Path) -> Non
 
     assert output.missing_files == ("pic.svg", "mask.png")
     assert not any("line 2" in line for line in output.log_tail)
+
+
+DIAGNOSTIC_OPENSCAD = """#!/bin/sh
+echo "WARNING: Ignoring unknown variable 'wdith' in file $(pwd -P)/model.scad, line 4"
+i=0
+while [ $i -lt 80 ]; do echo "ECHO: $i"; i=$((i+1)); done
+echo "ERROR: Assertion 'false' failed in file model.scad, line 9"
+exit "${FAKE_EXIT:-0}"
+"""
+
+
+async def test_a_run_parses_every_diagnostic_from_the_whole_log(tmp_path: Path) -> None:
+    """#252: read off the whole log like the missing files, not just the tail."""
+    binary = tmp_path / "diagnostic-openscad"
+    binary.write_text(DIAGNOSTIC_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path.resolve(), config=config)
+
+    assert [(d.severity, d.file, d.line) for d in output.diagnostics] == [
+        ("warning", "model.scad", 4),
+        ("error", "model.scad", 9),
+    ]
+    assert not any("wdith" in line for line in output.log_tail)
+
+
+async def test_a_failed_run_carries_its_diagnostics(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary = tmp_path / "diagnostic-openscad"
+    binary.write_text(DIAGNOSTIC_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    monkeypatch.setenv("FAKE_EXIT", "1")
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert [d.message for d in raised.value.diagnostics] == [
+        "Ignoring unknown variable 'wdith'",
+        "Assertion 'false' failed",
+    ]

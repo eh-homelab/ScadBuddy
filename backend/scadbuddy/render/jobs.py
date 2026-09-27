@@ -32,6 +32,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import model_search_path, revision_search_path
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.colours import colour_hex
+from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
@@ -77,6 +78,9 @@ class JobResult(BaseModel):
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: The main render's ERROR/WARNING lines, parsed (#252). The per-colour solid
+    #: passes re-run the same source and would only repeat them.
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -96,6 +100,9 @@ class Job(BaseModel):
     finished_at: datetime | None = None
     log_tail: list[str] = Field(default_factory=list)
     error: str | None = None
+    #: What OpenSCAD reported, parsed (#252): the result's on success, the failed
+    #: run's on failure -- a parser error is exactly when a client needs them.
+    diagnostics: list[Diagnostic] = Field(default_factory=list)
     result: JobResult | None = None
 
 
@@ -124,6 +131,16 @@ class JobStore:
             for path in sorted(self.paths.jobs.glob("*.json"))
         ]
         return sorted(jobs, key=lambda job: job.created_at)
+
+    def latest_finished(self, slug: str) -> Job | None:
+        """The render of ``slug`` that settled last, done or failed, while jobs are
+        kept (``SCADBUDDY_JOB_TTL``)."""
+        finished = [
+            job
+            for job in self.list_jobs()
+            if job.slug == slug and job.state in ("done", "failed") and job.finished_at
+        ]
+        return max(finished, key=lambda job: job.finished_at or job.created_at, default=None)
 
     def has_unfinished(self, slug: str) -> bool:
         """Is a render of ``slug`` queued or running?"""
@@ -481,7 +498,11 @@ async def render_job(
         output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
         preview_parts = extruder_order(split_by_material(work / RAW_RENDER_NAME), schema, params)
         if not preview_parts:
-            raise OpenSCADError("the render produced no geometry", output.log_tail)
+            raise OpenSCADError(
+                "the render produced no geometry",
+                output.log_tail,
+                diagnostics=output.diagnostics,
+            )
 
         preview_path = work / PREVIEW_NAME
         box = write_glb(preview_parts, preview_path)
@@ -528,6 +549,7 @@ async def render_job(
         bbox_mm=box,
         colors=[part.colour for part in parts],
         warnings=warnings,
+        diagnostics=list(output.diagnostics),
     )
     return result, output.log_tail
 
@@ -622,6 +644,7 @@ class RenderQueue:
             job.state = "failed"
             job.error = str(error)
             job.log_tail = error.log_tail
+            job.diagnostics = error.diagnostics
         except Exception as error:  # the job carries the failure, the worker lives on
             job.state = "failed"
             job.error = f"{type(error).__name__}: {error}"
@@ -629,6 +652,7 @@ class RenderQueue:
             job.state = "done"
             job.result = result
             job.log_tail = log_tail
+            job.diagnostics = result.diagnostics
         job.finished_at = _now()
         self.store.write(job)
         self.store.prune(self.config.job_ttl)
