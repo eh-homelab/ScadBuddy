@@ -52,6 +52,9 @@ class Config:
             raise ValueError(
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
+        # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
+        if self.lsp_sessions < 0:
+            raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:

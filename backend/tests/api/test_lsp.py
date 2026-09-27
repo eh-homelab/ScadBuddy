@@ -68,6 +68,12 @@ while True:
         os.close(0)
         send({"jsonrpc": "2.0", "id": message["id"], "result": None})
         time.sleep(60)
+    if method == "emit":
+        # Writes raw bytes as its whole output, then stops writing without exiting.
+        stdout.write(message["params"]["raw"].encode())
+        stdout.flush()
+        os.close(1)
+        time.sleep(60)
     if "id" not in message:
         continue
     cwd = pathlib.Path.cwd()
@@ -264,6 +270,30 @@ def test_a_server_that_crashes_is_logged(
             session.receive_json()
 
     assert "openscad-lsp exited with status 3" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "Content-Length: many\r\n\r\n{}",
+        "Content-Length: -1\r\n\r\n{}",
+        "Content-Length: 8\r\n\r\nnot json",
+        "Content-Length: 100\r\n\r\n{}",
+    ],
+    ids=["bad-length", "negative-length", "not-json", "truncated"],
+)
+def test_an_unreadable_server_message_ends_the_session(
+    client: TestClient, model: str, pid_file: Path, caplog: pytest.LogCaptureFixture, raw: str
+) -> None:
+    with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
+        _initialize(session)
+        pid = int(pid_file.read_text())
+        session.send_json({"jsonrpc": "2.0", "method": "emit", "params": {"raw": raw}})
+        with pytest.raises(WebSocketDisconnect):
+            session.receive_json()
+
+    assert "openscad-lsp sent an unreadable message" in caplog.text
+    assert _wait_until(lambda: _gone(pid))
 
 
 @pytest.mark.parametrize("frame", ["[1, 2]", '"text"', "null", "not json"])
