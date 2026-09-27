@@ -1184,7 +1184,7 @@ export interface components {
             description?: string | null;
             /**
              * File
-             * @description The .scad source
+             * @description The .scad source, at most 1,000,000 characters
              */
             file?: string | null;
             /**

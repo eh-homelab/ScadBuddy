@@ -99,7 +99,7 @@
                 "type": "null"
               }
             ],
-            "description": "The .scad source",
+            "description": "The .scad source, at most 1,000,000 characters",
             "title": "File"
           },
           "meta": {

@@ -334,7 +334,10 @@ async def create_model(
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
-    file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
+    file: Annotated[
+        UploadFile | None,
+        File(description=f"The .scad source, at most {MAX_SOURCE_CHARS:,} characters"),
+    ] = None,
     thumbnail: Annotated[
         UploadFile | None, File(description=f"Optional PNG, at most {MAX_THUMBNAIL_SIZE}")
     ] = None,
