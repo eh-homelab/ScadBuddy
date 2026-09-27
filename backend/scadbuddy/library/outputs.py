@@ -348,7 +348,15 @@ class OutputStore:
 
     def has_plate_cover(self, slug: str) -> bool:
         """Whether :meth:`plate_cover` has an image to give, without reading it."""
-        return self.plate_cover_archive(slug) is not None
+        return self.plate_cover_output(slug) is not None
+
+    def plate_cover_output(self, slug: str) -> str | None:
+        """The id of the output whose plate image :meth:`plate_cover` gives, from the
+        same cached resolution -- so the catalogue can tell when the fallback moves to
+        another output, which is no commit and so no change of the model's version."""
+        archive = self.plate_cover_archive(slug)
+        # outputs/<slug>/<output-id>/model.3mf
+        return archive.parent.name if archive is not None else None
 
     def plate_cover(self, slug: str) -> bytes | None:
         """The first generated output's ``plate_1.png`` -- the catalogue thumbnail of

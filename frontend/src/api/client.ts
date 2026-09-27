@@ -52,6 +52,12 @@ import type {
 
 export const API_BASE = '/api/v1'
 
+/** What a model thumbnail's URL is keyed on (#179). */
+export type ThumbnailKeyed = Pick<
+  ModelSummary,
+  'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id'
+>
+
 /** The optional parts of a model upload besides its source (#179). */
 export interface UploadExtras {
   /** What the source is called on the wire, which is where the slug comes from. */
@@ -228,11 +234,18 @@ export const api = {
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
   /**
-   * `version` (the model's revision) is only there to change the URL when the
-   * thumbnail does: an `<img>` already on the page does not refetch the same URL.
+   * The `v` param is only there to change the URL when the image does: an `<img>`
+   * already on the page does not refetch the same URL. It joins the model's
+   * revision (a thumbnail set or removed is a commit) with where the image comes
+   * from and, for the output fallback, which output -- that fallback moves with no
+   * commit when the covering output is deleted or another becomes the first (#179).
    */
-  modelThumbnailUrl: (slug: string, version?: string | null) =>
-    `${API_BASE}/models/${seg(slug)}/thumbnail${version ? `?v=${seg(version)}` : ''}`,
+  modelThumbnailUrl: (model: ThumbnailKeyed) => {
+    const key = [model.version, model.thumbnail_source, model.thumbnail_output_id]
+      .map((part) => part ?? '')
+      .join('.')
+    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '..' ? '' : `?v=${seg(key)}`}`
+  },
 
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>

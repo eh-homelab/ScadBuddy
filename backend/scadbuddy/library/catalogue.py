@@ -125,6 +125,11 @@ class ModelRecord(ModelMeta):
     has_thumbnail: bool
     has_readme: bool
     thumbnail_source: ThumbnailSource | None = None
+    #: The output whose plate image stands in when ``thumbnail_source`` is
+    #: ``output``, else None. That fallback moves with no commit (the covering
+    #: output is deleted, or an older one gains a cover), so this -- not
+    #: ``version`` -- is what tells a client its cached image is stale.
+    thumbnail_output_id: str | None = None
     updated_at: datetime
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
@@ -198,12 +203,15 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
-    def thumbnail_source(self, slug: str) -> ThumbnailSource | None:
+    def thumbnail_source(self, slug: str) -> tuple[ThumbnailSource | None, str | None]:
+        """Where the thumbnail comes from, and which output when it is the fallback."""
         if self.thumbnail_path(slug).is_file():
-            return "model"
-        if self.outputs is not None and self.outputs.has_plate_cover(slug):
-            return "output"
-        return None
+            return "model", None
+        if self.outputs is not None:
+            output_id = self.outputs.plate_cover_output(slug)
+            if output_id is not None:
+                return "output", output_id
+        return None, None
 
     def thumbnail(self, slug: str) -> bytes | None:
         """The catalogue thumbnail: the model's own, else the first generated
@@ -257,13 +265,14 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
-        thumbnail_source = self.thumbnail_source(slug)
+        thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug)
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
             has_thumbnail=thumbnail_source is not None,
             thumbnail_source=thumbnail_source,
+            thumbnail_output_id=thumbnail_output_id,
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,

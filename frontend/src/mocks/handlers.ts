@@ -493,7 +493,7 @@ export const handlers = [
       slug,
       `Set ${slug} thumbnail`,
       [{ status: had ? 'M' : 'A', path: 'thumbnail.png' }],
-      { has_thumbnail: true, thumbnail_source: 'model' },
+      { has_thumbnail: true, thumbnail_source: 'model', thumbnail_output_id: null },
     )
     return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
   }),
@@ -506,10 +506,17 @@ export const handlers = [
       return problem(404, 'Not Found', `'${slug}' has no thumbnail of its own to remove`)
     }
     // The fixtures' generated models fall back to their first output's plate image.
-    const generated = state.outputs.some((o) => o.slug === slug)
+    // Which is the first output: the one whose plate image the backend serves.
+    const first = state.outputs
+      .filter((o) => o.slug === slug)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
     const updated = reviseModel(slug, `Remove ${slug} thumbnail`, [
       { status: 'D', path: 'thumbnail.png' },
-    ], { has_thumbnail: generated, thumbnail_source: generated ? 'output' : null })
+    ], {
+      has_thumbnail: first !== undefined,
+      thumbnail_source: first ? 'output' : null,
+      thumbnail_output_id: first?.id ?? null,
+    })
     return HttpResponse.json(updated)
   }),
 

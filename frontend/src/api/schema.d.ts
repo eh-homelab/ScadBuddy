@@ -1595,6 +1595,8 @@ export interface components {
             source?: string | null;
             /** Tags */
             tags?: string[];
+            /** Thumbnail Output Id */
+            thumbnail_output_id?: string | null;
             /** Thumbnail Source */
             thumbnail_source?: ("model" | "output") | null;
             /**

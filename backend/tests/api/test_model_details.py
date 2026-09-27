@@ -344,6 +344,44 @@ def test_a_cover_scan_in_flight_across_a_model_delete_is_not_stored(
     assert not store.remembers_plate_cover(SLUG)
 
 
+def test_the_record_names_the_output_behind_the_fallback(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """The fallback moves with no commit, so `version` cannot tell a client its image
+    is stale; `thumbnail_output_id` can (#179)."""
+    _create(client)
+    _generate(client, paths, SLUG, None)
+    first = _generate(client, paths, SLUG, COVER_ONE)
+    second = _generate(client, paths, SLUG, COVER_TWO)
+
+    record = client.get(f"/api/v1/models/{SLUG}").json()
+    assert (record["thumbnail_source"], record["thumbnail_output_id"]) == ("output", first)
+    assert _listed(client)[SLUG]["thumbnail_output_id"] == first
+
+    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    moved = client.get(f"/api/v1/models/{SLUG}").json()
+    assert (moved["thumbnail_source"], moved["thumbnail_output_id"]) == ("output", second)
+    assert moved["version"] == record["version"]
+
+    assert client.delete(f"/api/v1/outputs/{second}").status_code == 204
+    gone = _listed(client)[SLUG]
+    assert (gone["has_thumbnail"], gone["thumbnail_source"], gone["thumbnail_output_id"]) == (
+        False,
+        None,
+        None,
+    )
+
+
+def test_a_thumbnail_of_its_own_names_no_output(client: TestClient, paths: DataPaths) -> None:
+    _create(client)
+    assert client.get(f"/api/v1/models/{SLUG}").json()["thumbnail_output_id"] is None
+    _generate(client, paths, SLUG, COVER_ONE)
+    _put_thumbnail(client, PNG_BYTES)
+
+    record = client.get(f"/api/v1/models/{SLUG}").json()
+    assert (record["thumbnail_source"], record["thumbnail_output_id"]) == ("model", None)
+
+
 def test_deleting_the_covering_output_falls_back_to_the_next(
     client: TestClient, paths: DataPaths
 ) -> None:

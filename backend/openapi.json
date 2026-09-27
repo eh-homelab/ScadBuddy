@@ -1513,6 +1513,17 @@
             "title": "Tags",
             "type": "array"
           },
+          "thumbnail_output_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Output Id"
+          },
           "thumbnail_source": {
             "anyOf": [
               {
