@@ -4,6 +4,7 @@ import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job, PipelineChoices, Plate } from '../api/types'
 import {
+  keychainSchema,
   pipelineViews,
   printOptions,
   settings as settingsFixture,
@@ -88,6 +89,17 @@ describe('CustomizePage', () => {
     await user.click(await screen.findByRole('button', { name: 'Edit details' }))
     const dialog = screen.getByRole('dialog', { name: 'Edit details' })
     expect(await within(dialog).findByLabelText('Name')).toHaveValue('Name Keychain')
+  })
+
+  it('offers no Edit details for a built-in template, whose details are read-only', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/schema', () => HttpResponse.json(keychainSchema)),
+    )
+    render('/m/builtin:name-keychain')
+
+    // The page is up (its other actions render) and Edit details is not among them.
+    expect(await screen.findByRole('link', { name: 'Versions' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
   })
 
   it('renders the defaults without being asked', async () => {

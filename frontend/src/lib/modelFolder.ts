@@ -3,7 +3,7 @@
  * `model.scad`, `model.json`, `thumbnail.png` and `README.md`.
  *
  * The server takes a multipart upload's slug from the source's filename, the way the
- * image seed takes it from the directory's name. So a directory's source is sent
+ * built-in sync takes a bundled model's from its directory's name. So a directory's source is sent
  * named after the directory — `model.scad` as it is would make every one `model`.
  */
 

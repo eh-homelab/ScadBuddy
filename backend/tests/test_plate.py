@@ -15,6 +15,7 @@ from scadbuddy.render.plate import (
     PlateFitError,
     PlateGeometry,
     Rect,
+    bed_types_for,
     nozzle_diameter_of,
     place_on_plate,
     plate_for,
@@ -46,6 +47,29 @@ class TestNozzleDiameter:
     @pytest.mark.parametrize("name", [None, "", "Bambu Lab A1", "H2C"])
     def test_a_name_without_a_nozzle_suffix_states_none(self, name: str | None) -> None:
         assert nozzle_diameter_of(name) is None
+
+
+class TestBedTypes:
+    """#83: the plates Bambu Studio's own bed picker offers for each printer."""
+
+    @pytest.mark.parametrize("name", ["H2C", "Bambu Lab H2C", "Bambu Lab H2C 0.4 nozzle"])
+    def test_the_h2c_takes_neither_the_cool_nor_the_smooth_pei_plate(self, name: str) -> None:
+        # Its machine_model profile: not_support_bed_type "Cool Plate;Smooth PEI Plate /
+        # High Temp Plate", which are labels for the values below.
+        assert bed_types_for(name) == ("Engineering Plate", "Textured PEI Plate", "Supertack Plate")
+
+    def test_the_a1_mini_refuses_the_cool_and_engineering_plates(self) -> None:
+        assert bed_types_for("A1M") == ("High Temp Plate", "Textured PEI Plate", "Supertack Plate")
+
+    @pytest.mark.parametrize("name", [None, "", "Elegoo Neptune"])
+    def test_an_unknown_printer_is_offered_every_plate(self, name: str | None) -> None:
+        assert bed_types_for(name) == (
+            "Cool Plate",
+            "Engineering Plate",
+            "High Temp Plate",
+            "Textured PEI Plate",
+            "Supertack Plate",
+        )
 
 
 class TestPlateLookup:

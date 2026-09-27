@@ -90,7 +90,8 @@ test.describe('real backend', () => {
     test.setTimeout(240_000)
     test.skip(process.env.E2E_OFFLINE === '1', 'no outbound network to Google Fonts')
 
-    await page.goto('/m/name-keychain')
+    // The bundled keychain is a built-in template (#155).
+    await page.goto('/m/builtin:name-keychain')
     const bbox = page.getByTestId('bbox-readout')
     await expect(bbox).toContainText('mm', { timeout: 120_000 })
     const beforeBbox = await bbox.textContent()
@@ -176,6 +177,35 @@ test.describe('real backend', () => {
     } finally {
       await request.delete(`/api/v1/models/${slug}`)
     }
+  })
+
+  /**
+   * Issue #95, end to end: openscad-lsp in the image, the WebSocket bridge, and the
+   * editor's client. `polyhedron` appears nowhere in the keychain, so Monaco's own
+   * word-based suggestions cannot produce it — and only the server labels a builtin
+   * with its parameters. Nothing is saved.
+   */
+  test('completes OpenSCAD builtins from the language server', async ({ page }) => {
+    test.setTimeout(90_000)
+
+    // The first frame back is the answer to `initialize`: until then there is no
+    // provider registered, and a keystroke would get Monaco's word list alone.
+    const socket = page.waitForEvent('websocket')
+    await page.goto('/m/builtin:name-keychain/source')
+    await (await socket).waitForEvent('framereceived')
+
+    const lines = page.locator('.monaco-editor .view-lines').first()
+    await expect(lines).toContainText('keychain')
+    await lines.click()
+    await page.keyboard.press('ControlOrMeta+End')
+    await page.keyboard.press('Enter')
+    // Typed at a person's pace: openscad-lsp reparses the whole file on every change.
+    await page.keyboard.type('polyh', { delay: 150 })
+    await page.keyboard.press('Control+Space')
+
+    await expect(page.locator('.monaco-editor .suggest-widget')).toContainText('polyhedron(points', {
+      timeout: 30_000,
+    })
   })
 })
 

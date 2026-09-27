@@ -1,5 +1,6 @@
 import type {
   BambuddyTargets,
+  BedTypeChoice,
   EligibilityReport,
   FilamentOptions,
   PipelineView,
@@ -153,6 +154,7 @@ export const models: ModelSummary[] = [
     has_thumbnail: true,
     thumbnail_source: 'model',
     has_readme: true,
+    origin: 'mine',
   },
   {
     slug: 'gridfinity-bin',
@@ -162,6 +164,7 @@ export const models: ModelSummary[] = [
     updated_at: '2026-09-14T09:12:00Z',
     has_thumbnail: false,
     has_readme: false,
+    origin: 'mine',
   },
 ]
 
@@ -405,6 +408,16 @@ export const settings: Settings = {
 }
 
 /**
+ * #83 — what the H2C's Bambu Studio profile takes: not the Cool Plate and not the Smooth
+ * PEI / High Temp one, which is why the Draft pipeline's Cool Plate draws a warning.
+ */
+export const h2cBedTypes: BedTypeChoice[] = [
+  { value: 'Engineering Plate', label: 'Engineering Plate' },
+  { value: 'Textured PEI Plate', label: 'Textured PEI Plate' },
+  { value: 'Supertack Plate', label: 'Bambu Cool Plate SuperTack' },
+]
+
+/**
  * #86 — the print picker's pipelines. `Textured PEI · 0.20 mm · AMS` targets the one H2C
  * directly; `Any H2C` targets the printer *class*, which is the case where the picker has
  * to ask which printer, and `Draft · 0.28 mm` is the one that is never eligible.
@@ -428,6 +441,7 @@ export const pipelineViews: PipelineView[] = [
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
     nozzle_diameter: '0.4',
     printer_ids: [1],
+    bed_types: h2cBedTypes,
   },
   {
     id: 2,
@@ -447,6 +461,7 @@ export const pipelineViews: PipelineView[] = [
     filament_preset_names: ['Bambu ABS @BBL H2C'],
     nozzle_diameter: '0.4',
     printer_ids: [1],
+    bed_types: h2cBedTypes,
   },
   {
     id: 3,
@@ -466,6 +481,7 @@ export const pipelineViews: PipelineView[] = [
     filament_preset_names: ['Bambu PLA Basic @BBL H2C'],
     nozzle_diameter: '0.4',
     printer_ids: [1, 2],
+    bed_types: h2cBedTypes,
   },
 ]
 

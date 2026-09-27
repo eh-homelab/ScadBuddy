@@ -35,7 +35,9 @@ def test_healthz_is_degraded_without_openscad(data_dir: Path, seed_dir: Path) ->
     assert body["data_dir_writable"] is True
 
 
-def test_startup_seeds_bundled_models(settings: Settings, seed_dir: Path, data_dir: Path) -> None:
+def test_startup_mirrors_bundled_models_as_built_ins(
+    settings: Settings, seed_dir: Path, data_dir: Path
+) -> None:
     bundled = seed_dir / "seeded-model"
     bundled.mkdir()
     (bundled / "model.scad").write_text("cube(1);\n", encoding="utf-8")
@@ -45,22 +47,25 @@ def test_startup_seeds_bundled_models(settings: Settings, seed_dir: Path, data_d
     with TestClient(create_app(settings)) as client:
         body = client.get("/api/v1/models").json()
 
-    assert [row["slug"] for row in body] == ["seeded-model"]
+    assert [(row["slug"], row["origin"]) for row in body] == [("builtin:seeded-model", "builtin")]
     assert body[0]["name"] == "Seeded"
+    mirrored = data_dir / "models" / "_builtin" / "seeded-model"
+    assert (mirrored / "model.scad").is_file()
     # Dotfiles are repo furniture, not model content.
-    assert not (data_dir / "models" / "seeded-model" / ".gitignore").exists()
+    assert not (mirrored / ".gitignore").exists()
 
 
-def test_seeding_never_overwrites_an_existing_model(
+def test_a_built_in_never_overwrites_a_model_of_mine(
     settings: Settings, seed_dir: Path, model: str, data_dir: Path
 ) -> None:
     bundled = seed_dir / model
     bundled.mkdir()
     (bundled / "model.scad").write_text("// from the seed dir\n", encoding="utf-8")
 
-    with TestClient(create_app(settings)):
-        pass
+    with TestClient(create_app(settings)) as client:
+        listed = {row["slug"]: row["origin"] for row in client.get("/api/v1/models").json()}
 
+    assert listed == {model: "mine", f"builtin:{model}": "builtin"}
     assert "from the seed dir" not in (data_dir / "models" / model / "model.scad").read_text(
         encoding="utf-8"
     )

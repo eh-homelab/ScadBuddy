@@ -70,6 +70,7 @@ async def slice_and_queue(
     filament_colours: list[str],
     filaments: QueueFilaments | None = None,
     plate_id: int = 1,
+    bed_type: str | None = None,
     copies: int = 1,
     project_id: int | None = None,
     options: PrintOptions | None = None,
@@ -79,6 +80,9 @@ async def slice_and_queue(
     ``quantity`` rather than one queue item per copy: Bambuddy's queue models repeats
     itself, and N identical items would show up as N rows the user has to cancel one at
     a time.
+
+    ``bed_type`` replaces the pipeline's own for this slice (#83): the queue item has no
+    such field, and the slice is what sets the first layer for the plate.
 
     ``options`` are the resolved print options (#88); ``copies`` and ``project_id``
     still win over the quantity and project they carry, because those two are what
@@ -98,7 +102,7 @@ async def slice_and_queue(
             process_preset=pipeline.process_preset,
             filament_presets=filament_presets,
             filament_colours=filament_colours,
-            bed_type=pipeline.bed_type,
+            bed_type=bed_type or pipeline.bed_type,
             plate=plate_id,
         ),
     )

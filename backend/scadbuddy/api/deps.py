@@ -16,7 +16,7 @@ from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
-from scadbuddy.library.slugs import SLUG_PATTERN
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -41,8 +41,12 @@ class AppState:
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
-    #: the pod's worst case is render_concurrency + check_concurrency.
+    #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
+    #: held for as long as the editor stays open rather than for one piece of work —
+    #: the third term in the pod's worst case above.
+    language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -67,6 +71,7 @@ def build_state(settings: Settings) -> AppState:
         ),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
+        language_servers=asyncio.Semaphore(config.lsp_sessions),
     )
 
 
@@ -145,7 +150,8 @@ FontsDep = Annotated[FontService, Depends(get_fonts)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 
-SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
+# A template id: a slug of mine, or `builtin:<slug>`.
+SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers

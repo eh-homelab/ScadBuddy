@@ -11,6 +11,7 @@ import type { PreviewCapture } from '../components/Preview'
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
+import { isBuiltin } from '../lib/builtin'
 import { editPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { fitMessages } from '../lib/plate'
@@ -231,7 +232,8 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
-          <EditDetailsButton slug={slug} />
+          {/* A built-in's details are the image's; the server refuses every write. */}
+          {!isBuiltin(slug) && <EditDetailsButton slug={slug} />}
           <DeleteModelButton slug={slug} name={schema.title ?? slug} />
         </div>
       </div>

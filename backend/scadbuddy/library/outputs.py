@@ -13,7 +13,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
@@ -39,6 +39,14 @@ PrintRoute = Literal["pipeline", "slice_queue"]
 
 class OutputNotFoundError(KeyError):
     pass
+
+
+class PlateSend(BaseModel):
+    """One plate's queue item and the slice job that produced it (#83)."""
+
+    plate_id: int
+    queue_item_id: int
+    slice_job_id: int
 
 
 class OutputMeta(BaseModel):
@@ -80,6 +88,10 @@ class OutputMeta(BaseModel):
     #: The Bambuddy project this output was last printed into (#79), so reopening the
     #: history shows what each print was filed under rather than only that it happened.
     project_id: int | None = None
+    #: Every plate the last slice-and-queue print put on the queue (#83), in order.
+    #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on a
+    #: pipeline run and on records written before multi-plate prints.
+    plates: list[PlateSend] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -203,10 +215,17 @@ class OutputStore:
         print_route: PrintRoute | None = None,
         slice_job_id: int | None = None,
         project_id: int | None = None,
+        plates: list[PlateSend] | None = None,
     ) -> OutputMeta:
-        """Persist the Bambuddy ids a send produced, leaving omitted ones alone."""
+        """Persist the Bambuddy ids a send produced, leaving omitted ones alone.
+
+        A new print (``print_route`` given) without ``plates`` clears the previous
+        print's plates, so they never describe a print they were not part of.
+        """
         directory = self._find_dir(output_id)
         meta = self.get(output_id)
+        if plates is None and print_route is not None:
+            plates = []
         updated = meta.model_copy(
             update={
                 key: value
@@ -218,6 +237,7 @@ class OutputStore:
                     ("print_route", print_route),
                     ("slice_job_id", slice_job_id),
                     ("project_id", project_id),
+                    ("plates", plates),
                 )
                 if value is not None
             }
@@ -367,4 +387,5 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = slugify(meta.name) if meta.name else meta.id
     except InvalidSlugError:
         suffix = meta.id
-    return f"{meta.slug}-{suffix}.3mf"
+    # A built-in's bare slug: `:` is not a character a saved file name can carry.
+    return f"{meta.slug.removeprefix(BUILTIN_PREFIX)}-{suffix}.3mf"
