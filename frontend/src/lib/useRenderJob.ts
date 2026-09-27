@@ -12,6 +12,12 @@ export interface RenderState {
   /** True from submit until the job reaches `done` or `failed`. */
   rendering: boolean
   error: Error | undefined
+  /**
+   * #254 — the exact `params` object the settled `job` (or `error`) answers, by identity.
+   * Between a new submission's commit and its `rendering` flag, `job` is still the
+   * previous one; this is how a caller waiting on "the render of these values" tells.
+   */
+  settledFor: ParamValues | undefined
 }
 
 /**
@@ -28,6 +34,7 @@ export function useRenderJob(
   const [job, setJob] = useState<Job | undefined>(undefined)
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
+  const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
   const generation = useRef(0)
 
   useEffect(() => {
@@ -49,6 +56,7 @@ export function useRenderJob(
         setJob(next)
         if (next.status === 'done' || next.status === 'failed') {
           setRendering(false)
+          setSettledFor(params)
           return
         }
         timer = setTimeout(() => void poll(jobId), POLL_MS)
@@ -56,6 +64,7 @@ export function useRenderJob(
         if (isStale()) return
         setError(cause instanceof Error ? cause : new Error(String(cause)))
         setRendering(false)
+        setSettledFor(params)
       }
     }
 
@@ -69,6 +78,7 @@ export function useRenderJob(
         if (isStale()) return
         setError(cause instanceof Error ? cause : new Error(String(cause)))
         setRendering(false)
+        setSettledFor(params)
       })
 
     return () => {
@@ -77,5 +87,5 @@ export function useRenderJob(
     }
   }, [slug, params, version])
 
-  return { job, rendering, error }
+  return { job, rendering, error, settledFor }
 }

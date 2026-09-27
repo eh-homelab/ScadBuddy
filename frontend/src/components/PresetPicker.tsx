@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
 import { sameValues, type ParamValues } from '../lib/params'
@@ -307,7 +308,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
             <Button variant="ghost" onClick={() => setConfirmingDelete(false)} disabled={busy}>
               Cancel
             </Button>
-            <Button variant="danger" onClick={() => void remove()} disabled={busy}>
+            <Button variant="danger" onClick={() => void remove()} disabled={busy} {...USER_ONLY}>
               {busy && <Spinner />}
               Delete preset
             </Button>

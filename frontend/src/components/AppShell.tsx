@@ -1,4 +1,5 @@
 import { NavLink, Outlet } from 'react-router'
+import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { useLoadDisplayUnit } from '../lib/units'
 
@@ -9,6 +10,8 @@ const NAV = [
 
 export function AppShell({ embedded = isEmbedded() }: { embedded?: boolean }) {
   useLoadDisplayUnit()
+  // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
+  useGlobalAgentTools()
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
       <header

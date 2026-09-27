@@ -18,6 +18,11 @@ interface Props {
   onReset: () => void
   /** Above the group tabs: the preset picker. */
   toolbar?: ReactNode
+  /**
+   * #254 — a parameter an agent just changed. A new object switches to its tab, so the
+   * change happens where the user can see it.
+   */
+  reveal?: { name: string }
 }
 
 export function ParameterPanel({
@@ -29,11 +34,18 @@ export function ParameterPanel({
   onChange,
   onReset,
   toolbar,
+  reveal,
 }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
   const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
   const [active, setActive] = useState(() => tabs[0]?.name ?? GLOBAL_GROUP)
+  const [revealed, setRevealed] = useState(reveal)
+  if (reveal !== revealed) {
+    setRevealed(reveal)
+    const home = reveal && tabs.find((group) => group.params.some((param) => param.name === reveal.name))
+    if (home) setActive(home.name)
+  }
   const current = tabs.find((group) => group.name === active) ?? tabs[0]
 
   const extruders = useMemo(() => extrudersOf(schema, values), [schema, values])
@@ -86,7 +98,7 @@ export function ParameterPanel({
           <div className="border-b border-line bg-surface-2/40">
             <ul className="divide-y divide-line/60">
               {globalGroup.params.map((param) => (
-                <li key={param.name}>
+                <li key={param.name} data-param={param.name}>
                   <ParamWidget
                     param={param}
                     value={values[param.name] ?? (param.initial as ParamValue)}
@@ -106,7 +118,7 @@ export function ParameterPanel({
         {current && (
           <ul role="tabpanel" aria-label={current.name} className="divide-y divide-line/60">
             {current.params.map((param) => (
-              <li key={param.name}>
+              <li key={param.name} data-param={param.name}>
                 <ParamWidget
                   param={param}
                   value={values[param.name] ?? (param.initial as ParamValue)}

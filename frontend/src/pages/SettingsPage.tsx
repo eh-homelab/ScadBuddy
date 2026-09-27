@@ -1,4 +1,8 @@
 import { useEffect, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
+import { committed, touchAfterRender } from '../agent/highlight'
+import { AgentToolError } from '../agent/types'
+import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
@@ -72,6 +76,106 @@ export function SettingsPage() {
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
     return body
   }
+
+  // #254 — the settings form's browser tools. They change the form, never what is stored:
+  // Save stays the user's (a settings write is outward, AI design spec §8.1), and the API
+  // key is neither readable nor settable here.
+  const form = {
+    bambuddy_url: [url, setUrl, 'bambuddy-url'],
+    public_url: [publicUrl, setPublicUrl, 'public-url'],
+    library_folder_id: [folderId, setFolderId, 'library-folder'],
+    pipeline_id: [pipelineId, setPipelineId, 'slicer-pipeline'],
+    printer_id: [printerId, setPrinterId, 'printer'],
+    default_plate: [defaultPlate, setDefaultPlate, 'default-plate'],
+    display_unit: [unit, (next: string) => setUnit(next as DisplayUnit), 'display-unit'],
+  } as const satisfies Record<string, readonly [string, (next: string) => void, string]>
+
+  const choices = {
+    library_folder_id: ['', ...(targetsState.data?.folders ?? []).map((folder) => String(folder.id))],
+    pipeline_id: ['', ...(targetsState.data?.pipelines ?? []).map((pipeline) => String(pipeline.id))],
+    printer_id: ['', ...(targetsState.data?.printers ?? []).map((printer) => String(printer.id))],
+    default_plate: ['', ...plateNames, ...(defaultPlate && !plateNames.includes(defaultPlate) ? [defaultPlate] : [])],
+    display_unit: ['mm', 'in'],
+  } as Partial<Record<keyof typeof form, string[]>>
+
+  // Unsaved: the form differs from what the server has, or a key has been typed.
+  const dirty =
+    apiKey.length > 0 ||
+    (settings !== undefined &&
+      (url !== (settings.bambuddy_url ?? '') ||
+        publicUrl !== (settings.public_url ?? '') ||
+        folderId !== idValue(settings.library_folder_id) ||
+        pipelineId !== idValue(settings.pipeline_id) ||
+        printerId !== idValue(settings.printer_id) ||
+        defaultPlate !== (settings.default_plate ?? '') ||
+        unit !== settings.display_unit))
+
+  function formValues() {
+    return Object.fromEntries(Object.entries(form).map(([field, [value]]) => [field, value]))
+  }
+
+  const live = useLatest(formValues)
+
+  useAgentHandlers(
+    'settings',
+    {
+      get_form: () => ({
+        values: formValues(),
+        unsaved: dirty,
+        has_api_key: settings?.has_api_key ?? false,
+        api_key_typed: apiKey.length > 0,
+        choices: {
+          library_folder_id: (targetsState.data?.folders ?? []).map((folder) => ({ value: String(folder.id), name: folder.name })),
+          pipeline_id: (targetsState.data?.pipelines ?? []).map((pipeline) => ({ value: String(pipeline.id), name: pipeline.name })),
+          printer_id: (targetsState.data?.printers ?? []).map((printer) => ({ value: String(printer.id), name: printer.name })),
+          default_plate: plateNames,
+          display_unit: ['mm', 'in'],
+        },
+        last_test: test ? { ok: test.ok, detail: test.detail } : null,
+        error,
+      }),
+      set_field: async ({ field, value }) => {
+        const allowed = choices[field]
+        if (allowed && !allowed.includes(value)) {
+          throw new AgentToolError(
+            'invalid_args',
+            `"${value}" is not a choice for ${field}: ${allowed.map((choice) => JSON.stringify(choice)).join(', ')}.`,
+          )
+        }
+        const [, set, id] = form[field]
+        set(value)
+        touchAfterRender(() => document.getElementById(id))
+        await committed(() => live.current()[field] === value)
+        return { field, value, saved: false, note: 'The user saves the form with Save changes.' }
+      },
+      test_connection: async () => {
+        if (dirty) {
+          throw new AgentToolError(
+            'refused',
+            'The form has unsaved changes, and the test saves the form first. Ask the user to save or test it.',
+          )
+        }
+        // With nothing unsaved the stored settings are the form, so this is Test
+        // connection minus its save — the one part that would be a settings write.
+        touchAfterRender(() => document.querySelector('[data-testid="test-connection"]'))
+        setTesting(true)
+        setError(null)
+        setTest(null)
+        try {
+          const result = await api.testSettings()
+          setTest(result)
+          return { ok: result.ok, detail: result.detail }
+        } catch (cause) {
+          const message = cause instanceof ApiError ? cause.detail : 'The connection test could not run.'
+          setError(message)
+          throw new AgentToolError('failed', message)
+        } finally {
+          setTesting(false)
+        }
+      },
+    },
+    () => ({ values: formValues(), unsaved: dirty, has_api_key: settings?.has_api_key ?? false }),
+  )
 
   async function save() {
     setSaving(true)
@@ -175,7 +279,13 @@ export function SettingsPage() {
             </div>
 
             <div className="flex items-center gap-2">
-              <Button onClick={() => void runTest()} disabled={testing} aria-busy={testing}>
+              <Button
+                onClick={() => void runTest()}
+                disabled={testing}
+                aria-busy={testing}
+                data-testid="test-connection"
+                {...USER_ONLY}
+              >
                 {testing && <Spinner />}
                 Test connection
               </Button>
@@ -341,6 +451,7 @@ export function SettingsPage() {
                 onClick={() => void addSidebar()}
                 disabled={registering}
                 aria-busy={registering}
+                {...USER_ONLY}
               >
                 {registering && <Spinner />}
                 Add to Bambuddy sidebar
@@ -362,7 +473,13 @@ export function SettingsPage() {
         )}
 
         <div className="mt-5 flex items-center gap-3">
-          <Button variant="primary" onClick={() => void save()} disabled={saving} aria-busy={saving}>
+          <Button
+            variant="primary"
+            onClick={() => void save()}
+            disabled={saving}
+            aria-busy={saving}
+            {...USER_ONLY}
+          >
             {saving && <Spinner />}
             Save changes
           </Button>
