@@ -223,6 +223,11 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
   that opens these parameters again.
 - **Print** opens the print picker.
 
+The button at the top right of the preview shows it full screen, with the plate and
+bounding box still on it; **Esc** or the button again puts it back. Where the browser
+refuses full screen, as it does inside a frame that isn't allowed it, the preview
+fills the frame instead.
+
 ### Print picker
 
 ![Print picker](images/print-picker.png)

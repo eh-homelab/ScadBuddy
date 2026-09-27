@@ -6,6 +6,7 @@ import * as THREE from 'three'
 import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
 import { plateSize, useDisplayUnit } from '../lib/units'
+import { useFullscreen } from '../lib/useFullscreen'
 import { Spinner } from './ui/Spinner'
 
 interface ViewerTheme {
@@ -65,8 +66,22 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
   const theme = useViewerTheme()
   const failed = job?.status === 'failed'
 
+  // The overlays go full screen with the scene, so the dimensions, the render state and
+  // a failed render's log stay in view. One element throughout, whichever way it fills
+  // the screen: remounting the canvas would reload the model and lose the camera.
+  const frame = useRef<HTMLDivElement>(null)
+  const fullscreen = useFullscreen(frame)
+
   return (
-    <div className="relative h-full min-h-0 w-full bg-bg">
+    <div
+      ref={frame}
+      // min-w-0: the canvas is sized in pixels, and without it that width holds the
+      // column open, so the view never narrows again after full screen or a smaller
+      // window.
+      className={`bg-bg ${
+        fullscreen.mode === 'window' ? 'fixed inset-0 z-40' : 'relative h-full min-h-0 w-full min-w-0'
+      }`}
+    >
       <Canvas
         key={theme.bg}
         data-testid="preview-canvas"
@@ -110,11 +125,14 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
       <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-3">
         <div className="flex items-start justify-between gap-3">
           {plate ? <PlateBadge plate={plate} /> : <span />}
-          {rendering && (
-            <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
-              <Spinner /> Rendering
-            </span>
-          )}
+          <div className="flex items-center gap-2">
+            {rendering && (
+              <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
+                <Spinner /> Rendering
+              </span>
+            )}
+            <FullscreenButton active={fullscreen.mode !== null} onClick={fullscreen.toggle} />
+          </div>
         </div>
 
         {shown?.bbox && !failed && <Dimensions bbox={shown.bbox} />}
@@ -138,6 +156,33 @@ function PlateBadge({ plate }: { plate: Plate }) {
       {plate.model ? `${plate.name} · ` : ''}
       {plateSize(plate.size, unit)} plate
     </span>
+  )
+}
+
+function FullscreenButton({ active, onClick }: { active: boolean; onClick: () => void }) {
+  const label = active ? 'Exit full screen' : 'Full screen'
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label={label}
+      title={active ? `${label} (Esc)` : label}
+      className="pointer-events-auto flex size-7 items-center justify-center rounded-[6px] border border-line bg-surface/90 text-muted backdrop-blur-sm transition-colors hover:border-line-strong hover:text-ink"
+    >
+      <svg
+        viewBox="0 0 16 16"
+        aria-hidden="true"
+        className="size-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        {/* Corners pointing out to enter, in to leave. */}
+        <path d={active ? 'M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4' : 'M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4'} />
+      </svg>
+    </button>
   )
 }
 

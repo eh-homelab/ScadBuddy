@@ -43,6 +43,63 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('bbox-readout')).toContainText('81.4', { timeout: 10_000 })
   })
 
+  test('shows the preview full screen and puts it back', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    const bbox = page.getByTestId('bbox-readout')
+    await expect(bbox).toContainText('64.1')
+    const canvas = page.getByTestId('preview-canvas')
+    const docked = await canvas.boundingBox()
+
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click()
+    const exit = page.getByRole('button', { name: 'Exit full screen' })
+    await expect(exit).toBeVisible()
+    // The browser's own full screen, with the readouts still over the scene.
+    expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
+    const viewport = page.viewportSize()
+    await expect
+      .poll(() => canvas.boundingBox())
+      .toEqual({ x: 0, y: 0, width: viewport?.width, height: viewport?.height })
+    await expect(bbox).toContainText('64.1')
+
+    await exit.click()
+    await expect(page.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
+    expect(await page.evaluate('document.fullscreenElement')).toBeNull()
+    // Back in its place and no wider: the canvas is sized in pixels, and its full-screen
+    // width must not hold the column open.
+    await expect.poll(() => canvas.boundingBox()).toEqual(docked)
+  })
+
+  test('fills the frame where the page may not go full screen, as inside Bambuddy', async ({
+    page,
+    baseURL,
+  }) => {
+    // Bambuddy's External Link frame: another origin, its sandbox flags and no
+    // allow="fullscreen", so the Fullscreen API is refused inside it. The page around it
+    // only has to be on a second origin; a static file there will do.
+    const host = new URL('/mockServiceWorker.js', baseURL)
+    host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
+    await page.goto(host.href)
+    await page.setContent(
+      `<iframe src="${new URL('/m/name-keychain', baseURL).href}" title="ScadBuddy"
+        sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
+        style="position: fixed; left: 180px; top: 56px; width: 1100px; height: 664px; border: 0"></iframe>`,
+    )
+    const frame = page.frameLocator('iframe')
+    await expect(frame.getByTestId('bbox-readout')).toContainText('64.1', { timeout: 15_000 })
+    const canvas = frame.getByTestId('preview-canvas')
+    const docked = await canvas.boundingBox()
+
+    await frame.getByRole('button', { name: 'Full screen', exact: true }).click()
+    await expect(frame.getByRole('button', { name: 'Exit full screen' })).toBeVisible()
+    await expect
+      .poll(() => canvas.boundingBox())
+      .toEqual({ x: 180, y: 56, width: 1100, height: 664 })
+
+    await page.keyboard.press('Escape')
+    await expect(frame.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
+    await expect.poll(() => canvas.boundingBox()).toEqual(docked)
+  })
+
   test('attaches an SVG to a file parameter and renders with it (#204)', async ({ page }) => {
     await page.goto('/m/gridfinity-bin')
     await expect(page.getByTestId('bbox-readout')).toBeVisible()

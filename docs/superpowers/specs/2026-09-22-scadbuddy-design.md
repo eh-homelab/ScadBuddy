@@ -384,8 +384,15 @@ when the source changes.
 
 Left: tabs per group, widgets, "Reset to defaults". Right: 3D preview
 (react-three-fiber, orbit controls, per-colour materials, build-plate grid,
-bounding-box dimensions in mm). Bottom bar: **Generate**, then **Download 3MF**
-and **Send to Bambuddy**.
+bounding-box dimensions in mm, a full-screen toggle). Bottom bar: **Generate**,
+then **Download 3MF** and **Send to Bambuddy**.
+
+Full screen takes the viewer with its overlays (plate, bounding box, render state,
+a failed render's log) through the Fullscreen API. A cross-origin frame may only use
+that API when its `<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`),
+and Bambuddy's is only known to set its sandbox flags (§1), so wherever the API is
+refused the viewer covers the window instead — when embedded, the frame. Escape
+leaves either.
 
 The preview is not a separate cheap render — it **is** the render. Every
 parameter change (debounced 400 ms) submits a render job; the job produces the
