@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
@@ -83,21 +84,6 @@ def _remove_tree(path: Path) -> bool:
             logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
             return False
     return True
-
-
-def _write_atomic(path: Path, data: bytes) -> None:
-    """Swap ``data`` in at ``path``: a reader sees the old file or the new one, never
-    a torn one. The temp file is in the same directory, so ``os.replace`` stays on one
-    filesystem and stays atomic. :class:`FileNotFoundError` when the directory is gone.
-    """
-    handle, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
-    try:
-        with os.fdopen(handle, "wb") as writer:
-            writer.write(data)
-        os.replace(staged, path)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
 
 
 def _still_there(path: Path) -> bool:
@@ -383,7 +369,7 @@ class Catalogue:
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
         try:
-            _write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
+            write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -662,7 +648,7 @@ class Catalogue:
         """
         self._require(slug)
         try:
-            _write_atomic(self.paths.model_dir(slug) / name, payload)
+            write_atomic(self.paths.model_dir(slug) / name, payload)
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -726,7 +712,7 @@ class Catalogue:
         # and swapping inside it then fail rather than recreate it, and the
         # failure is the same 404 the delete itself would give.
         try:
-            _write_atomic(self.paths.model_source(slug), source.encode())
+            write_atomic(self.paths.model_source(slug), source.encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
@@ -807,7 +793,7 @@ class Catalogue:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    _write_atomic(target, content)
+                    write_atomic(target, content)
             self._advance_base(slug, upstream, revision)
             plans.append(plan)
 
@@ -920,12 +906,16 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        for root in (self.paths.outputs, self.paths.model_revisions, self.paths.schema_cache):
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
+        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
+        for root in roots:
             try:
                 if not root.is_dir():
                     continue
                 for entry in root.iterdir():
-                    if root != self.paths.schema_cache:
+                    if root not in keyed_by_file:
                         candidates.append((entry.name, entry))
                     elif entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
@@ -974,6 +964,8 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
+            # Not derived, but the previous model's: its saved presets.
+            self.paths.model_presets(slug),
         ):
             _remove_tree(path)
         self._forget_cover(slug)

@@ -19,6 +19,9 @@ import type {
   ModelVersion,
   Output,
   OutputPlate,
+  ParamPreset,
+  ParamPresetCreate,
+  ParamPresetUpdate,
   PastedSource,
   ParamValue,
   PipelineChoices,
@@ -191,6 +194,24 @@ export const api = {
 
   removeReadme: (slug: string) =>
     request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
+
+  /** The template's shipped presets, then the ones saved on it. */
+  listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
+
+  createPreset: (slug: string, body: ParamPresetCreate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deletePreset: (slug: string, id: string) =>
+    request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, { method: 'DELETE' }),
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>

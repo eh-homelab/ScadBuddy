@@ -17,6 +17,7 @@ import type {
   ModelVersion,
   Output,
   Param,
+  ParamPreset,
   Plate,
   PrintProgress,
   Settings,
@@ -293,6 +294,38 @@ index 0000000..1111111
 +text_size = 14;
 +text_depth = 1.2;
 `,
+}
+
+/**
+ * Per-template presets. The built-in ships one; the keychain of mine has one saved,
+ * plus one whose parameter the template no longer has, which the picker must skip.
+ */
+export const presets: Record<string, ParamPreset[]> = {
+  'name-keychain': [
+    {
+      id: 'template-0',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10, keyring_hole: false },
+    },
+    {
+      id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Mum',
+      origin: 'mine',
+      params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      updated_at: '2026-09-20T10:00:00Z',
+    },
+    {
+      id: 'b1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Old engraving',
+      origin: 'mine',
+      params: { name: 'Ada', engrave_depth: 2 },
+      updated_at: '2026-09-19T10:00:00Z',
+    },
+  ],
+  [BUILTIN_SLUG]: [
+    { id: 'template-0', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+  ],
 }
 
 export const schemas: Record<string, CustomizerSchema> = {
