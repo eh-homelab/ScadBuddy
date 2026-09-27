@@ -3,6 +3,7 @@ import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
+import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
@@ -40,6 +41,7 @@ export function SettingsPage() {
   const [error, setError] = useState<string | null>(null)
 
   const settings = settingsState.data
+  const webMcp = useWebMcpEnabled()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -416,6 +418,30 @@ export function SettingsPage() {
                 is chosen in the print picker.
               </p>
             </div>
+          </div>
+        </section>
+
+        <section className="mt-4 rounded-[6px] border border-line bg-surface">
+          <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+            Browser agent
+          </h2>
+          <div className="p-4">
+            {/* Per browser and applied at once, so it is not part of the saved form. Only
+                the user may flip it: an agent must not grant itself access (#254). */}
+            <label className="flex items-start gap-2 text-[13px]" {...USER_ONLY}>
+              <input
+                type="checkbox"
+                checked={webMcp}
+                onChange={(event) => setWebMcpEnabled(event.target.checked)}
+                className="mt-0.5"
+                aria-describedby="webmcp-help"
+              />
+              Let this browser&rsquo;s built-in agent use ScadBuddy tools (WebMCP)
+            </label>
+            <p id="webmcp-help" className="mt-1.5 text-[12px] text-muted">
+              Off by default, as AI design spec §8.5 has an outside agent pair before it drives
+              a tab. Even when on, the print and send tool can only open the dialog; you confirm it.
+            </p>
           </div>
         </section>
 

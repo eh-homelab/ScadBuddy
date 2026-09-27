@@ -1,4 +1,5 @@
 import type { AgentBridge } from './bridge'
+import { isWebMcpEnabled, subscribeWebMcp } from './webmcpPreference'
 
 /**
  * WebMCP: the page's live tools, offered to an agent built into the browser.
@@ -19,6 +20,9 @@ import type { AgentBridge } from './bridge'
  *
  * The issue (#254) names `navigator.modelContext`; the current explainer and spec put it
  * on `document`, so that is what is feature-detected. Where it is missing this is a no-op.
+ *
+ * Opt-in: nothing is registered until the user turns it on in Settings
+ * (`webmcpPreference.ts`, AI design spec §8.5), and turning it off unregisters every tool.
  */
 interface ModelContextTool {
   name: string
@@ -37,11 +41,18 @@ function modelContext(): ModelContext | undefined {
   return candidate && typeof candidate.registerTool === 'function' ? (candidate as ModelContext) : undefined
 }
 
+export interface WebMcpPreference {
+  enabled: () => boolean
+  subscribe: (listener: () => void) => () => void
+}
+
+const STORED: WebMcpPreference = { enabled: isWebMcpEnabled, subscribe: subscribeWebMcp }
+
 /**
- * Keeps the browser's tool list in step with the bridge's live tools: every change of
- * route re-registers the set. Returns the teardown.
+ * While the preference is on, keeps the browser's tool list in step with the bridge's
+ * live tools: every change of route re-registers the set. Returns the teardown.
  */
-export function connectWebMcp(bridge: AgentBridge): () => void {
+export function connectWebMcp(bridge: AgentBridge, preference: WebMcpPreference = STORED): () => void {
   const context = modelContext()
   if (!context) return () => {}
 
@@ -51,6 +62,8 @@ export function connectWebMcp(bridge: AgentBridge): () => void {
   async function sync() {
     const mine = ++generation
     controller?.abort()
+    controller = null
+    if (!preference.enabled()) return
     controller = new AbortController()
     const { signal } = controller
     const tools = await bridge.listTools()
@@ -79,9 +92,11 @@ export function connectWebMcp(bridge: AgentBridge): () => void {
   }
 
   const unsubscribe = bridge.subscribe(() => void sync())
+  const unsubscribePreference = preference.subscribe(() => void sync())
   void sync()
   return () => {
     unsubscribe()
+    unsubscribePreference()
     generation++
     controller?.abort()
   }

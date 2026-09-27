@@ -11,8 +11,8 @@ declare global {
 /**
  * Called once at startup.
  *
- * WebMCP is feature-detected and runs in every build: it is the browser's own agent,
- * mediated by the browser.
+ * WebMCP is feature-detected in every build but registers nothing until the user opts
+ * in on the Settings page (per browser; AI design spec §8.5).
  *
  * `window.__scadbuddyBridge` is for the dev server and the msw-mocked e2e build
  * (`VITE_MOCK_API=1`, `playwright.config.ts`) only. In a production bundle both
