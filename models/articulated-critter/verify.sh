@@ -98,6 +98,10 @@ ERROR_CASES = [
      "raise length or shorten the name"),
     ("name-wide-short", dict(animal="caterpillar", length=120, width=40, name="WQW"),
      "raise length or shorten the name"),
+    # The plate-fit assert fires. No customizer combination reaches it (the
+    # widest straight critter is about 100 mm across), so the plate is
+    # narrowed through the hidden bed size to prove the guard works.
+    ("bed-too-small", dict(bed_w=150), "more than the 150 x 320 mm plate"),
 ]
 
 # Cases asking for more segments than the length has room for at the minimum
@@ -228,6 +232,7 @@ for name, ov in CASES:
     log = docker("\n".join(jobs))
     m = re.search(r'SB_CRITTER N=(\d+) pitch=(\S+) length=(\S+) R=(\S+) neck=(\S+) '
                   r'cap_mid=(\S+) cap_top=(\S+) cap_lip=(\S+) low_h=(\S+) name_size=(\S+) '
+                  r'bound=\[(\S+), (\S+)\] '
                   r'joints=\[([^\]]*)\]', log)
     if not m:
         print(log[-2000:])
@@ -236,7 +241,8 @@ for name, ov in CASES:
                       R=float(m.group(4)), neck=float(m.group(5)), cap_mid=float(m.group(6)),
                       cap_top=float(m.group(7)), cap_lip=float(m.group(8)),
                       name_size=float(m.group(10)),
-                      joints=[float(x) for x in m.group(11).split(",")])
+                      bound=(float(m.group(11)), float(m.group(12))),
+                      joints=[float(x) for x in m.group(13).split(",")])
 
 failures = []
 
@@ -279,6 +285,12 @@ for name, ov in CASES:
           "sits on z=0 and is %.1f mm tall (z %.3f .. %.3f)" % (T, min(zs), max(zs)))
     sx, sy = max(xs) - min(xs), max(ys) - min(ys)
     check(sx <= BED_X and sy <= BED_Y, "fits the %dx%d bed (%.1f x %.1f)" % (BED_X, BED_Y, sx, sy))
+    # The model asserts its own plate fit from a bound it computes; that bound
+    # must really contain the render, or the assert protects nothing.
+    bx, by = I["bound"]
+    check(sx <= bx + 0.01 and sy <= by + 0.01,
+          "render %.1f x %.1f lies inside the model's own bound %.1f x %.1f"
+          % (sx, sy, bx, by))
     if name in GROWS:
         check(I["L"] > p["length"], "too short for one segment: grows to %.1f (asked %s)"
               % (I["L"], p["length"]))

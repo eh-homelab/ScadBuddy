@@ -543,9 +543,33 @@ function seg_color(k) = k == 0 ? head_color : k % 2 == 1 ? body_color : stripe_c
 cap_mid = (rp + bulge) - (rp + c + bulge) * sin(slot_angle);   // pin vs gap in the C, middle
 cap_top = rp - (rp + c) * sin(slot_angle);                     // pin vs gap in the C, top lip
 cap_lip = bulge - c;                                           // pin vs ring lip, vertically
+// ---- plate fit, bounded from the parameters rather than trusted to the
+// sampled verify.sh cases. Every segment lies between its two joints (its
+// region is cut there), within `reach` of the spine; so the posed critter
+// lies inside the union of one rectangle per segment, and its bounding box
+// inside theirs.
+bed_w = 300;
+bed_d = 320;
+function phi(k) = k <= 0 ? 0 : phi(k - 1) + pose_psi(k);        // heading of segment k
+function jp(k) = k <= 1 ? [J[1], 0]
+               : jp(k - 1) + (J[k] - J[k - 1]) * [cos(phi(k - 1)), sin(phi(k - 1))];
+tail_tip = jp(N + 1) - J[N + 1] * [cos(phi(N + 1)), sin(phi(N + 1))];
+// Furthest anything reaches from the spine: wings (1.4 wmax past the body, a
+// 3 mm tip) bound the legs, fins and tails; the head adds horns or antennae.
+reach = max(hw + 6.5, 2.4 * wmax + 3);
+function seg_ends(k) = k == 0 ? [[L, 0], jp(1)] : k == N + 1 ? [jp(N + 1), tail_tip]
+                     : [jp(k), jp(k + 1)];
+corners = [for (k = [0:N + 1]) let(e = seg_ends(k), nrm = reach * [-sin(phi(k)), cos(phi(k))])
+               for (pt = [e[0] + nrm, e[0] - nrm, e[1] + nrm, e[1] - nrm]) pt];
+bound_x = max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]);
+bound_y = max([for (q = corners) q[1]]) - min([for (q = corners) q[1]]);
+assert(bound_x <= bed_w && bound_y <= bed_d,
+       str("the critter could be ", bound_x, " x ", bound_y, " mm, more than the ", bed_w, " x ",
+           bed_d, " mm plate: shorten it or make it narrower"));
+
 echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 * neck_hw,
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,
-         " low_h=", low_h, " name_size=", name_size, " joints=", [for (k = [1:N + 1]) J[k]]));
+         " low_h=", low_h, " name_size=", name_size, " bound=", [bound_x, bound_y], " joints=", [for (k = [1:N + 1]) J[k]]));
 assert(neck_hw >= 1, "hinge neck too thin");
 // A name that cannot fit is an error, not a silently shortened name.
 assert(nm <= N, str("the name needs ", nm, " body segments, but a ", length, " mm ", animal,

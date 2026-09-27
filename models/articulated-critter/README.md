@@ -135,12 +135,19 @@ Renders the defaults and twelve variations in `scadbuddy-verify:local`:
 
 It also renders two names that cannot fit their length, and checks that the
 render fails with a message saying to raise the length or shorten the name.
+It does the same with the plate narrowed to 150 mm (through the hidden
+`bed_w`), to prove the plate-fit assert below fires.
 
 For each one it checks:
 
 - the plate has exactly the colour parts the parameters imply, nothing on the
   `Default` material, sits on z=0, is `thickness` tall and fits the 300 × 320
   bed;
+- the render lies inside the bounding box the model computes for itself. The
+  model asserts that box fits the 300 × 320 plate, for every parameter
+  combination, not only the sampled ones. It puts one rectangle round each
+  segment, from joint to joint in its posed heading, as wide as anything can
+  reach from the spine;
 - laid out straight, it is `length` long (or longer, only where one segment
   does not fit) and at least `width` wide;
 - with a name, the pitch leaves room for a 4.5 mm letter, and the letters
