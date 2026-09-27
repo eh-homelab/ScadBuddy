@@ -501,7 +501,7 @@ string.
   repository's `.gitignore` and a duplicate's copy all skip them; they are deleted
   when the render ends, and each render gets its own.
 - **Samples.** A template can ship pictures for its file parameters beside its
-  source (`models/bookmark/sample-cat.svg`), and the viewer can pick one instead
+  source (`models/flexi-fabric/sample-overlay.svg`), and the viewer can pick one instead
   of downloading and re-uploading it. The schema lists them per parameter as
   `samples`: every regular file directly in the model's directory whose name is
   bare (the runner's own rule: `[A-Za-z0-9_][A-Za-z0-9_.-]*`, no `..`, so no
