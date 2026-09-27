@@ -366,7 +366,7 @@ def _running(pid: int) -> bool:
     image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except OSError:  # gone, or going: ENOENT or ESRCH mid-read
         return False
     return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
