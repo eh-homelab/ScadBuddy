@@ -8,7 +8,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  LibraryEntry,
+  CatalogueLibrary,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -85,7 +85,7 @@ const state = {
   /** #157 — each revision's `model.scad`, so a merge can read its `base`. */
   sourceAt: initialSourceAt(),
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
-  libraries: structuredClone(fixtures.libraries) as LibraryEntry[],
+  libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -845,13 +845,6 @@ export const handlers = [
     const refused = refuseBuiltin(slug)
     if (refused) return refused
     const patch = (await request.json()) as ModelPatch
-    // #93: only libraries that have been added (and so are pinned) can be declared.
-    const missing = (patch.libraries ?? []).filter(
-      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
-    )
-    if (missing.length > 0) {
-      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
-    }
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
     ) as Partial<ModelSummary>
@@ -1652,27 +1645,55 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
-  http.post(`${base}/libraries`, async ({ request }) => {
-    const body = (await request.json()) as { name: string; url?: string | null; ref?: string | null }
-    const known = state.libraries.find((entry) => entry.name === body.name)
+  // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
+  http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const name = String(params['name'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      return problem(422, 'Unprocessable Content', `'${name}' is not a library directory name`)
+    }
+    const body = (await request.json()) as { url?: string | null; ref?: string | null }
+    const known = state.libraries.find((entry) => entry.name === name)
     if (!known && !body.url) {
-      return problem(404, 'Not Found', `'${body.name}' is not in the catalogue; give a url to add it`)
+      return problem(404, 'Not Found', `'${name}' is not in the catalogue; give a url to add it`)
     }
     const url = body.url ?? known?.url ?? ''
     const ref = body.ref ?? known?.ref ?? ''
+    if (!ref) return problem(422, 'Unprocessable Content', `give a ref to pin '${name}' at`)
     if (ref === fixtures.MISSING_REF) {
       return problem(502, 'Bad Gateway', `git clone failed: Remote branch ${ref} not found`)
     }
     await delay(100)
     state.seq += 1
-    const pin = { url, ref, commit: state.seq.toString(16).padStart(40, 'c') }
-    const entry: LibraryEntry = known
-      ? { ...known, pin }
-      : { name: body.name, url, ref, curated: false, pin }
-    state.libraries = known
-      ? state.libraries.map((row) => (row.name === body.name ? entry : row))
-      : [...state.libraries, entry]
-    return HttpResponse.json(entry)
+    const pin = { name, url, ref, commit: state.seq.toString(16).padStart(40, 'c') }
+    const current = model.libraries ?? []
+    const libraries = current.some((row) => row.name === name)
+      ? current.map((row) => (row.name === name ? pin : row))
+      : [...current, pin]
+    const updated = { ...model, libraries }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    return HttpResponse.json(view(updated))
+  }),
+
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+    const slug = String(params['slug'])
+    const name = String(params['name'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    const current = model.libraries ?? []
+    if (!current.some((row) => row.name === name)) {
+      return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
+    }
+    await delay(50)
+    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    return HttpResponse.json(view(updated))
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),

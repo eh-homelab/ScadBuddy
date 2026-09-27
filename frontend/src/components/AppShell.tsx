@@ -4,7 +4,6 @@ import { useLoadDisplayUnit } from '../lib/units'
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
-  { to: '/libraries', label: 'Libraries', end: false },
   { to: '/settings', label: 'Settings', end: false },
 ]
 

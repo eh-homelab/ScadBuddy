@@ -51,9 +51,11 @@ class AppState:
     #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
     #: thread for up to the git timeout; uncapped, a burst of installs would hold the
     #: default executor that every other `to_thread` route shares. More than one, so
-    #: a long clone (NopSCADlib) doesn't hold up adding another library; the store's
-    #: per-name locks still order two adds of the same name. A queued install waits
-    #: on the loop, not in a thread.
+    #: a long clone (NopSCADlib) doesn't hold up adding another library. Nothing
+    #: orders two clones of the same library: each runs in full, and the one whose
+    #: commit is already checked out gives way to it (`LibraryStore._clone`); the pin
+    #: itself is written under the history's write lock. A queued install waits on
+    #: the loop, not in a thread.
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
@@ -83,7 +85,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        libraries=LibraryStore(paths, history, max_bytes=config.library_max_bytes),
+        libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),

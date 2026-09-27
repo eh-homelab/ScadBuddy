@@ -53,7 +53,13 @@ from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
 )
-from scadbuddy.library.libraries import Lock, model_search_path, read_lock, search_path
+from scadbuddy.library.libraries import (
+    LibraryDeclarationError,
+    ModelLibrary,
+    model_search_path,
+    parse_declaration,
+    search_path,
+)
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -434,11 +440,6 @@ async def create_model(
     # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
     # directory lands with the same metadata its bundled built-in has.
     base = await _read_meta_part(meta, slug) if meta is not None else ModelMeta(name=slug)
-    # A model.json may declare libraries (#93); held to what PATCH holds it to. The
-    # lockfile is read once, here, and the parse check's path is built from it too.
-    lock = await asyncio.to_thread(read_lock, catalogue.paths) if base.libraries else None
-    if lock is not None:
-        base.libraries = _require_pinned(lock, base.libraries)
     parsed_tags = _parse_tags(tags)
 
     return await _create(
@@ -468,7 +469,6 @@ async def create_model(
         force=force,
         thumbnail=thumbnail_bytes,
         readme=readme_text,
-        lock=lock,
     )
 
 
@@ -481,22 +481,24 @@ def _first_name(*candidates: str | None) -> str:
     raise ValueError("every name candidate is blank")
 
 
-def _require_pinned(lock: Lock, libraries: list[str]) -> list[str]:
-    """Only a pinned library can be declared: the render has nothing to put on
-    OPENSCADPATH for any other (#93). The declaration, de-duplicated.
-
-    Shared by PATCH and a dropped model.json. A library whose lock entry is
-    broken is refused as it would fail every render (LockfileError, #216); one
-    with no entry at all needs adding first.
-    """
-    missing = [name for name in libraries if lock.pin(name) is None]
-    if missing:
+def _require_pins(libraries: Any) -> None:
+    """A dropped model.json's ``libraries`` (#93, #179): pins, as ScadBuddy writes
+    them, or nothing. Checked here because the metadata itself reads them leniently
+    -- a model on disk must still list -- and an upload must not lose one quietly:
+    OpenSCAD only WARNs on a missing ``use``. A bare name, from before pins moved
+    into each model, has nothing left to resolve it against."""
+    try:
+        declared = parse_declaration({"libraries": libraries})
+    except LibraryDeclarationError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    names = [entry for entry in declared if isinstance(entry, str)]
+    if names:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"not added yet: {', '.join(missing)}; add them under Libraries first",
-            libraries=missing,
+            f"the model.json names libraries without a pin: {', '.join(names)}; "
+            "pin them to the model once it is created",
+            libraries=names,
         )
-    return list(dict.fromkeys(libraries))
 
 
 def _require_png(payload: bytes) -> bytes:
@@ -551,6 +553,8 @@ def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     raw = _client_json(text, refusal)
     if not isinstance(raw, dict):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
+    if raw.get("libraries") is not None:
+        _require_pins(raw["libraries"])
     # Read as the catalogue reads one on disk: a `null` for a defaulted field is
     # the field left out, so the name falls through to the slug.
     try:
@@ -589,23 +593,23 @@ async def _create(
     force: bool,
     thumbnail: bytes | None = None,
     readme: str | None = None,
-    lock: Lock | None = None,
 ) -> ModelRecord:
-    """The one path every create takes, whatever carried the source in.
-
-    ``lock`` is the lockfile a dropped model.json's ``libraries`` were checked
-    against, passed on so it is not read a second time.
-    """
+    """The one path every create takes, whatever carried the source in."""
     if catalogue.exists(slug):
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
-    # The libraries a dropped model.json declares (#93) are on the parse check's
-    # OPENSCADPATH, as they will be on every render; none for any other create.
+    # The pins a dropped model.json carries (#93) are on the parse check's
+    # OPENSCADPATH, as they will be on every render; none for any other create. A
+    # pin whose checkout is not on this volume is the 409 every render would be.
+    # One entry per name: the first, as `use <NAME/...>` can only mean one.
+    pins: list[ModelLibrary] = []
+    for library in meta.libraries:
+        if all(pin.name != library.name for pin in pins):
+            pins.append(library)
+    meta = meta.model_copy(update={"libraries": pins})
     library_path: tuple[Path, ...] = ()
-    if meta.libraries:
-        if lock is None:
-            # A file read, so off the event loop like the search below.
-            lock = await asyncio.to_thread(read_lock, catalogue.paths)
-        library_path = await asyncio.to_thread(search_path, catalogue.paths, meta.libraries, lock)
+    if pins:
+        # A directory check per pin: off the event loop.
+        library_path = await asyncio.to_thread(search_path, catalogue.paths, pins)
     checked = await _guard_source(
         source, config=replace(config, library_path=library_path), force=force, limit=limit
     )
@@ -717,13 +721,9 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(
-    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, paths: PathsDep
-) -> ModelRecord:
+def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
     require_mine(slug)
     require_model(catalogue, slug)
-    if patch.libraries is not None:
-        patch.libraries = _require_pinned(read_lock(paths), patch.libraries)
     try:
         return catalogue.update(slug, patch)
     except ModelNotFoundError:
