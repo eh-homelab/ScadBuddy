@@ -49,6 +49,11 @@ unchanged on MakerWorld and in ScadBuddy.
 | `border_width` | `2` | Ring width in mm. |
 | `border_inset` | `1.5` | Distance from the tile's edge to the ring. It is kept at least 0.3 mm inside the edge rounding, so the ring is always on the flat top. |
 
+The border and its inset may take at most 60 % of the room inside the tile, so
+every tile keeps room for its letter. On a small tile a wide or far-inset
+border is narrowed first (down to 1 mm), then moved out towards the edge. The
+`SB_TILES` line in the render log reports the border width and inset used.
+
 ### Magnets
 
 | Parameter | Default | What it does |
@@ -108,7 +113,7 @@ the top 0.6 mm.
 ./verify.sh
 ```
 
-Renders the defaults and eleven variations in `scadbuddy-verify:local`:
+Renders the defaults and thirteen variations in `scadbuddy-verify:local`:
 
 - every shape with a border and the awkward glyphs `WQg69&`;
 - both magnet sizes and both mounts;
@@ -119,7 +124,9 @@ Renders the defaults and eleven variations in `scadbuddy-verify:local`:
 - the smallest, thinnest tile with the deepest inlay and the biggest magnet;
 - sharp square tiles with spaces in the text;
 - text that is all spaces;
-- a serif face.
+- a serif face;
+- the smallest square and heart tiles with the widest, furthest-in border,
+  where the border has to narrow.
 
 For each one it checks:
 
@@ -129,8 +136,11 @@ For each one it checks:
   material, z from 0 to the top the parameters imply;
 - one separate tile per non-space character, in rows of the width and height
   the parameters imply, with the gap expected, on the 300 × 320 bed;
+- every tile has its letter, at least half as tall as `letter_scale` asks;
 - every letter lies inside its tile's letter room (it was sized to fit, not
-  clipped), and every border ring lies `border_inset` inside the tile's edge;
+  clipped), and that room is at least 40 % of the tile's;
+- every border ring is between 1 mm and `border_width` wide, and lies inside the
+  tile's edge by at least the inset it reports;
 - rendered once per colour the way ScadBuddy builds its closed parts, the
   colour parts do not overlap;
 - magnets, through a hidden `probe_magnet` render:

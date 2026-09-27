@@ -82,12 +82,32 @@ CASES = [
                               pose="straight")),
     ("dragon-min", dict(segments=3, length=120, width=22, thickness=6, pose="straight")),
     ("fish-wave-wide", dict(animal="fish", segments=5, width=40, clearance=0.6)),
+    # A name with wide letters on a critter too short for the segments asked:
+    # segments are dropped, but never below the pitch a 5 mm letter needs.
+    ("name-pitch-limited", dict(animal="snake", segments=20, length=200, width=22,
+                                name="WQW", pose="curl")),
+    # Too wide for its length even with one segment: the length grows (and
+    # the render log says so) rather than the head and tail overlapping.
+    ("dragon-grows", dict(width=40, length=120, pose="straight")),
+]
+
+# Requests that cannot be met must fail the render with a message that says
+# what to change, never render a critter with letters missing.
+ERROR_CASES = [
+    ("name-too-long", dict(animal="lizard", length=120, name="Maximilian12"),
+     "raise length or shorten the name"),
+    ("name-wide-short", dict(animal="caterpillar", length=120, width=40, name="WQW"),
+     "raise length or shorten the name"),
 ]
 
 # Cases asking for more segments than the length has room for at the minimum
 # pitch, and how many fit (computed by hand from the head, tail and pitch
 # factors in model.scad).
-DROPPED = {"snake-max-tight": 15, "caterpillar-fat-short": 3, "dragon-min": 2}
+DROPPED = {"snake-max-tight": 15, "caterpillar-fat-short": 3, "dragon-min": 2,
+           "name-pitch-limited": 7, "dragon-grows": 1,
+           "dragon-straight-name": 6}
+# Cases where even one segment does not fit, so the critter is longer than asked.
+GROWS = {"dragon-grows"}
 
 
 def scad(v):
@@ -167,6 +187,17 @@ def components(tris):
                 parent[ra] = rb
     return len({find(v) for v in parent})
 
+
+# ---- requests that must fail loudly
+for name, ov, want in ERROR_CASES:
+    r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w", IMAGE,
+                        "bash", "-ec", "openscad --backend=Manifold %s -o %s/%s.3mf model.scad"
+                        % (defines(ov), OUT, name)], capture_output=True, text=True)
+    ok = r.returncode != 0 and "Assertion" in r.stderr and want in r.stderr
+    print(("  PASS  " if ok else "  FAIL  ") + "[%s] render fails with '%s'" % (name, want))
+    if not ok:
+        print(r.stderr[-1500:])
+        sys.exit("FAIL: %s did not fail as expected" % name)
 
 # ---- renders
 with open("%s/wrap.scad" % OUT, "w") as f:
@@ -248,14 +279,25 @@ for name, ov in CASES:
           "sits on z=0 and is %.1f mm tall (z %.3f .. %.3f)" % (T, min(zs), max(zs)))
     sx, sy = max(xs) - min(xs), max(ys) - min(ys)
     check(sx <= BED_X and sy <= BED_Y, "fits the %dx%d bed (%.1f x %.1f)" % (BED_X, BED_Y, sx, sy))
-    if p["pose"] == "straight":
+    if name in GROWS:
+        check(I["L"] > p["length"], "too short for one segment: grows to %.1f (asked %s)"
+              % (I["L"], p["length"]))
+        check(N == 1, "with a single body segment (%d)" % N)
+    elif p["pose"] == "straight":
         check(abs(I["L"] - p["length"]) < 1e-3, "length %.1f == %s" % (I["L"], p["length"]))
-        check(abs(sx - p["length"]) <= 1.5, "straight: %.1f mm long (asked %s)" % (sx, p["length"]))
+        check(abs(sx - I["L"]) <= 1.5, "straight: %.1f mm long (%.1f)" % (sx, I["L"]))
         check(sy >= p["width"] - 0.5, "straight: %.1f mm wide >= width %s" % (sy, p["width"]))
     check(components(tris) == N + 2,
           "%d separate pieces == head + %d segments + tail" % (components(tris), N))
     if p["name"]:
-        check(I["name_size"] >= 3, "name letters are %.1f mm (>= 3)" % I["name_size"])
+        # Room for a 4.5 mm letter as wide as the name's widest (W 1.45, M/Q/m/w
+        # 1.22, others 1.07 x the size) between the hinge hole and the notch.
+        wide = max(1.45 if ch == "W" else 1.22 if ch in "MmwQ@&%" else 1.07
+                   for ch in p["name"])
+        need = 4.5 * wide + (3.2 + c + 0.6 + 0.6) + (I["R"] + c + 0.6)
+        check(I["pitch"] >= need - 1e-6, "pitch %.2f leaves room for a 4.5 mm letter (>= %.2f)"
+              % (I["pitch"], need))
+        check(I["name_size"] >= 4.5 - 0.01, "name letters are %.1f mm (>= 4.5)" % I["name_size"])
 
     # -- hinge capture, from the geometry the parameters imply
     check(I["neck"] >= 2.4, "hinge neck %.2f mm wide" % I["neck"])

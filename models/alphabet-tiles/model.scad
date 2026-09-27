@@ -62,10 +62,10 @@ gap = 5; // [2:1:15]
 // Add a border ring around the letter in its own colour
 border = false;
 
-// Border ring width in mm (with the border on)
+// Border ring width in mm (with the border on; narrowed on small tiles to leave room for the letter)
 border_width = 2; // [1:0.5:5]
 
-// Distance from the tile's edge to the border in mm (at least the edge rounding)
+// Distance from the tile's edge to the border in mm (at least the edge rounding; reduced on small tiles)
 border_inset = 1.5; // [0.5:0.5:5]
 
 /* [Magnets] */
@@ -130,7 +130,7 @@ mag_needs = !has_mag ? 0
 T = max(thickness, mag_needs, edge_round + inlay_d + 1);
 
 er = min(edge_round, T - inlay_d - 1);
-inset = max(border_inset, er + 0.3);
+inset_req = max(border_inset, er + 0.3);
 has_border = border;
 
 // Rows wrap at the bed width. If they would run off the bed's depth, the gap
@@ -189,23 +189,31 @@ module shape_2d() {
 // Room for the letter. The square gives a box of half-size room(); the other
 // shapes a circle of radius room() that fits inside them, centred at box_y()
 // (the heart's roomy part is above its middle).
-margin = has_border ? inset + border_width + 1 : er + 1;
-function room() = shape == "circle" ? S / 2 - margin
-                : shape == "hexagon" ? S / 2 * cos(30) - margin
-                : shape == "scalloped" ? scallop_r0 - margin
-                : shape == "heart" ? heart_k * 0.62 - margin
-                : S / 2 - margin;
+// Half-size of the room with no margin at all.
+base_r = shape == "circle" ? S / 2
+       : shape == "hexagon" ? S / 2 * cos(30)
+       : shape == "scalloped" ? scallop_r0
+       : shape == "heart" ? heart_k * 0.62
+       : S / 2;
+// A border may take at most 60 % of that, so there is always room for a
+// letter: on a small tile a wide or far-inset border is narrowed first (to
+// 1 mm), then moved out (to just inside the edge rounding).
+margin_cap = 0.6 * base_r;
+bw = !has_border ? border_width : max(1, min(border_width, margin_cap - inset_req - 1));
+inset = !has_border ? inset_req : max(er + 0.3, min(inset_req, margin_cap - bw - 1));
+margin = has_border ? inset + bw + 1 : er + 1;
+function room() = base_r - margin;
 function box_y() = shape == "heart" ? heart_k * 0.1 : 0;
 
 // Everything inside the border (or the flat top), less a margin.
 module inner_2d() {
-    offset(r = -(has_border ? inset + border_width + 1 : er + 1)) shape_2d();
+    offset(r = -margin) shape_2d();
 }
 
 module border_2d() {
     difference() {
         offset(r = -inset) shape_2d();
-        offset(r = -(inset + border_width)) shape_2d();
+        offset(r = -(inset + bw)) shape_2d();
     }
 }
 
@@ -306,8 +314,9 @@ module tile_border() {
 
 function tile_pos(j) = [(j % cols) * (S + G) + S / 2, -floor(j / cols) * (S + G) - S / 2];
 
+assert(room() >= 0.35 * base_r, str("no room for a letter: ", room(), " mm"));
 echo(str("SB_TILES n=", n, " cols=", cols, " rows=", rows, " gap=", G, " thickness=", T, " inset=", inset,
-         " margin=", margin, " room=", room(), " heart_k=", heart_k));
+         " border_width=", bw, " margin=", margin, " room=", room(), " heart_k=", heart_k));
 assert(rows * (S + G) - G <= bed_d, "too many tiles for the bed at this size");
 
 // With no characters, one blank tile, so there is always something to print.

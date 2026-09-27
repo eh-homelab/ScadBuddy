@@ -91,6 +91,12 @@ CASES = [
     ("square-sharp", dict(corner_radius=0, edge_round=0, text="hello world", gap=2,
                           letter_scale=40, magnet="6x2", magnet_clearance=0.1)),
     ("all-spaces", dict(text="   ")),
+    # The smallest tiles with the widest, furthest-in border: the border is
+    # narrowed and moved out so every tile still gets its letter.
+    ("small-max-border", dict(tile_size=20, border=True, border_width=5, border_inset=5,
+                              text="WQg8")),
+    ("small-max-border-heart", dict(shape="heart", tile_size=20, border=True, border_width=5,
+                                    border_inset=5, edge_round=2, text="W6")),
     # 24 big tiles with a wide gap run off the bed: the gap shrinks until
     # they fit: at 13-15 mm it is 4 columns x 6 rows (365+ mm deep), at 12 mm
     # 5 x 5 (298 mm).
@@ -209,14 +215,15 @@ for name, ov in CASES:
                         " model.scad" % (d, pm, OUT, name, pm))
     log = docker("\n".join(jobs))
     m = re.search(r"SB_TILES n=(\d+) cols=(\d+) rows=(\d+) gap=(\S+) thickness=(\S+) inset=(\S+) "
+                  r"border_width=(\S+) "
                   r"margin=(\S+) room=(\S+) heart_k=(\S+)\"", log)
     if not m:
         print(log[-2000:])
         sys.exit("FAIL: no SB_TILES echo for %s" % name)
     info[name] = dict(n=int(m.group(1)), cols=int(m.group(2)), rows=int(m.group(3)),
                       gap=float(m.group(4)), T=float(m.group(5)), inset=float(m.group(6)),
-                      margin=float(m.group(7)), room=float(m.group(8)),
-                      heart_k=float(m.group(9)))
+                      bw=float(m.group(7)), margin=float(m.group(8)), room=float(m.group(9)),
+                      heart_k=float(m.group(10)))
 
 failures = []
 
@@ -299,6 +306,12 @@ for name, ov in CASES:
         return min(range(tiles), key=lambda j: math.hypot(x - centre(j)[0], y - centre(j)[1]))
 
     room = I["room"]
+    # A border never takes more than 60 % of the letter room.
+    base = room + I["margin"]
+    check(room >= 0.4 * base - 1e-6, "letter room %.2f mm is >= 40 %% of %.2f" % (room, base))
+    if p["border"]:
+        check(1 - 1e-6 <= I["bw"] <= p["border_width"] + 1e-6,
+              "border %.2f mm wide (asked %s)" % (I["bw"], p["border_width"]))
     by = I["heart_k"] * 0.1 if p["shape"] == "heart" else 0
     if n:
         worst = 0.0
@@ -312,6 +325,18 @@ for name, ov in CASES:
                     worst = max(worst, math.hypot(dx, dy) - room)
         check(worst <= 0.05, "every letter inside its room of %.2f mm (worst excess %.3f)"
               % (room, worst))
+        # Every tile has its letter, and it is not a sliver: its ink spans at
+        # least half the height letter_scale asks for (lower case is shorter).
+        span = {}
+        for tri in read_stl("%s/%s_%s.stl" % (OUT, name, LETTER[1:])):
+            for x, y, _ in tri:
+                j = owner(x, y)
+                lo_, hi_ = span.get(j, (y, y))
+                span[j] = (min(lo_, y), max(hi_, y))
+        least = room * p["letter_scale"] / 100
+        short = [j for j in range(n) if j not in span or span[j][1] - span[j][0] < least]
+        check(not short, "every tile has a letter at least %.1f mm tall (short: %s)"
+              % (least, short))
     if p["border"]:
         # Outermost border point, from the tile centre: as a box for the
         # square, across for the heart, as a radius for the rest.

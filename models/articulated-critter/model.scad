@@ -118,6 +118,13 @@ t = tan(bend / 2);
 R = rp + c + bulge + ring_wall;                  // ring outer radius
 neck_hw = (rp + c) * sin(slot_angle - bend) - c - 0.05;
 P_min = 2 * R + c + 2;                           // shortest segment pitch
+// With a name, segments must also leave room for a letter at least
+// name_min tall (as wide as the name's widest letter needs) between the hinge
+// hole in front and the notch behind.
+name_min = 4.5;
+name_wide = len(name) > 0 ? max([for (ch = name) wide_of(ch)]) : 0;
+P_seg = len(name) > 0 ? max(P_min, name_min * name_wide + (rp + c + inlay + 0.6) + (R + c + 0.6))
+                      : P_min;
 wmax = width / 2;
 wmin = R + c + 2.5;                              // narrowest a jointed segment can be
 low_h = min(T, max(2.4, T * 0.45));              // wings and fins
@@ -147,11 +154,11 @@ function sum(v, i = 0) = i >= len(v) ? 0 : v[i] + sum(v, i + 1);
 function sumf(n) = sum([for (k = [1:n]) factor(feat(k, n))]);
 
 span_len = length - head_len() - tail_len();
-function fits(n) = span_len / sumf(n) >= P_min;
+function fits(n) = span_len / sumf(n) >= P_seg;
 function best_n(n) = n <= 1 ? 1 : fits(n) ? n : best_n(n - 1);
 
 N = best_n(max(segments, len(name)));
-p = max(P_min, span_len / sumf(N));
+p = max(P_seg, span_len / sumf(N));
 L = head_len() + tail_len() + p * sumf(N);       // == length unless it had to grow
 feats = [for (k = [1:N]) feat(k, N)];
 function f_at(k) = factor(feats[k - 1]);
@@ -211,6 +218,10 @@ fn_j = 96;
 sec = 1 / cos(180 / fn_j);
 module notch_2d(j) { translate([J[j], 0]) circle(r = (R + c) * sec, $fn = fn_j); }
 
+// How far from the spine a feature needing `need` mm of room either side of
+// the segment's centre can reach before the V cuts close in on it.
+function half_room(P, need) = ((P - c) / 2 - need) / t;
+
 module rounded_2d(r = round_r) { offset(r = r) offset(r = -r) children(); }
 // Softer rounding on the body segments, which are otherwise square-shouldered.
 function body_round(k) = k == 0 || k == N + 1 ? 1.5 : min(round_r, w_at(k) * 0.3);
@@ -223,7 +234,10 @@ module capsule_2d(x0, r0, x1, r1) {
 module legs_2d(k) {
     x = xc(k); w = min(w_at(k), w_at(k + 1));
     dir = k == 1 ? 1 : -1;                        // front legs reach forward
-    reach = wmax * 0.45;
+    // Keep the foot and toes inside the segment's region (it narrows away
+    // from the spine), or clipping would cut toes off as loose islands.
+    P = J[k] - J[k + 1];
+    reach = max(0, min(wmax * 0.45, half_room(P, 3 + 2.6) - w - 6.2));
     for (s = [-1, 1]) {
         foot = [x + dir * 3, s * (w + reach)];
         hull() { translate([x, s * (w - 4)]) circle(r = 4.4); translate(foot) circle(r = 3.4); }
@@ -234,10 +248,12 @@ module legs_2d(k) {
 // Dragon wings: swept back, with a scalloped trailing edge.
 module wings_2d(k) {
     x = xc(k); w = min(w_at(k), w_at(k + 1)); P = J[k] - J[k + 1];
-    span = wmax * 1.4;
+    // The tip must stay inside the segment's region, or the clip cuts it off.
+    span = max(4, min(wmax * 1.4, half_room(P, 4 + 0.02 * P) - w));
     F = [P * 0.3, w - 2]; Tp = [-P * 0.02, w + span]; B = [-P * 0.4, w - 2];
     v = B - Tp; n = [v[1], -v[0]] / norm(v);     // trailing-edge normal, pointing out
-    rb = norm(v) * 0.2;
+    // Scallops at most 2.4 mm deep, so none can cut through the wing.
+    rb = min(norm(v) * 0.2, 4);
     for (m = [0, 1]) translate([x, 0]) mirror([0, m]) difference() {
         hull() {
             translate(F) circle(r = 2);
@@ -245,7 +261,7 @@ module wings_2d(k) {
             translate(B) circle(r = 2);
         }
         // Scallops between the wing's fingers.
-        for (f = [0.2, 0.5, 0.8]) translate(Tp + v * f + n * rb * 0.25) circle(r = rb);
+        for (f = [0.2, 0.5, 0.8]) translate(Tp + v * f + n * rb * 0.4) circle(r = rb);
     }
 }
 
@@ -422,7 +438,7 @@ module letter_2d(k) {
         x_lo = J[k + 1] + R + c + 0.6;
         x_hi = J[k] - (rp + c + inlay + 0.6);
         s = name_size;
-        if (s >= 3)
+        if (s > 0)
             intersection() {
                 letter_room_2d(k);
                 translate([(x_lo + x_hi) / 2, 0])
@@ -531,6 +547,12 @@ echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,
          " low_h=", low_h, " name_size=", name_size, " joints=", [for (k = [1:N + 1]) J[k]]));
 assert(neck_hw >= 1, "hinge neck too thin");
+// A name that cannot fit is an error, not a silently shortened name.
+assert(nm <= N, str("the name needs ", nm, " body segments, but a ", length, " mm ", animal,
+                    " only has room for ", N, " (each at least ", P_seg,
+                    " mm long): raise length or shorten the name"));
+assert(nm == 0 || name_size >= name_min - 0.01,
+       str("name letters would be ", name_size, " mm, under ", name_min, " mm"));
 assert(cap_mid > 0.3 && cap_top > 0.15 && cap_lip > 0.5, "hinge pin not captured");
 
 // ---- output

@@ -34,10 +34,14 @@ Each pair of neighbouring segments shares one vertical hinge:
   at the bed, so first-layer squish (elephant's foot) cannot weld a hinge.
 
 The segment pitch can't be shorter than the hinge needs: two ring radii plus
-the clearance plus 2 mm, which is 16 mm at the defaults. If `length` is too
-short for `segments` at that pitch, the model makes as many segments as fit.
-The render log's `SB_CRITTER` line reports how many it made (`N=`) and the
-pitch. `length` is then still exact.
+the clearance plus 2 mm, which is 16 mm at the defaults. With a name, it also
+has to leave room for a letter at least 4.5 mm tall between the hinge hole
+and the notch, which is about 18–19 mm. If `length` is too short for
+`segments` at that pitch, the model makes as many segments as fit, and
+`length` stays exact. If even one segment does not fit (a wide critter on a
+short length), the critter makes one segment and comes out longer than
+`length`. The render log's `SB_CRITTER` line reports the segment count (`N=`),
+the pitch and the length.
 
 ## Parameters
 
@@ -56,7 +60,7 @@ pitch. `length` is then still exact.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments` (as long as they fit the length). All letters are the same size: the largest that fits the smallest segment. Shorter segments give smaller letters. The dragon's are smallest, because its leg and wing segments take up the length. |
+| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments`. All letters are the same size: the largest that fits the smallest segment, and never under 4.5 mm. If the length cannot fit a segment for every letter at that size, the render fails with a message naming how many segments fit: raise `length` or shorten the name. It never drops letters. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for the name. |
 
 ### Hinges
@@ -116,7 +120,7 @@ children under 3. Supervise young children. A hinge can pinch small fingers.
 ./verify.sh
 ```
 
-Renders the defaults and ten variations in `scadbuddy-verify:local`:
+Renders the defaults and twelve variations in `scadbuddy-verify:local`:
 
 - every animal, with and without a name;
 - every pose;
@@ -124,14 +128,23 @@ Renders the defaults and ten variations in `scadbuddy-verify:local`:
 - the widest, thickest and loosest settings at the shortest length, where
   segments have to be dropped;
 - a 12-letter name on a 3-segment request;
-- the smallest dragon.
+- a name with wide letters on a snake too short for the segments asked, so
+  segments are dropped, but never below the pitch a 4.5 mm letter needs;
+- the smallest dragon, and a dragon too wide for its length to fit even one
+  segment, so it grows.
+
+It also renders two names that cannot fit their length, and checks that the
+render fails with a message saying to raise the length or shorten the name.
 
 For each one it checks:
 
 - the plate has exactly the colour parts the parameters imply, nothing on the
   `Default` material, sits on z=0, is `thickness` tall and fits the 300 × 320
   bed;
-- laid out straight, it is `length` long and at least `width` wide;
+- laid out straight, it is `length` long (or longer, only where one segment
+  does not fit) and at least `width` wide;
+- with a name, the pitch leaves room for a 4.5 mm letter, and the letters
+  are at least 4.5 mm;
 - **the print is exactly head + segments + tail separate pieces.** A fused
   hinge would join two;
 - **every gap between neighbouring segments is at least `clearance` on every
