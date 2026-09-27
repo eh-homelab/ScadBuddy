@@ -298,6 +298,68 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     assert meta["queue_item_id"] == 9
     assert meta["print_route"] == "slice_queue"
     assert meta["slice_job_id"] == 9
+    assert meta["plates"] == [{"plate_id": 1, "queue_item_id": 9, "slice_job_id": 9}]
+
+
+@respx.mock
+def test_every_plate_of_an_all_plates_print_is_recorded(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The single ids hold one plate; ``plates`` keeps each plate's queue item and slice."""
+    configure(client)
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    add_plate(_output_3mf(paths, output_id), 2)
+    upload_route()
+    respx.post(f"{API}/library/files/41/slice").mock(
+        side_effect=[
+            httpx.Response(202, json={"job_id": 9, "status": "pending"}),
+            httpx.Response(202, json={"job_id": 10, "status": "pending"}),
+        ]
+    )
+    for job_id, sliced_id in ((9, 52), (10, 53)):
+        respx.get(f"{API}/slice-jobs/{job_id}").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": job_id,
+                    "status": "completed",
+                    "result": {"library_file_id": sliced_id},
+                },
+            )
+        )
+    item = recording("queue-item.json")
+    respx.post(f"{API}/queue/").mock(
+        side_effect=[
+            httpx.Response(200, json={**item, "id": 71}),
+            httpx.Response(200, json={**item, "id": 72}),
+        ]
+    )
+
+    answer = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+    )
+
+    assert answer.status_code == 200
+    meta = client.get(f"/api/v1/outputs/{output_id}").json()
+    assert meta["plates"] == [
+        {"plate_id": 1, "queue_item_id": 71, "slice_job_id": 9},
+        {"plate_id": 2, "queue_item_id": 72, "slice_job_id": 10},
+    ]
+    assert (meta["queue_item_id"], meta["slice_job_id"]) == (72, 10)
+
+
+def test_a_meta_json_without_plates_still_loads(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = make_output(client, model)
+    path = _output_3mf(paths, output_id).with_name("meta.json")
+    raw = json.loads(path.read_text())
+    del raw["plates"]
+    path.write_text(json.dumps(raw))
+
+    assert client.get(f"/api/v1/outputs/{output_id}").json()["plates"] == []
 
 
 # --- one filament plan across every plate -------------------------------------------

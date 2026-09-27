@@ -69,7 +69,7 @@ from scadbuddy.bambuddy.send import (
     target_for,
 )
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.plate import bed_types_for, nozzle_diameter_of
@@ -697,6 +697,7 @@ async def run_for_output(
         # Only the options or the plate forced this route: slice what the run would have.
         slice_request = pipeline_slice_request(pipeline, meta)
         outcomes = []
+        sent: list[PlateSend] = []
         for plate_id in plate_ids:
             outcome = await slice_and_queue(
                 client,
@@ -711,7 +712,7 @@ async def run_for_output(
                 project_id=project_id,
                 options=print_options,
             )
-            _record_queued(store, meta, outcome, project_id)
+            sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
             outcomes.append(outcome)
         warnings: list[FilamentWarning] = []
         target_model = outcomes[0].target_model
@@ -759,6 +760,7 @@ async def run_for_output(
         else None
     )
     outcomes = []
+    sent = []
     warnings = []
     # Each plate's slots are read on their own: a plate uses only some of the
     # project's filaments, and its requirements say which (#83). The one plan applies to
@@ -799,7 +801,7 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
-        _record_queued(store, meta, outcome, project_id)
+        sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
             if warning.kind == "no-choice" and warning.slot_id is not None and len(plate_ids) > 1:
@@ -842,13 +844,23 @@ async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pip
 
 
 def _record_queued(
-    store: OutputStore, meta: OutputMeta, outcome: QueueOutcome, project_id: int | None
-) -> None:
-    """Record one plate's queue items as soon as it is queued.
+    store: OutputStore,
+    meta: OutputMeta,
+    plate_id: int,
+    outcome: QueueOutcome,
+    project_id: int | None,
+    sent: list[PlateSend],
+) -> list[PlateSend]:
+    """Record one plate's queue items as soon as it is queued; returns every plate so far.
 
     Recorded per plate, not after the last one: a later plate failing to slice must not
-    leave the plates already on Bambuddy's queue unknown to the output (#83).
+    leave the plates already on Bambuddy's queue unknown to the output (#83). ``plates``
+    carries every plate of this print, since the single ids hold only the last.
     """
+    sent = sent + [
+        PlateSend(plate_id=plate_id, queue_item_id=item, slice_job_id=outcome.slice_job_id)
+        for item in outcome.queue_item_ids
+    ]
     for queue_item_id in outcome.queue_item_ids:
         store.record_send(
             meta.id,
@@ -856,7 +868,9 @@ def _record_queued(
             print_route="slice_queue",
             slice_job_id=outcome.slice_job_id,
             project_id=project_id,
+            plates=sent,
         )
+    return sent
 
 
 def _queued(

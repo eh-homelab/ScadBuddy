@@ -372,6 +372,9 @@ async def post_attach_project(
             status.HTTP_409_CONFLICT,
             "this output has no project, so there is nothing to file it under",
         )
-    ids = body.queue_item_ids or ([meta.queue_item_id] if meta.queue_item_id else [])
+    ids = body.queue_item_ids or (
+        [plate.queue_item_id for plate in meta.plates]
+        or ([meta.queue_item_id] if meta.queue_item_id else [])
+    )
     async with client_for(settings) as client:
         return await attach_results(client, project_id, queue_item_ids=ids)

@@ -1628,6 +1628,8 @@ export interface components {
             parts?: components["schemas"]["PartInfo"][];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
+            /** Plates */
+            plates?: components["schemas"]["PlateSend"][];
             /** Print Route */
             print_route?: ("pipeline" | "slice_queue") | null;
             /** Project Id */
@@ -2018,6 +2020,18 @@ export interface components {
             plate: components["schemas"]["PlateView"];
             /** Problem */
             problem?: string | null;
+        };
+        /**
+         * PlateSend
+         * @description One plate's queue item and the slice job that produced it (#83).
+         */
+        PlateSend: {
+            /** Plate Id */
+            plate_id: number;
+            /** Queue Item Id */
+            queue_item_id: number;
+            /** Slice Job Id */
+            slice_job_id: number;
         };
         /**
          * PlateView

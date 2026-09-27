@@ -1709,6 +1709,13 @@
             ],
             "title": "Pipeline Run Id"
           },
+          "plates": {
+            "items": {
+              "$ref": "#/components/schemas/PlateSend"
+            },
+            "title": "Plates",
+            "type": "array"
+          },
           "print_route": {
             "anyOf": [
               {
@@ -2950,6 +2957,30 @@
           "overshoots"
         ],
         "title": "PlateFit",
+        "type": "object"
+      },
+      "PlateSend": {
+        "description": "One plate's queue item and the slice job that produced it (#83).",
+        "properties": {
+          "plate_id": {
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "queue_item_id": {
+            "title": "Queue Item Id",
+            "type": "integer"
+          },
+          "slice_job_id": {
+            "title": "Slice Job Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plate_id",
+          "queue_item_id",
+          "slice_job_id"
+        ],
+        "title": "PlateSend",
         "type": "object"
       },
       "PlateView": {
