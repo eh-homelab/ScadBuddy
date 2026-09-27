@@ -101,6 +101,16 @@ export type SessionSummary = z.infer<typeof SessionSummarySchema>
 export const PageContextSchema = z.object({
   route: z.string(),
   modelSlug: z.string().optional(),
+  /** #254 — the browser tools live on this page (the bridge's `liveNames()`). */
+  tools: z.array(z.string()).optional(),
+  /** #254 — open dialogs, by accessible name; the last is on top. */
+  dialogs: z.array(z.string()).optional(),
+  /**
+   * #254 — what each mounted page reports about itself (the bridge snapshot's `page`):
+   * the customizer's changed values and render state, the settings form, and so on.
+   * Never a credential: no page describes one.
+   */
+  page: z.record(z.string(), z.unknown()).optional(),
 })
 export type PageContext = z.infer<typeof PageContextSchema>
 

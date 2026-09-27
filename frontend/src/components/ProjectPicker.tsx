@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { ProjectChoices, ProjectRequest, ProjectView } from '../api/types'
 import { Button } from './ui/Button'
@@ -221,6 +222,7 @@ export function ProjectPicker({ value, onChange, onLoaded }: Props) {
               disabled={name.trim() === '' || saving}
               aria-busy={saving}
               data-testid="create-project"
+              {...USER_ONLY}
             >
               {saving && <Spinner />}
               Create project
