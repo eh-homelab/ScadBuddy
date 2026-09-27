@@ -8,8 +8,19 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
@@ -24,15 +35,17 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import is_builtin
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
     Catalogue,
+    InvalidModelMetaError,
     ModelExistsError,
     ModelMeta,
     ModelNotFoundError,
     ModelPatch,
     ModelRecord,
     SidecarNotFoundError,
+    meta_from_raw,
 )
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
@@ -494,10 +507,6 @@ def _readme_text(payload: bytes) -> str:
         ) from None
 
 
-#: The model.json fields with a default and no `None` of their own.
-_DEFAULTED = frozenset({"name", "description", "tags", "libraries"})
-
-
 def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     """A ``model.json`` part, read the way the catalogue reads one from disk."""
     refusal = "the model.json is not valid JSON"
@@ -508,12 +517,10 @@ def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     raw = _client_json(text, refusal)
     if not isinstance(raw, dict):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
-    # A `null` for a field that has a default is the field left out, as a missing
-    # or blank one is: the name falls through to the slug, the rest to their
-    # defaults, rather than failing validation.
-    raw = {key: value for key, value in raw.items() if not (key in _DEFAULTED and value is None)}
+    # Read as the catalogue reads one on disk: a `null` for a defaulted field is
+    # the field left out, so the name falls through to the slug.
     try:
-        return ModelMeta.model_validate({"name": slug, **raw})
+        return meta_from_raw(raw, slug)
     except ValidationError as error:
         raise _malformed_body(error) from None
     except RecursionError:
@@ -1060,3 +1067,15 @@ def delete_readme(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except SidecarNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove") from None
+
+
+def install_model_handlers(app: FastAPI) -> None:
+    """A model whose model.json on disk cannot be read is a 409 from every route that
+    reads it, as a hand-broken `libraries.lock` is: the model is in a state only an
+    edit of that file fixes, and naming the file beats the bare 500 it would be."""
+
+    @app.exception_handler(InvalidModelMetaError)
+    async def _bad_meta(request: Request, exc: InvalidModelMetaError) -> JSONResponse:
+        return problem_response(
+            request, status.HTTP_409_CONFLICT, str(exc), title="Invalid Model Metadata"
+        )

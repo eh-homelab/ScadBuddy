@@ -336,3 +336,17 @@ def test_boot_links_a_template_the_old_seed_copied_in(
     with TestClient(create_app(settings)):
         pass
     assert history.head() == head
+
+
+def test_the_boot_survives_a_built_in_with_an_invalid_model_json(
+    app: FastAPI, bundled: Path
+) -> None:
+    """The sync mirrors it as it is; the listing leaves it out; reading it names why."""
+    (bundled / "model.json").write_text('{"name": "Keychain", "tags": 5}', encoding="utf-8")
+    with TestClient(app) as client:
+        listing = client.get("/api/v1/models")
+        assert listing.status_code == 200
+        assert BUILTIN not in {model["slug"] for model in listing.json()}
+        response = client.get(f"/api/v1/models/{BUILTIN}")
+        assert response.status_code == 409
+        assert "tags" in response.json()["detail"]

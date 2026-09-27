@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
@@ -119,6 +119,16 @@ class ModelExistsError(ValueError):
     pass
 
 
+class InvalidModelMetaError(ValueError):
+    """A ``model.json`` on disk that cannot be read as a model's metadata: not JSON,
+    or a field of the wrong type -- a hand edit, or a directory placed on the volume
+    by hand. It costs its own model only (#179)."""
+
+    def __init__(self, slug: str, reason: str) -> None:
+        super().__init__(f"the model.json of {slug!r} is not valid: {reason}")
+        self.slug = slug
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -135,6 +145,30 @@ class ModelMeta(BaseModel):
     # The third-party libraries (#93) this model renders with: the only ones on
     # its OPENSCADPATH, each at the commit `libraries.lock` pins.
     libraries: list[str] = Field(default_factory=list)
+
+
+#: The model.json fields with a default and no `None` of their own: a `null` for
+#: one is the field left out, as a missing one is (#179).
+DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries"})
+
+
+def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
+    """A model.json's contents as :class:`ModelMeta`, read the same permissive way
+    however it arrived -- uploaded, on disk, or from the image.
+
+    A `null` for a defaulted field, or a blank name, falls through to the default
+    (the name to ``default_name``). Anything else invalid raises pydantic's
+    ``ValidationError`` for the caller to report in its own terms.
+    """
+    cleaned = {
+        key: value
+        for key, value in raw.items()
+        if not (key in DEFAULTED_META_FIELDS and value is None)
+    }
+    name = cleaned.get("name")
+    if isinstance(name, str) and not name.strip():
+        del cleaned["name"]
+    return ModelMeta.model_validate({"name": default_name, **cleaned})
 
 
 class ModelPatch(BaseModel):
@@ -302,8 +336,24 @@ class Catalogue:
         meta_path = self.paths.model_meta(slug)
         if not meta_path.is_file():
             return {}
-        loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+            raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
         return loaded if isinstance(loaded, dict) else {}
+
+    def _meta(self, slug: str, raw: dict[str, Any]) -> ModelMeta:
+        """``raw`` as this model's metadata, or :class:`InvalidModelMetaError`."""
+        try:
+            return meta_from_raw(raw, slug.removeprefix(BUILTIN_PREFIX))
+        except ValidationError as error:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            raise InvalidModelMetaError(slug, problems) from None
+        except RecursionError:
+            raise InvalidModelMetaError(slug, "nested too deeply") from None
 
     def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
         # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
@@ -337,7 +387,7 @@ class Catalogue:
             # Nor is a built-in anything's duplicate (#156): only a duplicate of
             # mine records an upstream.
             raw.pop("upstream", None)
-        meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
+        meta = self._meta(slug, raw)
         version = version_of(slug)
         upstream_state: UpstreamState | None = None
         if meta.upstream is not None and history:
@@ -380,7 +430,15 @@ class Catalogue:
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
-        return [self._record(slug, versions.get, history) for slug in slugs]
+        records: list[ModelRecord] = []
+        for slug in slugs:
+            try:
+                records.append(self._record(slug, versions.get, history))
+            except InvalidModelMetaError as error:
+                # One broken model.json costs its own model, never the whole page;
+                # `GET /models/{slug}` says what is wrong with it.
+                logger.warning("left a model out of the listing: %s", error, extra={"slug": slug})
+        return records
 
     def create(
         self,
@@ -626,7 +684,7 @@ class Catalogue:
     # ── upstream (#157) ───────────────────────────────────────────────────────
 
     def _upstream(self, slug: str) -> Upstream:
-        upstream = ModelMeta.model_validate({"name": slug, **self.read_raw_meta(slug)}).upstream
+        upstream = self._meta(slug, self.read_raw_meta(slug)).upstream
         if upstream is None:
             raise NoUpstreamError(slug)
         return upstream

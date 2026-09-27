@@ -1000,3 +1000,56 @@ def test_the_size_in_a_message_is_derived_from_the_limit() -> None:
         "1.5 MiB",
         "0.5 MiB",
     )
+
+
+# ── a model.json on disk, read as permissively as an uploaded one ─────────────
+
+
+def _place(paths: DataPaths, slug: str, meta: str) -> None:
+    """A model directory put on the volume by hand, as the user guide allows."""
+    paths.model_dir(slug).mkdir(parents=True)
+    paths.model_source(slug).write_text(SOURCE, encoding="utf-8")
+    paths.model_meta(slug).write_text(meta, encoding="utf-8")
+
+
+def test_nulls_in_a_model_json_on_disk_are_the_defaults(
+    client: TestClient, paths: DataPaths
+) -> None:
+    _place(
+        paths,
+        "placed",
+        json.dumps({"name": None, "description": None, "tags": None, "libraries": None}),
+    )
+
+    listed = _listed(client)["placed"]
+    assert (listed["name"], listed["description"], listed["tags"], listed["libraries"]) == (
+        "placed",
+        "",
+        [],
+        [],
+    )
+    assert client.get("/api/v1/models/placed").json()["name"] == "placed"
+
+
+@pytest.mark.parametrize(
+    ("meta", "named"), [('{"name": "Bad", "tags": 5}', "tags"), ("{not json", "not JSON")]
+)
+def test_an_invalid_model_json_on_disk_costs_only_its_own_model(
+    client: TestClient, paths: DataPaths, meta: str, named: str
+) -> None:
+    _create(client)
+    _place(paths, "broken", meta)
+
+    listing = client.get("/api/v1/models")
+    assert listing.status_code == 200
+    slugs = {model["slug"] for model in listing.json()}
+    assert SLUG in slugs
+    assert "broken" not in slugs
+
+    response = client.get("/api/v1/models/broken")
+    assert response.status_code == 409
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["title"] == "Invalid Model Metadata"
+    assert "model.json of 'broken' is not valid" in body["detail"]
+    assert named in body["detail"]
