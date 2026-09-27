@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.catalogue import DUPLICATE_STAGING_PREFIX, Catalogue, ModelMeta
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -166,7 +166,7 @@ def test_derived_state_is_not_copied(client: TestClient, paths: DataPaths) -> No
     assert not (paths.model_revisions / "my-keychain").exists()
     assert client.get("/api/v1/models/my-keychain/outputs").json() == []
     assert (paths.outputs / BUILTIN / "deadbeef").is_dir()
-    assert not any(path.name.startswith("duplicate-") for path in paths.cache.iterdir())
+    assert not any(path.name.startswith(DUPLICATE_STAGING_PREFIX) for path in paths.cache.iterdir())
 
 
 def test_a_name_is_refused_as_on_create(client: TestClient, model: str) -> None:
@@ -206,7 +206,7 @@ def test_a_duplicate_is_the_revision_it_records_as_base(
 
 
 def _no_staging_left(paths: DataPaths) -> bool:
-    return not any(path.name.startswith("duplicate-") for path in paths.cache.iterdir())
+    return not any(path.name.startswith(DUPLICATE_STAGING_PREFIX) for path in paths.cache.iterdir())
 
 
 def _interrupt_first_claim(monkeypatch: pytest.MonkeyPatch, interloper: Any) -> None:
@@ -325,12 +325,10 @@ def test_a_copy_deleted_right_after_its_commit_is_a_404_naming_the_copy(
     assert client.get(f"/api/v1/models/{BUILTIN}").status_code == 200
 
 
-def test_the_boot_sweeps_a_crashed_duplicates_staging(
-    app: FastAPI, bundled: Path, paths: DataPaths
-) -> None:
+def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataPaths) -> None:
     """A duplicate killed mid-copy leaves its staging folder; the next boot clears it,
     and leaves the rest of the cache alone (#212)."""
-    staged = paths.cache / "duplicate-dead" / "copy"
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}dead" / "copy"
     staged.mkdir(parents=True)
     (staged / "model.scad").write_text(SOURCE, encoding="utf-8")
     kept = paths.cache / "keep-me"
