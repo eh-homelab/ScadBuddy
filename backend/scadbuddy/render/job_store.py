@@ -24,7 +24,7 @@ import json
 import os
 import shutil
 import threading
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Protocol
@@ -93,6 +93,14 @@ class Reaped:
     failed: list[Job] = field(default_factory=list)
 
 
+class Listener(Protocol):
+    """Wakes this process's workers when any process queues a job."""
+
+    async def run(self) -> None:
+        """Listen until cancelled, reconnecting on its own; never returns otherwise."""
+        ...
+
+
 class JobBackend(Protocol):
     #: What `scadbuddy_render_store_info` reports this store as.
     backend: str
@@ -101,6 +109,22 @@ class JobBackend(Protocol):
         """Connect, and bring the schema up to date where there is one."""
 
     def close(self) -> None: ...
+
+    def listener(
+        self,
+        *,
+        on_notify: Callable[[], None],
+        on_state: Callable[[bool], None],
+        check_interval: float,
+    ) -> Listener | None:
+        """What tells this process that another one queued a job, or `None` when
+        every job is queued by this process (which wakes its own workers).
+
+        ``on_notify`` is called for each notification and once on every
+        (re)connect -- a job may have been queued while nothing listened;
+        ``on_state`` with whether the listener is connected; ``check_interval`` is
+        how often an idle connection is checked for a silent drop."""
+        ...
 
     def abandon_orphans(self) -> list[Job]:
         """At startup: fail the unfinished jobs nothing will ever finish."""
@@ -189,6 +213,16 @@ class JobStore:
 
     def close(self) -> None:
         pass
+
+    def listener(
+        self,
+        *,
+        on_notify: Callable[[], None],
+        on_state: Callable[[bool], None],
+        check_interval: float,
+    ) -> Listener | None:
+        # The wait list is this process's own: every submit already wakes its workers.
+        return None
 
     def write(self, job: Job) -> None:
         """Atomically: a status poll reads the file from another thread while a worker

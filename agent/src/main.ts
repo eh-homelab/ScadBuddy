@@ -1,13 +1,17 @@
 import { serve } from '@hono/node-server'
+import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
 import { FailClosedTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
+import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
+import { testConnection } from './harness/testConnection.js'
 import { nodeClientAddress } from './mcp/http.js'
+import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
@@ -28,16 +32,45 @@ try {
   process.exit(1)
 }
 
-const database = config.databaseUrl ? connectDatabase(config.databaseUrl) : undefined
+// Read once at start: rotating the key means restarting the pod (spec §9).
+// A missing or malformed file is not fatal; /healthz and Settings say why.
+const kek = await loadKek(config.secretKeyFile)
+if (!kek.ok) console.error(`secret key: ${kek.reason}; saving Claude credentials is disabled`)
+
+const database = config.databaseUrl
+  ? connectDatabase(config.databaseUrl, {
+      onMigrationError: (err) => console.error('database migrations failed:', (err as Error).message),
+    })
+  : undefined
+// Migrate in the background: a database that is down at start-up is retried
+// by the next /healthz or API call instead of stopping the pod.
+void database?.ready()
+const credentials = database ? new CredentialStore(database.sql) : undefined
+const settings = database ? new SettingsStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
+const paths = { stateDir: DEFAULT_STATE_DIR }
 
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
+  kek,
+  credentials,
+  testConnection: async (credential) => {
+    const model = await settings?.get<string>('model')
+    return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
+  },
+  remoteAddress: (c) => {
+    try {
+      return getConnInfo(c).remote.address
+    } catch {
+      return undefined
+    }
+  },
   mcp: {
     tools: ALL_TOOLS,
     services: { backend, pending: new PendingActionStore(), pollIntervalMs: 1000, renderWaitMs: 10 * 60_000 },
-    // TODO(#255): the Postgres token store and the Settings-backed auth mode.
+    // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
+    // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
     // Until then `bearer` (the default) verifies no token, so /mcp answers
     // 401 to every request in production: fail closed, not open.
     tokens: new FailClosedTokenStore(),

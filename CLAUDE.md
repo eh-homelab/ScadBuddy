@@ -47,8 +47,11 @@ pnpm lint && pnpm typecheck && pnpm test && pnpm build
 docker build --target agent -t scadbuddy-agent:dev .   # asserts CLAUDE_CODE_VERSION
 ```
 
-Tests never call Anthropic. `test/cliVersion.test.ts` runs the bundled Claude Code
-binary's `--version` only.
+Tests never call Anthropic. `test/run.test.ts` runs the bundled Claude Code binary
+against a local fake Anthropic endpoint; `test/pg.test.ts` needs
+`SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
+-e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
+`SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
 
 Generated files (the `freshness` job regenerates them on PRs and pushes a fix; run
 them yourself when you change an API model or route, in this order):
@@ -101,12 +104,27 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   as the Dockerfile's `agent` target and run as a sidecar container. `src/config.ts`
   reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` and
   `SCADBUDDY_SECRET_KEY_FILE` (no AI env vars; AI settings live in the database);
-  `src/app.ts` is the Hono server (`/healthz`); `src/harness/options.ts` builds every
-  query's SDK options (`tools: []`, `settingSources: []`); `src/api/backend.ts` is the
-  `openapi-fetch` client over the generated `src/api/schema.d.ts`. `src/tools/` is the
-  tool registry (#251): one `defineTool` per tool, projected in-process for the harness
-  and over `/mcp` (`src/mcp/http.ts`, auth in `src/auth/`); every `/api/v1` operation
-  needs a tool or a `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails. The design is
+  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
+  `/api/v1/ai/credentials`); `src/harness/options.ts` builds every query's SDK options
+  (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
+  top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
+  abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
+  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `src/api/backend.ts` is the `openapi-fetch` client over the generated
+  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
+  auth in `src/auth/`); every `/api/v1` operation needs a tool or a
+  `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
+  - Database: the agent owns the `ai_*` tables. Schema changes are appended to
+    `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
+    start under advisory lock "SCADAGNT", ledger `ai_migrations`, separate from the
+    backend's `scadbuddy_migrations`). Secrets are envelope-encrypted with
+    `src/secrets.ts` under the KEK in `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes,
+    base64; spec §9); comparable tokens are stored hashed instead.
+  - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
+    (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
+    (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
+    `SCADBUDDY_TEST_DATABASE_URL` is set, as in the backend; the `agent` CI job sets it. The design is
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`

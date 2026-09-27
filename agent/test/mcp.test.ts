@@ -6,7 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { createApp } from '../src/app.js'
 import { nodeClientAddress } from '../src/mcp/http.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { appFetch, BACKEND, connect, firstText, LAN, LOOPBACK, MCP_URL, services, testApp } from './helpers/mcp.js'
+import { appFetch, BACKEND, baseDeps, connect, firstText, LAN, LOOPBACK, MCP_URL, services, testApp } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
 // "Checks and tests"; spec §13): transport rules, auth per mode, the approval
@@ -333,21 +333,37 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
 
 describe('/mcp: fail closed', () => {
   it('answers 503 "AI disabled: no database" when no database is configured (spec §9)', async () => {
-    const app = createApp({
-      database: undefined,
-      backend: async () => true,
-      mcp: {
-        tools: ALL_TOOLS,
-        services: services(),
-        tokens: testApp().tokens,
-        authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward', allowedOrigins: [] }),
-        clientAddress: nodeClientAddress,
-      },
-    })
+    const app = createApp(
+      baseDeps({
+        database: undefined,
+        credentials: undefined,
+        mcp: {
+          tools: ALL_TOOLS,
+          services: services(),
+          tokens: testApp().tokens,
+          authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward', allowedOrigins: [] }),
+          clientAddress: nodeClientAddress,
+        },
+      }),
+    )
     const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
     expect(res.status).toBe(503)
     expect(await res.text()).toContain('AI disabled: no database')
     await expect(connect(app)).rejects.toMatchObject({ code: 503 })
+  })
+
+  it("answers 503 until the database's migrations have applied (db.ts ready())", async () => {
+    let migrated = false
+    const { app } = testApp({
+      settings: { mode: 'disabled' },
+      deps: { database: { ping: async () => true, ready: async () => migrated } },
+    })
+    const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(503)
+    expect(await res.text()).toContain('migrations')
+    migrated = true
+    const client = await open(app)
+    expect((await client.listTools()).tools.length).toBe(ALL_TOOLS.length)
   })
 
   it('falls back to bearer with no valid tokens when the auth settings cannot be read', async () => {

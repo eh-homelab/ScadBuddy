@@ -2,13 +2,14 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Hono } from 'hono'
 import { createBackendClient } from '../../src/api/backend.js'
-import { createApp } from '../../src/app.js'
+import { type AppDeps, createApp } from '../../src/app.js'
 import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../../src/auth/authenticate.js'
 import { InMemoryTokenStore, type TokenStore } from '../../src/auth/tokens.js'
 import { nodeClientAddress } from '../../src/mcp/http.js'
 import { ALL_TOOLS } from '../../src/tools/index.js'
 import { PendingActionStore } from '../../src/tools/pending.js'
 import type { ToolServices } from '../../src/tools/registry.js'
+import { MemoryCredentials } from '../support/memoryCredentials.js'
 
 // An in-process ScadBuddy agent app and MCP SDK Streamable HTTP clients that
 // talk to it without a socket: the client's `fetch` calls `app.fetch`, passing
@@ -35,6 +36,19 @@ export function services(overrides: Partial<ToolServices> = {}): ToolServices {
 
 export type TestApp = { app: Hono; tokens: TokenStore; settings: McpAuthSettings; services: ToolServices }
 
+/** The non-MCP app dependencies (#255's credential routes and health), with a database that is up and migrated. */
+export function baseDeps(overrides: Partial<AppDeps> = {}): AppDeps {
+  return {
+    database: { ping: async () => true, ready: async () => true },
+    backend: async () => true,
+    kek: { ok: false, reason: 'not needed by /mcp tests' },
+    credentials: new MemoryCredentials(),
+    testConnection: async () => ({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
+    remoteAddress: () => undefined,
+    ...overrides,
+  }
+}
+
 export function testApp(
   options: {
     settings?: Partial<McpAuthSettings>
@@ -42,17 +56,25 @@ export function testApp(
     services?: ToolServices
     /** Replaces the settings reader, e.g. with one that throws. */
     authSettings?: () => McpAuthSettings | Promise<McpAuthSettings>
+    /** Overrides for the rest of the app, e.g. a database whose migrations failed. */
+    deps?: Partial<AppDeps>
   } = {},
 ): TestApp {
   const settings = { ...DEFAULT_MCP_AUTH, ...options.settings }
   const tokens = options.tokens ?? new InMemoryTokenStore()
   const svc = options.services ?? services()
-  const app = createApp({
-    // /mcp is only mounted with a database (spec §9); tests never touch it.
-    database: { ping: async () => true },
-    backend: async () => true,
-    mcp: { tools: ALL_TOOLS, services: svc, tokens, authSettings: options.authSettings ?? (() => settings), clientAddress: nodeClientAddress },
-  })
+  const app = createApp(
+    baseDeps({
+      ...options.deps,
+      mcp: {
+        tools: ALL_TOOLS,
+        services: svc,
+        tokens,
+        authSettings: options.authSettings ?? (() => settings),
+        clientAddress: nodeClientAddress,
+      },
+    }),
+  )
   return { app, tokens, settings, services: svc }
 }
 

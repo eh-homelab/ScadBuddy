@@ -21,6 +21,13 @@ export interface RenderState {
   rendering: boolean
   error: Error | undefined
   /**
+   * #254 — the exact `params` object the settled `job` (or `error`) answers, by identity.
+   * Between a new submission's commit and its `rendering` flag, `job` is still the
+   * previous one; this is how a caller waiting on "the render of these values" tells.
+   * Only the newest submission sets it: a superseded one is stale before it settles.
+   */
+  settledFor: ParamValues | undefined
+  /**
    * Seconds until the submit is tried again, while the server's render queue is
    * full (503 with `retry_after`, only when SCADBUDDY_RENDER_QUEUE_MAX is set).
    * Not an error: the preview is still coming.
@@ -53,6 +60,7 @@ export function useRenderJob(
   const [job, setJob] = useState<Job | undefined>(undefined)
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
+  const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
   const [busy, setBusy] = useState<number | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
@@ -85,6 +93,7 @@ export function useRenderJob(
         setJob(next)
         if (next.status === 'done' || next.status === 'failed') {
           setRendering(false)
+          setSettledFor(params)
           return
         }
         timer = setTimeout(() => void poll(jobId), POLL_MS)
@@ -92,6 +101,7 @@ export function useRenderJob(
         if (isStale()) return
         setError(cause instanceof Error ? cause : new Error(String(cause)))
         setRendering(false)
+        setSettledFor(params)
       }
     }
 
@@ -131,6 +141,7 @@ export function useRenderJob(
         setBusy(undefined)
         setError(cause instanceof Error ? cause : new Error(String(cause)))
         setRendering(false)
+        setSettledFor(params)
       })
 
     return () => {
@@ -139,5 +150,5 @@ export function useRenderJob(
     }
   }, [slug, params, version])
 
-  return { job, rendering, error, busy }
+  return { job, rendering, error, busy, settledFor }
 }

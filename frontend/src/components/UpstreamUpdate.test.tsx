@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { setMockMergeFiles } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import type { UpstreamState } from '../api/types'
 import { renderPage } from '../test/utils'
@@ -120,6 +121,48 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(onChanged).not.toHaveBeenCalled()
     // Nothing was written: the resolution is the editor's to save.
     expect(await api.getSource(COPY)).toBe(ours)
+  })
+
+  it('lists no other files when only model.scad changed (#237)', async () => {
+    await duplicateWithUpdate()
+    const { user } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog')
+    await within(dialog).findByTestId('merge-result')
+
+    expect(dialog).not.toHaveTextContent('Also takes:')
+    expect(dialog).not.toHaveTextContent('Keeps yours')
+  })
+
+  it('lists the other files the update takes (#237)', async () => {
+    await duplicateWithUpdate()
+    setMockMergeFiles(COPY, { taken: ['README.md', 'presets.json'], kept: [] })
+    const { user } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog')
+    await within(dialog).findByTestId('merge-result')
+
+    expect(within(dialog).getByText('Also takes:')).toHaveTextContent(
+      'Also takes: README.md, presets.json',
+    )
+    expect(dialog).not.toHaveTextContent('Keeps yours')
+  })
+
+  it('lists the other files changed on both sides, which stay yours (#237)', async () => {
+    await duplicateWithUpdate()
+    setMockMergeFiles(COPY, { taken: [], kept: ['README.md'] })
+    const { user } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog')
+    await within(dialog).findByTestId('merge-result')
+
+    expect(within(dialog).getByText('Keeps yours, changed on both sides:')).toHaveTextContent(
+      'Keeps yours, changed on both sides: README.md',
+    )
+    expect(dialog).not.toHaveTextContent('Also takes:')
   })
 
   it('dismisses the update on Not now', async () => {
