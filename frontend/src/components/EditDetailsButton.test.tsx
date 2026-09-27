@@ -229,6 +229,39 @@ describe('EditDetailsButton', () => {
     expect(setThumbnail).toHaveBeenCalledWith('gridfinity-bin', png)
   })
 
+  it('shows the server\'s 422 when a file named .png is not a PNG by its bytes', async () => {
+    // The client checks a name or type; the server reads the signature. Node's own
+    // `File` and `FormData` stand in for jsdom's, so the real multipart PUT crosses
+    // into Node's fetch and reaches the mock's `_require_png`, not a spy.
+    const builtin = 'node:buffer'
+    const { File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File }
+    const NodeFormData = (
+      await new Response('a=b', {
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      }).formData()
+    ).constructor as typeof FormData
+    vi.stubGlobal('File', NodeFile)
+    vi.stubGlobal('FormData', NodeFormData)
+    try {
+      const setThumbnail = vi.spyOn(api, 'setThumbnail')
+      const { dialog, user, onSaved } = await open()
+
+      const renamed = new NodeFile(['GIF89a'], 'cover.png', { type: 'image/png' })
+      await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), renamed)
+      expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+      await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+      expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+        'the thumbnail is not a PNG',
+      )
+      expect(setThumbnail).toHaveBeenCalledWith('name-keychain', renamed)
+      expect(onSaved).not.toHaveBeenCalled()
+      expect((await api.getModel('name-keychain')).thumbnail_source).toBe('model')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it('refuses a thumbnail that is not a PNG', async () => {
     const { dialog, user } = await open()
 

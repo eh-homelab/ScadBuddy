@@ -5,6 +5,7 @@ The upstream is a local bare repository, so the clone is real and offline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -25,6 +26,7 @@ import scadbuddy.api.models as models_api
 import scadbuddy.library.libraries as libraries_module
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import ModelMeta, ModelRecord
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
@@ -650,3 +652,38 @@ def test_a_dropped_model_json_reads_the_lockfile_once(
 
     assert created.status_code == 201, created.text
     assert len(reads) == 1
+
+
+def test_a_create_given_libraries_but_no_lock_reads_it_off_the_event_loop(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_create` falls back to reading the lockfile itself when no caller passed
+    one, and that read is file I/O -- in a worker thread, never on the loop."""
+    add(lib_client, name="BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    real = libraries_module.read_lock
+    readers: list[int] = []
+
+    def recording(paths: DataPaths) -> Any:
+        readers.append(threading.get_ident())
+        return real(paths)
+
+    monkeypatch.setattr(models_api, "read_lock", recording)
+
+    async def create() -> tuple[int, ModelRecord]:
+        record = await models_api._create(
+            state.catalogue,
+            state.config,
+            asyncio.Semaphore(1),
+            slug=SLUG,
+            source=SOURCE,
+            meta=ModelMeta(name="Widget", libraries=["BOSL2"]),
+            force=False,
+        )
+        return threading.get_ident(), record
+
+    loop_thread, record = asyncio.run(create())
+
+    assert record.libraries == ["BOSL2"]
+    assert len(readers) == 1
+    assert readers[0] != loop_thread

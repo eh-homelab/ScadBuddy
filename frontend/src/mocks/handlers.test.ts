@@ -24,25 +24,64 @@ const BOUNDARY = 'scadbuddy-test-boundary'
 
 interface Part {
   name: string
-  value: string
+  /** Bytes for a part that must not be re-encoded as UTF-8, such as a PNG. */
+  value: string | Uint8Array
   filename?: string
 }
 
-function multipart(parts: Part[]): string {
-  return (
-    parts
-      .map(({ name, value, filename }) =>
-        [
-          `--${BOUNDARY}`,
-          `Content-Disposition: form-data; name="${name}"${filename ? `; filename="${filename}"` : ''}`,
-          ...(filename ? ['Content-Type: application/octet-stream'] : []),
-          '',
-          value,
-        ].join('\r\n'),
-      )
-      .join('\r\n') + `\r\n--${BOUNDARY}--\r\n`
-  )
+function multipart(parts: Part[]): Uint8Array<ArrayBuffer> {
+  const encoder = new TextEncoder()
+  const chunks = parts.flatMap(({ name, value, filename }) => [
+    encoder.encode(
+      [
+        `--${BOUNDARY}`,
+        `Content-Disposition: form-data; name="${name}"${filename ? `; filename="${filename}"` : ''}`,
+        ...(filename ? ['Content-Type: application/octet-stream'] : []),
+        '',
+        '',
+      ].join('\r\n'),
+    ),
+    typeof value === 'string' ? encoder.encode(value) : value,
+    encoder.encode('\r\n'),
+  ])
+  chunks.push(encoder.encode(`--${BOUNDARY}--\r\n`))
+  const body = new Uint8Array(chunks.reduce((total, chunk) => total + chunk.length, 0))
+  let offset = 0
+  for (const chunk of chunks) {
+    body.set(chunk, offset)
+    offset += chunk.length
+  }
+  return body
 }
+
+/** Node's own `File` as the global for a block's requests with a file part (see above). */
+function withNodeFile(): void {
+  // Imported by a computed name because the app's tsconfig (which covers these
+  // tests) deliberately carries no Node types.
+  let NodeFile: typeof File
+  beforeAll(async () => {
+    const builtin = 'node:buffer'
+    ;({ File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File })
+  })
+  beforeEach(() => {
+    vi.stubGlobal('File', NodeFile)
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+}
+
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/** A body that passes `_require_png`: the PNG signature, padded to `size` bytes. */
+function png(size = 16): Uint8Array {
+  const bytes = new Uint8Array(size)
+  bytes.set(PNG_MAGIC)
+  return bytes
+}
+
+const TOO_LARGE =
+  'the thumbnail is too large: 2097153 bytes, and a thumbnail is at most 2097152 bytes (2 MiB)'
 
 async function upload(
   fields: Record<string, string> = {},
@@ -60,19 +99,7 @@ async function upload(
 }
 
 describe('mock POST /models (multipart), as the backend resolves details', () => {
-  // Node's own `File`. Imported by a computed name because the app's tsconfig
-  // (which covers these tests) deliberately carries no Node types.
-  let NodeFile: typeof File
-  beforeAll(async () => {
-    const builtin = 'node:buffer'
-    ;({ File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File })
-  })
-  beforeEach(() => {
-    vi.stubGlobal('File', NodeFile)
-  })
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
+  withNodeFile()
 
   it('names a model after its slug when nothing else names it', async () => {
     const { status, body } = await upload()
@@ -174,6 +201,64 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     const { status, body } = await upload({ tags: '[not json' })
     expect(status).toBe(422)
     expect(body.detail).toBe('tags is not valid JSON')
+  })
+
+  async function uploadThumbnail(thumbnail: Uint8Array) {
+    const response = await fetch('/api/v1/models', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart([
+        { name: 'file', value: 'cube(10);\n', filename: 'widget.scad' },
+        { name: 'thumbnail', value: thumbnail, filename: 'thumbnail.png' },
+      ]),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('takes a thumbnail that is a PNG by its bytes', async () => {
+    const { status, body } = await uploadThumbnail(png())
+    expect(status).toBe(201)
+    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+  })
+
+  it.each([
+    ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
+    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+  ])('refuses a thumbnail that %s, as _require_png does, and creates nothing', async (_, bytes, detail) => {
+    const { status, body } = await uploadThumbnail(bytes)
+    expect(status).toBe(422)
+    expect(body.detail).toBe(detail)
+    expect((await api.listModels()).some((model) => model.slug === 'widget')).toBe(false)
+  })
+})
+
+describe('mock PUT /models/:slug/thumbnail, as _require_png holds it', () => {
+  withNodeFile()
+
+  async function put(bytes: Uint8Array) {
+    const response = await fetch('/api/v1/models/name-keychain/thumbnail', {
+      method: 'PUT',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart([{ name: 'file', value: bytes, filename: 'cover.png' }]),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('sets a PNG within the limit', async () => {
+    const { status, body } = await put(png())
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+  })
+
+  it.each([
+    ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
+    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+  ])('refuses one that %s with the backend\'s 422, and changes nothing', async (_, bytes, detail) => {
+    const before = await api.getModel('name-keychain')
+    const { status, body } = await put(bytes)
+    expect(status).toBe(422)
+    expect(body.detail).toBe(detail)
+    expect(await api.getModel('name-keychain')).toEqual(before)
   })
 })
 

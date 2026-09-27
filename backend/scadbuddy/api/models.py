@@ -566,16 +566,12 @@ async def _create(
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
     # The libraries a dropped model.json declares (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create.
-    library_path = (
-        await asyncio.to_thread(
-            search_path,
-            catalogue.paths,
-            meta.libraries,
-            lock if lock is not None else read_lock(catalogue.paths),
-        )
-        if meta.libraries
-        else ()
-    )
+    library_path: tuple[Path, ...] = ()
+    if meta.libraries:
+        if lock is None:
+            # A file read, so off the event loop like the search below.
+            lock = await asyncio.to_thread(read_lock, catalogue.paths)
+        library_path = await asyncio.to_thread(search_path, catalogue.paths, meta.libraries, lock)
     checked = await _guard_source(
         source, config=replace(config, library_path=library_path), force=force, limit=limit
     )

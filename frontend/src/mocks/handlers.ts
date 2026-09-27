@@ -40,6 +40,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { MAX_THUMBNAIL_BYTES, MAX_THUMBNAIL_SIZE } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
@@ -357,6 +358,29 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/**
+ * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
+ * bytes -- not its name or type -- and at most `MAX_THUMBNAIL_BYTES`. The 422 the
+ * backend answers, or null when the upload passes.
+ */
+async function thumbnailRefusal(upload: File) {
+  const bytes = new Uint8Array(await upload.arrayBuffer())
+  if (bytes.length < PNG_MAGIC.length || PNG_MAGIC.some((byte, i) => bytes[i] !== byte)) {
+    return problem(422, 'Unprocessable Content', 'the thumbnail is not a PNG')
+  }
+  if (bytes.length > MAX_THUMBNAIL_BYTES) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `the thumbnail is too large: ${bytes.length} bytes, ` +
+        `and a thumbnail is at most ${MAX_THUMBNAIL_BYTES} bytes (${MAX_THUMBNAIL_SIZE})`,
+    )
+  }
+  return null
+}
+
 /**
  * A multipart text field as the backend receives it: FastAPI reads an empty string
  * as the field being absent.
@@ -533,6 +557,10 @@ export const handlers = [
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '')
+    if (thumbnailPart) {
+      const refused = await thumbnailRefusal(thumbnailPart)
+      if (refused) return refused
+    }
     // As `create_model` resolves them: the form field, then the model.json, then
     // the default -- and a name is the first that is not blank, stripped.
     const model: ModelSummary = {
@@ -818,10 +846,17 @@ export const handlers = [
   }),
 
   // Multipart with a `file` part, like the output thumbnail PUT.
-  http.put(`${base}/models/:slug/thumbnail`, ({ params }) => {
+  http.put(`${base}/models/:slug/thumbnail`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const refused = refuseBuiltin(slug)
     if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const upload = (await request.formData()).get('file')
+    if (upload === null || typeof upload === 'string') {
+      return problem(422, 'Unprocessable Content', 'the upload needs a file part')
+    }
+    const notPng = await thumbnailRefusal(upload as File)
+    if (notPng) return notPng
     const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
     const updated = reviseModel(
       slug,
