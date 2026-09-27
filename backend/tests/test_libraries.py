@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,52 @@ def test_a_new_ref_is_a_second_checkout_beside_the_first(
     assert sorted(entry.name for entry in (paths.libraries / "BOSL2").iterdir()) == sorted(
         [commits["v1"], commits["v2"]]
     )
+
+
+def test_a_clone_that_finds_its_commit_already_there_keeps_that_checkout(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """The rename onto an existing checkout fails; the tree there is the same commit,
+    so the clone gives way to it and leaves no staging directory behind."""
+    _, commits = upstream
+    first = store.resolve("BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2"
+    marker = checkout / ".first"
+    marker.write_text("", encoding="utf-8")
+
+    second = store.resolve("BOSL2")
+
+    assert second == first
+    assert marker.is_file()
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+
+
+def test_concurrent_clones_of_one_commit_both_succeed(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    barrier = threading.Barrier(2)
+    results: list[ModelLibrary] = []
+    errors: list[BaseException] = []
+
+    def resolve() -> None:
+        barrier.wait(10)
+        try:
+            results.append(store.resolve("BOSL2"))
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [threading.Thread(target=resolve) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(30)
+
+    assert errors == []
+    assert [pin.commit for pin in results] == [commits["v1"]] * 2
+    checkout = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
+    assert checkout.read_text(encoding="utf-8") == V1
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
 
 
 def test_the_catalogue_is_what_can_be_suggested(store: LibraryStore) -> None:

@@ -241,4 +241,37 @@ describe('ModelLibrariesButton', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent('Libraries1')
   })
+
+  it("keeps the open dialog's read when the first read lands after it", async () => {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const model = models.find((entry) => entry.slug === 'name-keychain')
+    const stale = {
+      name: 'BOSL2',
+      url: BOSL2_URL,
+      ref: 'v2.0.700',
+      commit: 'b'.repeat(40),
+    }
+    server.use(
+      http.get(
+        '/api/v1/models/:slug',
+        async () => {
+          await held
+          return HttpResponse.json({ ...model, libraries: [stale] })
+        },
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user)
+    expect(await within(dialog).findByText(/None yet/)).toBeInTheDocument()
+
+    release()
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(dialog).getByText(/None yet/)).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent(/^Libraries$/)
+  })
 })

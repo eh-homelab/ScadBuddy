@@ -37,13 +37,14 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // under the user between two pins.
   const dirty = useRef(false)
   const openRef = useRef(false)
-  // Bumped by every pin/unpin. A read started before one must not land after it and
-  // put back the pins it replaced.
+  // Bumped by every read as it starts and every pin/unpin as it lands: only the
+  // latest of them may set what the dialog shows. A read overtaken by a newer read,
+  // or by a pin, would otherwise land late and put back what it replaced.
   const generation = useRef(0)
 
   useEffect(() => {
     let live = true
-    const started = generation.current
+    const started = ++generation.current
     api
       .getModel(slug)
       .then((model) => {
@@ -61,13 +62,14 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     dirty.current = false
     setCatalogue(null)
     setError(null)
-    const started = generation.current
+    const started = ++generation.current
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
-      if (generation.current === started) setPins(model.libraries ?? [])
+      if (generation.current !== started) return
+      setPins(model.libraries ?? [])
       setCatalogue(libraries)
     } catch (caught) {
-      setError(message(caught))
+      if (generation.current === started) setError(message(caught))
     }
   }
 
