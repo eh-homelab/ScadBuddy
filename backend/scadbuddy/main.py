@@ -16,6 +16,7 @@ from scadbuddy.api import (
     jobs,
     libraries,
     lsp,
+    metrics,
     models,
     outputs,
     plates,
@@ -28,6 +29,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad
 from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
+from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 
@@ -141,13 +143,16 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         version=__version__,
         lifespan=lifespan,
     )
-    setattr(app.state, STATE_ATTR, build_state(app_settings))
+    state = build_state(app_settings)
+    setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
+    app.add_middleware(HttpMetrics, metrics=state.metrics)
     # Outermost, so an oversized body is refused on its headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 
     app.include_router(health.router)
+    app.include_router(metrics.router)
     app.include_router(_api_router())
     _name_in_openapi(app, models.PastedSource)
 

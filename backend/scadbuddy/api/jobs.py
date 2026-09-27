@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
+    JOB_ID_PATTERN,
     CatalogueDep,
     ConfigDep,
     HistoryDep,
@@ -21,7 +22,14 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, resolve_source
+from scadbuddy.render.jobs import (
+    Job,
+    JobState,
+    PartInfo,
+    QueueFullError,
+    RenderQueue,
+    resolve_source,
+)
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
 from scadbuddy.render.schema import ParamValue
 
@@ -35,6 +43,10 @@ class RenderRequest(BaseModel):
     # #90's "Customize this version": render an old revision without restoring it.
     # Omitted means the revision the model is currently at.
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+    # The job this render replaces -- the preview's previous submit. Dropped unrendered
+    # if no worker has taken it yet, so a slider drag does not queue every stop on
+    # the way. Harmless when it has already started or finished.
+    supersedes: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
 
 
 class RenderAccepted(BaseModel):
@@ -110,6 +122,11 @@ def require_job(queue: RenderQueue, job_id: str) -> Job:
     response_model=RenderAccepted,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": "The render queue is full; retry after `Retry-After` seconds"
+        }
+    },
 )
 async def render_model(
     slug: SlugPath,
@@ -157,7 +174,17 @@ async def render_model(
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
-    job = await queue.submit(slug, body.params, model_version=source.version)
+    try:
+        job = await queue.submit(
+            slug, body.params, model_version=source.version, supersedes=body.supersedes
+        )
+    except QueueFullError as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 

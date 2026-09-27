@@ -164,8 +164,9 @@ async def test_concurrency_is_capped_by_the_config(paths: DataPaths) -> None:
     queue = RenderQueue(replace(CONFIG, render_concurrency=2), paths, render=slow)
     await queue.start()
     try:
-        for _ in range(4):
-            await queue.submit("demo", {})
+        # Distinct parameters: identical waiting renders would coalesce into one job.
+        for n in range(4):
+            await queue.submit("demo", {"n": n})
         await asyncio.sleep(0.05)
         assert peak == 2
         release.set()

@@ -2715,6 +2715,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -3602,6 +3604,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description The render queue is full; retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

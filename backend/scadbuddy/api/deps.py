@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import Depends, Path, Request
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
@@ -43,6 +44,7 @@ class AppState:
     fonts: FontService
     libraries: LibraryStore
     queue: RenderQueue
+    metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -68,6 +70,8 @@ def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
     return AppState(
         settings=settings,
         config=config,
@@ -82,7 +86,8 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, history),
-        queue=RenderQueue(config, paths, history=history),
+        queue=RenderQueue(config, paths, history=history, metrics=metrics),
+        metrics=metrics,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
     )

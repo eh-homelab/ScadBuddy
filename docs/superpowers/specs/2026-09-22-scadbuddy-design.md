@@ -463,6 +463,22 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 - One job at a time per worker; a small in-process queue (asyncio) with
   `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
+- The queue keeps a render's latency bounded under load (`RenderQueue`):
+  - **Supersede.** A render request may name the job it replaces
+    (`supersedes`); the preview's debounce sends its previous unsettled job, which
+    is dropped unrendered if no worker has taken it (failed as superseded).
+  - **Coalesce.** A request identical to a job still *waiting* (same model,
+    revision and parameters) is answered with that job. Never a running one: it
+    has already read its source, and an edit since would be served stale.
+  - **Admission.** Past `SCADBUDDY_RENDER_QUEUE_MAX` waiting jobs (default 16) a
+    request is refused with 503 and `Retry-After` (about one mean render).
+  - **Deadline.** A job that waited longer than `SCADBUDDY_RENDER_QUEUE_TIMEOUT`
+    (default 300 s; 0 disables) for a worker is failed unrendered.
+- `GET /metrics` (Prometheus text) reports queue depth and capacity, running jobs,
+  submissions/coalesced/rejected, jobs finished by outcome
+  (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
+  submit-to-settled latency and per-stage time (`source`, `render`, `split`,
+  `solids`, `thumbnail`, `write`), and HTTP requests by route template.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:
@@ -658,6 +674,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 

@@ -9,6 +9,13 @@ DEFAULT_OPENSCAD = "openscad"
 DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
 DEFAULT_RENDER_CONCURRENCY = 2
+# Admission control for the render queue: how many jobs may wait behind the workers
+# before a submit is refused (503 + Retry-After) rather than queued behind work that
+# cannot start for minutes. Coalesced and superseded submissions do not count.
+DEFAULT_RENDER_QUEUE_MAX = 16
+# How long a job may wait for a worker before it is failed unrendered. A preview
+# nobody has looked at for this long is not worth a worker; 0 disables the deadline.
+DEFAULT_RENDER_QUEUE_TIMEOUT = 300.0
 # The editor's parse check does not go through the render queue, so it carries its own
 # budget rather than borrowing the render one: the pod's worst case is the two added
 # together, and that is a number worth declaring rather than discovering. One is
@@ -30,6 +37,8 @@ class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
+    render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
@@ -52,6 +61,16 @@ class Config:
             raise ValueError(
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
+        # Zero would refuse every render; say so by name rather than as a 503 storm.
+        if self.render_queue_max < 1:
+            raise ValueError(
+                f"SCADBUDDY_RENDER_QUEUE_MAX must be at least 1, not {self.render_queue_max}"
+            )
+        if self.render_queue_timeout < 0:
+            raise ValueError(
+                "SCADBUDDY_RENDER_QUEUE_TIMEOUT must be at least 0 (0 disables it), "
+                f"not {self.render_queue_timeout}"
+            )
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
             raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
@@ -66,6 +85,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         render_timeout=float(source.get("SCADBUDDY_RENDER_TIMEOUT") or DEFAULT_RENDER_TIMEOUT),
         render_concurrency=int(
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
+        ),
+        render_queue_max=int(source.get("SCADBUDDY_RENDER_QUEUE_MAX") or DEFAULT_RENDER_QUEUE_MAX),
+        render_queue_timeout=float(
+            source.get("SCADBUDDY_RENDER_QUEUE_TIMEOUT") or DEFAULT_RENDER_QUEUE_TIMEOUT
         ),
         check_concurrency=int(
             source.get("SCADBUDDY_CHECK_CONCURRENCY") or DEFAULT_CHECK_CONCURRENCY

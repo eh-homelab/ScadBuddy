@@ -4388,6 +4388,18 @@
             "title": "Params",
             "type": "object"
           },
+          "supersedes": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes"
+          },
           "version": {
             "anyOf": [
               {
@@ -6140,6 +6152,9 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "The render queue is full; retry after `Retry-After` seconds"
           }
         },
         "summary": "Queue a render",

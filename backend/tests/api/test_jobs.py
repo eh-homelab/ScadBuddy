@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from unittest import mock
+
 from fastapi.testclient import TestClient
 
+from scadbuddy.render.jobs import QueueFullError, RenderQueue
 from tests.api.conftest import FAIL_WIDTH, wait_for_job
 
 
@@ -83,3 +86,35 @@ def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:
 def test_an_unknown_job_is_a_404(client: TestClient) -> None:
     assert client.get("/api/v1/jobs/" + "0" * 32).status_code == 404
     assert client.get("/api/v1/jobs/not-a-job-id").status_code == 422
+
+
+def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model: str) -> None:
+    full = mock.AsyncMock(side_effect=QueueFullError(depth=16, retry_after=7))
+    with mock.patch.object(RenderQueue, "submit", full):
+        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
+    assert response.status_code == 503
+    assert response.headers["retry-after"] == "7"
+    assert response.headers["content-type"] == "application/problem+json"
+    body = response.json()
+    assert body["retry_after"] == 7
+    assert "queue is full" in body["detail"]
+
+
+def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str) -> None:
+    first = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 11}})
+    second = client.post(
+        f"/api/v1/models/{model}/render",
+        json={"params": {"width": 12}, "supersedes": first.json()["job_id"]},
+    )
+    assert second.status_code == 202
+    # The stub renders at once, so the first has usually started: either way both
+    # settle, and the newer one is rendered.
+    assert wait_for_job(client, second.json()["job_id"])["status"] == "done"
+    assert wait_for_job(client, first.json()["job_id"])["status"] in ("done", "failed")
+
+
+def test_supersedes_must_be_a_job_id(client: TestClient, model: str) -> None:
+    response = client.post(
+        f"/api/v1/models/{model}/render", json={"params": {}, "supersedes": "../etc"}
+    )
+    assert response.status_code == 422

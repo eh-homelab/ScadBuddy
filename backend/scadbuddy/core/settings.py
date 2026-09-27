@@ -14,6 +14,8 @@ from scadbuddy.core.config import (
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_RENDER_CONCURRENCY,
+    DEFAULT_RENDER_QUEUE_MAX,
+    DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     Config,
 )
@@ -34,6 +36,8 @@ class Settings(BaseSettings):
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
+    render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
@@ -73,6 +77,8 @@ class Settings(BaseSettings):
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
+            render_queue_max=self.render_queue_max,
+            render_queue_timeout=self.render_queue_timeout,
             check_concurrency=self.check_concurrency,
             job_ttl=self.job_ttl,
             google_fonts_api_key=self.google_fonts_api_key,
