@@ -21,6 +21,8 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import scadbuddy.api.models as models_api
+import scadbuddy.library.libraries as libraries_module
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.libraries import (
@@ -628,3 +630,23 @@ def test_a_dropped_model_json_cannot_declare_a_library_whose_lock_entry_is_broke
     assert refused.status_code == 409, refused.text
     assert "libraries.lock entry 'BOSL2' is not valid" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_reads_the_lockfile_once(
+    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin check and the parse check's OPENSCADPATH share one read of it."""
+    add(lib_client, name="BOSL2")
+    reads: list[object] = []
+    real = libraries_module.read_lock
+
+    def counting(paths: DataPaths) -> Any:
+        reads.append(paths)
+        return real(paths)
+
+    monkeypatch.setattr(models_api, "read_lock", counting)
+
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+
+    assert created.status_code == 201, created.text
+    assert len(reads) == 1

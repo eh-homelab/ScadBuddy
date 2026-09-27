@@ -23,7 +23,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths, is_builtin
+from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import (
     Catalogue,
@@ -40,7 +40,7 @@ from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
 )
-from scadbuddy.library.libraries import model_search_path, read_lock, search_path
+from scadbuddy.library.libraries import Lock, model_search_path, read_lock, search_path
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -405,9 +405,11 @@ async def create_model(
     # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
     # directory lands with the same metadata its bundled built-in has.
     base = _read_meta_file(await meta.read(), slug) if meta is not None else ModelMeta(name=slug)
-    if base.libraries:
-        # A model.json may declare libraries (#93); held to what PATCH holds it to.
-        base.libraries = await asyncio.to_thread(_require_pinned, catalogue.paths, base.libraries)
+    # A model.json may declare libraries (#93); held to what PATCH holds it to. The
+    # lockfile is read once, here, and the parse check's path is built from it too.
+    lock = await asyncio.to_thread(read_lock, catalogue.paths) if base.libraries else None
+    if lock is not None:
+        base.libraries = _require_pinned(lock, base.libraries)
     parsed_tags = _parse_tags(tags)
 
     return await _create(
@@ -437,6 +439,7 @@ async def create_model(
         force=force,
         thumbnail=thumbnail_bytes,
         readme=readme_text,
+        lock=lock,
     )
 
 
@@ -449,7 +452,7 @@ def _first_name(*candidates: str | None) -> str:
     raise ValueError("every name candidate is blank")
 
 
-def _require_pinned(paths: DataPaths, libraries: list[str]) -> list[str]:
+def _require_pinned(lock: Lock, libraries: list[str]) -> list[str]:
     """Only a pinned library can be declared: the render has nothing to put on
     OPENSCADPATH for any other (#93). The declaration, de-duplicated.
 
@@ -457,7 +460,6 @@ def _require_pinned(paths: DataPaths, libraries: list[str]) -> list[str]:
     broken is refused as it would fail every render (LockfileError, #216); one
     with no entry at all needs adding first.
     """
-    lock = read_lock(paths)
     missing = [name for name in libraries if lock.pin(name) is None]
     if missing:
         raise ApiError(
@@ -466,12 +468,6 @@ def _require_pinned(paths: DataPaths, libraries: list[str]) -> list[str]:
             libraries=missing,
         )
     return list(dict.fromkeys(libraries))
-
-
-def _declared_path(paths: DataPaths, libraries: list[str]) -> tuple[Path, ...]:
-    """The OPENSCADPATH for a declaration not yet on disk: :func:`search_path`
-    against the lockfile as it is."""
-    return search_path(paths, libraries, read_lock(paths))
 
 
 def _require_png(payload: bytes) -> bytes:
@@ -498,6 +494,10 @@ def _readme_text(payload: bytes) -> str:
         ) from None
 
 
+#: The model.json fields with a default and no `None` of their own.
+_DEFAULTED = frozenset({"name", "description", "tags", "libraries"})
+
+
 def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     """A ``model.json`` part, read the way the catalogue reads one from disk."""
     refusal = "the model.json is not valid JSON"
@@ -508,6 +508,10 @@ def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     raw = _client_json(text, refusal)
     if not isinstance(raw, dict):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
+    # A `null` for a field that has a default is the field left out, as a missing
+    # or blank one is: the name falls through to the slug, the rest to their
+    # defaults, rather than failing validation.
+    raw = {key: value for key, value in raw.items() if not (key in _DEFAULTED and value is None)}
     try:
         return ModelMeta.model_validate({"name": slug, **raw})
     except ValidationError as error:
@@ -544,14 +548,24 @@ async def _create(
     force: bool,
     thumbnail: bytes | None = None,
     readme: str | None = None,
+    lock: Lock | None = None,
 ) -> ModelRecord:
-    """The one path every create takes, whatever carried the source in."""
+    """The one path every create takes, whatever carried the source in.
+
+    ``lock`` is the lockfile a dropped model.json's ``libraries`` were checked
+    against, passed on so it is not read a second time.
+    """
     if catalogue.exists(slug):
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
     # The libraries a dropped model.json declares (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create.
     library_path = (
-        await asyncio.to_thread(_declared_path, catalogue.paths, meta.libraries)
+        await asyncio.to_thread(
+            search_path,
+            catalogue.paths,
+            meta.libraries,
+            lock if lock is not None else read_lock(catalogue.paths),
+        )
         if meta.libraries
         else ()
     )
@@ -672,7 +686,7 @@ def patch_model(
     require_mine(slug)
     require_model(catalogue, slug)
     if patch.libraries is not None:
-        patch.libraries = _require_pinned(paths, patch.libraries)
+        patch.libraries = _require_pinned(read_lock(paths), patch.libraries)
     try:
         return catalogue.update(slug, patch)
     except ModelNotFoundError:

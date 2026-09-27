@@ -823,6 +823,26 @@ def test_blank_fields_without_a_model_json_give_the_defaults(client: TestClient)
     assert (response.json()["description"], response.json()["tags"]) == ("", [])
 
 
+def test_a_null_in_a_model_json_is_the_field_left_out(client: TestClient) -> None:
+    """`null` falls through like a missing or blank value: the name to the slug, the
+    rest to their defaults -- not a validation 422."""
+    body = _create_with_meta(
+        client, {"name": None, "description": None, "tags": None, "libraries": None}
+    )
+    assert (body["name"], body["description"], body["tags"], body["libraries"]) == (
+        SLUG,
+        "",
+        [],
+        [],
+    )
+
+
+def test_a_null_model_json_name_still_yields_to_the_form(client: TestClient) -> None:
+    assert _create_with_meta(client, {"name": None}, data={"name": "From Form"})["name"] == (
+        "From Form"
+    )
+
+
 def test_a_model_json_name_is_stored_stripped(client: TestClient) -> None:
     assert _create_with_meta(client, {"name": "  Widget  "})["name"] == "Widget"
 

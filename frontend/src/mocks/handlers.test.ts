@@ -84,6 +84,11 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body.name).toBe('widget')
   })
 
+  it('treats null model.json fields as absent, as the backend does', async () => {
+    const { body } = await upload({}, { name: null, description: null, tags: null })
+    expect(body).toMatchObject({ name: 'widget', description: '', tags: [] })
+  })
+
   it('takes the model.json name, stripped', async () => {
     const { body } = await upload({}, { name: '  Widget Deluxe  ' })
     expect(body.name).toBe('Widget Deluxe')
