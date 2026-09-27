@@ -941,6 +941,24 @@ def test_one_template_that_cannot_be_linked_does_not_stop_the_rest(
     ]
 
 
+def test_a_freshly_linked_seeded_template_has_no_update_until_its_built_in_changes(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+
+    catalogue.link_seeded()
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.state == "current"
+    assert status.upstream.path == "_builtin/name-keychain"
+    assert status.upstream.base == status.revision
+    assert _merge(catalogue, "name-keychain") == KEYCHAIN
+
+
 def test_a_linked_seeded_template_takes_a_built_in_update(
     catalogue: Catalogue, tmp_path: Path
 ) -> None:

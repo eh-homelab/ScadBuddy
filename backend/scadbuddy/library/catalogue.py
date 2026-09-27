@@ -775,7 +775,9 @@ class Catalogue:
         commit: the seeded source is the true merge base, so an unedited one
         merges cleanly to the current built-in and an edited one keeps its edits.
         Nothing is renamed, so outputs, ``model_version`` stamps and deep links
-        still point where they did.
+        still point where they did. When the built-in has not changed since the
+        seed, ``base`` is its current revision instead (see :meth:`_seeded_base`),
+        so a freshly linked template reports no update.
 
         Runs at boot, after :meth:`sync_builtins`. Idempotent: a linked model has
         an ``upstream``, so a second boot finds nothing to do and commits nothing.
@@ -790,7 +792,7 @@ class Catalogue:
         except OSError:
             logger.exception("could not link seeded templates to their built-ins")
             return None
-        seeds: dict[str, str] = {}
+        seeds: dict[str, tuple[str, str]] = {}
         for slug in candidates:
             try:
                 if self.read_raw_meta(slug).get("upstream") is not None:
@@ -805,7 +807,7 @@ class Catalogue:
                     extra={"slug": slug},
                 )
                 continue
-            seeds[slug] = base
+            seeds[slug] = self._seeded_base(slug, base)
         if not seeds:
             return None
         linked: list[str] = []
@@ -813,13 +815,13 @@ class Catalogue:
         def link() -> None:
             # Re-read under the write lock: the read-modify-write of each
             # `model.json` is atomic with the commit, as every other one is.
-            for slug, base in seeds.items():
+            for slug, (base, path) in seeds.items():
                 try:
                     raw = self.read_raw_meta(slug)
                     if raw.get("upstream") is not None:
                         continue
                     raw["upstream"] = Upstream(
-                        id=f"{BUILTIN_PREFIX}{slug}", path=model_path(slug), base=base
+                        id=f"{BUILTIN_PREFIX}{slug}", path=path, base=base
                     ).model_dump()
                     self.write_raw_meta(slug, raw)
                 except (OSError, ValueError, ModelNotFoundError):
@@ -831,6 +833,23 @@ class Catalogue:
         if linked:
             logger.info("linked seeded templates to their built-ins", extra={"slugs": linked})
         return commit
+
+    def _seeded_base(self, slug: str, seed: str) -> tuple[str, str]:
+        """The ``(base, path)`` a seeded template links with: the built-in's current
+        revision when it is still what was seeded -- so an unchanged built-in is no
+        update -- and otherwise the seed commit, where the source lived at ``slug``.
+        ``model.json`` is each template's own, so it is not compared."""
+        assert self.history is not None
+        builtin = model_path(f"{BUILTIN_PREFIX}{slug}")
+        revision = self.history.last_commit(builtin)
+        if revision is not None:
+            seeded = self.history.blobs(seed, model_path(slug))
+            current = self.history.blobs(revision, builtin)
+            seeded.pop(MODEL_META_NAME, None)
+            current.pop(MODEL_META_NAME, None)
+            if seeded == current:
+                return revision, builtin
+        return seed, model_path(slug)
 
     def _replace_builtin(self, source: Path, target: Path) -> None:
         """Copy ``source`` over ``target`` without ever leaving a half-copied mirror.

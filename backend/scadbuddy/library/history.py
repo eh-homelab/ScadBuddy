@@ -476,6 +476,14 @@ class ModelHistory:
                 return None
         return None
 
+    def blobs(self, commit: str, path: str) -> dict[str, str]:
+        """Each file under ``path`` at ``commit``, relative to ``path``, to its blob id."""
+        blobs: dict[str, str] = {}
+        for line in self._out("ls-tree", "-r", commit, "--", f"{path}/").splitlines():
+            meta, _, name = line.partition("\t")
+            blobs[name.removeprefix(f"{path}/")] = meta.split()[2]
+        return blobs
+
     def last_commits(self) -> dict[str, str]:
         """Every model's current revision, from ONE walk of the history.
 
