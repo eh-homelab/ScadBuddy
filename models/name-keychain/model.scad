@@ -17,16 +17,16 @@ font = "Lobster Two:style=Bold"; // font
 
 /* [Size] */
 
-// Letter height in mm, from the top of the capitals to the bottom of the descenders
+// Letter height in mm, from the top of the capitals to the bottom of the descenders (a name too long for the 300 mm bed is shrunk to fit)
 text_size = 20; // [8:0.5:40]
 
-// How far the letters stand proud of the base
+// How far the letters stand proud of the base, in mm
 letter_height = 2.8; // [1:0.1:5]
 
-// Thickness of the base plate under the letters
+// Thickness of the base plate under the letters, in mm
 base_thickness = 4; // [2:0.5:8]
 
-// Width of the border the base adds around the letters
+// Width of the border the base adds around the letters, in mm
 outline = 3.5; // [1:0.5:6]
 
 /* [Keyring] */
@@ -34,10 +34,10 @@ outline = 3.5; // [1:0.5:6]
 // Add a keyring hole at the left-hand end
 hole = true;
 
-// Keyring hole diameter
+// Keyring hole diameter in mm
 hole_diameter = 4; // [2:0.5:8]
 
-// Material left around the keyring hole
+// Material left around the keyring hole, in mm
 ring_wall = 1.6; // [1:0.1:4]
 
 /* [Colours] */
@@ -68,12 +68,34 @@ function ring_radius() = hole_diameter / 2 + ring_wall;
 // origin, far enough out that the tab still overlaps the base's border.
 function ring_centre() = [-(outline + ring_radius() * 0.6), 0];
 
+// Longest word that still fits the H2C's 300 mm two-nozzle width, with the
+// border on both ends, the keyring tab and a little margin.
+bed_x = 300;
+max_word = bed_x - 4 - 2 * outline - (hole ? 1.6 * ring_radius() : 0);
+
+// Shrink-only fit: resize() the children together with their mirror image
+// and a hair-thin bar from x = -w to w, all on separate layers, then cut the
+// children's layer back out. The bounding box is symmetric about x = 0, so a
+// word that ends before x = w is left alone (a glyph reaching a little left
+// of the origin does not count) and a longer one is scaled down uniformly
+// about the origin, keeping it centred on the keyring tab, until it ends at w.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([2 * w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([0, 0, 5]) linear_extrude(1) mirror([1, 0]) children();
+                translate([-w, 0, 10]) cube([2 * w, 0.01, 0.01]);
+            }
+}
+
 // The word itself. halign/valign put the text origin at the left-hand end, on
 // the vertical centre of the line, which is what the keyring tab is placed
 // against — no text measurement needed, so this stays portable.
 module glyphs_2d() {
-    text(name, size = text_size, font = font, spacing = spacing,
-         halign = "left", valign = "center");
+    fit_x(max_word)
+        text(name, size = text_size, font = font, spacing = spacing,
+             halign = "left", valign = "center");
 }
 
 module name_2d() {

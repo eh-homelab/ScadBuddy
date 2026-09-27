@@ -83,11 +83,13 @@ CASES = [
                            tray_shape="cloud")),
     ("other-font", dict(name="MAX", font="Noto Serif:style=Bold", knobs=True)),
     ("train-ten", dict(name="BARTHOLOME", letter_size=25, tray_shape="train", tray_margin=4)),
+    ("rect-shrunk", dict(name="ALEXANDRA", letter_size=30)),
+    ("cloud-shrunk", dict(name="MAXIMILIAN", letter_size=70, tray_shape="cloud")),
     ("empty", dict(name="")),
     ("spaces", dict(name="   ", tray_shape="train")),
 ]
 FIT_CASES = ["defaults", "cloud-lobster", "train-knobs", "big-clamped", "small-generic",
-             "other-font", "train-ten"]
+             "other-font", "train-ten", "rect-shrunk", "cloud-shrunk"]
 
 
 def scad(v):
@@ -150,9 +152,31 @@ def volume(tris):
 
 
 # ---- geometry the parameters imply (mirrors model.scad)
+BED_X = 300
+
+
+def plate_len(p, met, letters, sz):
+    """Plate x extent at letter size sz, independent of model.scad's formula."""
+    m, cl, n = p["tray_margin"], p["clearance"], len(met)
+    train = p["tray_shape"] == "train"
+    if n:
+        span = (sum((t[1] - t[0]) * sz + 2 * cl for t in met)
+                + (n - 1) * (2 * m + COUPLER if train else WALL)
+                + (0 if train else SPACE_K * sz * sum(1 for _, gap in letters[1:] if gap)))
+    else:
+        span = 0.6 * sz
+    H = (max(t[3] - t[2] for t in met) if n else 1) * sz + 2 * cl + 2 * m
+    lr = span + 2 * m
+    if p["tray_shape"] == "cloud":
+        return lr + 0.34 * H
+    if train:
+        return lr + COUPLER + 1.02 * max(0.9 * H, 30)
+    return lr
+
+
 def layout(ov):
     p = dict(D, **ov)
-    s, m, cl = p["letter_size"], p["tray_margin"], p["clearance"]
+    m, cl = p["tray_margin"], p["clearance"]
     tbl = TABLES.get(p["font"], TABLES["DejaVu Sans:style=Bold"])
     name = p["name"]
     letters = []
@@ -160,6 +184,13 @@ def layout(ov):
         if c != " ":
             letters.append((c, i > 0 and name[i - 1] == " " and name[:i].strip() != ""))
     met = [tbl.get(c, GENERIC) for c, _ in letters]
+    s = p["letter_size"]
+    if plate_len(p, met, letters, s) > BED_X:
+        lo, hi = 0.0, s
+        for _ in range(30):
+            mid = (lo + hi) / 2
+            lo, hi = (mid, hi) if plate_len(p, met, letters, mid) <= BED_X else (lo, mid)
+        s = lo
     pw = [(t[1] - t[0]) * s + 2 * cl for t in met]
     gh = [(t[3] - t[2]) * s for t in met]
     n = len(letters)
@@ -261,6 +292,9 @@ for name, ov in CASES:
 
     lo, hi = bbox(verts)
     check(near(lo[2], 0), "sits on z=0 (min z %.3f)" % lo[2])
+    check(hi[0] - lo[0] <= BED_X + 0.05 and hi[1] - lo[1] <= 320,
+          "plate %.1f x %.1f mm fits 300 x 320 (letter size %.2f of %s requested)"
+          % (hi[0] - lo[0], hi[1] - lo[1], L["s"], p["letter_size"]))
 
     # Tray: closed part, outline and height.
     tray = read_stl("%s/%s_%s.stl" % (OUT, name, TRAY[1:]))

@@ -31,7 +31,7 @@ on MakerWorld and in ScadBuddy.
 | `shape` | `bauble` | `bauble`, `star`, `tree`, `heart` or `snowflake_disc`. |
 | `size` | `70` | Height of the body in mm (40–120), bottom to top of the silhouette. A loop adds up to 6.4 mm above it. |
 | `thickness` | `3` | Thickness of the body in mm (2–6). Raised text and border add 1.2 mm on top. |
-| `hanger` | `loop` | `loop`: an accent-coloured ring (5 mm hole, 2.4 mm wall) set into the top. `hole`: a 5 mm hole through the body — through the cap of the bauble, the top arm of the star, the top tier of the tree, just under the heart's cusp. |
+| `hanger` | `loop` | `loop`: an accent-coloured ring (5 mm hole, 2.4 mm wall) set into the top. `hole`: a 5 mm hole through the body — through the cap of the bauble, the top arm of the star, the top tier of the tree, just under the heart's cusp, or in place of the top snowflake on the disc. |
 | `border` | `true` | An accent-coloured border following the outline (and around the hole), `max(1.2, 0.035 × size)` mm wide. |
 
 Width follows from `size` and the shape:
@@ -107,15 +107,17 @@ can never reach the border or the edge.
 ./verify.sh
 ```
 
-Renders the defaults and seven variations (every shape, both text styles,
+Renders the defaults and nine variations (every shape, both text styles,
 both hangers, border on and off, a 40 mm heart where the loop extends above
-the top, a 120 mm bauble with a long name, and an empty name) in
+the top, a 120 mm bauble with a long name, an empty name, and the snowflake disc
+with a hole at 70 and 40 mm) in
 `openscad/openscad:dev` and checks, for each: the expected number of non-empty
 materials, no triangles on `Default`, the width and height the parameters
 imply, the model on z = 0, and the top at `thickness` (+1.2 mm when anything
 is raised). Each colour is then re-rendered alone with a `color()` override,
 the way ScadBuddy builds closed parts; the base must span 0..`thickness`, the
-text must sit where `text_style` says, and the per-colour volumes must add up
+text must sit where `text_style` says, every snowflake on the disc must be
+whole (a hole that clips one leaves a sliver), and the per-colour volumes must add up
 to the whole model's volume — so no two colours overlap.
 
 If the base image lacks `Lobster Two`, the script derives `scadbuddy-verify:local`

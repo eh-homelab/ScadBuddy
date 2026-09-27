@@ -96,14 +96,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Libraries and their pins */
+        /**
+         * The library catalogue
+         * @description Libraries ScadBuddy knows how to fetch, each with the ref it suggests. Any other can be pinned to a model by URL.
+         */
         get: operations["list_libraries_api_v1_libraries_get"];
         put?: never;
-        /**
-         * Add a library, or pin it to another ref
-         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.
-         */
-        post: operations["add_library_api_v1_libraries_post"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -258,10 +257,34 @@ export interface paths {
         put?: never;
         /**
          * Duplicate a template
-         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.
+         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied; the presets saved on it are.
          */
         post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/libraries/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Pin a library to a model, or re-pin it at another ref
+         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in this model's `model.json`, as one revision of the model. The model renders against that pin from then on; no other model moves.
+         */
+        put: operations["pin_library_api_v1_models__slug__libraries__name__put"];
+        post?: never;
+        /**
+         * Remove a library from a model
+         * @description The checkout stays on the volume: an older revision may still pin it.
+         */
+        delete: operations["unpin_library_api_v1_models__slug__libraries__name__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -287,6 +310,54 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A template's presets
+         * @description The presets the template ships with (`origin: template`, read-only), then the ones saved on it (`origin: mine`). A preset holds only the values it sets: apply it over the template's defaults. A value for a parameter the template no longer has is kept here and is the client's to skip.
+         */
+        get: operations["list_presets_api_v1_models__slug__presets_get"];
+        put?: never;
+        /**
+         * Save a preset
+         * @description Saves a named set of parameter values on any template, built-in or mine. The values are checked as a render checks them (422 naming an unknown parameter or a wrong type). Names are at most 80 characters and unique per template, ignoring case (409).
+         */
+        post: operations["create_preset_api_v1_models__slug__presets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/presets/{preset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a preset
+         * @description A template's own presets are read-only (403).
+         */
+        delete: operations["delete_preset_api_v1_models__slug__presets__preset_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename a preset or replace its values
+         * @description `params`, when given, replaces the preset's values whole. A template's own presets are read-only (403).
+         */
+        patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
     "/api/v1/models/{slug}/readme": {
@@ -1366,6 +1437,22 @@ export interface components {
             /** Variants */
             variants?: components["schemas"]["FontVariant"][];
         };
+        /**
+         * CatalogueLibrary
+         * @description One library ScadBuddy knows how to fetch, and the ref it suggests.
+         */
+        CatalogueLibrary: {
+            /** Homepage */
+            homepage: string;
+            /** Licence */
+            licence: string;
+            /** Name */
+            name: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /** CheckRequest */
         CheckRequest: {
             /**
@@ -1401,6 +1488,8 @@ export interface components {
             copy_index?: number | null;
             /** Message */
             message?: string | null;
+            /** Plate Id */
+            plate_id?: number | null;
             /** Printer Name */
             printer_name?: string | null;
             /** Queue Entry Id */
@@ -1761,13 +1850,8 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
-        /** LibraryAdd */
-        LibraryAdd: {
-            /**
-             * Name
-             * @description The directory `use <NAME/...>` names
-             */
-            name: string;
+        /** LibraryPinRequest */
+        LibraryPinRequest: {
             /**
              * Ref
              * @description A tag or branch to pin; the catalogue's default when omitted
@@ -1778,43 +1862,6 @@ export interface components {
              * @description An https git URL; the catalogue's when omitted
              */
             url?: string | null;
-        };
-        /**
-         * LibraryEntry
-         * @description The catalogue and the lockfile, joined: what can be added, and what is.
-         */
-        LibraryEntry: {
-            /** Curated */
-            curated: boolean;
-            /**
-             * Error
-             * @description Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again
-             */
-            error?: string | null;
-            /** Homepage */
-            homepage?: string | null;
-            /** Licence */
-            licence?: string | null;
-            /** Name */
-            name: string;
-            pin?: components["schemas"]["LibraryPin"] | null;
-            /** Ref */
-            ref: string;
-            /** Url */
-            url: string;
-        };
-        /**
-         * LibraryPin
-         * @description One entry of ``libraries.lock``: where it came from, what was asked for, what
-         *     that resolved to.
-         */
-        LibraryPin: {
-            /** Commit */
-            commit: string;
-            /** Ref */
-            ref: string;
-            /** Url */
-            url: string;
         };
         /**
          * LoadedAt
@@ -1872,12 +1919,27 @@ export interface components {
              */
             theirs: string;
         };
+        /**
+         * ModelLibrary
+         * @description One entry of a model's ``libraries``: a library pinned for that model.
+         */
+        ModelLibrary: {
+            /** Commit */
+            commit: string;
+            /**
+             * Name
+             * @description The directory `use <NAME/...>` names
+             */
+            name: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /** ModelPatch */
         ModelPatch: {
             /** Description */
             description?: string | null;
-            /** Libraries */
-            libraries?: string[] | null;
             /** Name */
             name?: string | null;
             /** Tags */
@@ -1910,7 +1972,7 @@ export interface components {
             /** Has Thumbnail */
             has_thumbnail: boolean;
             /** Libraries */
-            libraries?: string[];
+            libraries?: components["schemas"]["ModelLibrary"][];
             /** Name */
             name: string;
             /**
@@ -2056,6 +2118,46 @@ export interface components {
             limit: number;
             /** Size */
             size: number;
+        };
+        /** ParamPreset */
+        ParamPreset: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Origin
+             * @description `template`: shipped in the template's presets.json, read-only. `mine`: saved here, editable -- on built-ins too.
+             * @enum {string}
+             */
+            origin: "template" | "mine";
+            /** Params */
+            params: {
+                [key: string]: boolean | number | string;
+            };
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /** ParamPresetCreate */
+        ParamPresetCreate: {
+            /** Name */
+            name: string;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            };
+        };
+        /**
+         * ParamPresetUpdate
+         * @description A rename, a new set of values, or both. ``params`` replaces the old ones whole.
+         */
+        ParamPresetUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            } | null;
         };
         /** Parameter */
         Parameter: {
@@ -2934,6 +3036,8 @@ export interface components {
             bed_type?: string | null;
             /** Default Plate */
             default_plate?: string | null;
+            /** Display Unit */
+            display_unit?: ("mm" | "in") | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
@@ -2958,6 +3062,12 @@ export interface components {
             bed_type?: string | null;
             /** Default Plate */
             default_plate?: string | null;
+            /**
+             * Display Unit
+             * @default mm
+             * @enum {string}
+             */
+            display_unit: "mm" | "in";
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /**
@@ -3376,40 +3486,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["LibraryEntry"][];
-                };
-            };
-        };
-    };
-    add_library_api_v1_libraries_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["LibraryAdd"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["LibraryEntry"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
+                    "application/json": components["schemas"]["CatalogueLibrary"][];
                 };
             };
         };
@@ -3774,6 +3851,76 @@ export interface operations {
             };
         };
     };
+    pin_library_api_v1_models__slug__libraries__name__put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryPinRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    unpin_library_api_v1_models__slug__libraries__name__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_outputs_api_v1_models__slug__outputs_get: {
         parameters: {
             query?: never;
@@ -3827,6 +3974,138 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OutputDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_presets_api_v1_models__slug__presets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_preset_api_v1_models__slug__presets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_preset_api_v1_models__slug__presets__preset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_preset_api_v1_models__slug__presets__preset_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
                 };
             };
             /** @description Validation Error */

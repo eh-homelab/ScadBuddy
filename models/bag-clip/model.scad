@@ -16,19 +16,19 @@
 
 /* [Clip] */
 
-// Overall length of the closed clip, loop to latch tab
+// Overall length of the closed clip in mm, loop to latch tab
 length = 100; // [50:5:200]
 
-// Width of the arms across the bag — this is the print height
+// Width of the arms across the bag in mm (the clip prints on its side, so this is the print height)
 width = 10; // [8:1:20]
 
-// Thickness of each arm
+// Thickness of each arm in mm (also sets the text height)
 thickness = 6; // [4:0.5:10]
 
-// Thickness of the flexure loop that acts as the hinge
+// Thickness in mm of the flexure loop that acts as the hinge (thinner bends easier, fatigues sooner)
 hinge_t = 1.2; // [0.8:0.1:2]
 
-// Play between the hook lip and the tip of the upper arm when latched
+// Play in mm between the hook lip and the tip of the upper arm when latched (raise if it will not latch)
 latch_tol = 0.3; // [0.1:0.05:0.6]
 
 // Jaw faces: flat, or interlocking waves that grip better
@@ -36,7 +36,7 @@ style = "flat"; // [flat:Flat, wave_grip:Wave grip]
 
 /* [Text] */
 
-// Text raised on the top face of the lower arm (empty for none)
+// Text raised 0.6 mm on the lower arm's upward face as printed (empty for none)
 text = ""; // 24
 
 // Typeface

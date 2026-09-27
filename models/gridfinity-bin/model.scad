@@ -12,11 +12,11 @@
 
 /* [Size] */
 
-// Width in grid units (42 mm each)
-units_x = 2; // [1:1:8]
+// Width in grid units (42 mm each; 7 units is 293.5 mm, the most that fits the H2C bed)
+units_x = 2; // [1:1:7]
 
 // Depth in grid units (42 mm each)
-units_y = 1; // [1:1:8]
+units_y = 1; // [1:1:7]
 
 // Height in 7 mm units, measured from the bottom of the feet to the top of the wall (the stacking lip adds to this)
 height_units = 3; // [2:1:12]
@@ -39,23 +39,23 @@ divisions_x = 1; // [1:1:8]
 divisions_y = 1; // [1:1:8]
 
 // Label tab along the back of each compartment
-label_tab = "full"; // [none, left, full]
+label_tab = "full"; // [none:None, left:Left 42 mm of each compartment, full:Full width]
 
 // Finger scoop along the front inner wall of each compartment
 scoop = true;
 
-// Outer wall thickness
+// Outer wall thickness in mm
 wall = 1.2; // [0.8:0.1:2.4]
 
 // Floor style: solid feet, or hollow feet with a thin skin (uses much less filament)
-floor_style = "solid"; // [solid, ultralight]
+floor_style = "solid"; // [solid:Solid, ultralight:Ultralight (hollow feet)]
 
 /* [Label] */
 
-// Text inlaid into the label tab (leave empty for no label)
+// Text inlaid into the back-left label tab (leave empty for no label; needs a label tab)
 label_text = ""; // 24
 
-// Label letter height in mm
+// Label letter height in mm (a label too long for the tab is shrunk to fit)
 label_size = 6; // [3:0.5:10]
 
 // Label typeface
@@ -64,7 +64,7 @@ font = "DejaVu Sans:style=Bold"; // font
 /* [Colors] */
 
 // Bin colour (extruder 1)
-bin_color = "#3A3A3A"; // color
+bin_color = "#8E9089"; // color
 
 // Label colour (extruder 2)
 label_color = "#F2F2F2"; // color
@@ -94,10 +94,6 @@ HOLE_OFFSET = 13;                   // holes at +/-13 mm from each cell centre
 DIVIDER = 1.2;
 TAB_DEPTH = 15.85; TAB_ANGLE = 36; TAB_LEDGE = 1.2; TAB_MAX_W = 42;
 LABEL_DEPTH = 0.6;                  // inlay depth: three 0.2 mm layers
-// Average glyph advance as a multiple of the text size, used to shrink a label
-// that would not fit the tab (measured ~1.02 for DejaVu Sans Bold capitals).
-// OpenSCAD cannot measure text portably, so anything still too wide is clipped.
-LABEL_ADVANCE = 1.05;
 UL_SKIN = 1.0;                      // ultralight: bottom skin of each foot
 EPS = 0.01;
 
@@ -247,18 +243,31 @@ module hole_pillars() {
         translate([sx * HOLE_OFFSET, sy * HOLE_OFFSET, 0]) cylinder(d = d, h = depth + 0.8);
 }
 
-// Label inlay: the text, clipped to the flat top of the back-left tab.
+// Shrink-only fit: resize() the children together with their mirror image
+// and a hair-thin bar of width w, all on separate layers, then cut out the
+// children's layer. Anything whose ink stays within +/- w/2 is left alone;
+// anything wider is scaled down uniformly until it does.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([0, 0, 5]) linear_extrude(1) mirror([1, 0]) children();
+                translate([-w / 2, 0, 10]) cube([w, 0.01, 0.01]);
+            }
+}
+
+// Label inlay: the text, centred on the flat top of the back-left tab and
+// shrunk to fit its width.
 module label_2d() {
     yb = inner.y / 2;
     back_clear = stacking_lip ? LIP_D - wall + 0.5 : 1;
     x0 = cx0(0) + 1; x1 = cx0(0) + tab_w - 1;
     y0 = yb - tab_d + 1; y1 = yb - back_clear;
-    intersection() {
-        translate([x0, y0]) square([x1 - x0, y1 - y0]);
-        translate([(x0 + x1) / 2, (y0 + y1) / 2])
-            text(label_text, size = min(label_size, (x1 - x0) / (max(1, len(label_text)) * LABEL_ADVANCE), (y1 - y0) * 0.8),
+    translate([(x0 + x1) / 2, (y0 + y1) / 2])
+        fit_x(x1 - x0)
+            text(label_text, size = min(label_size, (y1 - y0) * 0.7),
                  font = font, halign = "center", valign = "center");
-    }
 }
 
 module label_prism() {

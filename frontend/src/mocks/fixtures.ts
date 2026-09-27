@@ -12,11 +12,12 @@ import type {
   CatalogueFont,
   CustomizerSchema,
   FontFamily,
-  LibraryEntry,
+  CatalogueLibrary,
   ModelSummary,
   ModelVersion,
   Output,
   Param,
+  ParamPreset,
   Plate,
   PrintProgress,
   Settings,
@@ -323,6 +324,38 @@ index 0000000..1111111
 `,
 }
 
+/**
+ * Per-template presets. The built-in ships one; the keychain of mine has one saved,
+ * plus one whose parameter the template no longer has, which the picker must skip.
+ */
+export const presets: Record<string, ParamPreset[]> = {
+  'name-keychain': [
+    {
+      id: 'template-0',
+      name: 'Tiny',
+      origin: 'template',
+      params: { text_size: 10, keyring_hole: false },
+    },
+    {
+      id: 'a1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Mum',
+      origin: 'mine',
+      params: { name: 'Mum', body_color: '#222222', text_color: '#FFFFFF' },
+      updated_at: '2026-09-20T10:00:00Z',
+    },
+    {
+      id: 'b1b2c3d4e5f60718293a4b5c6d7e8f90',
+      name: 'Old engraving',
+      origin: 'mine',
+      params: { name: 'Ada', engrave_depth: 2 },
+      updated_at: '2026-09-19T10:00:00Z',
+    },
+  ],
+  [BUILTIN_SLUG]: [
+    { id: 'template-0', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+  ],
+}
+
 export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
@@ -388,20 +421,14 @@ export const fontCatalogue: CatalogueFont[] = [
 /** The family the install route refuses, so the widget's error path is reachable. */
 export const UNINSTALLABLE_FONT = 'Playfair Display'
 
-/** #93 — BOSL2 is pinned, dotSCAD is only in the catalogue. */
-export const libraries: LibraryEntry[] = [
+/** #93 — the curated catalogue. No model starts with a pin: each pins its own. */
+export const libraries: CatalogueLibrary[] = [
   {
     name: 'BOSL2',
     url: 'https://github.com/BelfrySCAD/BOSL2.git',
     ref: 'v2.0.761',
     licence: 'BSD-2-Clause',
     homepage: 'https://github.com/BelfrySCAD/BOSL2',
-    curated: true,
-    pin: {
-      url: 'https://github.com/BelfrySCAD/BOSL2.git',
-      ref: 'v2.0.761',
-      commit: 'f47030c41d88d0676bca73be1c6b7ba58564f9dd',
-    },
   },
   {
     name: 'dotSCAD',
@@ -409,8 +436,6 @@ export const libraries: LibraryEntry[] = [
     ref: 'v3.3',
     licence: 'LGPL-3.0',
     homepage: 'https://github.com/JustinSDK/dotSCAD',
-    curated: true,
-    pin: null,
   },
 ]
 
@@ -510,6 +535,7 @@ export const settings: Settings = {
   filament_presets: [],
   bed_type: null,
   default_plate: null,
+  display_unit: 'mm',
 }
 
 /**

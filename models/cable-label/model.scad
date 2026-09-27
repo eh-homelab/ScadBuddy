@@ -31,7 +31,7 @@ cable_d = 5; // [2:0.5:15]
 // Width of the clip's opening as a percentage of the cable diameter. Lower grips harder and snaps on less easily
 clip_opening_pct = 70; // [55:5:85]
 
-// Length of the clip along the cable (its print height). Not used by wrap_band, where the band is the label length
+// Length of the clip along the cable in mm (its print height). Not used by wrap_band, where the band is the label length
 clip_len = 10; // [6:1:20]
 
 /* [Label] */
@@ -42,13 +42,13 @@ text = "HDMI"; // 16
 // Typeface (the app fills this dropdown from the fonts installed in the image)
 font = "DejaVu Sans Mono:style=Bold"; // font
 
-// Letter height in mm
+// Letter height in mm (text too big for the label face shrinks to fit)
 text_size = 6; // [3:0.5:12]
 
-// Length of the label: tag length beyond the clip, or band length along the cable for wrap_band
+// Length of the label in mm: tag length beyond the clip, or band length along the cable for wrap_band
 flag_len = 35; // [15:1:80]
 
-// Height of the label face (the tag's width across, or the band face's width)
+// Height of the label face in mm (the tag's width across, or the band face's width)
 flag_h = 10; // [6:1:20]
 
 // Label style
@@ -109,6 +109,28 @@ module clip_2d() {
     }
 }
 
+// Shrink-only fits, as in models/building-brick: resize() the children plus
+// a hair-thin bar of the target length, so text that already fits is left at
+// text_size and larger text is scaled down uniformly instead of being cut off
+// at the edge of the label face.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([-w / 2, 0, 10]) cube([w, 0.01, 0.01]);
+            }
+}
+
+module fit_y(h) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([0, h, 0], auto = [true, false, false])
+            union() {
+                linear_extrude(1) children();
+                translate([0, -h / 2, 10]) cube([0.01, h, 0.01]);
+            }
+}
+
 // ---- flag / double_sided ------------------------------------------------
 
 tag_end = r_out + flag_len;
@@ -134,8 +156,9 @@ module tag_text_area_2d() {
 module tag_text_2d() {
     intersection() {
         translate([r_out + flag_len / 2, 0])
-            text(text, size = text_size, font = font,
-                 halign = "center", valign = "center");
+            fit_y(flag_h - 2 * margin) fit_x(flag_len - 2 * margin)
+                text(text, size = text_size, font = font,
+                     halign = "center", valign = "center");
         tag_text_area_2d();
     }
 }
@@ -188,8 +211,9 @@ module band_2d() {
 module band_text_2d() {
     intersection() {
         translate([0, band_len / 2]) rotate(90)
-            text(text, size = text_size, font = font,
-                 halign = "center", valign = "center");
+            fit_y(flag_h - 2 * margin) fit_x(band_len - 3)
+                text(text, size = text_size, font = font,
+                     halign = "center", valign = "center");
         translate([-flag_h / 2 + margin, 1.5]) square([flag_h - 2 * margin, band_len - 3]);
     }
 }

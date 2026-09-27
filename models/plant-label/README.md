@@ -20,7 +20,7 @@ ScadBuddy.
 |---|---|---|
 | `text` | `Basil` | The plant name, up to 20 characters. |
 | `font` | `Lobster Two:style=Bold` | Typeface (`// font`). |
-| `text_size` | `12` | Letter height in mm. A name that does not fit the label is shrunk to fit; it is never enlarged. |
+| `text_size` | `12` | Letter height in mm (6–40). A name that does not fit the label is shrunk to fit; it is never enlarged. |
 | `text_style` | `raised` | `raised`: letters stand 1 mm proud. `inlay`: letters fill a pocket flush with the face, 1 mm deep (at most 40 % of the thickness). |
 
 ### Shape
@@ -34,7 +34,8 @@ ScadBuddy.
 | `thickness` | `2.5` | Label thickness. Raised letters add 1 mm on top. |
 | `rim_thickness` | `3` | Thickness of the pot rim the clip fits over. Pot rim clip only. |
 
-The text box is the label less 2.5 mm on every side.
+The text box is the label less 2.5 mm on every side; on the arrow it also
+starts past the fletching notch, which reaches `label_h / 4` into the left end.
 
 - **stake** — rounded label with an 8 mm stake centred below it, ending in a
   12 mm point.
@@ -77,9 +78,10 @@ Set them equal and the label prints in one colour.
 ./verify.sh
 ```
 
-Renders the defaults, all eight `style` × `text_style` combinations and five
-edge cases (a long name on a narrow tag, a 1.6 mm inlay, an 8 mm rim, empty
-text, a 200 mm stake with a serif face) in `scadbuddy-verify:local`, building it
+Renders the defaults, all eight `style` × `text_style` combinations and seven
+edge cases (a long name on a narrow tag, a long name on the arrow, 40 mm
+letters on a 150 × 50 mm label, a 1.6 mm inlay, an 8 mm rim, empty text, a
+200 mm stake with a serif face) in `scadbuddy-verify:local`, building it
 from `openscad/openscad:dev` plus ScadBuddy's font packages when it is missing.
 For each it checks:
 
@@ -89,8 +91,9 @@ For each it checks:
 - from one closed render per colour, the way ScadBuddy builds its parts, the
   label at 0–`thickness` and the letters above it (raised) or in the top of it
   (inlay);
-- the letters fit inside the text box, and a long name is shrunk to exactly its
-  width;
+- the letters fit inside the text box (clear of the arrow's notch), a long
+  name is shrunk to exactly its width, and 40 mm letters are not capped at the
+  old 25 mm;
 - the pot rim clip's gap is `rim_thickness` at the label edge and
   `rim_thickness - 0.6` at the grip bumps.
 
