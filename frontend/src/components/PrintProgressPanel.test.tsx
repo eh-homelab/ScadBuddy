@@ -142,6 +142,30 @@ describe('PrintProgressPanel', () => {
     expect(screen.getByTestId('print-progress')).toHaveTextContent('1 of 3 plates queued')
   })
 
+  it('says an all-plates print failed when a plate fails before it is queued', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          queue_item_id: null,
+          stage: 'failed',
+          settled: false,
+          copies: 2,
+          copies_detail: [
+            { plate_id: 1, queue_entry_id: null, stage: 'failed' },
+            { plate_id: 2, queue_entry_id: 4471, stage: 'running' },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('2 plates — failed')
+    expect(panel).not.toHaveTextContent('Slicing…')
+    expect(panel).not.toHaveTextContent('plates queued')
+  })
+
   it('spins only while the caller is still polling', () => {
     const { container, rerender } = render(
       <PrintProgressPanel progress={fixtures.pipelineProgress} polling />,

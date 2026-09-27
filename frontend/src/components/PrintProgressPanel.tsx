@@ -35,14 +35,19 @@ function queueEntryUrl(progress: PrintProgress, entryId: number): string {
   return `${progress.bambuddy_url}/${entryId}`
 }
 
+/** How many entries have a queue entry id — the thing the poll is waiting for. */
+function queuedCount(progress: PrintProgress): number {
+  return (progress.copies_detail ?? []).filter(
+    (copy) => copy.queue_entry_id !== null && copy.queue_entry_id !== undefined,
+  ).length
+}
+
 function headline(progress: PrintProgress): string {
   if (progress.route === 'pipeline') {
     // Counted from the entries rather than from `copies_completed`: on this route the
     // run is accepted before the queue entries exist, so "queued" means a copy has an
     // entry id — which is exactly the thing the poll is waiting for.
-    const queued = (progress.copies_detail ?? []).filter(
-      (copy) => copy.queue_entry_id !== null && copy.queue_entry_id !== undefined,
-    ).length
+    const queued = queuedCount(progress)
     const run = progress.pipeline_run_id ?? '?'
     return `Run #${run} — ${queued} of ${progress.copies} ${
       progress.copies === 1 ? 'copy' : 'copies'
@@ -51,11 +56,14 @@ function headline(progress: PrintProgress): string {
   // The slice-and-queue route has no run: the queue item is the whole print, and until
   // a plate has sliced it does not exist yet. An all-plates print is still slicing until
   // one of its plates has an entry (#295).
-  const queued = (progress.copies_detail ?? []).filter(
-    (copy) => copy.queue_entry_id !== null && copy.queue_entry_id !== undefined,
-  ).length
   if (progress.copies > 1) {
-    // One queue item per plate, each followed on its own (#200).
+    // One queue item per plate, each followed on its own (#200). A plate can fail or be
+    // cancelled before it is ever queued, so an ended print says how it ended rather
+    // than counting entries that will never arrive.
+    if (progress.settled || progress.stage === 'failed' || progress.stage === 'cancelled') {
+      return `${progress.copies} plates — ${progress.stage}`
+    }
+    const queued = queuedCount(progress)
     if (queued === 0) return 'Slicing…'
     if (queued < progress.copies) return `${queued} of ${progress.copies} plates queued`
     return `${progress.copies} plates queued`
