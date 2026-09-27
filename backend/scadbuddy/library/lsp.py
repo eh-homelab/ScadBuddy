@@ -139,8 +139,18 @@ async def serve(websocket: WebSocket, binary: str, root: Path, env: Mapping[str,
                 return
 
     async def to_client() -> None:
-        while (body := await read_message(stdout)) is not None:
-            message = json.loads(body)
+        while True:
+            try:
+                body = await read_message(stdout)
+                if body is None:
+                    return
+                message = json.loads(body)
+            except (ValueError, asyncio.IncompleteReadError) as error:
+                # A bad Content-Length, a truncated body or one that is not JSON: the
+                # stream cannot be resynchronised, so the session ends like any other
+                # server failure rather than raising out of the bridge.
+                logger.warning("openscad-lsp sent an unreadable message: %s", error)
+                return
             if roots is not None:
                 message = roots.outbound(message)
             await websocket.send_text(json.dumps(message))

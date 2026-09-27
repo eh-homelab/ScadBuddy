@@ -13,3 +13,12 @@ def test_a_render_concurrency_below_one_is_refused_by_name(value: str) -> None:
 
 def test_the_default_render_concurrency_loads() -> None:
     assert load_config({}).render_concurrency >= 1
+
+
+def test_a_negative_lsp_sessions_is_refused_by_name() -> None:
+    with pytest.raises(ValueError, match="SCADBUDDY_LSP_SESSIONS must be at least 0"):
+        load_config({"SCADBUDDY_LSP_SESSIONS": "-1"})
+
+
+def test_zero_lsp_sessions_loads() -> None:
+    assert load_config({"SCADBUDDY_LSP_SESSIONS": "0"}).lsp_sessions == 0
