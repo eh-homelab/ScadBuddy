@@ -35,7 +35,9 @@ MAX_TEXT_BODY_BYTES = 8 * 1024 * 1024
 #: the source. Starlette caps none of that by default: a non-file field is held to
 #: 1 MiB, but a file part is spooled to disk without any total, and the routes then
 #: `read()` it whole. This leaves room for a source at `MAX_SOURCE_CHARS` fully
-#: UTF-8 encoded (4 MiB), a README as large again, and a viewer-sized PNG.
+#: UTF-8 encoded (4 MiB), a README as large again, a thumbnail at
+#: `MAX_THUMBNAIL_BYTES` (10 MiB) and a model.json at `MAX_META_BYTES` -- about
+#: 18 MiB in one create, with the multipart framing to spare.
 MAX_MULTIPART_BODY_BYTES = 32 * 1024 * 1024
 
 #: The gated content types and what each may carry. A url-encoded form holds no
