@@ -132,3 +132,62 @@ def test_the_check_resolves_a_sibling_include_through_the_models_slug(
 
     assert with_slug.json()["diagnostics"] == [], with_slug.json()
     assert any("include" in d["message"] for d in without.json()["diagnostics"]), without.json()
+
+
+# #204: an uploaded SVG reaches import() -- in the main render AND in every per-colour
+# wrapper render (§6.3), which is where a missing copy would silently lose it.
+OVERLAY = """\
+// Picture to inlay
+overlay = ""; // file:svg
+color("#FF0000") cube([30, 30, 2]);
+if (overlay != "")
+  color("#0000FF") translate([5, 5, 2]) linear_extrude(1) resize([20, 20]) import(overlay);
+"""
+
+TRIANGLE_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10">'
+    b'<path d="M0 0 L10 0 L10 10 Z"/><script>alert(1)</script></svg>'
+)
+
+
+def test_an_uploaded_svg_is_rendered_into_every_part(client: TestClient, data_dir: Path) -> None:
+    created = client.post("/api/v1/models", json={"name": "Overlay", "source": OVERLAY})
+    assert created.status_code == 201, created.text
+    schema = client.get("/api/v1/models/overlay/schema").json()
+    assert schema["parameters"][0]["type"] == "file"
+    assert schema["parameters"][0]["accept"] == ["svg"]
+
+    asset = client.post(
+        "/api/v1/models/overlay/assets",
+        files={"file": ("triangle.svg", TRIANGLE_SVG, "image/svg+xml")},
+    ).json()
+    accepted = client.post(
+        "/api/v1/models/overlay/render", json={"params": {"overlay": asset["id"]}}
+    )
+    assert accepted.status_code == 202, accepted.text
+    job = wait_for_job(client, accepted.json()["job_id"])
+
+    assert job["status"] == "done", job["error"]
+    assert job["colors"] == ["#FF0000", "#0000FF"]
+    # No "the solid render was empty" fallback: the wrapper render found the file too.
+    assert job["warnings"] == []
+    assert [part["watertight"] for part in job["parts"]] == [True, True]
+    assert job["bbox_mm"]["size"] == [30.0, 30.0, 3.0]
+    # Nothing staged is left beside the model.
+    model_dir = DataPaths(data_dir).model_dir("overlay")
+    assert sorted(p.name for p in model_dir.iterdir() if not p.name.startswith(".")) == [
+        "model.json",
+        "model.scad",
+    ]
+
+
+def test_a_file_openscad_cannot_open_is_a_warning_not_silence(client: TestClient) -> None:
+    source = OVERLAY.replace('overlay = "";', 'overlay = "missing.svg";')
+    created = client.post("/api/v1/models", json={"name": "Missing", "source": source})
+    assert created.status_code == 201, created.text
+
+    accepted = client.post("/api/v1/models/missing/render", json={"params": {}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+
+    assert job["status"] == "done", job["error"]
+    assert "OpenSCAD could not open missing.svg; the model rendered without it" in job["warnings"]

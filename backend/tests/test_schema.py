@@ -150,7 +150,11 @@ def test_find_annotations() -> None:
             "// f = 5; // color",
         ]
     )
-    assert find_annotations(source) == {"a": "color", "b": "font", "c": "color"}
+    assert {name: a.kind for name, a in find_annotations(source).items()} == {
+        "a": "color",
+        "b": "font",
+        "c": "color",
+    }
 
 
 def test_schema_cache_round_trip(tmp_path: Path) -> None:
@@ -206,3 +210,78 @@ def test_schema_cache_is_keyed_on_the_library_path_too(tmp_path: Path) -> None:
     assert load_cached_schema(cache, source_sha256(source)) is None
     repinned = (tmp_path / "libraries" / "BOSL2" / "def456",)
     assert load_cached_schema(cache, source_sha256(source), library_path=repinned) is None
+
+
+# ── #204: `// file` parameters ────────────────────────────────────────────────
+
+# `openscad -o x.param` on 2026.09.23 for the source below: every one of these is a
+# plain string to OpenSCAD, caption kept, and the trailing `// file:svg,png` breaks
+# nothing.
+FILE_SOURCE = """\
+/* [Overlay] */
+// Picture to overlay
+overlay_file = ""; // file:svg,png
+any_file = ""; // file
+mask = "star.png"; // file: png
+model_file = ""; // file:stl
+note = ""; // files
+depth = 2; // file:svg
+"""
+
+
+def _file_param_json() -> dict[str, object]:
+    string = {"type": "string", "group": "Overlay"}
+    return {
+        "parameters": [
+            {**string, "name": "overlay_file", "initial": "", "caption": "Picture to overlay"},
+            {**string, "name": "any_file", "initial": ""},
+            {**string, "name": "mask", "initial": "star.png"},
+            {**string, "name": "model_file", "initial": ""},
+            {**string, "name": "note", "initial": ""},
+            {"name": "depth", "type": "number", "initial": 2.0, "group": "Overlay"},
+        ]
+    }
+
+
+def test_a_file_annotation_types_a_string_parameter_as_file() -> None:
+    schema = build_schema(_file_param_json(), FILE_SOURCE)
+    by_name = {p.name: p for p in schema.parameters}
+
+    assert _types(schema) == {
+        "overlay_file": "file",
+        "any_file": "file",
+        "mask": "file",
+        # Names only a kind ScadBuddy cannot store: left a text field.
+        "model_file": "string",
+        # `// files` is not the annotation.
+        "note": "string",
+        # Only a string can be a file.
+        "depth": "integer",
+    }
+    assert by_name["overlay_file"].accept == ["svg", "png"]
+    assert by_name["overlay_file"].caption == "Picture to overlay"
+    assert by_name["any_file"].accept == ["svg", "png"]
+    assert by_name["mask"].accept == ["png"]
+    assert by_name["mask"].initial == "star.png"
+    assert by_name["model_file"].accept == []
+    assert by_name["depth"].accept == []
+
+
+def test_find_annotations_reads_the_accepted_kinds() -> None:
+    annotations = find_annotations('a = ""; // file:SVG, .png\nb = ""; // file : svg\n')
+    assert annotations["a"].kind == "file"
+    assert annotations["a"].accept == ("svg", "png")
+    assert annotations["b"].accept == ("svg",)
+
+
+def test_a_cache_entry_from_before_file_parameters_is_rederived(tmp_path: Path) -> None:
+    """An entry written before #204 typed `// file` as a string for the same source."""
+    schema = build_schema(_file_param_json(), FILE_SOURCE)
+    cache = tmp_path / "schema.json"
+    store_cached_schema(cache, schema)
+    assert load_cached_schema(cache, source_sha256(FILE_SOURCE)) == schema
+
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    del body["format"]
+    cache.write_text(json.dumps(body), encoding="utf-8")
+    assert load_cached_schema(cache, source_sha256(FILE_SOURCE)) is None

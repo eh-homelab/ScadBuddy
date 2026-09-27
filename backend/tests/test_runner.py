@@ -16,6 +16,7 @@ from scadbuddy.render.runner import (
     cached_schema,
     export_schema,
     format_scad_value,
+    missing_file,
     quote_string,
     render_3mf,
     run_openscad,
@@ -198,3 +199,55 @@ async def test_a_model_with_no_libraries_gets_no_inherited_path(
     config = Config(data_dir=tmp_path / "data")
 
     assert "OPENSCADPATH=<unset>" in await _openscadpath_seen_by(tmp_path, config)
+
+
+# ── #204: file parameters and the missing-file signal ─────────────────────────
+
+FILE_PARAMETER = Parameter(name="overlay", type="file", initial="sample.svg", accept=["svg"])
+
+
+@pytest.mark.parametrize(
+    "value", ["", "sample.svg", "_scadbuddy_solid_asset_0123456789abcdef.svg", "a" * 64]
+)
+def test_a_file_parameter_passes_a_bare_name(value: str) -> None:
+    assert format_scad_value(FILE_PARAMETER, value) == quote_string(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["/etc/passwd", "../model.scad", "sub/dir.svg", "..", "a\\b.svg", ".hidden", "x\n.svg", 3],
+)
+def test_a_file_parameter_never_passes_a_path(value: object) -> None:
+    with pytest.raises(ValueError, match="expects an uploaded file"):
+        format_scad_value(FILE_PARAMETER, value)  # type: ignore[arg-type]
+
+
+def test_missing_file_reads_both_messages() -> None:
+    assert missing_file("ERROR: Can't open file '/data/models/x/pic.svg', import() at line 7") == (
+        "pic.svg"
+    )
+    assert missing_file("WARNING: The file '/w/nope.png' couldn't be opened.") == "nope.png"
+    assert missing_file('ECHO: "Can\'t open file"') is None
+    assert missing_file("Total rendering time: 0:00:00.000") is None
+
+
+MISSING_FILE_OPENSCAD = """#!/bin/sh
+echo "ERROR: Can't open file '/models/demo/pic.svg', import() at line 2"
+i=0
+while [ $i -lt 80 ]; do echo "filler $i"; i=$((i+1)); done
+echo "WARNING: The file '/models/demo/mask.png' couldn't be opened."
+echo "ERROR: Can't open file '/models/demo/pic.svg', import() at line 9"
+"""
+
+
+async def test_a_run_reports_every_file_it_could_not_open(tmp_path: Path) -> None:
+    """Exit 0, and the first message long gone from the log tail by the end."""
+    binary = tmp_path / "missing-openscad"
+    binary.write_text(MISSING_FILE_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert output.missing_files == ("pic.svg", "mask.png")
+    assert not any("line 2" in line for line in output.log_tail)

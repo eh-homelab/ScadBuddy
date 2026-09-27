@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  Asset,
   AttachResult,
   BoundingBox,
   CatalogueFont,
@@ -91,6 +92,8 @@ const state = {
   sourceAt: initialSourceAt(),
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
+  /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
+  assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -121,6 +124,7 @@ export function resetMockState(): void {
   state.sourceAt = initialSourceAt()
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
+  state.assets.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -369,6 +373,42 @@ function jobView(job: MockJob): Job {
   return rest
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/** `library/assets.py`'s `sniff`: the kind comes from the bytes, never the name. */
+function sniffAsset(bytes: ArrayBuffer): Asset['kind'] | undefined {
+  const head = new Uint8Array(bytes.slice(0, 4096))
+  if (PNG_MAGIC.every((byte, index) => head[index] === byte)) return 'png'
+  return new TextDecoder().decode(head).includes('<svg') ? 'svg' : undefined
+}
+
+export const ASSET_REFUSAL = 'only SVG and PNG files can be attached'
+
+/**
+ * What `POST /models/{slug}/assets` does with a file, exported so a jsdom test can
+ * reach it: jsdom's `File` cannot cross into Node's `fetch` as a multipart body.
+ */
+export async function storeAsset(file: Blob & { name?: string }): Promise<Asset | undefined> {
+  const bytes = await file.arrayBuffer()
+  const kind = sniffAsset(bytes)
+  if (!kind) return undefined
+  const meta: Asset = {
+    id: await sha256Hex(bytes),
+    name: file.name || `upload.${kind}`,
+    kind,
+    size: bytes.byteLength,
+    width: kind === 'png' ? 96 : null,
+    height: kind === 'png' ? 96 : null,
+  }
+  state.assets.set(meta.id, { meta, bytes })
+  return meta
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
@@ -376,7 +416,6 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
-const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
 /**
  * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
@@ -1194,6 +1233,20 @@ export const handlers = [
     if (unknown.length > 0) {
       return problem(422, 'Unknown parameter', `Not in the model schema: ${unknown.join(', ')}`)
     }
+    // #204 — `file_assets`: empty, the model's default, or an uploaded id; never a path.
+    for (const param of schema.parameters ?? []) {
+      const value = body.params[param.name]
+      if (param.type !== 'file' || value === undefined || value === '' || value === param.initial) {
+        continue
+      }
+      if (typeof value !== 'string' || !state.assets.has(value)) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `parameter '${param.name}' is not an uploaded file: '${String(value)}'`,
+        )
+      }
+    }
 
     const jobId = nextHexId()
     state.jobs.set(jobId, {
@@ -1209,6 +1262,35 @@ export const handlers = [
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
     )
+  }),
+
+  http.post(`${base}/models/:slug/assets`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((model) => model.slug === slug)) {
+      return problem(404, 'Not Found', `no model named '${slug}'`)
+    }
+    // Duck-typed, as on `POST /models`: the entry's class differs between the
+    // browser worker and the Node interceptor.
+    const file = (await request.formData()).get('file')
+    if (file === null || typeof file === 'string') {
+      return problem(422, 'Unprocessable Content', 'no file part')
+    }
+    const stored = await storeAsset(file)
+    return stored
+      ? HttpResponse.json(stored, { status: 201 })
+      : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
+  }),
+
+  http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
+    const asset = state.assets.get(String(params['id']))
+    return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
+  }),
+
+  http.get(`${base}/models/:slug/assets/:id/content`, ({ params }) => {
+    const asset = state.assets.get(String(params['id']))
+    if (!asset) return problem(404, 'Not Found', 'no uploaded file')
+    const type = asset.meta.kind === 'svg' ? 'image/svg+xml' : 'image/png'
+    return HttpResponse.arrayBuffer(asset.bytes, { headers: { 'Content-Type': type } })
   }),
 
   http.get(`${base}/jobs/:id`, ({ params }) => {

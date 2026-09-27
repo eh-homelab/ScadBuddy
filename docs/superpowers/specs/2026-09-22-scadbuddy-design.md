@@ -224,6 +224,8 @@ outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
+assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
+assets/<sha256>.json              its original name, kind and size; never pruned
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -351,7 +353,9 @@ normalised and overlaid:
 
 - `type`: `number` | `integer` (step is whole and initial is whole) | `string`
   | `boolean` | `select` (has `options`) | `color` (`// color`) | `font`
-  (`// font`) | `slider` (`number` with min and max).
+  (`// font`) | `file` (`// file:svg,png`, §5.5) | `slider` (`number` with min
+  and max).
+- `accept`: a `file` parameter's kinds, `["svg", "png"]` or a subset.
 - `groups`: ordered list preserving first appearance; parameters in
   `/* [Hidden] */` are excluded (OpenSCAD convention), `/* [Global] */` shown
   on every tab.
@@ -371,6 +375,7 @@ when the source changes.
 | `select` | dropdown; option `name` is the label, `value` is passed to OpenSCAD |
 | `color` | colour picker; the value is passed as a `"#RRGGBB"` string |
 | `font` | free-text field with an installed-font datalist, plus a **Browse** button opening the Google Fonts picker (§5.4) |
+| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear** (§5.5) |
 
 ### 5.3 The page
 
@@ -453,6 +458,52 @@ disk without one.
 says so and falls back to the families `fc-list` reports, which is also the fast path
 for picking one of the image's own faces — an already-resolvable family is returned
 as-is and nothing is fetched.
+
+### 5.5 File parameters (#204)
+
+A template can take a picture for one render: a logo, an overlay, a mask for
+`surface()`. The parameter is an ordinary string with a trailing annotation naming
+the kinds it takes:
+
+```scad
+// Picture to overlay
+overlay_file = ""; // file:svg,png
+```
+
+`// file` alone takes both kinds; `// file:png` takes one. Unlike `// [..]` this is
+not OpenSCAD customizer syntax, and that is deliberate: OpenSCAD (measured on
+2026.09.23) exports the parameter as a plain `string`, caption kept, so the model
+still opens in the OpenSCAD GUI and on MakerWorld, and only ScadBuddy types it
+`file`. An annotation naming no kind ScadBuddy stores (`// file:stl`) leaves it a
+string.
+
+- **Upload.** `POST /models/{id}/assets` (multipart `file`) sniffs the bytes, never
+  the name, and refuses anything but SVG and PNG (422) or over 8 MiB (413). An SVG
+  is re-serialised without scripts, event handlers, `foreignObject`/`image`/
+  animation elements, entity declarations, or any `href`/`url()` that leaves the
+  document. A PNG is decoded (refused past 25 MP), downscaled to 256 px on its
+  long side — `surface()` makes a vertex per pixel — and re-encoded without
+  metadata. The stored bytes' SHA-256 is the asset's id, so the same picture is
+  stored once. Built-ins take uploads too.
+- **The value is the id, never a path.** A render refuses (422) a `file` value
+  that is not `""`, the model's own default, or the id of a stored asset of an
+  accepted kind. The runner additionally refuses any `file` value that is not a
+  bare file name, so nothing reaches `import()` as a path whichever route sent it.
+- **Staging.** The job copies each asset into the model's directory as
+  `_scadbuddy_solid_asset_<random>.<kind>` and passes that bare name with `-D`, so
+  `import()`/`surface()` resolve it beside the model as they do a bundled file —
+  and so do all of §6.3's wrapper renders, which run in the same directory with
+  the same values. A template that guards the parameter to a bare file name keeps
+  working. The copies share the wrapper's prefix, so the source hash, the models
+  repository's `.gitignore` and a duplicate's copy all skip them; they are deleted
+  when the render ends, and each render gets its own.
+- **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
+  content hash; assets are never pruned, so a re-render and "Customize this
+  version" reproduce the output.
+- **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
+  (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
+  exits 0 when anything else rendered. Both are read off the whole log, and the job
+  result carries `OpenSCAD could not open <name>; the model rendered without it`.
 
 ## 6. Render pipeline
 
@@ -650,6 +701,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
+| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5) |
+| GET | `/models/{slug}/assets/{id}` / `…/{id}/content` | an upload's metadata / its stored bytes (served with a sandboxing CSP) |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema. `?merge_base=<commit>` saves a conflicted upstream merge's resolution: conflict markers are refused (422, `force` or not), and `upstream.base` advances to that revision in the same commit, `Merge <upstream id> into <slug>` by default |
 | GET | `/models/{slug}/upstream` | a duplicate's upstream: `{state, upstream, revision, preview}`. `state` is `current`, `update` (the upstream's current revision is neither `base` nor `dismissed`), `dismissed` or `gone`. On `update`, `preview` is `{ours, base, theirs, merged, clean, taken[], kept[]}`: `merged` is `git merge-file -p --diff3 ours base theirs`, `taken` the other files that follow the upstream (unchanged here since `base`) and `kept` those changed on both sides. 404 for a template that is not a duplicate |
 | POST | `/models/{slug}/upstream/merge` | clean → writes the merged `model.scad` and the `taken` files, sets `base` to the upstream's revision (and `path` to where it lives now), clears `dismissed`; one commit, `Merge <upstream id> into <slug>` → `{model, taken, kept}`. Conflicted → 409 with the marked-up source as `merged` and `merge_base`, nothing written. `model.json` is always the duplicate's own |

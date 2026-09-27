@@ -25,6 +25,7 @@ function Harness({
     <ParamWidget
       param={param}
       value={value}
+      slug="name-keychain"
       fonts={fonts}
       extruder={1}
       onChange={(next) => {
@@ -171,6 +172,7 @@ describe('select', () => {
     const user = userEvent.setup()
     render(
       <ParamWidget
+        slug="name-keychain"
         param={{
           group: 'Main',
           name: 'layers',
@@ -217,6 +219,7 @@ describe('color', () => {
   it('pairs a colour picker with the hex field', () => {
     const { container } = render(
       <ParamWidget
+        slug="name-keychain"
         param={param}
         value="#1B6CA8"
         fonts={fonts}
@@ -295,6 +298,7 @@ describe('font', () => {
     const user = userEvent.setup()
     render(
       <ParamWidget
+        slug="name-keychain"
         param={param}
         value="Liberation Sans:style=Bold"
         fonts={fonts}

@@ -320,6 +320,7 @@ export function CustomizePage() {
         <div className="min-h-0 max-lg:max-h-[45vh] max-lg:border-b max-lg:border-line">
           <ParameterPanel
             schema={schema}
+            slug={slug}
             values={values}
             fonts={fontsState.data ?? []}
             onChange={onChange}
