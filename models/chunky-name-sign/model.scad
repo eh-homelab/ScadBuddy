@@ -35,10 +35,10 @@ letter_spacing = 0.9; // [0.7:0.01:1.3]
 // Thicken every letter by this much all round, in mm (makes any face chunkier)
 boldness = 1; // [0:0.1:3]
 
-// Shrink the text so the word is never longer than max_length
+// Shrink the text so the word is never longer than max_length (off or on, a word too long for the 300 x 320 mm plate is always shrunk to fit it)
 auto_fit = true;
 
-// Longest the word may run in mm (its width when horizontal, its height when vertical)
+// Longest the word may run in mm (its width when horizontal, its height when vertical); capped at what fits the plate
 max_length = 180; // [40:5:400]
 
 /* [Layout] */
@@ -57,7 +57,7 @@ text_shape = "straight"; // [straight:Straight, arch_up:Arch up, arch_down:Arch 
 // Arch radius in mm; smaller bends the word more
 arc_radius = 120; // [40:5:500]
 
-// Circle: radius of the ring the letters stand on, in mm (0 = automatic, the word wraps most of the way round)
+// Circle: radius of the ring the letters stand on, in mm (0 = automatic, the word wraps most of the way round); a badge too big for the plate is shrunk
 circle_radius = 0; // [0:1:150]
 
 // Wave height in mm (either side of the centre line)
@@ -72,7 +72,7 @@ skew_angle = 15; // [5:1:40]
 // Bulge, pinch and perspective: how much the letter size changes, in percent
 shape_amount = 40; // [10:5:80]
 
-// Stairs: how far each letter steps up from the one before, in mm
+// Stairs: how far each letter steps up from the one before, in mm (reduced if the staircase would not fit the plate)
 stair_step = 6; // [1:0.5:30]
 
 /* [Backing] */
@@ -115,7 +115,7 @@ mount_spacing = 0; // [0:5:300]
 // Magnet diameter in mm (the pocket adds 0.3 mm)
 magnet_d = 10; // [4:0.5:20]
 
-// Magnet thickness in mm (the pocket adds 0.2 mm)
+// Magnet thickness in mm (the pocket adds 0.2 mm, but is never deeper than the backing less 1 mm)
 magnet_h = 2; // [1:0.5:5]
 
 /* [Colors] */
@@ -283,6 +283,30 @@ slant = shape == "slant_up" ? tan(skew_angle)
 sp = letter_spacing;
 k_amt = shape_amount / 100;
 
+// ------------------------------------------------------------ plate fit
+
+// The H2C prints 300 mm wide with both nozzles and 320 mm deep. Nothing here
+// measures the finished sign, so the longest run of letters is capped at the
+// plate less the frame round it: backing border, outer ring, the thickening,
+// and 3 % for arches that reach past their fitted length. In the vertical
+// layouts a foot sits below the sign on the same plate, so its depth comes
+// off too. The cap applies with auto_fit off as well: a sign that cannot go
+// on the plate is not a useful result.
+PLATE_W = 300;
+PLATE_D = 320;
+ring_w = outer_ring ? ring_width : 0;
+frame = 2 * (border + ring_w + boldness) + 2;
+foot_below = stand == "foot"
+    ? max(0, 9 + (text_outline ? min(outline_width, border - 0.5) : 0) - border)
+      + 8 + max(30, backing_thickness + 24.3)
+    : 0;
+plate_len = layout == "horizontal" ? (PLATE_W - frame) / 1.03
+          : (PLATE_D - frame - foot_below) / 1.03;
+fit_max = auto_fit ? min(max_length, plate_len) : plate_len;
+// A circle badge is as tall as it is wide, and the widest the plate takes is
+// its 300 mm.
+circle_plate = PLATE_W - frame;
+
 function cumsum(v, i) = i <= 0 ? 0 : cumsum(v, i - 1) + v[i - 1];
 function total(v) = cumsum(v, len(v));
 
@@ -308,15 +332,15 @@ L1 = max(0.001, total(W1));
 is_circle = shape == "circle";
 R_nom = circle_radius > 0 ? circle_radius
       : max(2 * text_size, text_size * L1 / (0.8 * 2 * PI));
-k_circ = circle_radius == 0 && auto_fit
-       ? min(1, max_length / (2 * (R_nom + 0.6 * text_size))) : 1;
+k_circ = min(1, (circle_radius == 0 && auto_fit ? min(max_length, circle_plate) : circle_plate)
+                / (2 * (R_nom + 0.6 * text_size)));
 R_circ = R_nom * k_circ;
 
 // Longest path the shape allows before the word would run into itself.
 shape_cap = is_circle ? 0.9 * 2 * PI * R_circ
           : (shape == "arch_up" || shape == "arch_down") ? 1.5 * PI * arc_radius
           : 1e9;
-fit_len = min(shape_cap, auto_fit && horizontal && !is_circle ? max_length : 1e9);
+fit_len = min(shape_cap, horizontal && !is_circle ? fit_max : 1e9);
 
 // Letter size after fitting. Straight and slanted text is fitted exactly by
 // resize() below; this estimate (from the metrics, ignoring kerning) is only
@@ -329,6 +353,11 @@ ym = mid_k * s;
 WS = [for (w = W1) w * s];
 LS = total(WS);
 CS = [for (i = [0:1:n - 1]) -LS / 2 + cumsum(WS, i) + WS[i] / 2];
+
+// Stairs rise across the plate's depth (its width when rotated); the step
+// shrinks so the whole staircase, one letter tall at the top, still fits.
+st_room = layout == "horizontal" ? PLATE_D - frame - foot_below : PLATE_W - frame;
+st_step = n > 1 ? max(0, min(stair_step, (st_room - 1.2 * s) / (n - 1))) : stair_step;
 
 R_arc = shape == "circle" ? R_circ : arc_radius;
 
@@ -347,7 +376,7 @@ function place(i) =
           let(r = atan(wave_amplitude * 2 * PI / wave_length * cos(a)))
           // tilted about the centre line, which follows the wave
           [c + ym * sin(r), wave_amplitude * sin(a) + ym * (1 - cos(r)), r, 1]
-  : shape == "stairs" ? [c, (i - (n - 1) / 2) * stair_step, 0, 1]
+  : shape == "stairs" ? [c, (i - (n - 1) / 2) * st_step, 0, 1]
   : [c, c * slant, 0, F[i]];
 
 P = [for (i = [0:1:n - 1]) place(i)];
@@ -358,9 +387,8 @@ function xf(p, q) =            // local glyph point q through placement p
 
 // Stacked layout: letter size and row pitch. A row is about 1.05 sizes of
 // ink; the column fits max_length including the thickening.
-s_st = auto_fit ? max(1, min(text_size, (max_length - (n - 1) * row_gap - 2 * boldness)
-                                        / (max(1, n) + 0.05)))
-                : text_size;
+s_st = max(1, min(text_size, (fit_max - (n - 1) * row_gap - 2 * boldness)
+                              / (max(1, n) + 0.05)));
 row_pitch = s_st + row_gap;
 function row_y(i) = ((n - 1) / 2 - i) * row_pitch;
 
@@ -411,10 +439,7 @@ module fit_x(w) {
 
 module native_word() {
     multmatrix([[1, 0, 0, 0], [slant, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
-        if (auto_fit) fit_x(max_length)
-            text(word, size = text_size, font = font, spacing = sp,
-                 halign = "center", valign = "baseline");
-        else
+        fit_x(fit_max)
             text(word, size = text_size, font = font, spacing = sp,
                  halign = "center", valign = "baseline");
 }
