@@ -3799,7 +3799,32 @@
         "type": "object"
       },
       "PrinterBedType": {
-        "description": "The plate on one printer (#83); ``null`` forgets it.",
+        "description": "The plate remembered on one printer (#83).",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "printer_id": {
+            "title": "Printer Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "printer_id"
+        ],
+        "title": "PrinterBedType",
+        "type": "object"
+      },
+      "PrinterBedTypePut": {
+        "description": "The plate to remember on the printer the path names (#83); ``null`` forgets it.",
         "properties": {
           "bed_type": {
             "anyOf": [
@@ -3812,20 +3837,9 @@
               }
             ],
             "title": "Bed Type"
-          },
-          "printer_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Printer Id"
           }
         },
-        "title": "PrinterBedType",
+        "title": "PrinterBedTypePut",
         "type": "object"
       },
       "ProjectAttach": {
@@ -7218,7 +7232,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "$ref": "#/components/schemas/PrinterBedType"
+                "$ref": "#/components/schemas/PrinterBedTypePut"
               }
             }
           },

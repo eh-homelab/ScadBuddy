@@ -761,7 +761,12 @@ async def run_for_output(
     outcomes = []
     warnings = []
     # Each plate's slots are read on their own: a plate uses only some of the
-    # project's filaments, and its requirements say which (#83).
+    # project's filaments, and its requirements say which (#83). The one plan applies to
+    # every plate because a slot is a project filament, not a plate position: extruders
+    # are numbered by colour parameter across the whole output (#180), so slot 2 is the
+    # same colour on plate 1 and plate 2. A slot a later plate uses and the plan (picked
+    # against plate 1) does not cover is what a single plate does with an unpicked slot:
+    # sliced with its own colour and the pipeline's preset, and said in a warning.
     for plate_id in plate_ids:
         options = await gather_options(
             client,
@@ -797,6 +802,16 @@ async def run_for_output(
         _record_queued(store, meta, outcome, project_id)
         outcomes.append(outcome)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
+            if warning.kind == "no-choice" and warning.slot_id is not None and len(plate_ids) > 1:
+                warning = warning.model_copy(
+                    update={
+                        "message": (
+                            f"Plate {plate_id} uses slot {warning.slot_id}, which has no "
+                            "filament chosen, so it is sliced with its own colour and the "
+                            "pipeline's filament preset."
+                        )
+                    }
+                )
             if warning not in warnings:
                 warnings.append(warning)
     return _queued(

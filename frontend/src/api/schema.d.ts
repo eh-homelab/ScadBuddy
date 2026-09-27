@@ -2357,13 +2357,21 @@ export interface components {
         };
         /**
          * PrinterBedType
-         * @description The plate on one printer (#83); ``null`` forgets it.
+         * @description The plate remembered on one printer (#83).
          */
         PrinterBedType: {
             /** Bed Type */
             bed_type?: string | null;
             /** Printer Id */
-            printer_id?: number | null;
+            printer_id: number;
+        };
+        /**
+         * PrinterBedTypePut
+         * @description The plate to remember on the printer the path names (#83); ``null`` forgets it.
+         */
+        PrinterBedTypePut: {
+            /** Bed Type */
+            bed_type?: string | null;
         };
         /**
          * ProjectAttach
@@ -4219,7 +4227,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["PrinterBedType"];
+                "application/json": components["schemas"]["PrinterBedTypePut"];
             };
         };
         responses: {

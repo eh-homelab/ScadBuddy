@@ -61,11 +61,17 @@ class PipelineDefaultPatch(BaseModel):
     pipeline_id: int | None = None
 
 
-class PrinterBedType(BaseModel):
-    """The plate on one printer (#83); ``null`` forgets it."""
+class PrinterBedTypePut(BaseModel):
+    """The plate to remember on the printer the path names (#83); ``null`` forgets it."""
 
-    printer_id: int | None = None
     bed_type: str | None = Field(default=None, max_length=64)
+
+
+class PrinterBedType(BaseModel):
+    """The plate remembered on one printer (#83)."""
+
+    printer_id: int
+    bed_type: str | None = None
 
 
 class ProjectAttach(BaseModel):
@@ -175,7 +181,7 @@ def put_model_choices(
     summary="Remember the plate on this printer",
 )
 def put_printer_bed_type(
-    printer_id: int, body: PrinterBedType, store: SettingsStoreDep
+    printer_id: int, body: PrinterBedTypePut, store: SettingsStoreDep
 ) -> PrinterBedType:
     """What the picker last printed on this printer with (#83), which it opens on next.
 

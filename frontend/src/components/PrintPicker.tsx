@@ -325,6 +325,9 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const bedTypes = current?.bed_types ?? []
   const sendsBedType = bedType !== pipelineBed
   const bedTypeTaken = bedType === null || bedTypes.some((entry) => entry.value === bedType)
+  // "All plates" picks its spools against plate 1 and the server applies that plan to
+  // every plate: a slot is a colour-numbered project filament (#180), the same colour on
+  // each plate. A slot only a later plate uses comes back as a warning naming the plate.
   const chosenPlate = plate === 'all' ? 1 : plate
 
   /**

@@ -20,6 +20,8 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print import API, pipelines_route, presets_routes, printers_route
+from tests.api.test_print_filaments import inventory_routes, slice_routes
+from tests.api.test_print_filaments import queue_route as filament_queue_route
 from tests.api.test_print_options_picker import slice_route
 from tests.api.test_send import configure, make_output, upload_route
 from tests.api.test_send_options import queue_route, remember
@@ -296,3 +298,85 @@ def test_plates_queued_before_a_later_plate_fails_are_still_recorded(
     assert meta["queue_item_id"] == 9
     assert meta["print_route"] == "slice_queue"
     assert meta["slice_job_id"] == 9
+
+
+# --- one filament plan across every plate -------------------------------------------
+
+
+def _plates_use(used: dict[int, set[int]]) -> None:
+    """Each plate's requirements: the recording's two slots, marked used per plate."""
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        body = recording("filament-requirements.json")
+        plate = int(request.url.params["plate_id"])
+        body["plate_id"] = plate
+        for filament in body["filaments"]:
+            filament["used_in_plate"] = filament["slot_id"] in used[plate]
+        return httpx.Response(200, json=body)
+
+    # Registered after `inventory_routes`, so this one answers.
+    respx.route(method="GET", path__regex=r"/api/v1/library/files/\d+/filament-requirements").mock(
+        side_effect=answer
+    )
+
+
+def _plan_run(
+    client: TestClient, model: str, paths: DataPaths, used: dict[int, set[int]]
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    configure(client)
+    pipelines_route()
+    printers_route()
+    presets_routes()
+    output_id = make_output(client, model)
+    add_plate(_output_3mf(paths, output_id), 2)
+    upload_route()
+    inventory_routes()
+    _plates_use(used)
+    slice_routes()
+    queue = filament_queue_route()
+    body = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json={
+            "pipeline_id": 1,
+            "printer_id": 1,
+            "all_plates": True,
+            # Picked against plate 1, as the picker does for "all plates".
+            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
+        },
+    ).json()
+    return body, [json.loads(call.request.read()) for call in queue.calls]
+
+
+@respx.mock
+def test_one_plan_maps_the_same_slot_on_every_plate(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A slot is a colour-numbered project filament (#180), so plate 2's slot 1 is the
+    colour plate 1's slot 1 is, and the spool picked for it prints it there too."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}})
+
+    assert len(queued) == 2
+    for item in queued:
+        [override] = item["filament_overrides"]
+        # Spool 9: PETG, #688197.
+        assert (override["slot_id"], override["type"], override["color"]) == (
+            1,
+            "PETG",
+            "#688197",
+        )
+    assert not any(warning["kind"] == "no-choice" for warning in body["warnings"])
+
+
+@respx.mock
+def test_a_slot_only_a_later_plate_uses_is_left_to_the_pipeline_and_said(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Plate 2 uses slot 2, which the plan (built from plate 1) does not cover: the
+    single-plate rule for an unpicked slot, no override and a warning, naming the plate."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1, 2}})
+
+    assert [override["slot_id"] for override in queued[1]["filament_overrides"]] == [1]
+    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "no-choice"]
+    assert warning["slot_id"] == 2
+    assert "Plate 2" in warning["message"]
+    assert "slot 2" in warning["message"]
