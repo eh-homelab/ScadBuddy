@@ -22,7 +22,7 @@ from scadbuddy.core.paths import (
     is_builtin,
     model_path,
 )
-from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -279,13 +279,25 @@ class Catalogue:
         staged = staging / slug
         target = self.paths.model_dir(slug)
         try:
-            try:
-                # Dotfiles are left out: a `.model-*.scad` is a source write in flight.
-                shutil.copytree(
-                    self.paths.model_dir(upstream_id), staged, ignore=shutil.ignore_patterns(".*")
-                )
-            except FileNotFoundError:
-                raise ModelNotFoundError(upstream_id) from None
+            if base is not None and self.history is not None:
+                # From the revision recorded as `base`, not the working tree: a
+                # source edit landing between reading `base` and copying would
+                # otherwise give a copy newer than the revision it claims.
+                try:
+                    self.history.export(model_path(upstream_id), base, staged)
+                except RevisionNotFoundError:
+                    raise ModelNotFoundError(upstream_id) from None
+            else:
+                try:
+                    # Dotfiles are left out: a `.model-*.scad` is a source write in
+                    # flight.
+                    shutil.copytree(
+                        self.paths.model_dir(upstream_id),
+                        staged,
+                        ignore=shutil.ignore_patterns(".*"),
+                    )
+                except FileNotFoundError:
+                    raise ModelNotFoundError(upstream_id) from None
             meta_path = staged / MODEL_META_NAME
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
             meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}

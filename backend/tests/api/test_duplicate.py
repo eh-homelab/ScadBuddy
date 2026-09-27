@@ -170,3 +170,18 @@ def test_an_unknown_template_is_a_404(client: TestClient) -> None:
         response = client.post(f"/api/v1/models/{model_id}/duplicate", json={"name": "Copy"})
         assert response.status_code == 404
     assert client.get("/api/v1/models/copy").status_code == 404
+
+
+def test_a_duplicate_is_the_revision_it_records_as_base(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """The copy comes from `base`, not the working tree: a source write that lands
+    after `base` was read must not show up in a copy that claims the older one."""
+    mine = _duplicate(client, BUILTIN, "Mine")
+    # Uncommitted, as a PUT in flight between reading `base` and copying would be.
+    paths.model_source(mine["slug"]).write_text("width = 99;\n", encoding="utf-8")
+
+    again = _duplicate(client, mine["slug"], "Again")
+
+    assert again["upstream"]["base"] == mine["version"]
+    assert client.get(f"/api/v1/models/{again['slug']}/source").text == SOURCE
