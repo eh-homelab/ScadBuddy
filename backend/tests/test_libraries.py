@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -16,10 +17,13 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.api.deps import build_state
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.library.libraries import (
+    KILL_WAIT,
     LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
@@ -29,6 +33,7 @@ from scadbuddy.library.libraries import (
     LibraryNotInstalledError,
     LibraryPin,
     LibraryStore,
+    LibraryTooLargeError,
     Lock,
     LockfileError,
     _write_pins,
@@ -365,6 +370,26 @@ def test_a_git_that_times_out_is_killed_with_its_helpers(
         pytest.fail("the timed-out git's child is still running")
 
 
+def test_a_killed_git_that_is_never_reaped_does_not_hold_up_the_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    waits: list[float | None] = []
+
+    class Unreapable:
+        pid = 0
+        args = ("git",)
+
+        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
+            waits.append(timeout)
+            raise subprocess.TimeoutExpired("git", timeout or 0)
+
+    monkeypatch.setattr("scadbuddy.library.libraries.os.killpg", lambda pid, sig: None)
+
+    LibraryStore._kill(Unreapable())  # type: ignore[arg-type]
+
+    assert waits == [KILL_WAIT]
+
+
 def _running(pid: int) -> bool:
     """A killed orphan whose new parent never reaps it (pytest as PID 1 in the test
     image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
@@ -431,7 +456,7 @@ def _recording_git(store: LibraryStore, monkeypatch: pytest.MonkeyPatch) -> list
     """Every git call the store makes, each failing as an unreachable fetch would."""
     calls: list[tuple[str, ...]] = []
 
-    def git(*args: str) -> str:
+    def git(*args: str, watch: Path | None = None) -> str:
         calls.append(args)
         raise LibraryFetchError("unreachable")
 
@@ -677,6 +702,76 @@ def test_an_unknown_ref_leaves_nothing_behind(store: LibraryStore, paths: DataPa
 
     assert not (paths.models / LOCKFILE_NAME).exists()
     assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
+    store: LibraryStore, paths: DataPaths
+) -> None:
+    store.max_bytes = 1
+
+    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ bytes, over the 1 bytes"):
+        store.install("BOSL2")
+
+    assert not (paths.models / LOCKFILE_NAME).exists()
+    assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
+    paths: DataPaths, history: ModelHistory, tmp_path: Path
+) -> None:
+    """The cap stops the clone mid-transfer: an oversized repository never gets to
+    write its whole tree to the volume before it is refused."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    # A clone that never finishes: a child keeps appending to the checkout.
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'for last; do :; done\nmkdir -p "$last"\n'
+        '(while :; do head -c 65536 /dev/zero >> "$last/blob"; sleep 0.01; done) &\n'
+        f"echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    store = LibraryStore(
+        paths,
+        history,
+        catalogue=(),
+        git=str(fake_git),
+        timeout=60,
+        max_bytes=1_000_000,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ MB, over the 1 MB"):
+        store._clone("Big", "https://git.example/o/big.git", "main")
+
+    assert time.monotonic() - started < 30
+    assert list(paths.libraries.iterdir()) == []
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _running(pid):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the oversized clone's writer is still running")
+
+
+def test_a_clone_within_the_size_cap_is_installed(store: LibraryStore, paths: DataPaths) -> None:
+    store.max_bytes = 10_000_000
+
+    pin = store.install("BOSL2")
+
+    assert (paths.libraries / "BOSL2" / pin.commit / "BOSL2").is_dir()
+
+
+def test_the_size_cap_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_LIBRARY_MAX_BYTES", "1234")
+    state = build_state(Settings(data_dir=tmp_path, frontend_dir=Path("/nonexistent")))
+
+    assert state.libraries.max_bytes == 1234
 
 
 def test_search_path_is_only_what_the_model_declares(
