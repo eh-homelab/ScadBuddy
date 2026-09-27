@@ -62,6 +62,8 @@ CASES += [
     ("long-name", dict(text="Rosemary & Thyme", label_w=50, style="hanging_tag")),
     ("thin-inlay", dict(thickness=1.6, text_style="inlay")),
     ("wide-rim", dict(style="pot_rim_clip", rim_thickness=8, label_h=12)),
+    ("arrow-long", dict(style="arrow_stake", text="Lemon Verbena", font="DejaVu Sans:style=Bold")),
+    ("tall-text", dict(text="Mint", label_w=150, label_h=50, text_size=40)),
     ("empty-text", dict(text="")),
     ("long-stake-serif", dict(stake_len=200, font="DejaVu Serif:style=Bold", text_size=25)),
 ]
@@ -217,11 +219,17 @@ for name, ov in CASES:
     if has_text:
         blo, bhi = bbox(parts[WHITE])
         w, h = bhi[0] - blo[0], bhi[1] - blo[1]
-        check(w <= W - 2 * TEXT_PAD + 0.05 and h <= H - 2 * TEXT_PAD + 0.05,
-              "text %.2f x %.2f fits the %.1f x %.1f text box" % (w, h, W - 2 * TEXT_PAD, H - 2 * TEXT_PAD))
-        if name == "long-name":
-            check(w >= W - 2 * TEXT_PAD - 0.5,
-                  "long name shrinks to the text box width (%.2f ~ %.1f)" % (w, W - 2 * TEXT_PAD))
+        # The arrow's text box starts past its fletching notch (H / 4 deep).
+        notch = H / 4 if p(ov, "style") == "arrow_stake" else 0
+        box_l, box_r = -W / 2 + TEXT_PAD + notch, W / 2 - TEXT_PAD
+        check(blo[0] >= box_l - 0.05 and bhi[0] <= box_r + 0.05 and h <= H - 2 * TEXT_PAD + 0.05,
+              "text x %.2f .. %.2f, height %.2f fits the text box x %.2f .. %.2f, height %.1f"
+              % (blo[0], bhi[0], h, box_l, box_r, H - 2 * TEXT_PAD))
+        if name in ("long-name", "arrow-long"):
+            check(w >= box_r - box_l - 0.5,
+                  "long name shrinks to the text box width (%.2f ~ %.1f)" % (w, box_r - box_l))
+        if name == "tall-text":
+            check(h > 26, "text_size above 25 is honoured on a tall label (letters %.1f mm tall)" % h)
 
     if p(ov, "style") == "pot_rim_clip":
         rim = p(ov, "rim_thickness")
