@@ -773,3 +773,169 @@ def test_a_mirror_that_cannot_be_made_does_not_raise(
 
     assert catalogue.sync_builtins(image) is None
     assert "could not sync built-in templates" in caplog.text
+
+
+KEYCHAIN = 'label = "hi";\nfont = "Lobster Two";\nheight = 2;\nsize = 10;\ncube(size);\n'
+
+
+def _seeded(catalogue: Catalogue, slug: str, source: str, message: str | None = None) -> str:
+    """A model as the pre-#155 seed left it: copied in, committed as ``Seed … from the image``."""
+    assert catalogue.history is not None
+    directory = catalogue.paths.model_dir(slug)
+    directory.mkdir(parents=True)
+    (directory / "model.scad").write_text(source, encoding="utf-8")
+    (directory / "model.json").write_text(json.dumps({"name": slug}), encoding="utf-8")
+    commit = catalogue.history.commit(message or f"Seed {slug} from the image", slug)
+    assert commit is not None
+    return commit
+
+
+def _merge(catalogue: Catalogue, slug: str) -> str:
+    """Three-way merge the built-in into a linked template, as an upstream update does."""
+    assert catalogue.history is not None
+    upstream = catalogue.record(slug).upstream
+    assert upstream is not None and upstream.base is not None
+    base = catalogue.paths.cache / "merge-base.scad"
+    base.write_bytes(catalogue.history.show(upstream.base, f"{upstream.path}/model.scad"))
+    ours = catalogue.paths.model_source(slug)
+    theirs = catalogue.paths.model_source(upstream.id)
+    merged = subprocess.run(
+        ["git", "merge-file", "-p", str(ours), str(base), str(theirs)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert merged.returncode == 0, merged.stdout
+    return merged.stdout
+
+
+def test_a_seeded_template_becomes_a_duplicate_of_its_built_in(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    seed = _seeded(catalogue, "name-keychain", KEYCHAIN)
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    assert catalogue.link_seeded() is not None
+
+    record = catalogue.record("name-keychain")
+    assert record.upstream is not None
+    assert record.upstream.model_dump() == {
+        "id": "builtin:name-keychain",
+        "path": "name-keychain",
+        "base": seed,
+        "dismissed": None,
+    }
+    assert record.origin == "mine"
+    assert catalogue.history.log()[0].message == "Link seeded templates to their built-ins"
+    # Nothing renamed: the slug, its source and the seeded revision all stand.
+    assert sorted(entry.slug for entry in catalogue.list_models()) == [
+        "builtin:name-keychain",
+        "name-keychain",
+    ]
+    assert catalogue.paths.model_source("name-keychain").read_text(encoding="utf-8") == KEYCHAIN
+    assert catalogue.history.resolve(seed) == seed
+    # Unedited: merges clean to the current built-in.
+    assert _merge(catalogue, "name-keychain") == KEYCHAIN.replace("size = 10", "size = 12")
+
+
+def test_an_edited_seeded_template_keeps_its_edits_through_the_merge(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    catalogue.write_source("name-keychain", KEYCHAIN.replace('"hi"', '"mine"'))
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    catalogue.link_seeded()
+
+    assert _merge(catalogue, "name-keychain") == (
+        KEYCHAIN.replace('"hi"', '"mine"').replace("size = 10", "size = 12")
+    )
+
+
+def test_linking_is_idempotent(catalogue: Catalogue, tmp_path: Path) -> None:
+    assert catalogue.history is not None
+    _seeded(catalogue, "name-keychain", KEYCHAIN, "Seed name-keychain and tag from the image")
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+    assert catalogue.link_seeded() is not None
+    head = catalogue.history.head()
+    meta = catalogue.paths.model_meta("name-keychain").read_bytes()
+
+    assert catalogue.link_seeded() is None
+
+    assert catalogue.history.head() == head
+    assert catalogue.paths.model_meta("name-keychain").read_bytes() == meta
+
+
+def test_a_template_with_no_seed_commit_is_left_alone(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    assert catalogue.history is not None
+    # Uploaded under a built-in's slug; and seeded, deleted, then uploaded again.
+    catalogue.create("tag", "cube(1);\n", ModelMeta(name="Mine"))
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    catalogue.delete("name-keychain")
+    catalogue.create("name-keychain", "cube(2);\n", ModelMeta(name="Mine too"))
+    image = tmp_path / "image"
+    _bundle(image, "tag", "cube(5);\n")
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+    head = catalogue.history.head()
+
+    with caplog.at_level("INFO"):
+        assert catalogue.link_seeded() is None
+
+    assert catalogue.record("tag").upstream is None
+    assert catalogue.record("name-keychain").upstream is None
+    assert catalogue.history.head() == head
+    skipped = [
+        getattr(record, "slug", None) for record in caplog.records if "not seeded" in record.msg
+    ]
+    assert sorted(slug for slug in skipped if slug) == ["name-keychain", "tag"]
+
+
+def test_a_template_that_already_has_an_upstream_is_left_alone(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    raw = catalogue.read_raw_meta("name-keychain")
+    raw["upstream"] = {"id": "builtin:tag", "path": "_builtin/tag", "base": None, "dismissed": None}
+    catalogue.write_raw_meta("name-keychain", raw)
+    catalogue.history.commit("Point it elsewhere", "name-keychain")
+    head = catalogue.history.head()
+
+    assert catalogue.link_seeded() is None
+
+    upstream = catalogue.record("name-keychain").upstream
+    assert upstream is not None and upstream.id == "builtin:tag"
+    assert catalogue.history.head() == head
+
+
+def test_one_template_that_cannot_be_linked_does_not_stop_the_rest(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    _seeded(catalogue, "tag", "cube(5);\n")
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    catalogue.paths.model_meta("tag").write_text("{not json", encoding="utf-8")
+
+    assert catalogue.link_seeded() is not None
+
+    assert catalogue.record("name-keychain").upstream is not None
+    assert [getattr(record, "slug", None) for record in caplog.records if record.exc_info] == [
+        "tag"
+    ]

@@ -372,6 +372,48 @@ export const handlers = [
     return HttpResponse.json(imported, { status: 201 })
   }),
 
+  // #156 — any template, built-in or mine, copied to a new one of mine that records
+  // it as `upstream`, with `base` its current revision (`catalogue.duplicate`).
+  http.post(`${base}/models/:slug/duplicate`, async ({ params, request }) => {
+    const id = String(params['slug'])
+    const upstream = state.models.find((m) => m.slug === id)
+    if (!upstream) return problem(404, 'Not Found', `no model named '${id}'`)
+    const body = (await request.json()) as { name: string }
+    const slug = slugify(body.name)
+    if (!slug) {
+      return problem(422, 'Unprocessable Content', `'${body.name}' does not yield a usable slug`)
+    }
+    if (state.models.some((m) => m.slug === slug)) {
+      return problem(409, 'Conflict', `a model named '${slug}' already exists`)
+    }
+    const base = state.versions[id]?.[0]?.commit ?? null
+    const version = recordVersion(slug, `Duplicate ${id} as ${slug}`, [
+      { status: 'A', path: 'model.scad' },
+    ])
+    const copy: ModelSummary = {
+      ...upstream,
+      slug,
+      name: body.name,
+      origin: 'mine',
+      origin_url: null,
+      has_thumbnail: false,
+      updated_at: version.date,
+      version: version.commit,
+      upstream: {
+        id,
+        path: id.startsWith('builtin:') ? `_builtin/${id.slice('builtin:'.length)}` : id,
+        base,
+      },
+    }
+    state.models = [copy, ...state.models]
+    const schema = state.schemas[id]
+    if (schema) state.schemas[slug] = { ...schema, title: body.name }
+    const source = state.sources[id]
+    if (source !== undefined) state.sources[slug] = source
+    await delay(120)
+    return HttpResponse.json(copy, { status: 201 })
+  }),
+
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const refused = refuseBuiltin(slug)

@@ -25,6 +25,10 @@ export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']
 
+/** #156 — the body of `POST /models/{id}/duplicate`, and what a duplicate records. */
+export type DuplicateRequest = Schemas['DuplicateRequest']
+export type Upstream = Schemas['Upstream']
+
 /** #153 — a model fetched from a URL rather than uploaded or pasted. */
 export type UrlImport = Schemas['UrlImport']
 

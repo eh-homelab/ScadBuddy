@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
 import { api } from '../api/client'
+import { DuplicateModelButton } from '../components/DuplicateModelButton'
 import { SourceWorkbench } from '../components/SourceWorkbench'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -9,7 +10,8 @@ import { useAsync } from '../lib/useAsync'
 
 /**
  * The same editor as "New model", prefilled. Saving overwrites the source in place.
- * A built-in template (#184) opens read-only: the server refuses to write it.
+ * A built-in template (#184) opens read-only: the server refuses to write it, and
+ * "Duplicate to edit" (#159) opens an editable copy instead.
  */
 export function EditSourcePage() {
   const { slug = '' } = useParams()
@@ -81,6 +83,16 @@ export function EditSourcePage() {
       saveLabel="Save source"
       canSave={model.data?.origin === 'mine'}
       readOnly={builtin}
+      readOnlyActions={
+        // #159 — the way to edit a built-in: a copy of it, opened on its source.
+        <DuplicateModelButton
+          slug={slug}
+          name={model.data?.name ?? slug}
+          label="Duplicate to edit"
+          landOn="source"
+          primary
+        />
+      }
       onSave={save}
     />
   )

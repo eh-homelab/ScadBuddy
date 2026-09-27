@@ -37,6 +37,7 @@ import fcntl
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -76,6 +77,10 @@ DEFAULT_BRANCH = "main"
 RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
+
+#: The subject the pre-#155 copy-if-absent seed committed a bundled model under:
+#: ``Seed name-keychain and tag from the image``.
+_SEED_SUBJECT = re.compile(r"^Seed .+ from the image$")
 
 # git's own hash of the empty tree: what a root commit's diff is taken against,
 # since it has no parent to compare with.
@@ -451,6 +456,25 @@ class ModelHistory:
         if completed.returncode != 0:
             return None
         return completed.stdout.strip() or None
+
+    def seed_commit(self, slug: str) -> str | None:
+        """The ``Seed … from the image`` commit ``slug`` as it stands was copied in by.
+
+        Walks the model's own history newest first. ``None`` when the model was
+        made some other way -- uploaded, duplicated, or recreated after a delete --
+        since an older seed of the same slug is then not its origin.
+        """
+        completed = self._run("log", "--format=%H%x1f%s", "--", slug, check=False)
+        assert isinstance(completed.stdout, str)
+        if completed.returncode != 0:
+            raise GitError(f"git log failed: {completed.stderr.strip()}", completed.stderr)
+        for line in completed.stdout.splitlines():
+            commit, _, subject = line.partition(_FIELD)
+            if _SEED_SUBJECT.match(subject):
+                return commit
+            if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
+                return None
+        return None
 
     def last_commits(self) -> dict[str, str]:
         """Every model's current revision, from ONE walk of the history.

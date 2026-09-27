@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
+import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { ImportDialog } from '../components/ImportDialog'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
@@ -63,7 +64,11 @@ export function CataloguePage() {
         {data && data.length > 0 && (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.map((model) => (
-              <ModelCard key={model.slug} model={model} />
+              <ModelCard
+                key={model.slug}
+                model={model}
+                upstreamName={data.find((m) => m.slug === model.upstream?.id)?.name}
+              />
             ))}
           </ul>
         )}
@@ -89,7 +94,7 @@ export function CataloguePage() {
   )
 }
 
-function ModelCard({ model }: { model: ModelSummary }) {
+function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?: string }) {
   return (
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
       <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
@@ -141,6 +146,12 @@ function ModelCard({ model }: { model: ModelSummary }) {
           </a>
         </p>
       )}
+      <div className="flex items-center justify-between gap-2 px-3 pb-2">
+        <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
+        <span className="ml-auto">
+          <DuplicateModelButton slug={model.slug} name={model.name} />
+        </span>
+      </div>
     </li>
   )
 }

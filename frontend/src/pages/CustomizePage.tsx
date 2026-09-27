@@ -4,6 +4,7 @@ import { api } from '../api/client'
 import type { Output, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
+import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
@@ -187,6 +188,7 @@ export function CustomizePage() {
           </Link>
           <span className="text-faint">/</span>
           <h1 className="truncate text-[13px] font-medium">{schema.title}</h1>
+          <DuplicatedFrom upstream={modelState.data?.upstream} className="shrink-0" />
           {reopened && (
             <span className="sb-num shrink-0 text-[11px] text-faint">
               reopened from {reopened.name ?? reopened.output_id.slice(0, 8)}
@@ -246,6 +248,9 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
+          {origin && (
+            <DuplicateModelButton slug={slug} name={modelState.data?.name ?? schema.title ?? slug} />
+          )}
           {origin === 'mine' && (
             <>
               <ModelLibrariesButton
