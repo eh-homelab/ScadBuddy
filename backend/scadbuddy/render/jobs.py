@@ -20,6 +20,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
     SCHEMA_CACHE_NAME,
@@ -43,6 +44,14 @@ from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 logger = logging.getLogger(__name__)
 
 JobState = Literal["pending", "running", "done", "failed"]
+
+#: The event each state is announced as.
+JOB_EVENT_KINDS: dict[JobState, JobKind] = {
+    "pending": "job.pending",
+    "running": "job.running",
+    "done": "job.done",
+    "failed": "job.failed",
+}
 
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
@@ -544,10 +553,13 @@ class RenderQueue:
         store: JobStore | None = None,
         render: RenderCallable | None = None,
         history: ModelHistory | None = None,
+        events: EventBus | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
         self.history = history
+        #: Told of every state a job enters, as ``job.<state>``.
+        self.events = events
         self.store = store or JobStore(paths)
         # The cover rasteriser's own threads, sized like the workers that feed it.
         self._thumbnails = ThreadPoolExecutor(
@@ -567,7 +579,8 @@ class RenderQueue:
 
     async def start(self) -> None:
         self.paths.ensure()
-        self.store.fail_unfinished()
+        for job in self.store.fail_unfinished():
+            self._announce(job)
         self.store.prune(self.config.job_ttl)
         prune_revision_exports(self.paths, self.config.job_ttl)
         self._workers = [
@@ -597,8 +610,12 @@ class RenderQueue:
             created_at=_now(),
         )
         self.store.write(job)
+        self._announce(job)
         await self._queue.put(job.id)
         return job
+
+    def _announce(self, job: Job) -> None:
+        emit(self.events, JobEvent(kind=JOB_EVENT_KINDS[job.state], job_id=job.id, slug=job.slug))
 
     async def join(self) -> None:
         await self._queue.join()
@@ -616,6 +633,7 @@ class RenderQueue:
         job.state = "running"
         job.started_at = _now()
         self.store.write(job)
+        self._announce(job)
         try:
             result, log_tail = await self._render(job)
         except OpenSCADError as error:
@@ -631,5 +649,6 @@ class RenderQueue:
             job.log_tail = log_tail
         job.finished_at = _now()
         self.store.write(job)
+        self._announce(job)
         self.store.prune(self.config.job_ttl)
         prune_revision_exports(self.paths, self.config.job_ttl)

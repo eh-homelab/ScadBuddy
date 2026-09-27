@@ -3,12 +3,21 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
 from fastapi import Depends, Path, Request
 
+from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import (
+    EventBus,
+    InProcessEventBus,
+    UpstreamAvailable,
+    VersionCommitted,
+    emit,
+)
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
@@ -45,6 +54,11 @@ class AppState:
     fonts: FontService
     libraries: LibraryStore
     queue: RenderQueue
+    #: Where every state change is published (spec §7). In-process today; the
+    #: Postgres ``pg_notify`` backend (#241) replaces it behind the same protocol.
+    events: EventBus
+    #: Publishes ``print.*`` from the progress reads the backend makes.
+    print_progress: ProgressObserver
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -68,28 +82,57 @@ class AppState:
     openscad_version: str | None = field(default=None)
 
 
+def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
+    """The history's commit hook: ``version.committed`` for each template a commit
+    touched, and ``upstream.available`` for every duplicate of one that still exists.
+
+    Runs on the committing thread after the write lock is released, so reading the
+    duplicates' ``model.json`` here cannot deadlock against the commit.
+    """
+
+    def on_commit(commit: str, touched: list[str]) -> None:
+        for model_id in touched:
+            emit(events, VersionCommitted(slug=model_id, commit=commit))
+            try:
+                if not catalogue.exists(model_id):
+                    continue  # deleted: its duplicates' upstream is gone, not updated
+                duplicates = catalogue.duplicates_of(model_id)
+            except OSError:
+                logger.exception("could not list duplicates", extra={"slug": model_id})
+                continue
+            for duplicate in duplicates:
+                emit(events, UpstreamAvailable(slug=duplicate, upstream=model_id, commit=commit))
+
+    return on_commit
+
+
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
+    events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     outputs = OutputStore(paths)
+    # The outputs feed the catalogue's fallback thumbnail (#179).
+    catalogue = Catalogue(paths, history, outputs)
+    history.on_commit = announce_commits(events, catalogue)
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
         history=history,
-        # The outputs feed the catalogue's fallback thumbnail (#179).
-        catalogue=Catalogue(paths, history, outputs),
+        catalogue=catalogue,
         outputs=outputs,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
+        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        queue=RenderQueue(config, paths, history=history),
+        queue=RenderQueue(config, paths, history=history, events=events),
+        events=events,
+        print_progress=ProgressObserver(events),
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
     )
@@ -164,6 +207,14 @@ def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
 
+def get_events(state: StateDep) -> EventBus:
+    return state.events
+
+
+def get_print_progress(state: StateDep) -> ProgressObserver:
+    return state.print_progress
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -182,6 +233,8 @@ SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
+EventsDep = Annotated[EventBus, Depends(get_events)]
+PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 
