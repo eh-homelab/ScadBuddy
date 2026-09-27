@@ -554,9 +554,18 @@ jobs:
   # Dockerfile's pinned OPENSCAD_VERSION. Not the full `test` image: the
   # scripts need openscad and fonts and nothing else, and `base` has no
   # frontend or Python dependency layers to rebuild on a PR that changes them.
-  # Its own job rather than steps in `image`: the full set took 96 s locally at
-  # four in parallel, and as steps it would sit serially behind that job's ~7
-  # minutes instead of beside them.
+  # Its own job rather than steps in `image`, so it runs beside that job's ~7
+  # minutes instead of after them.
+  #
+  # Timing, measured rather than assumed: on ubuntu-latest (4 vCPU, four
+  # templates at a time) the 24 templates then on main took 3.5 min for the
+  # whole job, slowest chunky-name-sign at 158 s (#283's own run). flexi-fabric
+  # (159 s locally, against chunky-name-sign's 84 s there) and dollhouse-kit
+  # landed after, so budget roughly double that on hosted. `timeout-minutes: 30`
+  # is headroom for the wall time, and it stays above the runner's 20-minute
+  # per-template guard, so a single hung template reds as a named timeout in
+  # the summary table rather than as the whole job being killed. Raise both
+  # together if the set outgrows it.
   #
   # It runs as root (as `openscad/openscad:dev` does), which is what the
   # scripts assume: they bind-mount the checkout and write their renders into

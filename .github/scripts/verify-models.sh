@@ -34,20 +34,51 @@ fi
 
 echo "Verifying ${#slugs[@]} template(s), $JOBS at a time: ${slugs[*]}"
 
+# Force-remove every running container with a bind mount inside $1.
+#
+# `timeout` kills verify.sh and its process group, which includes the `docker
+# run` CLI blocked on a render — but killing the CLI does not stop the
+# container: it lives on the daemon, and `--rm` only fires once IT exits. A
+# hung render would keep burning the runner's cores under the templates still
+# running beside it. The scripts start their containers anonymously, so they
+# are found by what they mount: every render bind-mounts the template's own
+# directory (or a directory under it), and no two templates share one. The
+# trailing `/` keeps `name-sign` from matching `name-sign-foo`.
+reap_containers() {
+  local dir="$1" id src
+  for id in $(docker ps -q); do
+    while read -r src; do
+      case "$src/" in
+        "$dir"/*)
+          echo "reaping container $id (mounts $src)"
+          docker rm -f "$id" >/dev/null 2>&1 || true
+          break
+          ;;
+      esac
+    done < <(docker inspect --format '{{range .Mounts}}{{println .Source}}{{end}}' "$id" 2>/dev/null || true)
+  done
+}
+
 # One template: run it, record exit status and wall time next to its log.
 run_one() {
   local slug="$1" start rc
   start=$(date +%s)
   rc=0
-  timeout "$TIMEOUT" "models/$slug/verify.sh" >"$LOG_DIR/$slug.log" 2>&1 || rc=$?
+  # -k: SIGKILL a script that ignores the TERM, so the guard is a hard one.
+  timeout -k 30s "$TIMEOUT" "models/$slug/verify.sh" >"$LOG_DIR/$slug.log" 2>&1 || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    reap_containers "$PWD/models/$slug" >>"$LOG_DIR/$slug.log" 2>&1
+  fi
   echo "$rc $(($(date +%s) - start))" >"$LOG_DIR/$slug.result"
   if [ "$rc" -eq 0 ]; then
     echo "PASS $slug"
+  elif [ "$rc" -eq 124 ] || [ "$rc" -eq 137 ]; then
+    echo "FAIL $slug (timed out after $TIMEOUT)"
   else
     echo "FAIL $slug (exit $rc)"
   fi
 }
-export -f run_one
+export -f reap_containers run_one
 export LOG_DIR TIMEOUT
 
 # `|| true`: run_one never fails, but xargs exits non-zero if a child is
