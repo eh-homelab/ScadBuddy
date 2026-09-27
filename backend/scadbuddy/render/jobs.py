@@ -27,6 +27,12 @@ from scadbuddy.core.paths import (
     model_path,
 )
 from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.libraries import (
+    declared_libraries,
+    lock_at,
+    model_search_path,
+    search_path,
+)
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
@@ -291,6 +297,13 @@ class ModelSource:
     scad: Path
     schema_cache: Path
     version: str | None
+    #: The checkouts of the libraries this revision declares, at the pins it goes
+    #: with (#93): its whole OPENSCADPATH.
+    library_path: tuple[Path, ...] = ()
+
+    def configure(self, config: Config) -> Config:
+        """``config`` for every openscad call made on this source."""
+        return replace(config, library_path=self.library_path)
 
 
 async def resolve_source(
@@ -321,6 +334,9 @@ async def resolve_source(
             scad=paths.model_source(slug),
             schema_cache=paths.model_schema_cache(slug),
             version=current,
+            # Off the loop: `model.json`, the lockfile and each checkout are reads
+            # on the same PVC the history's calls are offloaded for.
+            library_path=await asyncio.to_thread(model_search_path, paths, slug),
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
@@ -331,10 +347,16 @@ async def resolve_source(
         await asyncio.to_thread(_touch, directory)
     else:
         await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
+    # The lockfile as it was at that revision, not as it is now: an old revision
+    # renders against the library versions it was written with.
+    lock = await asyncio.to_thread(lock_at, history, requested)
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
+        library_path=await asyncio.to_thread(
+            lambda: search_path(paths, declared_libraries(directory), lock)
+        ),
     )
 
 
@@ -415,6 +437,7 @@ async def render_job(
     version = source.version
     if version is None:
         version = await asyncio.to_thread(source_version, scad.parent)
+    config = source.configure(config)
     schema = await cached_schema(scad, source.schema_cache, config=config)
     work = paths.job_work_dir(job.id)
     work.mkdir(parents=True, exist_ok=True)

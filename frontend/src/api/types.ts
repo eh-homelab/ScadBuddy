@@ -25,6 +25,10 @@ export type Diagnostic = Schemas['Diagnostic']
 
 export type PastedSource = Schemas['PastedSource']
 
+/** #156 — the body of `POST /models/{id}/duplicate`, and what a duplicate records. */
+export type DuplicateRequest = Schemas['DuplicateRequest']
+export type Upstream = Schemas['Upstream']
+
 /** #153 — a model fetched from a URL rather than uploaded or pasted. */
 export type UrlImport = Schemas['UrlImport']
 
@@ -47,6 +51,12 @@ export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
 export type InstalledFamily = Schemas['InstalledFamily']
+
+/** #93 — third-party OpenSCAD libraries, pinned in the models repository's lockfile. */
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryPin = Schemas['LibraryPin']
+export type LibraryAdd = Schemas['LibraryAdd']
+export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']

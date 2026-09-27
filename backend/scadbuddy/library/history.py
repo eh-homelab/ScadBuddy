@@ -37,12 +37,13 @@ import fcntl
 import io
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tarfile
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -75,6 +76,10 @@ DEFAULT_BRANCH = "main"
 RECOVERED_MESSAGE = "Recover uncommitted changes"
 
 COMMIT_ID_PATTERN = r"^[0-9a-f]{7,40}$"
+
+#: The subject the pre-#155 copy-if-absent seed committed a bundled model under:
+#: ``Seed name-keychain and tag from the image``.
+_SEED_SUBJECT = re.compile(r"^Seed .+ from the image$")
 
 # git's own hash of the empty tree: what a root commit's diff is taken against,
 # since it has no parent to compare with.
@@ -146,6 +151,30 @@ class Revision:
         return self.commit[:7]
 
 
+def git_env() -> dict[str, str]:
+    """The hermetic environment every git call runs in -- see the module docstring.
+
+    Shared with the library checkouts (#93), which clone with the same client.
+    """
+    return {
+        # Inherited, not pinned: `available` resolves the binary with
+        # `shutil.which` against this PATH, so a pinned one would make the
+        # probe pass and every call then fail. Hermeticity here is about
+        # git's CONFIG, not about where the binary lives.
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_AUTHOR_NAME": AUTHOR_NAME,
+        "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
+        "GIT_COMMITTER_NAME": AUTHOR_NAME,
+        "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
+        # Some git paths still want a HOME even with both config files nulled;
+        # the runtime user's own, never the volume.
+        "HOME": os.environ.get("HOME", "/tmp"),
+    }
+
+
 def _gitignore_body(wrapper_prefix: str) -> str:
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
@@ -183,25 +212,6 @@ class ModelHistory:
         """A git binary exists and ``root`` is a repository."""
         return shutil.which(self.git) is not None and (self.root / ".git").is_dir()
 
-    def _env(self) -> dict[str, str]:
-        return {
-            # Inherited, not pinned: `available` resolves the binary with
-            # `shutil.which` against this PATH, so a pinned one would make the
-            # probe pass and every call then fail. Hermeticity here is about
-            # git's CONFIG, not about where the binary lives.
-            "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-            "GIT_CONFIG_GLOBAL": "/dev/null",
-            "GIT_CONFIG_SYSTEM": "/dev/null",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_AUTHOR_NAME": AUTHOR_NAME,
-            "GIT_AUTHOR_EMAIL": AUTHOR_EMAIL,
-            "GIT_COMMITTER_NAME": AUTHOR_NAME,
-            "GIT_COMMITTER_EMAIL": AUTHOR_EMAIL,
-            # Some git paths still want a HOME even with both config files nulled;
-            # the runtime user's own, never the volume.
-            "HOME": os.environ.get("HOME", "/tmp"),
-        }
-
     def _run(
         self,
         *args: str,
@@ -224,7 +234,7 @@ class ModelHistory:
             completed = subprocess.run(
                 command,
                 cwd=self.root,
-                env=self._env(),
+                env=git_env(),
                 capture_output=True,
                 text=text,
                 check=False,
@@ -334,9 +344,17 @@ class ModelHistory:
 
     # ── writing ───────────────────────────────────────────────────────────────
 
-    def commit(self, message: str, *paths: str) -> str | None:
-        """Stage ``paths`` and commit them. ``None`` when nothing actually changed."""
+    def commit(
+        self, message: str, *paths: str, prepare: Callable[[], None] | None = None
+    ) -> str | None:
+        """Stage ``paths`` and commit them. ``None`` when nothing actually changed.
+
+        ``prepare`` runs under the write lock first, which makes a read-modify-write
+        of a shared file -- ``libraries.lock`` (#93) -- atomic with its commit.
+        """
         with self._exclusive():
+            if prepare is not None:
+                prepare()
             return self._commit_locked(message, *paths)
 
     def _commit_locked(self, message: str, *paths: str) -> str | None:
@@ -372,8 +390,15 @@ class ModelHistory:
             return bool(self._out("ls-files", "--cached").strip())
         return self._run("diff", "--cached", "--quiet", check=False).returncode != 0
 
-    def restore(self, slug: str, commit: str) -> str:
-        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite."""
+    def restore(
+        self, slug: str, commit: str, *, also: Callable[[str], Sequence[str]] | None = None
+    ) -> str:
+        """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite.
+
+        ``also`` is called with the resolved commit under the write lock, and the
+        paths it returns go into the same commit -- how a model's library pins come
+        back with it (#93).
+        """
         resolved = self.resolve(commit)
         with self._exclusive():
             present = set(self._files_at(resolved, slug))
@@ -385,7 +410,8 @@ class ModelHistory:
             for path in self._tracked(slug):
                 if path not in present:
                     (self.root / path).unlink(missing_ok=True)
-            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug)
+            extra = also(resolved) if also is not None else []
+            created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, *extra)
         if created is None:
             # Already identical: the caller still wants a revision id to point
             # at, and it is this model's own, not the repository HEAD -- which
@@ -423,6 +449,25 @@ class ModelHistory:
         if completed.returncode != 0:
             return None
         return completed.stdout.strip() or None
+
+    def seed_commit(self, slug: str) -> str | None:
+        """The ``Seed … from the image`` commit ``slug`` as it stands was copied in by.
+
+        Walks the model's own history newest first. ``None`` when the model was
+        made some other way -- uploaded, duplicated, or recreated after a delete --
+        since an older seed of the same slug is then not its origin.
+        """
+        completed = self._run("log", "--format=%H%x1f%s", "--", slug, check=False)
+        assert isinstance(completed.stdout, str)
+        if completed.returncode != 0:
+            raise GitError(f"git log failed: {completed.stderr.strip()}", completed.stderr)
+        for line in completed.stdout.splitlines():
+            commit, _, subject = line.partition(_FIELD)
+            if _SEED_SUBJECT.match(subject):
+                return commit
+            if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
+                return None
+        return None
 
     def last_commits(self) -> dict[str, str]:
         """Every model's current revision, from ONE walk of the history.

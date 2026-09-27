@@ -14,6 +14,7 @@ from scadbuddy.api import (
     fonts,
     health,
     jobs,
+    libraries,
     lsp,
     models,
     outputs,
@@ -46,6 +47,7 @@ def _api_router() -> APIRouter:
     router.include_router(settings.router)
     router.include_router(fonts.router)
     router.include_router(plates.router)
+    router.include_router(libraries.router)
     router.include_router(lsp.router)
     return router
 
@@ -89,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
+    # After the sync, so the built-ins exist: a model the old seed copied in
+    # becomes a duplicate of its built-in (#158). Contains its own failures.
+    await asyncio.to_thread(state.catalogue.link_seeded)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:
@@ -98,6 +103,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # A library clone the process died in the middle of. Nothing is cloning yet:
+    # no request has been served.
+    try:
+        await asyncio.to_thread(state.libraries.sweep_staging)
+    except OSError:
+        logger.exception("could not sweep library staging clones")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
@@ -130,6 +141,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     setattr(app.state, STATE_ATTR, build_state(app_settings))
     install_problem_handlers(app)
+    libraries.install_library_handlers(app)
     # Outermost, so an oversized body is refused on its headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 
