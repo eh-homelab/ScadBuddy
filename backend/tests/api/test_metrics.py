@@ -16,6 +16,17 @@ def test_metrics_are_served_as_prometheus_text(client: TestClient) -> None:
     assert "scadbuddy_render_queue_depth 0.0" in response.text
 
 
+def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) -> None:
+    """eh-homelab/clusters alerts on `increase()` of these. Over a series whose
+    first sample is already 1, `increase()` sees nothing, so the first 503 (or
+    the first store error) after a start would never page. They must be exported
+    at 0 before anything happens."""
+    text = client.get("/metrics").text
+    assert "scadbuddy_render_jobs_rejected_total 0.0" in text
+    assert 'scadbuddy_render_store_errors_total{operation="read"} 0.0' in text
+    assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
+
+
 def test_metrics_count_renders(client: TestClient, model: str) -> None:
     accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     wait_for_job(client, accepted.json()["job_id"])
