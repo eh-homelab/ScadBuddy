@@ -182,7 +182,7 @@ export function connectLanguageServer(
               textDocument: document,
               position: position(at),
             })
-            // Only this file: an `include`d one has no model in this editor to open (#95).
+            // Only this file: an `include`d one has no model in this editor to open (#185).
             return toLocations(result)
               .filter((location) => location.uri === uri)
               .map((location) => ({ uri: target.uri, range: location.range }))
