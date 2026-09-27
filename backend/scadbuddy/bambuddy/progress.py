@@ -364,7 +364,16 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
                         for plate in meta.plates
                     ]
             except ExceptionGroup as grouped:
-                raise grouped.exceptions[0] from None
+                # The group is in completion order; the earliest failing plate is the
+                # one reported, so the same failures always surface the same error.
+                failures = [
+                    error
+                    for task in tasks
+                    if task.done()
+                    and not task.cancelled()
+                    and (error := task.exception()) is not None
+                ]
+                raise (failures or grouped.exceptions)[0] from None
             return from_plates(
                 [task.result() for task in tasks],
                 [plate.plate_id for plate in meta.plates],

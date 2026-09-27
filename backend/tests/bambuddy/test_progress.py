@@ -14,12 +14,14 @@ import httpx
 import pytest
 import respx
 
+from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
 from scadbuddy.bambuddy.progress import (
     NEVER_QUEUED_FIX,
     QUEUED_THEN_FAILED_FIX,
     SLICE_FIX,
+    PrintProgress,
     from_queue,
     from_run,
     progress_for,
@@ -379,6 +381,28 @@ async def test_a_failing_plate_read_cancels_the_others_and_raises_its_own_error(
         await asyncio.wait_for(progress_for(bambuddy, plates_meta()), timeout=5)
     assert "the database is locked" in raised.value.detail
     assert second_cancelled
+
+
+async def test_when_several_plates_fail_the_earliest_plates_error_is_raised(
+    bambuddy: BambuddyClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plate 2 fails first and plate 1 in the same loop pass, so both are in the group
+    with plate 2's first; the error raised is still plate 1's (#244)."""
+    released = asyncio.Event()
+
+    async def read(
+        client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+    ) -> PrintProgress:
+        if queue_item_id == 52:
+            released.set()
+            raise ApiError(502, "plate 2 broke")
+        await released.wait()
+        raise ApiError(502, "plate 1 broke")
+
+    monkeypatch.setattr(progress_module, "_queued_progress", read)
+    with pytest.raises(ApiError) as raised:
+        await progress_for(bambuddy, plates_meta())
+    assert raised.value.detail == "plate 1 broke"
 
 
 @respx.mock
