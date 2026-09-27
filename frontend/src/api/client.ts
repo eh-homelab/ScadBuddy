@@ -238,7 +238,9 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
+  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
+  deleteModel: (slug: string, force = false) =>
+    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
 
   /**
    * The `v` param is only there to change the URL when the image does: an `<img>`
