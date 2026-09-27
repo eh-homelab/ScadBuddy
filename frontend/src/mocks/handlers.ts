@@ -500,21 +500,12 @@ function refuseBuiltin(slug: string) {
 export const MAX_PRESET_NAME = 80
 export const MAX_PRESETS = 200
 
-/** Why a preset save is refused, as the server words it, or undefined. */
-function presetRefusal(
-  slug: string,
-  name: string,
-  params: Record<string, ParamValue>,
-  own: string | null,
-) {
-  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
-  if (name.length > MAX_PRESET_NAME) {
-    return problem(
-      422,
-      'Unprocessable Content',
-      `a preset name is at most ${MAX_PRESET_NAME} characters`,
-    )
-  }
+/**
+ * Why a preset's values are refused, as `require_valid_preset_params` words it, or
+ * undefined: an unknown parameter, then each value's type as `build_defines` checks
+ * it, then a dropdown value that is not one of its options.
+ */
+function valueRefusal(slug: string, params: Record<string, ParamValue>) {
   const byName = new Map((state.schemas[slug]?.parameters ?? []).map((p) => [p.name, p]))
   const unknown = Object.keys(params).filter((key) => !byName.has(key))
   if (unknown.length > 0) {
@@ -550,6 +541,26 @@ function presetRefusal(
       )
     }
   }
+  return undefined
+}
+
+/** Why a preset save is refused, as the server words it, or undefined. */
+function presetRefusal(
+  slug: string,
+  name: string,
+  params: Record<string, ParamValue>,
+  own: string | null,
+) {
+  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  if (name.length > MAX_PRESET_NAME) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `a preset name is at most ${MAX_PRESET_NAME} characters`,
+    )
+  }
+  const refused = valueRefusal(slug, params)
+  if (refused) return refused
   // After the values, as the server checks them: they are validated in the route,
   // and only then does the store count the presets and compare the names.
   const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
@@ -984,21 +995,27 @@ export const handlers = [
     if (refused) return refused
     const { presets: defined, ...patch } = (await request.json()) as ModelPatch
     if (defined) {
-      // #326: the template's own presets, replaced whole and checked as a save is.
+      // #326: the template's own presets, replaced whole and checked as the server's
+      // `TemplatePresets` and `require_valid_preset_params` check them.
+      if (defined.length > MAX_PRESETS) {
+        return problem(422, 'Unprocessable Content', `a template defines at most ${MAX_PRESETS} presets`)
+      }
       const names = new Set<string>()
+      const ids = new Set<string>()
       for (const preset of defined) {
         const folded = preset.name.toLowerCase()
         if (names.has(folded)) {
           return problem(422, 'Unprocessable Content', `two presets are named '${preset.name}'`)
         }
         names.add(folded)
-        const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
-        const unknown = Object.keys(preset.params ?? {}).filter((key) => !known.has(key))
-        if (unknown.length > 0) {
-          return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
-            parameters: unknown,
-          })
+        if (preset.id) {
+          if (ids.has(preset.id)) {
+            return problem(422, 'Unprocessable Content', `two presets have the id '${preset.id}'`)
+          }
+          ids.add(preset.id)
         }
+        const refused = valueRefusal(slug, preset.params ?? {})
+        if (refused) return refused
       }
       const shipped: ParamPreset[] = defined.map((preset) => ({
         id: `template-${preset.id ?? slugify(preset.name)}`,

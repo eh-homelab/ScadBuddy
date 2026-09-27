@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 
 import scadbuddy.api.presets as presets_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
-from scadbuddy.library.presets import MAX_PRESET_NAME
+from scadbuddy.library.presets import MAX_PRESET_NAME, MAX_PRESETS
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
 
 BUILTIN = "builtin:keychain"
@@ -388,6 +388,10 @@ def test_a_template_preset_edit_is_checked(client: TestClient, model: str) -> No
     assert unknown.json()["parameters"] == ["depth"]
     twice = _patch_presets(client, model, [{"name": "X"}, {"name": "x"}])
     assert twice.status_code == 422
+    same_id = [{"id": "same", "name": "One"}, {"id": "same", "name": "Two"}]
+    assert _patch_presets(client, model, same_id).status_code == 422
+    too_many = [{"name": f"Preset {n}"} for n in range(MAX_PRESETS + 1)]
+    assert _patch_presets(client, model, too_many).status_code == 422
     assert _ids(client, model) == []
 
 

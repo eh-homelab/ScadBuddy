@@ -163,6 +163,10 @@ class TemplatePresets(BaseModel):
     @field_validator("presets")
     @classmethod
     def _unique(cls, presets: list[TemplatePreset]) -> list[TemplatePreset]:
+        # The same bound as a template's saved presets: model.json is committed on
+        # every edit, so an unbounded list is an unbounded commit.
+        if len(presets) > MAX_PRESETS:
+            raise ValueError(f"a template defines at most {MAX_PRESETS} presets")
         return _checked(presets)
 
 

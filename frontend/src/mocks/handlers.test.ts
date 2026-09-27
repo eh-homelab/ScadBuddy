@@ -1,6 +1,6 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelSummary } from '../api/types'
+import type { ModelPatch, ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
 import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
@@ -654,5 +654,22 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
     await expect(
       api.updateModel('name-keychain', { presets: [{ name: 'X' }, { name: 'x' }] }),
     ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses what the server refuses: a stale dropdown value, a wrong type, a repeated id, too many', async () => {
+    const refused = (presets: ModelPatch['presets']) =>
+      expect(api.updateModel('name-keychain', { presets })).rejects.toMatchObject({ status: 422 })
+    await refused([{ name: 'X', params: { hole_side: 'bottom' } }])
+    await refused([{ name: 'X', params: { text_size: 'big' } }])
+    await refused([
+      { id: 'same', name: 'One' },
+      { id: 'same', name: 'Two' },
+    ])
+    await refused(Array.from({ length: MAX_PRESETS + 1 }, (_, n) => ({ name: `Preset ${n}` })))
+    // Nothing was written by any of them.
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-tiny',
+    ])
   })
 })
