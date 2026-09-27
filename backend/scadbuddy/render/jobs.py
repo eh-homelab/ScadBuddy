@@ -36,7 +36,7 @@ from scadbuddy.render.job_models import JobState as JobState
 from scadbuddy.render.job_models import PartInfo as PartInfo
 from scadbuddy.render.job_models import now as _now
 from scadbuddy.render.job_store import SUPERSEDED_ERROR as SUPERSEDED_ERROR
-from scadbuddy.render.job_store import JobBackend, render_key
+from scadbuddy.render.job_store import JobBackend, Listener, render_key
 from scadbuddy.render.job_store import JobNotFoundError as JobNotFoundError
 from scadbuddy.render.job_store import JobStore as JobStore
 from scadbuddy.render.job_store import QueueFullError as QueueFullError
@@ -492,6 +492,11 @@ class RenderQueue:
       that for a worker is failed unrendered rather than rendered for nobody.
     - **Leases** (Postgres). A worker heartbeats its job; one whose worker died is
       requeued after `render_lease_timeout`, up to `render_max_attempts` tries.
+    - **Wake-ups.** An idle worker waits for a submit in this process, or (Postgres)
+      for the NOTIFY any replica's submit sends, which one LISTEN connection per
+      process turns into the same wake-up. While that connection is up the poll is
+      only a fallback, every `render_fallback_poll_interval` (30 s); while it is
+      down, or with the file store, it is `render_poll_interval`.
 
     **Admission is off by default**: `render_queue_max` (SCADBUDDY_RENDER_QUEUE_MAX)
     0 accepts every render. Set, a submit that would be a new job past that many
@@ -539,9 +544,13 @@ class RenderQueue:
             )
         )
         self._tasks: list[asyncio.Task[None]] = []
-        # Set on every submit so an idle worker claims at once rather than at its
-        # next poll; the poll is what finds jobs another replica submitted.
+        # Set on every submit, and (Postgres) on every NOTIFY from any replica's, so
+        # an idle worker claims at once rather than at its next poll.
         self._wakeup = asyncio.Event()
+        #: What wakes the workers for other processes' jobs; `None` with the file store.
+        self.listener: Listener | None = None
+        self._listening = False
+        self._listened_before = False
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
@@ -564,6 +573,13 @@ class RenderQueue:
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
         self._tasks.append(asyncio.create_task(self._reaper()))
+        self.listener = self.store.listener(
+            on_notify=self._wakeup.set,
+            on_state=self._listener_state,
+            check_interval=self.config.render_fallback_poll_interval,
+        )
+        if self.listener is not None:
+            self._tasks.append(asyncio.create_task(self.listener.run()))
 
     async def aclose(self) -> None:
         for task in self._tasks:
@@ -666,6 +682,24 @@ class RenderQueue:
             max(0.0, ((job.finished_at or _now()) - job.created_at).total_seconds())
         )
 
+    def _listener_state(self, connected: bool) -> None:
+        if connected and self._listened_before:
+            self.metrics.listener_reconnects.inc()
+        self._listened_before = self._listened_before or connected
+        self._listening = connected
+        self.metrics.listener_connected.set(1 if connected else 0)
+        if not connected:
+            # Workers asleep on the long fallback go back to the short poll now,
+            # not up to `render_fallback_poll_interval` later.
+            self._wakeup.set()
+
+    @property
+    def idle_poll_interval(self) -> float:
+        """How long an idle worker waits for a wake-up before it looks anyway."""
+        if self._listening:
+            return self.config.render_fallback_poll_interval
+        return self.config.render_poll_interval
+
     async def _worker(self) -> None:
         while True:
             # Cleared BEFORE the claim: a submit landing between an empty claim and
@@ -694,9 +728,7 @@ class RenderQueue:
                 continue
             if job is None:
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._wakeup.wait(), timeout=self.config.render_poll_interval
-                    )
+                    await asyncio.wait_for(self._wakeup.wait(), timeout=self.idle_poll_interval)
 
     async def _reaper(self) -> None:
         """Recover jobs whose worker died, every third of a lease."""
