@@ -163,6 +163,43 @@ updates:
         patterns:
           - "@types/node"
 
+  # The AI agent service (#261). `@anthropic-ai/claude-agent-sdk` is pinned to
+  # an exact version and the Dockerfile asserts the Claude Code binary it
+  # bundles (CLAUDE_CODE_VERSION), so an SDK bump PR reds the `agent` job until
+  # that ARG is bumped with it — which is the review this pin exists to force.
+  - package-ecosystem: "npm"
+    directory: "/agent"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    reviewers:
+      - "ElanHasson"
+    commit-message:
+      prefix: "deps"
+      prefix-development: "deps-dev"
+      include: "scope"
+    labels: ["dependencies", "api", "npm"]
+    groups:
+      # The SDK declares these as peer dependencies; they move together.
+      agent-sdk:
+        patterns:
+          - "@anthropic-ai/*"
+          - "@modelcontextprotocol/sdk"
+          - "zod"
+      hono:
+        patterns: ["hono", "@hono/*"]
+      eslint:
+        patterns:
+          - "eslint"
+          - "@eslint/*"
+          - "typescript-eslint"
+          - "globals"
+      types:
+        patterns:
+          - "@types/node"
+
   # Docker: the Dockerfile's FROM lines. Three of the four are bumpable
   # (node, ghcr.io/astral-sh/uv, hadolint's own image is not here); the fourth,
   # openscad/openscad:dev, is a rolling tag Dependabot cannot version — it is

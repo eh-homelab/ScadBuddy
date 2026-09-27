@@ -143,6 +143,33 @@ the pinned `revision` — the commit stamped into the image at build time by
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
 
+### The agent sidecar (AI, #261)
+
+The AI agent service in `agent/` ships as a **separate image**,
+`ghcr.io/eh-homelab/scadbuddy-agent` (the Dockerfile's `--target agent`,
+published by the `agent` job in `build-image.yml` with the same tags as the
+backend image). It is meant to run as a **second container in the ScadBuddy
+pod**, not inside the backend image: the sidecar layout chosen in §4.1 of the
+AI design spec (`docs/superpowers/specs/2026-09-27-ai-integration-design.md`,
+issue #250; on branch `claude/scad-buddy-ai-integration-pfn00c` until it
+merges). The two containers share the pod network, so the agent reaches
+the backend on `http://127.0.0.1:8080` (§4.3).
+
+- It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
+- It reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
+  `http://127.0.0.1:8080`) and `SCADBUDDY_SECRET_KEY_FILE`
+  (`agent/src/config.ts`; spec §9). With no database URL it still runs and
+  `/healthz` reports `"ai": "disabled (no database)"`.
+- It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
+  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (spec §4.4; the CI smoke test runs it with `--read-only`).
+- Nothing deploys it yet. The clusters manifest, and the ingress routes for
+  `/mcp`, `/api/v1/ai/*` and `/api/v1/ws` (spec §4.2), come with the stories
+  that give it routes. Until then the image's publish job is
+  `continue-on-error`, so it cannot hold back a backend deploy, and the new
+  GHCR package needs the same one-time **public** visibility step as
+  `scadbuddy` (see the header of `build-image.yml`).
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:
@@ -191,6 +218,8 @@ what makes the running image knowable.
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
+- `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
+  `pnpm test`, `pnpm build`; see "The agent sidecar" above.
 - `models/` — bundled example models; `models/<name>/verify.sh` renders one
   against `openscad/openscad:dev` and checks the result.
 - `backend/openapi.json` and `frontend/public/mockServiceWorker.js` are
