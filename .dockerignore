@@ -1,6 +1,7 @@
 # The build context is the repo root (the Dockerfile's Node stage needs
-# frontend/, the runtime stage needs backend/ and models/). Everything that is
-# not one of those three is noise that invalidates layers.
+# frontend/, the runtime stage needs backend/ and models/, the agent stages
+# need agent/). Everything that is not one of those four is noise that
+# invalidates layers.
 
 .git
 .gitignore
@@ -18,6 +19,9 @@ frontend/.vite
 frontend/playwright-report
 frontend/test-results
 frontend/coverage
+agent/dist
+agent/node_modules
+agent/coverage
 node_modules
 
 # Python build/test detritus. .venv in particular: a host venv has absolute

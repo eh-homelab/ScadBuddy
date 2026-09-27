@@ -8,6 +8,7 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
+    JOB_ID_PATTERN,
     CatalogueDep,
     ConfigDep,
     HistoryDep,
@@ -29,8 +30,10 @@ from scadbuddy.library.history import (
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
     Job,
+    JobNotFoundError,
     JobState,
     PartInfo,
+    QueueFullError,
     RenderQueue,
 )
 from scadbuddy.render.schema import ParamValue
@@ -45,6 +48,10 @@ class RenderRequest(BaseModel):
     # #90's "Customize this version": render an old revision without restoring it.
     # Omitted means the revision the model is currently at.
     version: str | None = Field(default=None, pattern=COMMIT_ID_PATTERN)
+    # The job this render replaces -- the preview's previous submit. Dropped unrendered
+    # if no worker has taken it yet, so a slider drag does not queue every stop on
+    # the way. Harmless when it has already started or finished.
+    supersedes: str | None = Field(default=None, pattern=JOB_ID_PATTERN)
 
 
 class RenderAccepted(BaseModel):
@@ -111,7 +118,7 @@ async def _resolve_version(history: HistoryDep, slug: str, version: str | None) 
 def require_job(queue: RenderQueue, job_id: str) -> Job:
     try:
         return queue.store.read(job_id)
-    except FileNotFoundError:
+    except JobNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
 
 
@@ -120,6 +127,14 @@ def require_job(queue: RenderQueue, job_id: str) -> Job:
     response_model=RenderAccepted,
     status_code=status.HTTP_202_ACCEPTED,
     summary="Queue a render",
+    responses={
+        status.HTTP_503_SERVICE_UNAVAILABLE: {
+            "description": (
+                "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that "
+                "limit is set); retry after `Retry-After` seconds"
+            )
+        }
+    },
 )
 async def render_model(
     slug: SlugPath,
@@ -147,7 +162,19 @@ async def render_model(
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
-    job = await queue.submit(slug, body.params, model_version=source.version)
+    # Refused only when SCADBUDDY_RENDER_QUEUE_MAX is set and reached; by default
+    # the queue accepts every render and works through them.
+    try:
+        job = await queue.submit(
+            slug, body.params, model_version=source.version, supersedes=body.supersedes
+        )
+    except QueueFullError as error:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            str(error),
+            headers={"Retry-After": str(error.retry_after)},
+            retry_after=error.retry_after,
+        ) from None
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)
 
 

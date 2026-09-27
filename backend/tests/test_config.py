@@ -28,6 +28,15 @@ def test_zero_lsp_sessions_loads() -> None:
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_database_pool_size_below_one_is_refused_by_name(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_DATABASE_POOL_SIZE", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_DATABASE_POOL_SIZE must be at least 1"):
+        Settings()
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
 def test_a_library_max_bytes_below_one_is_refused_by_name(value: str) -> None:
     with pytest.raises(ValueError, match="SCADBUDDY_LIBRARY_MAX_BYTES must be at least 1"):
         load_config({"SCADBUDDY_LIBRARY_MAX_BYTES": value})

@@ -95,7 +95,7 @@ jobs:
         # merge-gate steps below. continue-on-error keeps the job going so the gate runs
         # and becomes the single source of pass/fail.
         continue-on-error: true
-        uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de # v1
+        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1
         env:
           CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "1"
         with:
@@ -235,9 +235,21 @@ jobs:
             as no review at all and the PR stays red. Write it even when you found
             nothing — an all-clear still has to be attributable to a commit.
 
-            Then post the document as ONE top-level PR comment:
+            Then post the document as ONE top-level PR comment, passing it on
+            stdin through a quoted heredoc, in a single Bash call:
 
-              gh pr comment ${{ github.event.inputs.pr_number }} --repo ${{ github.repository }} --body-file <path-to-your-review.md>
+              gh pr comment ${{ github.event.inputs.pr_number }} --repo ${{ github.repository }} --body-file - <<'CLAUDE_REVIEW_EOF'
+              <your review, ending with the marker line above>
+              CLAUDE_REVIEW_EOF
+
+            Do not try to save the review to a file first. The Write tool is
+            denied in this job and so is shell redirection into a file (`>`,
+            `tee`), so there is no path you could give `--body-file`. Each
+            attempt is refused and the review ends up posting nothing. The
+            quoted delimiter keeps `$`, backticks and quotes literal. Put the
+            closing `CLAUDE_REVIEW_EOF` alone on its own line with no leading
+            spaces, and make sure no line of the review itself is exactly
+            `CLAUDE_REVIEW_EOF`.
 
             This is a plain new comment each run, not an edited-in-place one — do
             not attempt inline per-line review comments, and do not search for or
@@ -417,7 +429,7 @@ jobs:
       - name: Merge-gate classification
         id: gate
         if: always()
-        uses: anthropics/claude-code-action@cfc3eb22bfed5c26ef66e3223c982af27e4524de # v1
+        uses: anthropics/claude-code-action@9171db3e57d6a3140a37ddc2ba92788584e0ead6 # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           # Classify bot-authored PRs too (weekly cache-refresh, image digest bumps);
