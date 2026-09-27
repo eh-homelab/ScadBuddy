@@ -58,6 +58,7 @@ $fn = 64;
 | `x = true;` | toggle |
 | `x = "#RRGGBB"; // color` | colour picker; the value reaches OpenSCAD as a `"#RRGGBB"` string |
 | `x = "Family:style=Bold"; // font` | font field with the installed families, plus **Browse** for Google Fonts |
+| `x = ""; // file:svg,png` | drop zone for an SVG or PNG, with a preview and **Clear** (see [File parameters](#file-parameters)) |
 
 Groups:
 
@@ -82,6 +83,34 @@ the picker falls back to the installed families.
 The Debian package `fonts-lobster` provides a family called **"Lobster Two"**, and
 there is no family called "Lobster". If you ask for a family that doesn't exist,
 OpenSCAD silently uses a different font, and the text comes out a different size.
+
+### File parameters
+
+A parameter annotated `// file` takes a picture the viewer attaches in the
+customizer, without editing the model:
+
+```scad
+// Picture to overlay
+overlay_file = ""; // file:svg,png
+
+if (overlay_file != "")
+  linear_extrude(0.6) resize([30, 30]) import(overlay_file);
+```
+
+- List the kinds after the colon: `// file:svg`, `// file:png` or both. A bare
+  `// file` takes both. Use an SVG with `import()` and a PNG with `surface()`.
+- The value is a bare file name in the model's directory, so `import()` and
+  `surface()` resolve it as they would a file shipped beside the model. A default
+  such as `"sample.svg"` keeps working; `""` means no file.
+- ScadBuddy checks the upload's content, not its name. It strips scripts and
+  external references from an SVG, and scales a PNG down to 256 px on its long
+  side, because `surface()` gets slow with large images. Other files are refused.
+- The render records the file's SHA-256 with the output's parameters, so
+  re-rendering an output uses the same picture.
+- If OpenSCAD can't open the file, the model still renders without it, and the
+  render shows a warning.
+- OpenSCAD itself sees an ordinary string, so the model still works in the OpenSCAD
+  GUI and on MakerWorld.
 
 ### Includes
 
