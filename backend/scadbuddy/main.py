@@ -91,6 +91,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
+    # After the sync, so the built-ins exist: a model the old seed copied in
+    # becomes a duplicate of its built-in (#158). Contains its own failures.
+    await asyncio.to_thread(state.catalogue.link_seeded)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:

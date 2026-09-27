@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
+import { Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
@@ -208,5 +209,46 @@ describe('CataloguePage', () => {
 
     const mine = screen.getByRole('heading', { name: 'Name Keychain' }).closest('li') as HTMLElement
     expect(within(mine).queryByTestId('builtin-badge')).not.toBeInTheDocument()
+  })
+
+  it('duplicates a built-in from its card and opens the copy (#159)', async () => {
+    const { user } = renderPage(
+      <Routes>
+        <Route path="/" element={<CataloguePage />} />
+        <Route path="/m/:slug" element={<p>Customizer</p>} />
+      </Routes>,
+    )
+    const builtin = (await screen.findByRole('heading', { name: 'Keychain Template' })).closest(
+      'li',
+    ) as HTMLElement
+
+    await user.click(within(builtin).getByRole('button', { name: 'Duplicate' }))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Keychain Template' })
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+
+    expect(await screen.findByText('Customizer')).toBeInTheDocument()
+    expect((await api.getModel('keychain-template-copy')).upstream?.id).toBe(BUILTIN_SLUG)
+  })
+
+  it('offers Duplicate on every card', async () => {
+    renderPage(<CataloguePage />)
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    expect(screen.getAllByRole('button', { name: 'Duplicate' })).toHaveLength(models.length)
+  })
+
+  it('says what a duplicate was duplicated from, linked by name (#159)', async () => {
+    await api.duplicateModel(BUILTIN_SLUG, 'My Keychain')
+    renderPage(<CataloguePage />)
+
+    const copy = (await screen.findByRole('heading', { name: 'My Keychain' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(copy).getByTestId('duplicated-from')).toHaveTextContent(
+      'Duplicated from Keychain Template',
+    )
+    expect(within(copy).getByRole('link', { name: 'Keychain Template' })).toHaveAttribute(
+      'href',
+      `/m/${encodeURIComponent(BUILTIN_SLUG)}`,
+    )
   })
 })

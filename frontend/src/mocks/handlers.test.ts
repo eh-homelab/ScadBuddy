@@ -206,3 +206,60 @@ describe('mock API: a built-in template (#192)', () => {
     expect(await api.getSource(BUILTIN_SLUG)).toContain('/* [Text] */')
   })
 })
+
+describe('mock API: duplicate (#156)', () => {
+  it('answers 201 with a template of mine recording its upstream', async () => {
+    const response = await fetch(`/api/v1/models/${encodeURIComponent(BUILTIN_SLUG)}/duplicate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'My Keychain' }),
+    })
+    expect(response.status).toBe(201)
+    expect(await response.json()).toMatchObject({
+      slug: 'my-keychain',
+      name: 'My Keychain',
+      origin: 'mine',
+      upstream: { id: BUILTIN_SLUG, path: '_builtin/keychain-template', base: versionIds.synced },
+    })
+    expect(await api.getSource('my-keychain')).toContain('/* [Text] */')
+    expect((await api.listVersions('my-keychain'))[0]?.message).toBe(
+      `Duplicate ${BUILTIN_SLUG} as my-keychain`,
+    )
+  })
+
+  it('refuses a slug that is taken with a 409', async () => {
+    const error: unknown = await api
+      .duplicateModel(BUILTIN_SLUG, 'Name Keychain')
+      .catch((caught: unknown) => caught)
+    expect(error).toMatchObject({
+      status: 409,
+      detail: "a model named 'name-keychain' already exists",
+    })
+  })
+
+  it('answers 404 for a template that is not there', async () => {
+    const error: unknown = await api
+      .duplicateModel('gone', 'Copy')
+      .catch((caught: unknown) => caught)
+    expect(error).toMatchObject({ status: 404 })
+  })
+})
+
+describe('mock API: a duplicate takes its upstream\'s thumbnail and README (#179)', () => {
+  it('copies them as its own, but not the plate fallback, which is derived', async () => {
+    const copy = await fetch('/api/v1/models/name-keychain/duplicate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Keychain copy' }),
+    }).then((response) => response.json() as Promise<ModelSummary>)
+
+    expect(copy).toMatchObject({
+      origin: 'mine',
+      has_thumbnail: true,
+      thumbnail_source: 'model',
+      thumbnail_output_id: null,
+      has_readme: true,
+    })
+    expect(await api.getReadme(copy.slug)).toBe(await api.getReadme('name-keychain'))
+  })
+})

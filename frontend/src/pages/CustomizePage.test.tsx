@@ -832,4 +832,36 @@ describe('CustomizePage', () => {
       '/m/builtin%3Akeychain-template/history',
     )
   })
+
+  it('duplicates a built-in from its header and opens the copy, linked to it (#159)', async () => {
+    const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+
+    await user.click(await screen.findByRole('button', { name: 'Duplicate' }))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Keychain Template' })
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+
+    expect(
+      await screen.findByRole('heading', { name: 'Keychain Template copy' }),
+    ).toBeInTheDocument()
+    expect(await screen.findByTestId('duplicated-from')).toHaveTextContent(
+      `Duplicated from ${BUILTIN_SLUG}`,
+    )
+    expect(screen.getByRole('link', { name: BUILTIN_SLUG })).toHaveAttribute(
+      'href',
+      '/m/builtin%3Akeychain-template',
+    )
+    // The copy is the user's: its write actions are back.
+    expect(await screen.findByRole('link', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+    // #179: Edit details among them, opening on the copy's own details.
+    await user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const details = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(details).findByLabelText('Name')).toHaveValue('Keychain Template copy')
+  })
+
+  it('offers Duplicate on a model of the user\'s own too (#159)', async () => {
+    render()
+    expect(await screen.findByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
+    expect(screen.queryByTestId('duplicated-from')).not.toBeInTheDocument()
+  })
 })

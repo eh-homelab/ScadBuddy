@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
@@ -284,3 +286,53 @@ def test_a_built_in_without_a_thumbnail_shows_its_first_plate_image(
         record = client.get(f"/api/v1/models/{BUILTIN}").json()
         assert record["thumbnail_source"] == "output"
         assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == cover
+
+
+def test_linking_a_seeded_template_drops_an_origin_url_its_image_carried(
+    settings: Settings, bundled: Path, paths: DataPaths
+) -> None:
+    """Linked, a seeded copy is a duplicate of the built-in, and a duplicate never
+    carries a link its image's model.json supplied (#179); the rest of it stays."""
+    meta = {"name": "Keychain", "origin_url": "javascript:alert(document.domain)"}
+    (bundled / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+    history = ModelHistory(paths.models)
+    history.ensure_repo()
+    shutil.copytree(bundled, paths.model_dir("keychain"))
+    history.commit("Seed keychain from the image", "keychain")
+
+    with TestClient(create_app(settings)) as client:
+        model = client.get("/api/v1/models/keychain").json()
+        assert (model["name"], model["origin_url"]) == ("Keychain", None)
+        assert model["upstream"]["id"] == BUILTIN
+        # Its own thumbnail came with the seed, and is still its own.
+        assert model["thumbnail_source"] == "model"
+    assert "origin_url" not in json.loads(paths.model_meta("keychain").read_text("utf-8"))
+
+
+def test_boot_links_a_template_the_old_seed_copied_in(
+    settings: Settings, bundled: Path, paths: DataPaths
+) -> None:
+    """An install seeded before #155: its copy becomes a duplicate of the built-in (#158)."""
+    history = ModelHistory(paths.models)
+    history.ensure_repo()
+    shutil.copytree(bundled, paths.model_dir("keychain"))
+    seed = history.commit("Seed keychain from the image", "keychain")
+
+    with TestClient(create_app(settings)) as client:
+        model = client.get("/api/v1/models/keychain").json()
+        assert model["origin"] == "mine"
+        assert model["upstream"] == {
+            "id": BUILTIN,
+            "path": "keychain",
+            "base": seed,
+            "dismissed": None,
+        }
+        assert _versions(client, "keychain")[0]["message"] == (
+            "Link seeded templates to their built-ins"
+        )
+    head = history.head()
+
+    # A second boot finds nothing to link and commits nothing.
+    with TestClient(create_app(settings)):
+        pass
+    assert history.head() == head
