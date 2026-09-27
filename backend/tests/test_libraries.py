@@ -7,7 +7,6 @@ network is never involved.
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from collections.abc import Callable, Sequence
@@ -353,13 +352,21 @@ def test_a_git_that_times_out_is_killed_with_its_helpers(
     pid = int(child_pid.read_text())
     deadline = time.monotonic() + 5
     while time.monotonic() < deadline:
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        if not _running(pid):
             break
         time.sleep(0.05)
     else:
         pytest.fail("the timed-out git's child is still running")
+
+
+def _running(pid: int) -> bool:
+    """A killed orphan whose new parent never reaps it (pytest as PID 1 in the test
+    image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
+    try:
+        stat = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return False
+    return stat.rsplit(")", 1)[1].split()[0] != "Z"
 
 
 def test_a_refused_add_leaves_no_lock_behind(store: LibraryStore) -> None:
