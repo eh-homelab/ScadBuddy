@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -37,6 +38,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    across_plates,
     check,
     gather_options,
     nozzle_warnings,
@@ -635,6 +637,19 @@ async def run_for_output(
             "no slicer pipeline is set for this model and there is no default, "
             "so there is nothing to print with"
         )
+    plate_ids = (
+        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
+        if request.all_plates
+        else [request.plate_id]
+    )
+    if not plate_ids:
+        # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
+        # to queue, and every route below reads the first plate's outcome. Read
+        # from the local 3MF before anything touches Bambuddy.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This output's 3MF lays out no plates, so there is nothing to print.",
+        )
     # Placed for the pipeline being run, which ``request.pipeline_id`` may have
     # overridden — not for whatever the settings would have defaulted to.
     target = await target_for(client, settings, meta.slug, pipeline_id=pipeline_id)
@@ -658,11 +673,6 @@ async def run_for_output(
         settings, meta.slug, scope_printer_id, request_scope(request.copies, request.options)
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
-    plate_ids = (
-        [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
-        if request.all_plates
-        else [request.plate_id]
-    )
     plate_chosen = request.bed_type is not None or plate_ids != [1]
 
     if request.filament_plan is None and not plate_chosen and not print_options.beyond_pipeline():
@@ -762,6 +772,7 @@ async def run_for_output(
     outcomes = []
     sent = []
     warnings = []
+    plate_options: list[FilamentOptions] = []
     # Each plate's slots are read on their own: a plate uses only some of the
     # project's filaments, and its requirements say which (#83). The one plan applies to
     # every plate because a slot is a project filament, not a plate position: extruders
@@ -803,7 +814,11 @@ async def run_for_output(
         )
         sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
+        plate_options.append(options)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
+            # Checked once below, against what every plate needs together.
+            if warning.kind == "low-filament":
+                continue
             if warning.kind == "no-choice" and warning.slot_id is not None and len(plate_ids) > 1:
                 warning = warning.model_copy(
                     update={
@@ -816,6 +831,11 @@ async def run_for_output(
                 )
             if warning not in warnings:
                 warnings.append(warning)
+    warnings += [
+        warning
+        for warning in check(across_plates(plate_options), request.filament_plan, copies=copies)
+        if warning.kind == "low-filament"
+    ]
     return _queued(
         client,
         outcomes,

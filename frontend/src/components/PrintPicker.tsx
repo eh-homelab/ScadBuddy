@@ -234,11 +234,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   }, [open, load, check])
 
   // The reports describe one output's 3MF, so they do not survive a change of output. Nor
-  // do this print's option overrides, which the collapsed disclosure would not show.
+  // do this print's option overrides, which the collapsed disclosure would not show, or
+  // its plates, which would stay on screen while the new output's load.
   useEffect(() => {
     setReports({})
     setOptions({})
     setPlate(1)
+    setPlates([])
   }, [outputId])
 
   useEffect(() => {

@@ -11,6 +11,8 @@ goes. Assertions are on the request bodies, because that is all Bambuddy sees.
 from __future__ import annotations
 
 import json
+import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -350,6 +352,40 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
     assert (meta["queue_item_id"], meta["slice_job_id"]) == (72, 10)
 
 
+@respx.mock
+def test_all_plates_of_a_3mf_that_lists_none_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload = upload_route()
+    _drop_plates(_output_3mf(paths, output_id))
+    queue = queue_route()
+
+    answer = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+    )
+
+    assert answer.status_code == 422
+    assert "no plates" in answer.json()["detail"]
+    assert not upload.called
+    assert not queue.called
+
+
+def _drop_plates(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    entries["Metadata/model_settings.config"] = re.sub(
+        r" <plate>.*?</plate>\n", "", config, flags=re.DOTALL
+    ).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
+
+
 def test_a_meta_json_without_plates_still_loads(
     client: TestClient, model: str, paths: DataPaths
 ) -> None:
@@ -365,8 +401,9 @@ def test_a_meta_json_without_plates_still_loads(
 # --- one filament plan across every plate -------------------------------------------
 
 
-def _plates_use(used: dict[int, set[int]]) -> None:
-    """Each plate's requirements: the recording's two slots, marked used per plate."""
+def _plates_use(used: dict[int, set[int]], grams: float = 0) -> None:
+    """Each plate's requirements: the recording's two slots, marked used per plate,
+    each needing ``grams`` (``0`` is Bambuddy's "unknown")."""
 
     def answer(request: httpx.Request) -> httpx.Response:
         body = recording("filament-requirements.json")
@@ -374,6 +411,7 @@ def _plates_use(used: dict[int, set[int]]) -> None:
         body["plate_id"] = plate
         for filament in body["filaments"]:
             filament["used_in_plate"] = filament["slot_id"] in used[plate]
+            filament["used_grams"] = grams
         return httpx.Response(200, json=body)
 
     # Registered after `inventory_routes`, so this one answers.
@@ -383,7 +421,13 @@ def _plates_use(used: dict[int, set[int]]) -> None:
 
 
 def _plan_run(
-    client: TestClient, model: str, paths: DataPaths, used: dict[int, set[int]]
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    used: dict[int, set[int]],
+    grams: float = 0,
+    *,
+    all_plates: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     configure(client)
     pipelines_route()
@@ -393,7 +437,7 @@ def _plan_run(
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
     inventory_routes()
-    _plates_use(used)
+    _plates_use(used, grams)
     slice_routes()
     queue = filament_queue_route()
     body = client.post(
@@ -401,7 +445,7 @@ def _plan_run(
         json={
             "pipeline_id": 1,
             "printer_id": 1,
-            "all_plates": True,
+            "all_plates": all_plates,
             # Picked against plate 1, as the picker does for "all plates".
             "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
         },
@@ -442,3 +486,38 @@ def test_a_slot_only_a_later_plate_uses_is_left_to_the_pipeline_and_said(
     assert warning["slot_id"] == 2
     assert "Plate 2" in warning["message"]
     assert "slot 2" in warning["message"]
+
+
+@respx.mock
+def test_the_filament_check_sums_what_every_plate_needs(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Spool 9 has 1000 g left: each plate's 600 g fits, the run's 1200 g does not (#198)."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=600)
+
+    assert len(queued) == 2
+    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "low-filament"]
+    assert warning["slot_id"] == 1
+    assert "needs 1200 g" in warning["message"]
+
+
+@respx.mock
+def test_one_plate_short_of_filament_is_still_warned_about(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The summed check (#198) runs for every planned print, so one plate is its own total."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=1200, all_plates=False)
+
+    assert len(queued) == 1
+    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "low-filament"]
+    assert warning["slot_id"] == 1
+    assert "needs 1200 g" in warning["message"]
+
+
+@respx.mock
+def test_plates_that_fit_the_spool_together_say_nothing_about_it(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    body, _ = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=400)
+
+    assert not any(warning["kind"] == "low-filament" for warning in body["warnings"])
