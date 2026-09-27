@@ -81,6 +81,19 @@ class Metrics:
             ["operation"],
             registry=r,
         )
+        self.listener_connected = Gauge(
+            "scadbuddy_render_queue_listener_connected",
+            "1 while this process LISTENs for the NOTIFY that wakes its render workers "
+            "(Postgres); 0 while that connection is down and the workers fall back to "
+            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none.",
+            registry=r,
+        )
+        self.listener_reconnects = Counter(
+            "scadbuddy_render_queue_listener_reconnects",
+            "Times the render queue's LISTEN connection was re-established after it "
+            "dropped (Postgres). A first connection is not counted.",
+            registry=r,
+        )
         self.render_rejected = Counter(
             "scadbuddy_render_jobs_rejected",
             "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
