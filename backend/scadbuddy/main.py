@@ -100,6 +100,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # A library clone the process died in the middle of. Nothing is cloning yet:
+    # no request has been served.
+    try:
+        await asyncio.to_thread(state.libraries.sweep_staging)
+    except OSError:
+        logger.exception("could not sweep library staging clones")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()

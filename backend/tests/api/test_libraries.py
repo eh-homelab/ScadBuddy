@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import httpx
 import pytest
@@ -22,7 +23,12 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.libraries import LOCKFILE_NAME, CatalogueLibrary, LibraryStore
+from scadbuddy.library.libraries import (
+    LOCKFILE_NAME,
+    STAGING_PREFIX,
+    CatalogueLibrary,
+    LibraryStore,
+)
 from tests.conftest import make_library_upstream
 
 pytestmark = pytest.mark.requires_git
@@ -199,6 +205,64 @@ def test_a_curated_name_with_another_url_is_a_422(
 def test_a_name_with_a_path_in_it_is_a_422(lib_client: TestClient) -> None:
     response = lib_client.post("/api/v1/libraries", json={"name": "../up"})
     assert response.status_code == 422
+
+
+def test_a_ref_with_dot_dot_is_refused_by_validation(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    store = libraries_app.dependency_overrides[get_libraries]()
+    with patch.object(store, "install", side_effect=AssertionError("reached the service")):
+        response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2", "ref": "a..b"})
+
+    assert response.status_code == 422
+    assert [error["loc"] for error in response.json()["errors"]] == [["body", "ref"]]
+
+
+def test_the_schema_states_that_a_ref_has_no_dot_dot(lib_client: TestClient) -> None:
+    schema = lib_client.get("/openapi.json").json()["components"]["schemas"]
+    ref = schema["LibraryAdd"]["properties"]["ref"]["anyOf"][0]
+
+    assert "(?!.*\\.\\.)" in ref["pattern"]
+
+
+def test_a_hand_edited_pin_with_a_bad_commit_is_a_clear_500(
+    libraries_app: FastAPI, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, _ = upstream
+    (paths.models / LOCKFILE_NAME).write_text(
+        json.dumps({"BOSL2": {"url": url, "ref": "v1", "commit": "HEAD"}}), encoding="utf-8"
+    )
+
+    with TestClient(libraries_app, raise_server_exceptions=False) as client:
+        response = client.get("/api/v1/libraries")
+
+    assert response.status_code == 500
+    assert "libraries.lock entry 'BOSL2' is not valid: commit:" in response.json()["detail"]
+
+
+def test_boot_sweeps_staging_clones_a_killed_install_left(app: FastAPI, paths: DataPaths) -> None:
+    staging = paths.libraries / f"{STAGING_PREFIX}0123abcd" / "BOSL2"
+    staging.mkdir(parents=True)
+    (staging / "std.scad").write_text("cube(1);\n", encoding="utf-8")
+    checkout = paths.libraries / "BOSL2" / ("a" * 40) / "BOSL2"
+    checkout.mkdir(parents=True)
+
+    with TestClient(app):
+        pass
+
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+    assert checkout.is_dir()
+
+
+def test_a_failed_staging_sweep_does_not_stop_the_boot(
+    app: FastAPI, caplog: pytest.LogCaptureFixture
+) -> None:
+    with (
+        patch.object(LibraryStore, "sweep_staging", side_effect=OSError("EIO")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert "could not sweep library staging clones" in caplog.text
 
 
 def test_a_ref_that_does_not_exist_upstream_is_a_502(

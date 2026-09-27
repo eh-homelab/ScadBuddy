@@ -19,6 +19,7 @@ from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
+    STAGING_PREFIX,
     CatalogueLibrary,
     LibraryError,
     LibraryFetchError,
@@ -26,6 +27,7 @@ from scadbuddy.library.libraries import (
     LibraryNotInstalledError,
     LibraryPin,
     LibraryStore,
+    LockfileError,
     _write_pins,
     declared_libraries,
     pins_at,
@@ -539,6 +541,36 @@ def test_a_name_that_is_not_a_directory_name_is_refused(
 def test_a_ref_that_is_not_a_ref_is_refused(store: LibraryStore, ref: str) -> None:
     with pytest.raises(LibraryError):
         store.install("BOSL2", ref=ref)
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "v1"}}', "'BOSL2'"),
+        ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1"}}', "commit"),
+        ("{not json", "not valid JSON"),
+    ],
+)
+def test_a_hand_edited_lock_that_is_not_valid_is_refused_by_name(
+    paths: DataPaths, body: str, match: str
+) -> None:
+    (paths.models / LOCKFILE_NAME).write_text(body, encoding="utf-8")
+
+    with pytest.raises(LockfileError, match=match):
+        read_pins(paths)
+
+
+@pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
+def test_a_pin_takes_a_sha1_or_sha256_commit(commit: str) -> None:
+    assert LibraryPin(url="https://x.invalid/b.git", ref="v1", commit=commit).commit == commit
+
+
+def test_sweep_staging_leaves_the_checkouts(store: LibraryStore, paths: DataPaths) -> None:
+    store.install("BOSL2")
+    (paths.libraries / f"{STAGING_PREFIX}dead" / "BOSL2").mkdir(parents=True)
+
+    assert store.sweep_staging() == [f"{STAGING_PREFIX}dead"]
+    assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
 
 
 def test_an_unknown_ref_leaves_nothing_behind(store: LibraryStore, paths: DataPaths) -> None:

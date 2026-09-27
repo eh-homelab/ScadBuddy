@@ -49,7 +49,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.history import (
@@ -66,10 +66,12 @@ logger = logging.getLogger(__name__)
 LOCKFILE_NAME = "libraries.lock"
 #: A directory name OpenSCAD can `use <NAME/...>`: no separators, no dot-files.
 NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
-#: A branch or tag, never with a leading dash (it would read as an option). `..`
-#: is refused on top of this: git refuses it in a ref anyway, and the pattern has
-#: to stay free of look-arounds to double as the API's own validation.
-REF_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+#: A branch or tag, never with a leading dash (it would read as an option) and
+#: never with `..` (git refuses it in a ref anyway). The look-ahead needs Python's
+#: `re`: a pydantic model using this sets ``regex_engine="python-re"``.
+REF_PATTERN = r"^(?!.*\.\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$"
+#: A full SHA-1 or SHA-256 object name, as `git rev-parse HEAD` prints it.
+COMMIT_PATTERN = r"^[0-9a-f]{40}([0-9a-f]{24})?$"
 # A clone crosses the network, unlike every other git call here, and NopSCADlib
 # is large; a stalled one still has to give its executor slot back.
 CLONE_TIMEOUT = 300.0
@@ -93,7 +95,7 @@ class LibraryPin(BaseModel):
 
     url: str
     ref: str
-    commit: str
+    commit: str = Field(pattern=COMMIT_PATTERN)
 
 
 class LibraryEntry(BaseModel):
@@ -165,14 +167,36 @@ class LibraryNotInstalledError(LookupError):
     """A model declares a library that has no pin, or whose checkout is gone."""
 
 
+class LockfileError(RuntimeError):
+    """``libraries.lock`` is not what ScadBuddy writes: a hand edit, most likely."""
+
+
 # ── the lockfile ──────────────────────────────────────────────────────────────
 
 
 def _parse_lock(raw: str) -> dict[str, LibraryPin]:
-    loaded: Any = json.loads(raw)
+    try:
+        loaded: Any = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise LockfileError(f"{LOCKFILE_NAME} is not valid JSON: {error}") from None
     if not isinstance(loaded, dict):
         return {}
-    return {name: LibraryPin.model_validate(pin) for name, pin in loaded.items()}
+    pins: dict[str, LibraryPin] = {}
+    for name, pin in loaded.items():
+        try:
+            pins[name] = LibraryPin.model_validate(pin)
+        except ValidationError as error:
+            # Named, so whoever edited the file by hand can find the entry; the
+            # renders and routes that read it fail with this rather than a bare
+            # pydantic dump. Nothing reads the lock at boot, so it never stops one.
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in detail['loc']) or 'entry'}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            raise LockfileError(
+                f"{LOCKFILE_NAME} entry {name!r} is not valid: {problems}"
+            ) from None
+    return pins
 
 
 def _lock_body(pins: Mapping[str, LibraryPin]) -> str:
@@ -335,6 +359,22 @@ class LibraryStore:
         # waits for it and the table never outgrows the adds in flight.
         self._names: dict[str, _NameLock] = {}
         self._names_guard = threading.Lock()
+
+    def sweep_staging(self) -> list[str]:
+        """Remove the staging clones an install killed mid-clone left behind.
+
+        Only safe while no install can run -- at boot, before the first request --
+        since a live clone is in one of these too.
+        """
+        root = self.paths.libraries
+        if not root.is_dir():
+            return []
+        removed: list[str] = []
+        for entry in sorted(root.iterdir()):
+            if entry.name.startswith(STAGING_PREFIX):
+                shutil.rmtree(entry)
+                removed.append(entry.name)
+        return removed
 
     def entries(self) -> list[LibraryEntry]:
         pins = read_pins(self.paths)

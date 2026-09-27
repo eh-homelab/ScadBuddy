@@ -10,7 +10,7 @@ import asyncio
 
 from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import InstallsDep, LibrariesDep
 from scadbuddy.core.problems import ApiError, problem_response
@@ -29,6 +29,9 @@ router = APIRouter(tags=["libraries"])
 
 
 class LibraryAdd(BaseModel):
+    # REF_PATTERN refuses `..` with a look-ahead, which pydantic's default engine lacks.
+    model_config = ConfigDict(regex_engine="python-re")
+
     name: str = Field(pattern=NAME_PATTERN, description="The directory `use <NAME/...>` names")
     url: str | None = Field(
         default=None,

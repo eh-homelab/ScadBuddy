@@ -148,6 +148,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   pre-slice check reads **object-level `extruder`** from `model_settings.config`
   and ignores `paint_color`, so per-object assignment is the only reliable
   path.
+- **The image's `git` must be at least 2.37**, asserted as a floor in the
+  Dockerfile (`MIN_GIT_VERSION`) rather than pinned: 2.9 for `core.hooksPath`,
+  2.28 for `--initial-branch`, 2.35.2 for `safe.directory` as protected
+  command-line scope, and 2.37 for `http.curloptResolve`, which holds a library
+  clone (#93) to the addresses its host was vetted at. An older git ignores that
+  key and resolves the host again, so the vetting would not bind the clone.
 - **MakerWorld does not serve a model's source to an anonymous server**
   (checked 2026-09-26, #153/#174). Model pages sit behind a Cloudflare challenge
   (403). `api.bambulab.com/v1/design-service/design/<id>` answers without a login
