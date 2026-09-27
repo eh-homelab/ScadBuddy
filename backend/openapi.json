@@ -509,6 +509,20 @@
         "title": "Diagnostic",
         "type": "object"
       },
+      "DuplicateRequest": {
+        "properties": {
+          "name": {
+            "description": "Display name of the duplicate; its slug is derived from it",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DuplicateRequest",
+        "type": "object"
+      },
       "EditTarget": {
         "description": "What ``/edit/{output_id}`` needs to reopen the customizer.",
         "properties": {
@@ -1636,6 +1650,16 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "upstream": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Upstream"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "version": {
             "anyOf": [
@@ -4958,6 +4982,52 @@
         "title": "SpoolOption",
         "type": "object"
       },
+      "Upstream": {
+        "description": "The template a duplicate was copied from, and the revision of it it includes.",
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The upstream commit this template includes; None without history",
+            "title": "Base"
+          },
+          "dismissed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An upstream commit the user chose not to take",
+            "title": "Dismissed"
+          },
+          "id": {
+            "description": "The upstream template's id: a slug, or `builtin:<slug>`",
+            "title": "Id",
+            "type": "string"
+          },
+          "path": {
+            "description": "The upstream's directory in the models repository",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "base"
+        ],
+        "title": "Upstream",
+        "type": "object"
+      },
       "UrlImport": {
         "properties": {
           "force": {
@@ -5690,6 +5760,61 @@
           }
         },
         "summary": "Edit model metadata",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/duplicate": {
+      "post": {
+        "description": "Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.",
+        "operationId": "duplicate_model_api_v1_models__slug__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Duplicate a template",
         "tags": [
           "models"
         ]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -16,12 +17,14 @@ from pydantic import BaseModel, Field
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
+    MODEL_META_NAME,
     SOURCE_NAME,
     DataPaths,
     is_builtin,
     model_path,
 )
-from scadbuddy.library.history import GitError, ModelHistory
+from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
+from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +76,21 @@ class ModelExistsError(ValueError):
     pass
 
 
+class Upstream(BaseModel):
+    """The template a duplicate was copied from, and the revision of it it includes."""
+
+    id: str = Field(description="The upstream template's id: a slug, or `builtin:<slug>`")
+    #: Stored, not derived from `id`: a merge base may name a commit where the
+    #: upstream's source lived somewhere else.
+    path: str = Field(description="The upstream's directory in the models repository")
+    base: str | None = Field(
+        description="The upstream commit this template includes; None without history"
+    )
+    dismissed: str | None = Field(
+        default=None, description="An upstream commit the user chose not to take"
+    )
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -83,6 +101,9 @@ class ModelMeta(BaseModel):
     #: Where the model was imported from (#153), for the link back; None for anything
     #: uploaded, pasted or built in. Not in `ModelPatch`: it records a fact, not a choice.
     origin_url: str | None = None
+    #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
+    #: never clobbers it.
+    upstream: Upstream | None = None
     # The third-party libraries (#93) this model renders with: the only ones on
     # its OPENSCADPATH, each at the commit `libraries.lock` pins.
     libraries: list[str] = Field(default_factory=list)
@@ -232,18 +253,98 @@ class Catalogue:
     ) -> ModelRecord:
         if self.exists(slug):
             raise ModelExistsError(slug)
-        directory = self.paths.model_dir(slug)
-        directory.mkdir(parents=True, exist_ok=True)
-        # After the mkdir, so the window between `exists` and claiming the slug
-        # is no wider than it was.
-        self._clear_derived(slug)
-        self.paths.model_source(slug).write_text(source, encoding="utf-8")
-        self.write_raw_meta(slug, meta.model_dump())
-        if thumbnail is not None:
-            self.thumbnail_path(slug).write_bytes(thumbnail)
-        if readme is not None:
-            self.readme_path(slug).write_text(readme, encoding="utf-8")
+        directory = self._claim(slug)
+        try:
+            self.paths.model_source(slug).write_text(source, encoding="utf-8")
+            self.write_raw_meta(slug, meta.model_dump())
+            if thumbnail is not None:
+                self.thumbnail_path(slug).write_bytes(thumbnail)
+            if readme is not None:
+                self.readme_path(slug).write_text(readme, encoding="utf-8")
+        except BaseException:
+            # The claim is exclusive, so the directory is this create's alone: a
+            # half-written one left behind would hold the slug for good.
+            _remove_tree(directory)
+            raise
         self._commit(f"Add {slug}", slug)
+        return self.record(slug)
+
+    def duplicate(self, upstream_id: str, slug: str, name: str) -> ModelRecord:
+        """Copy a template to a new one of mine at ``slug``, recording its upstream.
+
+        The copy is staged under ``cache/`` (same volume) and renamed into place
+        with its ``model.json`` already written, so the new template appears whole
+        or not at all, and a slug something else claimed meanwhile refuses the
+        rename rather than being copied into. Not under ``cache/tombstones/``: a
+        concurrent delete sweeps that.
+        """
+        self._require(upstream_id)
+        if self.exists(slug):
+            raise ModelExistsError(slug)
+        # Not `self.version`, which logs a git failure and answers None: here that
+        # would record no base and copy the working tree instead of the revision.
+        # A failure reading it fails the duplicate, as a failed export does.
+        base: str | None = None
+        if self.history is not None and self.history.available:
+            base = self.history.last_commit(model_path(upstream_id))
+            if base is None:
+                # `last_commit` answers None for a failed `git log` as well as for
+                # no commit; either way there is no revision to copy or to record.
+                raise GitError(f"could not read the current revision of {upstream_id!r}")
+        self.paths.cache.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
+        staged = staging / slug
+        target = self.paths.model_dir(slug)
+        try:
+            if base is not None and self.history is not None:
+                # From the revision recorded as `base`, not the working tree: a
+                # source edit landing between reading `base` and copying would
+                # otherwise give a copy newer than the revision it claims.
+                try:
+                    self.history.export(model_path(upstream_id), base, staged)
+                except RevisionNotFoundError:
+                    raise ModelNotFoundError(upstream_id) from None
+            else:
+                try:
+                    # Dotfiles are left out: a `.model-*.scad` is a source write in
+                    # flight.
+                    shutil.copytree(
+                        self.paths.model_dir(upstream_id),
+                        staged,
+                        # Nor a render's colour wrapper, written beside the source
+                        # for the length of a render and gitignored for that reason.
+                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
+                    )
+                except FileNotFoundError:
+                    raise ModelNotFoundError(upstream_id) from None
+            meta_path = staged / MODEL_META_NAME
+            loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
+            meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
+            meta.pop("schema", None)
+            meta["name"] = name
+            meta["upstream"] = Upstream(
+                id=upstream_id, path=model_path(upstream_id), base=base
+            ).model_dump()
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            # Claimed as `create` claims, so the copy is never visible beside a
+            # previous occupant's schema cache, outputs or revisions.
+            self._claim(slug)
+            # Onto the empty directory just claimed, the rename replaces it whole.
+            try:
+                staged.rename(target)
+            except OSError as error:
+                # Only an empty claim is still ours to give back: `rmdir` refuses
+                # anything something else has written into, and that is left alone.
+                try:
+                    target.rmdir()
+                except OSError as leftover:
+                    if leftover.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                        raise ModelExistsError(slug) from error
+                    raise
+                raise
+        finally:
+            _remove_tree(staging)
+        self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
@@ -379,6 +480,24 @@ class Catalogue:
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
         return removed
+
+    def _claim(self, slug: str) -> Path:
+        """Make ``slug``'s directory, or raise ModelExistsError if anything has it.
+
+        The one way a new model takes its slug, and exclusive (no ``exist_ok``):
+        of two creates or duplicates racing for a slug, the second is refused
+        rather than writing into, or renamed over, the first one's directory.
+        What an earlier model of the slug left behind is cleared only once the
+        claim is held.
+        """
+        directory = self.paths.model_dir(slug)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            raise ModelExistsError(slug) from None
+        self._clear_derived(slug)
+        return directory
 
     def _clear_derived(self, slug: str) -> None:
         """Remove what an earlier model of this slug left behind, before it is reused.
