@@ -343,6 +343,10 @@ class LibraryStore:
         """
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
+        # A URL is recorded in the pin, logged and quoted back in errors, so one that
+        # carries credentials is refused before any of that -- without quoting it.
+        if url is not None and "@" in urlsplit(url).netloc:
+            raise LibraryError("a library URL must not carry a user name or password")
         with self._names_guard:
             entry = self._names.setdefault(name, _NameLock())
             entry.users += 1

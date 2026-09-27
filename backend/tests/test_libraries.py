@@ -407,6 +407,21 @@ def test_an_address_literal_that_is_not_public_is_refused(
     assert calls == []
 
 
+@pytest.mark.parametrize(
+    "url", ["https://tok3n@git.example/o/r.git", "https://me:s3cret@git.example/o/r.git"]
+)
+def test_a_url_carrying_credentials_is_refused_without_quoting_them(
+    paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch, url: str
+) -> None:
+    https_only = LibraryStore(paths, history, catalogue=())
+    calls = _recording_git(https_only, monkeypatch)
+
+    with pytest.raises(LibraryError, match="user name or password") as refused:
+        https_only.install("mylib", url=url, ref="v1")
+    assert "s3cret" not in str(refused.value) and "tok3n" not in str(refused.value)
+    assert calls == []
+
+
 @pytest.mark.usefixtures("fake_dns")
 def test_a_public_url_is_cloned_from_only_the_addresses_it_was_vetted_at(
     paths: DataPaths, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
