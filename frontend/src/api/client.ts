@@ -3,6 +3,7 @@ import type {
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
+  DuplicateRequest,
   EditTarget,
   EligibilityOverview,
   FilamentOptions,
@@ -10,6 +11,9 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  LibraryAdd,
+  LibraryEntry,
+  ModelPatch,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -160,6 +164,17 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ source, slug: slug ?? null }),
       signal,
+    }),
+
+  /** Metadata, and since #93 the libraries the model renders with. */
+  updateModel: (slug: string, patch: ModelPatch) =>
+    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
+  duplicateModel: (slug: string, name: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
@@ -389,6 +404,13 @@ export const api = {
   },
 
   listPlates: () => request<PlateCatalogue>('/plates'),
+
+  /** #93 — the curated catalogue plus anything added by URL, each with its pin. */
+  listLibraries: () => request<LibraryEntry[]>('/libraries'),
+
+  /** Clones the library at `ref` server-side and pins it in `libraries.lock`. */
+  addLibrary: (body: LibraryAdd) =>
+    request<LibraryEntry>('/libraries', { method: 'POST', body: JSON.stringify(body) }),
 
   getSettings: () => request<Settings>('/settings'),
 

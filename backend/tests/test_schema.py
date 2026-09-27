@@ -162,3 +162,19 @@ def test_schema_cache_round_trip(tmp_path: Path) -> None:
     assert load_cached_schema(meta, source_sha256(source)) == schema
     assert load_cached_schema(meta, source_sha256(source + "\n")) is None
     assert load_cached_schema(tmp_path / "missing.json", schema.source_sha256) is None
+
+
+def test_schema_cache_is_keyed_on_the_library_path_too(tmp_path: Path) -> None:
+    """#93: the same source can derive a different schema against another pin, and
+    a pin's checkout directory is named by its commit."""
+    source = load_fixture_source("plain")
+    schema = build_schema(load_fixture_param("plain"), source)
+    cache = tmp_path / "schema.json"
+    pinned = (tmp_path / "libraries" / "BOSL2" / "abc123",)
+
+    store_cached_schema(cache, schema, library_path=pinned)
+
+    assert load_cached_schema(cache, source_sha256(source), library_path=pinned) == schema
+    assert load_cached_schema(cache, source_sha256(source)) is None
+    repinned = (tmp_path / "libraries" / "BOSL2" / "def456",)
+    assert load_cached_schema(cache, source_sha256(source), library_path=repinned) is None

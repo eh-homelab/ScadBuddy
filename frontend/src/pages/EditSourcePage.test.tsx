@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
@@ -152,5 +152,33 @@ describe('EditSourcePage', () => {
       'href',
       '/m/builtin%3Akeychain-template',
     )
+  })
+
+  it('duplicates a built-in to edit, landing on the copy\'s editable source (#159)', async () => {
+    const { user } = renderEdit(encodeURIComponent(BUILTIN_SLUG))
+    await screen.findByLabelText('OpenSCAD source')
+
+    await user.click(screen.getByRole('button', { name: 'Duplicate to edit' }))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Keychain Template' })
+    expect(within(dialog).getByRole('textbox', { name: 'Name' })).toHaveValue(
+      'Keychain Template copy',
+    )
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+
+    expect(await screen.findByRole('heading', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'keychain-template-copy' })).toBeInTheDocument()
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    expect(editor).toHaveValue(keychainSource)
+    expect(editor).not.toHaveAttribute('readonly')
+    expect(screen.getByRole('button', { name: 'Save source' })).toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+    // The built-in is left as it was.
+    expect((await api.getModel(BUILTIN_SLUG)).origin).toBe('builtin')
+  })
+
+  it('offers no Duplicate to edit on a model of the user\'s own', async () => {
+    renderEdit()
+    await screen.findByRole('button', { name: 'Save source' })
+    expect(screen.queryByRole('button', { name: 'Duplicate to edit' })).not.toBeInTheDocument()
   })
 })

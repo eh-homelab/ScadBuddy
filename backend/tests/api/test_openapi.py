@@ -11,6 +11,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/check",
     "/api/v1/models/import",
     "/api/v1/models/{slug}",
+    "/api/v1/models/{slug}/duplicate",
     "/api/v1/models/{slug}/source",
     "/api/v1/models/{slug}/schema",
     "/api/v1/models/{slug}/thumbnail",
@@ -53,6 +54,7 @@ EXPECTED_PATHS = {
     "/api/v1/plate",
     "/api/v1/plate/fit",
     "/api/v1/plates",
+    "/api/v1/libraries",
 }
 
 
