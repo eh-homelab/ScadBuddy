@@ -218,7 +218,7 @@ describe('CataloguePage', () => {
 
   it('says so on a duplicate whose upstream is gone (#160)', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
-    await api.deleteModel(UPSTREAM)
+    await api.deleteModel(UPSTREAM, true)
     renderPage(<CataloguePage />)
 
     const copy = (await screen.findByRole('heading', { name: 'Keychain for Nova' })).closest(

@@ -179,7 +179,9 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
+  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
+  deleteModel: (slug: string, force = false) =>
+    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
 
   /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
   getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),

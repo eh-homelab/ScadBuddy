@@ -114,6 +114,8 @@ test.describe('taking upstream updates (#160)', () => {
 
     await page.getByRole('button', { name: 'Delete' }).click()
     await page.getByRole('button', { name: 'Delete model' }).click()
+    await expect(page.getByText('1 template is a duplicate of this one')).toBeVisible()
+    await page.getByRole('button', { name: 'Delete anyway' }).click()
 
     const card = page
       .getByRole('listitem')
