@@ -36,8 +36,8 @@ export function DeleteModelButton({ slug, name }: Props) {
       navigate('/', { replace: true })
     } catch (caught) {
       const tracking = caught instanceof ApiError ? trackingDuplicates(caught.problem) : undefined
-      if (tracking) setDuplicates(tracking)
-      else setError(caught instanceof ApiError ? caught.detail : String(caught))
+      setDuplicates(tracking ?? null)
+      if (!tracking) setError(caught instanceof ApiError ? caught.detail : String(caught))
       setDeleting(false)
     }
   }

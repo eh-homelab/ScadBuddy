@@ -62,6 +62,12 @@ describe('trackingDuplicates', () => {
     expect(trackingDuplicates({ ...base, duplicates: 2, slugs: ['a', 'b'] })).toEqual(['a', 'b'])
   })
 
+  it('is undefined when no duplicate is named', () => {
+    expect(trackingDuplicates({ ...base, duplicates: 0, slugs: [] })).toBeUndefined()
+    expect(trackingDuplicates({ ...base, duplicates: 1, slugs: [] })).toBeUndefined()
+    expect(trackingDuplicates({ ...base, duplicates: 0, slugs: ['a'] })).toBeUndefined()
+  })
+
   it('is undefined for any other conflict', () => {
     expect(trackingDuplicates({ ...base, detail: 'render in progress' })).toBeUndefined()
   })

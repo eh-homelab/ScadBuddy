@@ -104,6 +104,8 @@ export function refusedCheck(problem: Problem): SourceCheck | undefined {
  * slugs as the `slugs` problem extension (and the count as `duplicates`).
  */
 export function trackingDuplicates(problem: Problem): string[] | undefined {
-  if (typeof problem.duplicates !== 'number' || !Array.isArray(problem.slugs)) return undefined
-  return problem.slugs.map(String)
+  const { duplicates, slugs } = problem
+  if (typeof duplicates !== 'number' || duplicates < 1) return undefined
+  if (!Array.isArray(slugs) || slugs.length === 0) return undefined
+  return slugs.map(String)
 }

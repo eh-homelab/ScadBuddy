@@ -110,4 +110,32 @@ describe('DeleteModelButton', () => {
     expect(screen.getByRole('button', { name: 'Delete model' })).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   })
+
+  it('shows only the new error when the forced delete fails for another reason', async () => {
+    await api.duplicateModel('name-keychain', 'My Keychain')
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+    await screen.findByRole('button', { name: 'Delete anyway' })
+    server.use(
+      http.delete('/api/v1/models/:slug', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Conflict',
+            status: 409,
+            detail: "'name-keychain' has a render in progress; try again when it ends",
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.click(screen.getByRole('button', { name: 'Delete anyway' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('render in progress')
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.queryByText('my-keychain')).not.toBeInTheDocument()
+  })
 })
