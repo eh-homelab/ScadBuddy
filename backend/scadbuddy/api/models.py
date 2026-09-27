@@ -976,7 +976,8 @@ def _etag_matches(if_none_match: str | None, etag: str) -> bool:
     summary="Model thumbnail",
     description=(
         "The thumbnail set on the model or, when it has none, the plate image of its "
-        "first generated output. 404 when there is neither. Carries a strong `ETag` "
+        "first generated output, or else its default-render preview. 404 when there is "
+        "none of the three. Carries a strong `ETag` "
         "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
         "answered 304 with no body."
     ),
@@ -1036,7 +1037,9 @@ async def put_thumbnail(
     description=(
         "Removes the thumbnail set on the model, as one revision in its history. The "
         "record that comes back can still have one: a generated model falls back to "
-        "its first output's plate image (`thumbnail_source` is then `output`)."
+        "its first output's plate image (`thumbnail_source` is then `output`), and any "
+        "other to its default-render preview (`preview`) once that has rendered in the "
+        "background."
     ),
 )
 def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:

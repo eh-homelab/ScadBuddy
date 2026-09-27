@@ -75,6 +75,11 @@ for the project picker).
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
+  `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
+  generated output is rendered at its default settings in the background, one at
+  a time and behind any render someone asked for, and that plate image is its
+  catalogue thumbnail; `false` renders nothing, and such a model shows no image
+  until one is set or generated);
   `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
   `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
   clone may take on the volume; the clone's size is measured while it runs, so it
