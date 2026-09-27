@@ -70,6 +70,34 @@ test.describe('customizer', () => {
     await expect(page.getByText('Drop a file here')).toBeVisible()
   })
 
+  test('picks a sample the template ships for a file parameter', async ({ page }) => {
+    await page.goto('/m/gridfinity-bin')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await page.getByRole('tab', { name: 'Features' }).click()
+
+    const samples = page.getByTestId('samples-label_art')
+    await expect(samples.getByRole('button')).toHaveCount(2)
+
+    const rendered = page.waitForRequest(
+      (request) =>
+        request.method() === 'POST' &&
+        request.url().endsWith('/render') &&
+        request.postDataJSON()?.params?.label_art === 'sample-heart.svg',
+    )
+    await samples.getByRole('button', { name: 'Use sample sample-heart.svg' }).click()
+
+    const preview = page.getByRole('img', { name: 'Preview of sample-heart.svg' })
+    await expect(preview).toBeVisible()
+    // The thumbnail actually loaded from the sample route, not a broken image.
+    await expect
+      .poll(() => preview.evaluate((img) => (img as { naturalWidth: number }).naturalWidth))
+      .toBeGreaterThan(0)
+    await expect(page.getByText('Template sample')).toBeVisible()
+    const request = await rendered
+    const job = (await (await request.response())?.json()) as { job_id?: string } | undefined
+    expect(job?.job_id).toBeTruthy()
+  })
+
   test('shows the OpenSCAD log when a render fails', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toBeVisible()

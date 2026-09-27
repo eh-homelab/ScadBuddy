@@ -17,23 +17,29 @@ const PICKER_ACCEPT: Record<string, string> = {
  * SHA-256 the server stored it under), never a file name or a path: the render stages
  * the file beside the model under a name of its own. The original name is only shown.
  *
- * The empty string means no file; any other non-id value is the model's own default,
- * a file that ships beside it.
+ * The empty string means no file. Any other non-id value is a file that ships beside
+ * the model: one of its `samples` (offered as a row of thumbnails under the drop
+ * zone, so a viewer can pick one without downloading and re-uploading it), or the
+ * model's own default.
  */
 export function FileWidget({
   param,
   value,
   slug,
+  version,
   onChange,
 }: {
   param: Param
   value: string
   slug: string
+  /** The revision being customized: its samples are read as they were then. */
+  version?: string
   onChange: (next: string) => void
 }) {
   const id = `p-${param.name}`
   const label = param.caption ?? param.name
   const accept = param.accept ?? []
+  const samples = param.samples ?? []
   const input = useRef<HTMLInputElement>(null)
   const [uploading, setUploading] = useState(false)
   const [error, setError] = useState<string>()
@@ -47,6 +53,12 @@ export function FileWidget({
     [slug, value, isAsset],
   )
   const asset = isAsset ? (known[value] ?? lookup.data) : undefined
+  const isSample = !isAsset && samples.includes(value)
+  const previewUrl = isAsset
+    ? api.assetContentUrl(slug, value)
+    : isSample
+      ? api.sampleContentUrl(slug, value, version)
+      : undefined
 
   async function upload(file: File): Promise<void> {
     setError(undefined)
@@ -93,10 +105,10 @@ export function FileWidget({
         }`}
       >
         <div className="grid size-12 shrink-0 place-items-center overflow-hidden rounded-[4px] border border-line bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:12px_12px]">
-          {isAsset ? (
+          {previewUrl ? (
             <img
-              src={api.assetContentUrl(slug, value)}
-              alt={asset ? `Preview of ${asset.name}` : 'Preview'}
+              src={previewUrl}
+              alt={isSample ? `Preview of ${value}` : asset ? `Preview of ${asset.name}` : 'Preview'}
               className="size-full object-contain"
             />
           ) : (
@@ -120,6 +132,15 @@ export function FileWidget({
                   {asset.width && asset.height ? ` · ${asset.width}×${asset.height}` : ''}
                 </span>
               )}
+            </>
+          ) : isSample ? (
+            <>
+              <span className="block truncate text-ink" title={value}>
+                {value}
+              </span>
+              <span className="text-faint">
+                {value === param.initial ? 'Model default · template sample' : 'Template sample'}
+              </span>
             </>
           ) : value ? (
             <span className="block truncate text-muted" title={value}>
@@ -160,6 +181,52 @@ export function FileWidget({
           </Button>
         )}
       </div>
+      {samples.length > 0 && (
+        <div
+          role="group"
+          aria-labelledby={`${id}-samples`}
+          data-testid={`samples-${param.name}`}
+          className="mt-1.5"
+        >
+          <span id={`${id}-samples`} className="mb-1 block text-[11px] text-faint">
+            Samples
+          </span>
+          <div className="flex flex-wrap gap-1.5">
+            {samples.map((name) => {
+              const chosen = name === value
+              return (
+                <button
+                  key={name}
+                  type="button"
+                  aria-pressed={chosen}
+                  aria-label={`Use sample ${name}`}
+                  title={name}
+                  disabled={uploading}
+                  onClick={() => {
+                    setError(undefined)
+                    onChange(name)
+                  }}
+                  className={`flex w-[72px] flex-col items-center gap-1 rounded-[6px] border p-1 text-[10px] transition-colors disabled:opacity-50 ${
+                    chosen
+                      ? 'border-accent bg-accent/10 text-ink'
+                      : 'border-line bg-surface-2/60 text-muted hover:border-accent/60'
+                  }`}
+                >
+                  <span className="grid size-10 place-items-center overflow-hidden rounded-[4px] bg-[repeating-conic-gradient(var(--color-surface-3)_0_25%,var(--color-surface-2)_0_50%)] bg-[length:10px_10px]">
+                    <img
+                      src={api.sampleContentUrl(slug, name, version)}
+                      alt=""
+                      loading="lazy"
+                      className="size-full object-contain"
+                    />
+                  </span>
+                  <span className="w-full truncate text-center">{name}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
+      )}
       {error && (
         <p role="alert" className="mt-1.5 text-[12px] text-warn">
           {error}

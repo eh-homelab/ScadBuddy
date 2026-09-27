@@ -17,8 +17,10 @@ from scadbuddy.library.assets import (
     AssetStore,
     display_name,
     file_assets,
+    sample_files,
     sanitise_svg,
     sniff,
+    with_samples,
 )
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 
@@ -199,6 +201,14 @@ def test_an_unknown_or_malformed_id_is_not_found(store: AssetStore, asset_id: st
 # ── file_assets: what a render may pass for a `file` parameter ────────────────
 
 
+@pytest.fixture
+def model_dir(tmp_path: Path) -> Path:
+    directory = tmp_path / "model"
+    directory.mkdir()
+    (directory / "model.scad").write_text('overlay = ""; // file:svg,png\n')
+    return directory
+
+
 def _file_schema(initial: str = "", accept: tuple[str, ...] = ("svg", "png")) -> CustomizerSchema:
     return CustomizerSchema(
         parameters=[
@@ -208,30 +218,125 @@ def _file_schema(initial: str = "", accept: tuple[str, ...] = ("svg", "png")) ->
     )
 
 
-def test_a_file_parameter_takes_an_uploaded_id(store: AssetStore) -> None:
+def test_a_file_parameter_takes_an_uploaded_id(store: AssetStore, model_dir: Path) -> None:
     meta = store.put(HEART_SVG, "heart.svg")
-    assert file_assets(_file_schema(), {"overlay": meta.id, "label": "x"}, store) == {
+    assert file_assets(_file_schema(), {"overlay": meta.id, "label": "x"}, store, model_dir) == {
         "overlay": meta
     }
 
 
-def test_the_empty_value_and_the_models_own_default_need_no_upload(store: AssetStore) -> None:
+def test_the_empty_value_and_the_models_own_default_need_no_upload(
+    store: AssetStore, model_dir: Path
+) -> None:
     schema = _file_schema(initial="sample-overlay.svg")
-    assert file_assets(schema, {"overlay": ""}, store) == {}
-    assert file_assets(schema, {"overlay": "sample-overlay.svg"}, store) == {}
-    assert file_assets(schema, {}, store) == {}
+    assert file_assets(schema, {"overlay": ""}, store, model_dir) == {}
+    assert file_assets(schema, {"overlay": "sample-overlay.svg"}, store, model_dir) == {}
+    assert file_assets(schema, {}, store, model_dir) == {}
 
 
 @pytest.mark.parametrize(
     "value",
     ["/etc/passwd", "../../secrets.svg", "other.svg", "a" * 64, 3, True],
 )
-def test_anything_else_is_refused(store: AssetStore, value: str | int | bool) -> None:
+def test_anything_else_is_refused(
+    store: AssetStore, model_dir: Path, value: str | int | bool
+) -> None:
     with pytest.raises(ValueError, match="overlay"):
-        file_assets(_file_schema(), {"overlay": value}, store)
+        file_assets(_file_schema(), {"overlay": value}, store, model_dir)
 
 
-def test_a_kind_the_parameter_does_not_accept_is_refused(store: AssetStore) -> None:
+def test_a_kind_the_parameter_does_not_accept_is_refused(
+    store: AssetStore, model_dir: Path
+) -> None:
     meta = store.put(HEART_SVG, "heart.svg")
     with pytest.raises(ValueError, match="accepts png, not svg"):
-        file_assets(_file_schema(accept=("png",)), {"overlay": meta.id}, store)
+        file_assets(_file_schema(accept=("png",)), {"overlay": meta.id}, store, model_dir)
+
+
+# ── samples: the files a template ships beside its source ─────────────────────
+
+
+def _ship(model_dir: Path, *names: str) -> None:
+    for name in names:
+        (model_dir / name).write_bytes(HEART_SVG if name.endswith(".svg") else png_bytes(4, 4))
+
+
+def test_samples_are_the_bare_named_files_of_an_accepted_kind(model_dir: Path) -> None:
+    _ship(
+        model_dir,
+        "sample-cat.svg",
+        "sample-leaf.PNG",
+        "sample-rings.svg",
+        "notes.txt",
+        "part.stl",
+        ".hidden.svg",
+        "thumbnail.png",
+        "_scadbuddy_solid_asset_0123456789abcdef.svg",
+        "has space.svg",
+    )
+    (model_dir / "sub").mkdir()
+    (model_dir / "sub" / "nested.svg").write_bytes(HEART_SVG)
+    (model_dir / "dir.svg").mkdir()
+
+    assert sample_files(model_dir) == ["sample-cat.svg", "sample-leaf.PNG", "sample-rings.svg"]
+    assert sample_files(model_dir, ("png",)) == ["sample-leaf.PNG"]
+    assert sample_files(model_dir, ("svg",)) == ["sample-cat.svg", "sample-rings.svg"]
+
+
+def test_a_symlink_is_never_a_sample(tmp_path: Path, model_dir: Path) -> None:
+    outside = tmp_path / "secret.svg"
+    outside.write_bytes(HEART_SVG)
+    (model_dir / "link.svg").symlink_to(outside)
+    assert sample_files(model_dir) == []
+
+
+def test_a_missing_model_directory_has_no_samples(tmp_path: Path) -> None:
+    assert sample_files(tmp_path / "gone") == []
+
+
+def test_the_served_schema_lists_each_file_parameters_samples(model_dir: Path) -> None:
+    _ship(model_dir, "sample-cat.svg", "sample-leaf.png")
+    schema = CustomizerSchema(
+        parameters=[
+            Parameter(name="overlay", type="file", initial="", accept=["svg", "png"]),
+            Parameter(name="mask", type="file", initial="", accept=["png"]),
+            Parameter(name="label", type="string", initial="hi"),
+        ]
+    )
+    served = with_samples(schema, model_dir)
+    assert [p.samples for p in served.parameters] == [
+        ["sample-cat.svg", "sample-leaf.png"],
+        ["sample-leaf.png"],
+        [],
+    ]
+    # The cached schema it was built from is not changed.
+    assert all(p.samples == [] for p in schema.parameters)
+
+
+def test_a_file_parameter_takes_a_sample_the_template_ships(
+    store: AssetStore, model_dir: Path
+) -> None:
+    _ship(model_dir, "sample-cat.svg", "sample-leaf.png")
+    assert file_assets(_file_schema(), {"overlay": "sample-cat.svg"}, store, model_dir) == {}
+    assert file_assets(_file_schema(), {"overlay": "sample-leaf.png"}, store, model_dir) == {}
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "sample-gone.svg",  # not shipped
+        "sample-leaf.png",  # shipped, but not a kind this parameter takes
+        "thumbnail.png",
+        "model.scad",
+        "sub/nested.svg",
+        "../model/sample-cat.svg",
+        "_scadbuddy_solid_asset_0123456789abcdef.svg",
+    ],
+)
+def test_only_a_listed_sample_is_taken(store: AssetStore, model_dir: Path, value: str) -> None:
+    _ship(model_dir, "sample-cat.svg", "sample-leaf.png", "thumbnail.png")
+    _ship(model_dir, "_scadbuddy_solid_asset_0123456789abcdef.svg")
+    (model_dir / "sub").mkdir()
+    (model_dir / "sub" / "nested.svg").write_bytes(HEART_SVG)
+    with pytest.raises(ValueError, match="overlay"):
+        file_assets(_file_schema(accept=("svg",)), {"overlay": value}, store, model_dir)

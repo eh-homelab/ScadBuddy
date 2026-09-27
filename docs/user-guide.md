@@ -102,6 +102,12 @@ if (overlay_file != "")
 - The value is a bare file name in the model's directory, so `import()` and
   `surface()` resolve it as they would a file shipped beside the model. A default
   such as `"sample.svg"` keeps working; `""` means no file.
+- Ship sample pictures next to `model.scad` and the customizer offers them as
+  thumbnails under the drop zone, so a viewer can pick one instead of uploading
+  their own. Every `.svg` or `.png` directly in the model's folder is offered to
+  the parameters that take its kind, except `thumbnail.png`, hidden files
+  (a leading `.`), and names with spaces or characters other than letters,
+  digits, `_`, `-` and `.`.
 - ScadBuddy checks the upload's content, not its name. It strips scripts and
   external references from an SVG, and scales a PNG down to 256 px on its long
   side, because `surface()` gets slow with large images. Other files are refused.

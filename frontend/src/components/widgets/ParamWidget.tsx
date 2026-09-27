@@ -13,6 +13,8 @@ export interface ParamWidgetProps {
   value: ParamValue
   /** The model the parameter belongs to: a `file` parameter uploads against it. */
   slug: string
+  /** The revision being customized, if not the current one: a sample's preview reads it. */
+  version?: string
   fonts: FontFamily[]
   /** Seeds the font picker's preview: the text this model will actually set. */
   sampleText?: string
@@ -25,6 +27,7 @@ export function ParamWidget({
   param,
   value,
   slug,
+  version,
   fonts,
   sampleText,
   extruder,
@@ -60,7 +63,15 @@ export function ParamWidget({
         />
       )
     case 'file':
-      return <FileWidget param={param} value={String(value)} slug={slug} onChange={onChange} />
+      return (
+        <FileWidget
+          param={param}
+          value={String(value)}
+          slug={slug}
+          version={version}
+          onChange={onChange}
+        />
+      )
     case 'string':
       return <TextWidget param={param} value={String(value)} onChange={onChange} />
   }

@@ -152,9 +152,12 @@ async def render_model(
             parameters=unknown,
         )
     try:
-        # A `file` parameter's value must name an upload (#204): checked here, so a
-        # bad one is a 422 rather than a job that fails later or renders without it.
-        await asyncio.to_thread(file_assets, schema, body.params, AssetStore(paths.assets))
+        # A `file` parameter's value must name an upload or one of the revision's
+        # own sample files (#204): checked here, so a bad one is a 422 rather than a
+        # job that fails later or renders without it.
+        await asyncio.to_thread(
+            file_assets, schema, body.params, AssetStore(paths.assets), source.scad.parent
+        )
         build_defines(schema, body.params)
     except UnknownParameterError as error:  # pragma: no cover - covered by the check above
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None

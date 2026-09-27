@@ -299,6 +299,13 @@ export const api = {
   assetContentUrl: (slug: string, id: string) =>
     `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
+  /**
+   * A sample file the template ships beside its source (a `file` parameter's
+   * `samples`), at `version` when customizing an older revision.
+   */
+  sampleContentUrl: (slug: string, name: string, version?: string) =>
+    `${API_BASE}/models/${seg(slug)}/samples/${seg(name)}${version ? `?version=${seg(version)}` : ''}`,
+
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
     slug ? `${API_BASE}/models/${seg(slug)}/lsp` : `${API_BASE}/lsp`,

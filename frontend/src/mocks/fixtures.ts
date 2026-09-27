@@ -149,8 +149,28 @@ export const gridfinitySchema: CustomizerSchema = {
       initial: '',
       caption: 'Label artwork',
       accept: ['svg', 'png'],
+      // What `with_samples` lists from the model's directory.
+      samples: ['sample-heart.svg', 'sample-star.png'],
     }),
   ],
+}
+
+/**
+ * The sample files `GET /models/{slug}/samples/{name}` serves, keyed by slug then
+ * bare name — the files behind a `file` parameter's `samples` above.
+ */
+export const sampleFiles: Record<string, Record<string, { type: string; body: string }>> = {
+  'gridfinity-bin': {
+    'sample-heart.svg': {
+      type: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10"><path d="M5 9 1 4a2 2 0 0 1 4-2 2 2 0 0 1 4 2Z"/></svg>',
+    },
+    // A 1x1 PNG, base64.
+    'sample-star.png': {
+      type: 'image/png',
+      body: 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4DwABAQEABRjYTgAAAABJRU5ErkJggg==',
+    },
+  },
 }
 
 /**
