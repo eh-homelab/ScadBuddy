@@ -96,6 +96,7 @@ CASES+=(
     'too-many-for-plate|count=12;size=150'
     'twelve-small-holder|count=12;size=60;holder=true;pattern="sunburst";holder_color="#8D6E63"'
     'thin-recess-clamped|thickness=3;underside="recess";recess_depth=4;inlay_depth=1;count=2;shape="square"'
+    'thin-recess-none|thickness=3;underside="recess";inlay_depth=2;count=2;shape="round"'
     'fine-stripes-big|pattern="stripes";spacing=5;line_width=0.8;size=150;count=2;pattern_rotation=30'
 )
 
@@ -233,7 +234,8 @@ for line in open(os.path.join(OUT, "cases.txt")):
     bw = max(c[0] + hx for c, hx, hy in boxes) - min(c[0] - hx for c, hx, hy in boxes)
     bh = max(c[1] + hy for c, hx, hy in boxes) - min(c[1] - hy for c, hx, hy in boxes)
     face_down = p["face"] == "down" or p["underside"] == "recess"
-    recess = min(p["recess_depth"], th - d - 1.2) if p["underside"] == "recess" else 0
+    recess_max = max(0.0, th - d - 1.2)
+    recess = min(p["recess_depth"], recess_max) if p["underside"] == "recess" else 0
     h_height = 2.4 + max(10, 0.7 * p["count"] * th)
     top = max(th, h_height if hold else 0)
 
@@ -264,6 +266,9 @@ for line in open(os.path.join(OUT, "cases.txt")):
     m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+)", log)
     check(name, m is not None and int(m.group(1)) == n and int(m.group(2)) == cols,
           "%d coaster(s) in %d column(s)%s" % (n, cols, "" if n == p["count"] else " (only %d fit)" % n))
+    if p["underside"] == "recess" and p["recess_depth"] > recess_max + 1e-9:
+        check(name, "NOTE: recess reduced" in log and (recess > 0 or "no recess cut" in log),
+              "the log says the recess was reduced to %.2f mm" % recess)
     if n < p["count"]:
         check(name, "NOTE: only %d coasters" % n in log, "the log says how many fit")
     check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))

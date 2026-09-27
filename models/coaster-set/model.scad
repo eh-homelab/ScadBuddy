@@ -151,7 +151,14 @@ BED_Y = 320;
 
 d = inlay_depth;
 face_down = face == "down" || underside == "recess";
-recess_d = underside == "recess" ? min(recess_depth, thickness - d - 1.2) : 0;
+// The recess leaves at least 1.2 mm of solid above the inlay; a thin coaster
+// with a deep inlay gets a shallower recess, or none, and says so.
+recess_max = max(0, thickness - d - 1.2);
+recess_d = underside == "recess" ? min(recess_depth, recess_max) : 0;
+if (underside == "recess" && recess_depth > recess_max)
+    echo(str("NOTE: recess reduced from ", recess_depth, " to ", recess_d,
+             " mm to leave 1.2 mm above the ", d, " mm inlay",
+             recess_d == 0 ? "; no recess cut (raise thickness or lower inlay_depth)" : ""));
 
 ext_x = shape == "hexagon" ? size / cos(30) : size;
 ext_y = size;

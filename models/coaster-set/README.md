@@ -93,7 +93,7 @@ it cannot open the file and the coasters render without the picture.
 | `count` | `4` | Number of coasters, 1–12 (fewer if they do not fit the plate). |
 | `gap` | `5` | Gap between parts on the plate, mm. |
 | `underside` | `plain` | `plain`, or `recess` for a cork or felt pad (prints face down). |
-| `recess_depth` | `2` | Recess depth, mm: 2 for 2 mm cork, 1 for felt. Capped so at least 1.2 mm is left above the inlay. |
+| `recess_depth` | `2` | Recess depth, mm: 2 for 2 mm cork, 1 for felt. Capped so at least 1.2 mm is left above the inlay; when it is reduced (or, on a thin coaster with a deep inlay, dropped) the log says `NOTE: recess reduced ...`. |
 | `recess_rim` | `4` | Rim left around the recess, mm; the pad is the coaster outline shrunk by this much. |
 | `holder` | `false` | Add a holder: a tray in the coaster's shape, walls 2.4 mm, a 2.4 mm base, 70% as tall as the stack of `count` coasters (at least 10 mm), with finger slots front and back. |
 | `holder_clearance` | `1` | Clearance between coasters and holder, per side, mm. |
@@ -137,15 +137,15 @@ one part and one filament. The defaults print in three colours.
 ./verify.sh
 ```
 
-Renders the defaults and 34 variations: every pattern (read from the
+Renders the defaults and 35 variations: every pattern (read from the
 dropdown, so a new one is tested automatically) cycling through the shapes, a
 cork recess on every shape, face-down text, per-coaster monograms with a
 holder and alternating colours, SVG and PNG overlays (including a `.PNG`
 upper-case extension picked up by `auto`, a forced threshold, inverted and
 face down), a missing overlay file, five refused `overlay_file` values
 (`../`, absolute, a subdirectory, a dotfile, a backslash), a set too large for
-the plate, twelve small coasters with a holder, a recess deeper than the
-coaster allows, and the finest pattern on the largest coaster. Each 3MF is
+the plate, twelve small coasters with a holder, a recess reduced and a recess dropped because the
+coaster is too thin, and the finest pattern on the largest coaster. Each 3MF is
 checked for: no geometry on the `Default` material; exactly the expected
 colour parts, each rendered closed on its own and summing to the whole (no
 overlaps); the layout's coaster count and columns; z = 0; the bounding box
