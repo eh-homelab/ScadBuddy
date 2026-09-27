@@ -6,7 +6,7 @@ import json
 import logging
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
 from fastapi.responses import FileResponse
@@ -103,6 +103,23 @@ def require_mine(slug: str) -> None:
         )
 
 
+#: What a hand-parsed client JSON can raise. `RecursionError` too: `json.loads`
+#: recurses per level of nesting, so `[` * 100000 is a stack overflow rather than
+#: a decode error -- a bare 500 unless it is caught like any other bad JSON.
+_BAD_JSON = (UnicodeDecodeError, ValueError, RecursionError)
+
+
+def _client_json(text: str | bytes, refusal: str) -> Any:
+    """JSON a client sent in a form field or part, or a 422 saying ``refusal``.
+
+    `ValueError` covers `json.JSONDecodeError`, which subclasses it.
+    """
+    try:
+        return json.loads(text)
+    except _BAD_JSON:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+
+
 def _parse_tags(raw: str | None) -> list[str] | None:
     """Tags arrive as a JSON array or a comma-separated list, whichever the form sends.
 
@@ -115,12 +132,7 @@ def _parse_tags(raw: str | None) -> list[str] | None:
     if not text:
         return None
     if text.startswith("["):
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "tags is not valid JSON"
-            ) from None
+        decoded = _client_json(text, "tags is not valid JSON")
         if not isinstance(decoded, list):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "tags must be a list")
         return [str(tag) for tag in decoded]
@@ -292,7 +304,7 @@ async def create_model(
     if content_type == "application/json":
         try:
             pasted = PastedSource.model_validate(await request.json())
-        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:
+        except (*_BAD_JSON, ValidationError) as error:
             raise _malformed_body(error) from None
         return await _create(
             catalogue,
@@ -442,18 +454,21 @@ def _readme_text(payload: bytes) -> str:
 
 def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
     """A ``model.json`` part, read the way the catalogue reads one from disk."""
+    refusal = "the model.json is not valid JSON"
     try:
-        raw = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not valid JSON"
-        ) from None
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+    raw = _client_json(text, refusal)
     if not isinstance(raw, dict):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
     try:
         return ModelMeta.model_validate({"name": slug, **raw})
     except ValidationError as error:
         raise _malformed_body(error) from None
+    except RecursionError:
+        # Nesting shallow enough to parse can still be too deep to validate.
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
 
 
 def _require_within_cap(source: str, what: str) -> None:

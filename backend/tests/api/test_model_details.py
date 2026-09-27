@@ -822,6 +822,64 @@ def test_a_patch_without_a_name_leaves_it_alone(client: TestClient) -> None:
     assert response.json()["name"] == before["name"]
 
 
+# ── hostile JSON ──────────────────────────────────────────────────────────────
+
+#: Parses as a stack overflow, not a decode error: `json.loads` recurses per level.
+DEEP = "[" * 100_000 + "]" * 100_000
+
+
+def _refused_without_a_model(response: httpx.Response, client: TestClient) -> dict[str, Any]:
+    assert response.status_code == 422, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
+    body: dict[str, Any] = response.json()
+    return body
+
+
+def test_a_deeply_nested_model_json_is_a_422_not_a_500(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", DEEP.encode(), "application/json"),
+        },
+    )
+    assert _refused_without_a_model(response, client)["detail"] == (
+        "the model.json is not valid JSON"
+    )
+
+
+def test_a_model_json_nested_too_deep_to_validate_is_a_422(client: TestClient) -> None:
+    """Shallow enough for `json.loads`, deep enough to worry the validator."""
+    nested = "[" * 900 + "]" * 900
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", f'{{"tags": {nested}}}'.encode(), "application/json"),
+        },
+    )
+    _refused_without_a_model(response, client)
+
+
+def test_deeply_nested_tags_are_a_422_not_a_500(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+        data={"tags": DEEP},
+    )
+    assert _refused_without_a_model(response, client)["detail"] == "tags is not valid JSON"
+
+
+def test_a_deeply_nested_json_paste_is_a_422_not_a_500(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models", content=DEEP, headers={"Content-Type": "application/json"}
+    )
+    assert _refused_without_a_model(response, client)["detail"] == (
+        "the request body is not valid JSON"
+    )
+
+
 # ── every change is a revision ────────────────────────────────────────────────
 
 
