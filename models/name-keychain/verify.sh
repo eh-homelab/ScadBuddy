@@ -33,8 +33,36 @@ DOCKERFILE
 fi
 
 echo "==> rendering with $IMAGE"
-docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
-    openscad --backend=Manifold -D 'name="Reagan"' -o "$OUT/out.3mf" model.scad
+render() {  # render <out.3mf> [-D ...]: fails on OpenSCAD warnings
+    local out=$1 log
+    shift
+    log=$(docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
+        openscad --backend=Manifold "$@" -o "$out" model.scad 2>&1) \
+        || { echo "$log"; echo "FAIL: $out did not render"; exit 1; }
+    if grep -qE '^(WARNING|ERROR)' <<<"$log"; then
+        grep -E '^(WARNING|ERROR)' <<<"$log"; echo "FAIL: $out rendered with warnings"; exit 1
+    fi
+}
+render "$OUT/out.3mf" -D 'name="Reagan"'
+
+# Edge cases: name | -D overrides separated by ";". Each must render cleanly,
+# fit the bed, and keep the base / letter heights.
+EDGE=(
+    "long-script|name=\"Maximiliana Wolfgang\";text_size=40"
+    "long-wide|name=\"WWWWWWWWWWWWWWWWWWWW\";text_size=40;font=\"DejaVu Sans:style=Bold\""
+    "no-hole-small|name=\"Jo\";hole=false;text_size=8;outline=1"
+    "big-ring|name=\"Sam\";hole_diameter=8;ring_wall=4;base_thickness=8;letter_height=5"
+    "empty|name=\"\""
+)
+: > "$OUT/edge.txt"
+for c in "${EDGE[@]}"; do
+    name="${c%%|*}"
+    defs=()
+    IFS=";" read -ra kvs <<< "${c#*|}"
+    for d in "${kvs[@]}"; do defs+=(-D "$d"); done
+    render "$OUT/edge-$name.3mf" "${defs[@]}"
+    printf '%s %s\n' "$name" "${c#*|}" >> "$OUT/edge.txt"
+done
 
 echo "==> preview"
 if docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
@@ -143,6 +171,51 @@ if len(named) == 2:
         union(t[1], t[2])
     comps = len({find(v) for v in parent})
     check(comps == 1, "letters are one connected piece (%d component(s))" % comps)
+
+if failures:
+    print("\nFAILED: %d check(s)" % len(failures))
+    sys.exit(1)
+PY
+
+python3 - "$OUT" <<'PY'
+import sys, zipfile, xml.etree.ElementTree as ET
+from collections import Counter
+
+NS = "{http://schemas.microsoft.com/3dmanufacturing/core/2015/02}"
+OUT = sys.argv[1]
+BED_X, BED_Y, TOL = 300, 320, 0.001
+failures = []
+
+
+def check(ok, msg):
+    print(("  PASS  " if ok else "  FAIL  ") + msg)
+    if not ok:
+        failures.append(msg)
+
+
+for line in open("%s/edge.txt" % OUT):
+    name, _, rest = line.strip().partition(" ")
+    p = dict(kv.split("=", 1) for kv in rest.split(";"))
+    base = float(p.get("base_thickness", 4))
+    top = base + float(p.get("letter_height", 2.8))
+    empty = p.get("name") == '""'
+    root = ET.fromstring(zipfile.ZipFile("%s/edge-%s.3mf" % (OUT, name)).read("3D/3dmodel.model"))
+    mats = [b.get("name") for b in root.iter(NS + "base")]
+    verts = [(float(v.get("x")), float(v.get("y")), float(v.get("z")))
+             for v in root.iter(NS + "vertex")]
+    counts = Counter(int(t.get("p1") or 0) for t in root.iter(NS + "triangle"))
+    xs, ys, zs = zip(*verts)
+    print("\n%s: %s" % (name, rest))
+    named = [i for i, n in enumerate(mats) if n != "Default" and counts.get(i)]
+    want = 1 if empty else 2
+    check(len(named) == want, "%d non-empty material(s) besides Default (got %d)" % (want, len(named)))
+    check(counts.get(0, 0) == 0, "Default material carries no geometry")
+    check(max(xs) - min(xs) <= BED_X and max(ys) - min(ys) <= BED_Y,
+          "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
+          % (BED_X, BED_Y, max(xs) - min(xs), max(ys) - min(ys)))
+    check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
+    want_top = base if empty else top
+    check(abs(max(zs) - want_top) <= TOL, "top at z=%.1f (got %.3f)" % (want_top, max(zs)))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

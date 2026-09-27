@@ -71,6 +71,11 @@ CASES = [
                                 inlay_depth=1.4, count=4)),
     ("words-all-blank", dict(faces="custom_text", **BLANK)),
     ("numbers-deep-5", dict(faces="numbers", inlay_depth=2, count=5, size=16)),
+    # Full rounding on the smallest die: the artwork must shrink onto the flat
+    # rather than wrap over the rounded edges.
+    ("words-small-round", dict(faces="custom_text", size=12, rounding=5)),
+    ("shapes-small-round", dict(faces="emoji_shapes", size=12, rounding=5)),
+    ("numbers-small-round", dict(faces="numbers", size=12, rounding=5)),
 ]
 
 
@@ -270,6 +275,14 @@ for name, ov in CASES:
           "inlays are %.1f mm deep (deepest vertex %.3f in from the surface)"
           % (depth, s / 2 - worst))
 
+    # The artwork stays on the flat of each face, clear of the rounded edges.
+    r = min(p(ov, "rounding"), s / 5)
+    flat = s / 2 - r
+    spill = max(sorted((abs(v[i] - nearest_centre(ov, v)[i]) for i in range(3)))[1]
+                for t in face for v in t)
+    check(spill <= flat + TOL,
+          "artwork stays on the flat: %.3f from the centre line <= %.3f" % (spill, flat))
+
     # Faces with artwork carry an inlay on every die; blank faces carry none.
     per_face = Counter()
     for comp in components(face):
@@ -288,14 +301,13 @@ for name, ov in CASES:
               % (dict(sorted(per_face.items())), n))
         check(all(per_face[a] + per_face[b] == 7 * n for a, b in [(1, 6), (2, 5), (3, 4)]),
               "opposite faces add up to 7 (1/6 top/bottom, 2/5 front/back, 3/4 right/left)")
-        r = min(p(ov, "rounding"), s / 5)
-        if s * 0.25 + s * 0.17 / 2 <= s / 2 - r:          # every pip on the flat
-            pd = s * 0.17
-            disc = 0.5 * 48 * (pd / 2) ** 2 * math.sin(2 * math.pi / 48)
-            exp = 21 * n * disc * depth
-            check(abs(vf - exp) <= 0.001 * exp,
-                  "pip volume %.2f == 21 x %d discs of %.2f mm x %.1f mm deep (%.2f)"
-                  % (vf, n, pd, depth, exp))
+        fit = min(1, 0.92 * (s - 2 * r) / (0.72 * s))
+        pd = s * 0.17 * fit
+        disc = 0.5 * 48 * (pd / 2) ** 2 * math.sin(2 * math.pi / 48)
+        exp = 21 * n * disc * depth
+        check(abs(vf - exp) <= 0.001 * exp,
+              "pip volume %.2f == 21 x %d discs of %.2f mm x %.1f mm deep (%.2f)"
+              % (vf, n, pd, depth, exp))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

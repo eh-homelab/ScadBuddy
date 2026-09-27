@@ -40,6 +40,7 @@ and in ScadBuddy.
 | Parameter | Default | What it does |
 |---|---|---|
 | `mode` | `open_tray` | `open_tray`, or `ball_lid`: a flat lid with a snap skirt prints next to the tray, upside down. It clicks over a V-groove round the outside of the border. Put the ball in, then snap the lid on. A clear filament lets you see the maze. |
+| `parts` | `both` | Lid mode only. `both` puts the lid beside the tray — to the right when the pair fits the bed's 300 mm width (both nozzles), else behind within its 320 mm depth. When neither fits (15 × 15 at 16 mm, or a large round maze) the lid is left off with an `ECHO: "NOTE: ..."` line: render again with `lid` for the lid alone, and `tray` for the tray alone. |
 | `ball_d` | `6` | Ball diameter. Corridors are at least `ball_d + 1` mm wide: if `cell_size - wall_thickness` is narrower, the pitch is widened. In lid mode the walls are at least `ball_d + 0.5` mm tall so the ball cannot jam against the lid. Either change is reported by an `ECHO: "NOTE: ..."` line. |
 | `markers` | `true` | Inlays the start circle and finish star, 0.6 mm deep and flush with the floor. |
 
@@ -99,15 +100,17 @@ ECHO: "MAZE", cells_x, cells_y, active[], east_open[], north_open[], start, fini
 ./verify.sh
 ```
 
-Renders the defaults and 13 variations (both shapes, both modes, 4 × 4 to
+Renders the defaults and 18 variations (both shapes, both modes, 4 × 4 to
 15 × 15, non-square grids, an auto-widened 12 mm ball, thick walls without
-markers) and checks for each:
+markers, a lid placed behind the tray, a tray and lid too big to share the
+plate, and each of `parts = lid` / `tray`) and checks for each:
 
 - the echoed maze is perfect: every active cell reachable from the start,
   openings == cells − 1, no opening into a missing cell, start ≠ finish;
 - different seeds give different mazes, the same seed the same maze;
 - the expected colour parts, nothing in `Default`, the exact bounding box the
-  parameters imply, sitting on z = 0;
+  parameters imply (including where the lid goes, or that it is left off with
+  a note), sitting on z = 0 and fitting the 300 × 320 mm bed;
 - from one closed render per colour: the floor, wall, marker and lid z ranges;
   the parts do not overlap; the wall volume equals the outline minus exactly
   the cells and openings of the echoed maze (so the geometry is the maze that
