@@ -110,6 +110,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   line 185) describes the backend container; the
   AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
+  `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
+  the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
+  `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
+  the authoritative manifest check.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 

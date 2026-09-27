@@ -234,6 +234,19 @@ jobs:
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
 
+      # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
+      # in CI reads: a skill that loses its frontmatter still loads with its
+      # description gone, and a malformed marketplace.json only fails when a
+      # user runs `/plugin marketplace add`. The lint also enforces the AI
+      # spec's citation rule (D10) on every skill. jq is on ubuntu-latest; the
+      # Claude Code CLI's `claude plugin validate` is not, so it stays a local
+      # check (plugins/scadbuddy/README.md).
+      - name: Lint the Claude plugin and marketplace
+        run: .github/scripts/lint-plugin.sh
+
+      - name: Test the plugin lint
+        run: .github/scripts/lint-plugin.test.sh
+
   # ── Frontend: no Docker needed, so the cheap pool ───────────────────────────
   frontend:
     name: Frontend lint, typecheck, test, build
