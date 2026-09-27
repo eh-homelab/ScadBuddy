@@ -36,8 +36,7 @@ from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     MAX_SUBJECT,
     GitError,
-    ModelHistory,
-    RevisionNotFoundError,
+    GitUnavailableError,
 )
 from scadbuddy.library.libraries import model_search_path, read_pins
 from scadbuddy.library.scad import (
@@ -56,7 +55,11 @@ from scadbuddy.library.slugs import (
     slug_from_filename,
     slugify,
 )
-from scadbuddy.library.upstream import NoUpstreamError, has_conflict_markers
+from scadbuddy.library.upstream import (
+    InvalidMergeBaseError,
+    NoUpstreamError,
+    has_conflict_markers,
+)
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
@@ -632,15 +635,15 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
         "`message` when given, and re-derives the customizer schema so the next "
         "customizer open does not pay for it. `merge_base` saves the resolution of a "
         "conflicted upstream merge: the source must carry no conflict markers (`force` "
-        "does not skip that), and the duplicate's `base` becomes that upstream revision "
-        "in the same commit, `Merge <upstream id> into <slug>` unless `message` names it."
+        "does not skip that), `merge_base` must be a revision of the upstream (422 "
+        "otherwise, writing nothing), and the duplicate's `base` becomes it in the same "
+        "commit, `Merge <upstream id> into <slug>` unless `message` names it."
     ),
 )
 async def put_source(
     slug: SlugPath,
     body: SourceUpdate,
     catalogue: CatalogueDep,
-    history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
     checks: ChecksDep,
@@ -658,13 +661,11 @@ async def put_source(
     # record `write_source` returns carries the new revision anyway.
     require_mine(slug)
     require_model_exists(catalogue, slug)
-    if merge_base is not None:
-        if has_conflict_markers(body.source):
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                "the source still has conflict markers; resolve every conflict first",
-            )
-        merge_base = await asyncio.to_thread(_resolve_merge_base, history, merge_base)
+    if merge_base is not None and has_conflict_markers(body.source):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source still has conflict markers; resolve every conflict first",
+        )
     library_path = await asyncio.to_thread(model_search_path, paths, slug)
     checked = await _guard_source(
         body.source,
@@ -687,6 +688,15 @@ async def put_source(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} is not a duplicate, so it has no merge to resolve"
         ) from None
+    except InvalidMergeBaseError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except GitUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable: no git repository under the models directory",
+        ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     if checked is not None and checked.schema is not None:
         # After the write: `write_source` drops the old cache entry.
         store_cached_schema(
@@ -697,22 +707,6 @@ async def put_source(
         # /schema is where the failure surfaces.
         logger.warning("stored source without a schema", extra={"slug": slug})
     return record
-
-
-def _resolve_merge_base(history: ModelHistory, commit: str) -> str:
-    if not history.available:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "model history is unavailable: no git repository under the models directory",
-        )
-    try:
-        return history.resolve(commit)
-    except RevisionNotFoundError:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, f"merge_base {commit!r} is not a revision"
-        ) from None
-    except GitError as error:
-        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
 @router.get("/models/{slug}/schema", response_model=CustomizerSchema, summary="Customizer schema")

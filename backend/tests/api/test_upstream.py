@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,10 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.catalogue import Catalogue, ModelMeta
-from scadbuddy.library.history import GitUnavailableError
+from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
+from scadbuddy.library.history import GitUnavailableError, ModelHistory
 from scadbuddy.main import create_app
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES
 
 pytestmark = pytest.mark.requires_git
@@ -182,11 +185,25 @@ def test_a_conflict_is_a_409_and_saving_the_resolution_advances_base(
     assert _messages(client, MINE) == [f"Merge {BUILTIN} into {MINE}", *before]
 
 
-def test_a_merge_base_is_refused_where_it_cannot_apply(client: TestClient, model: str) -> None:
-    _duplicate(client)
+def test_a_merge_base_is_refused_where_it_cannot_apply(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    mine = _duplicate(client)
+    _json(_put(client, model, "width = 11;\n"))
+    other_model = _json(client.get(f"/api/v1/models/{model}"))["version"]
+    before = _messages(client, MINE)
+    meta_before = paths.model_meta(MINE).read_text(encoding="utf-8")
+    edited = SOURCE.replace("hole = 3;", "hole = 5;")
 
-    unknown = _put(client, MINE, SOURCE, merge_base="0" * 40)
-    assert unknown.status_code == 422, unknown.text
+    # Unknown, another model's revision, this duplicate's own (it touched only
+    # the duplicate), and empty: none is a revision of the upstream.
+    for bogus in ("0" * 40, other_model, other_model[:7], mine["version"], ""):
+        refused = _put(client, MINE, edited, merge_base=bogus)
+        assert refused.status_code == 422, (bogus, refused.text)
+        assert _source(client) == SOURCE
+        assert paths.model_meta(MINE).read_text(encoding="utf-8") == meta_before
+        assert _messages(client, MINE) == before
+    assert _upstream(client)["upstream"]["base"] == mine["upstream"]["base"]
 
     head = _json(client.get(f"/api/v1/models/{BUILTIN}"))["version"]
     not_a_duplicate = _put(client, model, SOURCE, merge_base=head)
@@ -359,3 +376,54 @@ def test_without_history_there_is_no_upstream_state(paths: DataPaths) -> None:
     assert catalogue.record("copy").upstream_state is None
     with pytest.raises(GitUnavailableError):
         catalogue.upstream_status("copy")
+
+
+def _racing(paths: DataPaths) -> Catalogue:
+    """A duplicate of a template that has moved since, in a catalogue with history."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    history.ensure_repo()
+    catalogue = Catalogue(paths, history)
+    catalogue.create("keychain", SOURCE, ModelMeta(name="Keychain"))
+    catalogue.duplicate("keychain", "copy", "Copy")
+    catalogue.write_source("keychain", SOURCE.replace("width = 40;", "width = 50;"))
+    return catalogue
+
+
+@pytest.mark.parametrize("action", ["dismiss", "resolve"])
+def test_upstream_changes_and_metadata_edits_racing_both_land(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    catalogue = _racing(paths)
+    revision = catalogue.upstream_status("copy").revision
+    assert revision is not None
+    write = Catalogue.write_raw_meta
+
+    # Each write lingers after its read, so two unlocked read-modify-writes both
+    # read before either writes, and the second write loses the first's update.
+    def slow_write(self: Catalogue, slug: str, meta: dict[str, Any]) -> None:
+        time.sleep(0.3)
+        write(self, slug, meta)
+
+    monkeypatch.setattr(Catalogue, "write_raw_meta", slow_write)
+
+    def upstream_change() -> None:
+        if action == "dismiss":
+            catalogue.dismiss_upstream("copy")
+        else:
+            catalogue.write_source("copy", SOURCE, merge_base=revision)
+
+    threads = [
+        threading.Thread(target=upstream_change),
+        threading.Thread(target=lambda: catalogue.update("copy", ModelPatch(name="Renamed"))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    raw = catalogue.read_raw_meta("copy")
+    assert raw["name"] == "Renamed"
+    if action == "dismiss":
+        assert raw["upstream"]["dismissed"] == revision
+    else:
+        assert raw["upstream"]["base"] == revision

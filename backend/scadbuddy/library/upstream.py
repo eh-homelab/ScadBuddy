@@ -56,6 +56,10 @@ class UpstreamStateError(ValueError):
         self.state = state
 
 
+class InvalidMergeBaseError(ValueError):
+    """A ``merge_base`` that names no revision of the upstream."""
+
+
 class MergeConflictError(Exception):
     """The merge left conflicts: nothing was written."""
 

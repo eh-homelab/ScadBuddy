@@ -6218,7 +6218,7 @@
         ]
       },
       "put": {
-        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it. `merge_base` saves the resolution of a conflicted upstream merge: the source must carry no conflict markers (`force` does not skip that), and the duplicate's `base` becomes that upstream revision in the same commit, `Merge <upstream id> into <slug>` unless `message` names it.",
+        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it. `merge_base` saves the resolution of a conflicted upstream merge: the source must carry no conflict markers (`force` does not skip that), `merge_base` must be a revision of the upstream (422 otherwise, writing nothing), and the duplicate's `base` becomes it in the same commit, `Merge <upstream id> into <slug>` unless `message` names it.",
         "operationId": "put_source_api_v1_models__slug__source_put",
         "parameters": [
           {

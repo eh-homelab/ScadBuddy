@@ -433,6 +433,12 @@ class ModelHistory:
             raise RevisionNotFoundError(commit)
         return resolved
 
+    def touched(self, commit: str, path: str) -> bool:
+        """Whether ``commit`` (a full id, as :meth:`resolve` answers) changed ``path``."""
+        completed = self._run("log", "-1", "--format=%H", commit, "--", path, check=False)
+        assert isinstance(completed.stdout, str)
+        return completed.returncode == 0 and completed.stdout.strip() == commit
+
     def last_commit(self, slug: str) -> str | None:
         """The revision a model is currently at: the last commit that touched it.
 

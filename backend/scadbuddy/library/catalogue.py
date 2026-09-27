@@ -31,6 +31,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.upstream import (
+    InvalidMergeBaseError,
     MergeConflictError,
     MergePlan,
     NoUpstreamError,
@@ -75,6 +76,21 @@ def _remove_tree(path: Path) -> bool:
             logger.exception("could not remove a deleted model's files", extra={"path": str(path)})
             return False
     return True
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """Swap ``data`` in at ``path``: a reader sees the old file or the new one, never
+    a torn one. The temp file is in the same directory, so ``os.replace`` stays on one
+    filesystem and stays atomic. :class:`FileNotFoundError` when the directory is gone.
+    """
+    handle, staged = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}-", suffix=path.suffix)
+    try:
+        with os.fdopen(handle, "wb") as writer:
+            writer.write(data)
+        os.replace(staged, path)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 def _still_there(path: Path) -> bool:
@@ -161,6 +177,31 @@ class Catalogue:
             logger.exception("could not record a revision", extra={"revision_message": message})
             return None
 
+    def _commit_change(self, message: str, slug: str, change: Callable[[], None]) -> None:
+        """Run ``change`` -- a read-modify-write of the template's files -- and commit it,
+        both under the history's write lock, so no other catalogue commit's change
+        lands between its read and its write and is lost.
+
+        Failures as :meth:`_commit`: once ``change`` has run, a failed commit is
+        logged, not raised. One before it (the lock wait) wrote nothing, and raises.
+        """
+        if self.history is None or not self.history.available:
+            change()
+            return
+        changed = False
+
+        def run() -> None:
+            nonlocal changed
+            change()
+            changed = True
+
+        try:
+            self.history.commit(message, slug, prepare=run)
+        except (GitError, OSError):
+            if not changed:
+                raise
+            logger.exception("could not record a revision", extra={"revision_message": message})
+
     def version(self, slug: str) -> str | None:
         if self.history is None or not self.history.available:
             return None
@@ -209,9 +250,7 @@ class Catalogue:
         # A write racing a delete then fails instead of recreating a directory
         # holding only `model.json` -- unlisted, and never swept as a tombstone.
         try:
-            self.paths.model_meta(slug).write_text(
-                json.dumps(meta, indent=2) + "\n", encoding="utf-8"
-            )
+            _write_atomic(self.paths.model_meta(slug), (json.dumps(meta, indent=2) + "\n").encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
 
@@ -374,10 +413,13 @@ class Catalogue:
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
         self._require(slug)
-        raw = self.read_raw_meta(slug)
-        raw.update(patch.model_dump(exclude_none=True))
-        self.write_raw_meta(slug, raw)
-        self._commit(f"Update {slug} metadata", slug)
+
+        def change() -> None:
+            raw = self.read_raw_meta(slug)
+            raw.update(patch.model_dump(exclude_none=True))
+            self.write_raw_meta(slug, raw)
+
+        self._commit_change(f"Update {slug} metadata", slug, change)
         return self.record(slug)
 
     def write_source(
@@ -403,17 +445,25 @@ class Catalogue:
         keeps it on one filesystem so it stays that way.
 
         ``merge_base`` saves the resolution of a conflicted upstream merge (#157):
-        the upstream revision it resolves becomes ``base``, in the same commit.
+        the upstream revision it resolves becomes ``base``, in the same commit. It
+        must name a revision of the upstream (:class:`InvalidMergeBaseError`
+        otherwise, with nothing written).
         """
         self._require(slug)
-        upstream: Upstream | None = None
-        if merge_base is not None:
+        if merge_base is None:
+            self._replace_source(slug, source)
+            self._commit(message or f"Edit {slug} source", slug)
+            return self.record(slug)
+        history = self._require_history()
+        upstream_id = self._upstream(slug).id
+
+        def resolve() -> None:
             upstream = self._upstream(slug)
-        self._replace_source(slug, source)
-        if upstream is not None and merge_base is not None:
-            self._advance_base(slug, upstream, merge_base)
-            message = message or f"Merge {upstream.id} into {slug}"
-        self._commit(message or f"Edit {slug} source", slug)
+            base = _merge_base_of(history, upstream, merge_base)
+            self._replace_source(slug, source)
+            self._advance_base(slug, upstream, base)
+
+        self._commit_change(message or f"Merge {upstream_id} into {slug}", slug, resolve)
         return self.record(slug)
 
     def _replace_source(self, slug: str, source: str) -> None:
@@ -422,21 +472,9 @@ class Catalogue:
         # and swapping inside it then fail rather than recreate it, and the
         # failure is the same 404 the delete itself would give.
         try:
-            handle, staged = tempfile.mkstemp(
-                dir=self.paths.model_dir(slug), prefix=".model-", suffix=".scad"
-            )
+            _write_atomic(self.paths.model_source(slug), source.encode())
         except FileNotFoundError:
             raise ModelNotFoundError(slug) from None
-        try:
-            with os.fdopen(handle, "w", encoding="utf-8") as writer:
-                writer.write(source)
-            os.replace(staged, self.paths.model_source(slug))
-        except FileNotFoundError:
-            Path(staged).unlink(missing_ok=True)
-            raise ModelNotFoundError(slug) from None
-        except BaseException:
-            Path(staged).unlink(missing_ok=True)
-            raise
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
 
     # ── upstream (#157) ───────────────────────────────────────────────────────
@@ -472,6 +510,8 @@ class Catalogue:
     def _advance_base(self, slug: str, upstream: Upstream, revision: str) -> None:
         """This template now includes the upstream at ``revision``, which is where the
         upstream lives now: the next merge reads its base from there."""
+        if not revision:
+            raise InvalidMergeBaseError("an upstream base cannot be empty")
         self._write_upstream(
             slug, Upstream(id=upstream.id, path=model_path(upstream.id), base=revision)
         )
@@ -513,31 +553,39 @@ class Catalogue:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(content)
+                    _write_atomic(target, content)
             self._advance_base(slug, upstream, revision)
             plans.append(plan)
 
-        history.commit(f"Merge {upstream_id} into {slug}", slug, prepare=merge)
+        self._commit_change(f"Merge {upstream_id} into {slug}", slug, merge)
         return self.record(slug), plans[0]
 
     def dismiss_upstream(self, slug: str) -> ModelRecord:
         """Don't offer the upstream's current revision again; a later one still is."""
-        upstream, revision, state = self._upstream_now(slug)
-        if state not in ("update", "dismissed") or revision is None:
-            raise UpstreamStateError(f"{slug!r} has no upstream update to dismiss", state)
-        self._write_upstream(slug, upstream.model_copy(update={"dismissed": revision}))
-        self._commit(f"Dismiss {upstream.id} update in {slug}", slug)
+        upstream_id = self._upstream_now(slug)[0].id
+
+        def dismiss() -> None:
+            upstream, revision, state = self._upstream_now(slug)
+            if state not in ("update", "dismissed") or revision is None:
+                raise UpstreamStateError(f"{slug!r} has no upstream update to dismiss", state)
+            self._write_upstream(slug, upstream.model_copy(update={"dismissed": revision}))
+
+        self._commit_change(f"Dismiss {upstream_id} update in {slug}", slug, dismiss)
         return self.record(slug)
 
     def detach_upstream(self, slug: str) -> ModelRecord:
         """Forget an upstream that is gone; the template carries on as a plain one of mine."""
-        upstream, _, state = self._upstream_now(slug)
-        if state != "gone":
-            raise UpstreamStateError(
-                f"{upstream.id!r} still exists, so {slug!r} stays linked", state
-            )
-        self._write_upstream(slug, None)
-        self._commit(f"Detach {slug} from {upstream.id}", slug)
+        upstream_id = self._upstream_now(slug)[0].id
+
+        def detach() -> None:
+            upstream, _, state = self._upstream_now(slug)
+            if state != "gone":
+                raise UpstreamStateError(
+                    f"{upstream.id!r} still exists, so {slug!r} stays linked", state
+                )
+            self._write_upstream(slug, None)
+
+        self._commit_change(f"Detach {slug} from {upstream_id}", slug, detach)
         return self.record(slug)
 
     def duplicates_of(self, model_id: str) -> list[str]:
@@ -756,6 +804,20 @@ def _tree(directory: Path) -> dict[str, bytes]:
         if path.is_file()
         and not any(part.startswith(".") for part in path.relative_to(directory).parts)
     }
+
+
+def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> str:
+    """``commit`` as a full id, when it is a revision of ``upstream``: one that touched
+    where it lives now -- which the conflict 409's ``merge_base`` always does -- or
+    where it lived at ``base``."""
+    try:
+        resolved = history.resolve(commit) if commit else ""
+    except RevisionNotFoundError:
+        resolved = ""
+    places = {model_path(upstream.id), upstream.path}
+    if not resolved or not any(history.touched(resolved, place) for place in places):
+        raise InvalidMergeBaseError(f"merge_base {commit!r} is not a revision of {upstream.id!r}")
+    return resolved
 
 
 def _templates_in(directory: Path) -> list[str]:
