@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from scadbuddy.core.paths import (
     model_path,
 )
 from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
+from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -307,7 +309,9 @@ class Catalogue:
                     shutil.copytree(
                         self.paths.model_dir(upstream_id),
                         staged,
-                        ignore=shutil.ignore_patterns(".*"),
+                        # Nor a render's colour wrapper, written beside the source
+                        # for the length of a render and gitignored for that reason.
+                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
@@ -331,8 +335,10 @@ class Catalogue:
                 # anything something else has written into, and that is left alone.
                 try:
                     target.rmdir()
-                except OSError:
-                    raise ModelExistsError(slug) from error
+                except OSError as leftover:
+                    if leftover.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                        raise ModelExistsError(slug) from error
+                    raise
                 raise
         finally:
             _remove_tree(staging)

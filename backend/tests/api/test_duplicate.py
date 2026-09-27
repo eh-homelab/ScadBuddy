@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
+from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES
 
 pytestmark = pytest.mark.requires_git
@@ -318,8 +319,12 @@ def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -
     catalogue.create(
         "keychain", SOURCE, ModelMeta(name="Keychain", tags=["t"]), thumbnail=THUMBNAIL
     )
-    # A source write in flight, which the copy must leave out.
+    # A source write in flight and a render's colour wrapper, which the copy must
+    # both leave out.
     (paths.model_dir("keychain") / ".model-x.scad").write_text("torn", encoding="utf-8")
+    (paths.model_dir("keychain") / f"{WRAPPER_PREFIX}0123abcd.scad").write_text(
+        "wrapper", encoding="utf-8"
+    )
 
     record = catalogue.duplicate("keychain", "copy", "Copy")
 
