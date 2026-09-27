@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { type CancellableQuery, makePing } from '../src/db.js'
+import { type CancellableQuery, makePing, makeReady } from '../src/db.js'
 
 /** A fake postgres.js query that settles only when told to, and records cancels. */
 function fakeQuery() {
@@ -55,5 +55,21 @@ describe('makePing', () => {
     // Once settled, the next ping issues a fresh query.
     await ping(20)
     expect(issued).toHaveLength(2)
+  })
+})
+
+describe('makeReady', () => {
+  it('retries after a failure and memoises the first success', async () => {
+    let calls = 0
+    const errors: unknown[] = []
+    const ready = makeReady(
+      () => (++calls === 1 ? Promise.reject(new Error('down')) : Promise.resolve()),
+      (err) => errors.push(err),
+    )
+    expect(await ready()).toBe(false)
+    expect(errors).toHaveLength(1)
+    expect(await Promise.all([ready(), ready()])).toEqual([true, true])
+    expect(await ready()).toBe(true)
+    expect(calls).toBe(2)
   })
 })
