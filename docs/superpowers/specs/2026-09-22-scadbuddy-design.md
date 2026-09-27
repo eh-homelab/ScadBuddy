@@ -474,8 +474,8 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 ### 6.1 Runner
 
-- One job at a time per worker; a small in-process queue (asyncio) with
-  `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
+- One job at a time per worker; `SCADBUDDY_RENDER_CONCURRENCY` (default 2) workers
+  per process, as asyncio tasks, over the job store below.
 - **Every render request is accepted by default.** `RenderQueue` runs
   `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest job
   first, and keeps latency down without refusing anything:
@@ -519,6 +519,16 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
   submit-to-settled latency and per-stage time (`source`, `render`, `split`,
   `solids`, `thumbnail`, `write`), and HTTP requests by route template.
+- Store health, for alerts: `scadbuddy_render_store_info{backend}` (`postgres` or
+  `files`) says where the queue is, and `scadbuddy_render_store_up` whether the last
+  scrape could read it. When a read fails, `store_up` goes to 0 and the queue
+  gauges keep their last good values rather than going absent, so an outage is
+  seen by `store_up`, not by the depth or stall rules.
+  `scadbuddy_render_store_errors_total{operation}` counts failed calls: `read`
+  (the scrape), `work` (claiming), `reap`, `heartbeat`. The app never falls back to
+  files on a database error: an unreachable database at startup fails the start.
+  The file store's read is in-process with no I/O, so without a database URL
+  `store_up` is always 1.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:
