@@ -19,7 +19,9 @@ from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
+from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -72,6 +74,12 @@ def build_state(settings: Settings) -> AppState:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
+    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
+    store: JobBackend = (
+        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
+        if settings.database_url
+        else JobStore(paths)
+    )
     return AppState(
         settings=settings,
         config=config,
@@ -86,7 +94,7 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, history),
-        queue=RenderQueue(config, paths, history=history, metrics=metrics),
+        queue=RenderQueue(config, paths, store=store, history=history, metrics=metrics),
         metrics=metrics,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),

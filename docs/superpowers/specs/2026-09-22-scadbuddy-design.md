@@ -463,19 +463,33 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 - One job at a time per worker; a small in-process queue (asyncio) with
   `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
-- The queue keeps a render's latency bounded under load (`RenderQueue`):
+- **Every render request is accepted**; there is no admission limit. `RenderQueue`
+  runs `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest
+  job first, and keeps latency down without refusing anything:
   - **Supersede.** A render request may name the job it replaces
     (`supersedes`); the preview's debounce sends its previous unsettled job, which
     is dropped unrendered if no worker has taken it (failed as superseded).
   - **Coalesce.** A request identical to a job still *waiting* (same model,
     revision and parameters) is answered with that job. Never a running one: it
     has already read its source, and an edit since would be served stale.
-  - **Admission.** Past `SCADBUDDY_RENDER_QUEUE_MAX` waiting jobs (default 16) a
-    request is refused with 503 and `Retry-After` (about one mean render).
-  - **Deadline.** A job that waited longer than `SCADBUDDY_RENDER_QUEUE_TIMEOUT`
-    (default 300 s; 0 disables) for a worker is failed unrendered.
-- `GET /metrics` (Prometheus text) reports queue depth and capacity, running jobs,
-  submissions/coalesced/rejected, jobs finished by outcome
+  - **Deadline** (optional). A job that waited longer than
+    `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (default 0 = never) for a worker is failed
+    unrendered.
+- **Job store.** With `SCADBUDDY_DATABASE_URL` the queue is a Postgres table
+  (`render/pg_store.py`): workers claim with `FOR UPDATE SKIP LOCKED`; a partial
+  unique index on the render key over pending rows makes coalescing atomic
+  (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
+  heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
+  heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
+  jobs survive a restart. Migrations are append-only and applied at startup under
+  an advisory lock. Without a database URL the store is JSON files under `jobs/`
+  with the wait list in the process, and a restart fails unfinished jobs.
+- SLO targets `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and
+  `SCADBUDDY_RENDER_LATENCY_SLO` (60 s) are exported as gauges for alerts to
+  compare against; they limit nothing.
+- `GET /metrics` (Prometheus text) reports queue depth, oldest wait and running jobs
+  (read from the store per scrape), submissions/coalesced/retried, jobs finished by
+  outcome
   (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
   submit-to-settled latency and per-stage time (`source`, `render`, `split`,
   `solids`, `thumbnail`, `write`), and HTTP requests by route template.

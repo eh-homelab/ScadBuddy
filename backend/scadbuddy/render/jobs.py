@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
-import math
 import os
 import shutil
 import threading
@@ -12,12 +10,8 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import AbstractContextManager, nullcontext, suppress
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
-
-from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
@@ -37,7 +31,16 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.colours import colour_hex
-from scadbuddy.render.glb import BoundingBox, write_glb
+from scadbuddy.render.glb import write_glb
+from scadbuddy.render.job_models import Job as Job
+from scadbuddy.render.job_models import JobResult as JobResult
+from scadbuddy.render.job_models import JobState as JobState
+from scadbuddy.render.job_models import PartInfo as PartInfo
+from scadbuddy.render.job_models import now as _now
+from scadbuddy.render.job_store import SUPERSEDED_ERROR as SUPERSEDED_ERROR
+from scadbuddy.render.job_store import JobBackend, render_key
+from scadbuddy.render.job_store import JobNotFoundError as JobNotFoundError
+from scadbuddy.render.job_store import JobStore as JobStore
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -45,9 +48,10 @@ from scadbuddy.render.solids import render_solids
 from scadbuddy.render.split import ColourPart, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
-logger = logging.getLogger(__name__)
+# The `X as X` imports above are re-exports: the job models and the file store
+# lived here before the stores were split out, and routes and tests import them here.
 
-JobState = Literal["pending", "running", "done", "failed"]
+logger = logging.getLogger(__name__)
 
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
@@ -58,109 +62,6 @@ UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
-SUPERSEDED_ERROR = "superseded by a newer render before it started"
-
-
-class PartInfo(BaseModel):
-    name: str
-    colour: str
-    extruder: int
-    watertight: bool
-
-
-class JobResult(BaseModel):
-    model_3mf: str
-    preview_glb: str
-    #: The model's sources as this render read them. Taken here rather than when the
-    #: output is saved: Generate persists a render that already happened, and the
-    #: files on the PVC can be edited in between.
-    #: Empty only on a job written before this field existed — job files outlive a
-    #: deploy on the PVC and the queue validates every one at startup, so a required
-    #: field here would turn an upgrade into a crash loop rather than one bad job.
-    source_version: str = ""
-    parts: list[PartInfo]
-    bbox_mm: BoundingBox
-    colors: list[str] = Field(default_factory=list)
-    warnings: list[str] = Field(default_factory=list)
-
-
-class Job(BaseModel):
-    # `model_version` is the name #90 asks for on the wire; without this pydantic
-    # warns that it collides with its own `model_` namespace.
-    model_config = ConfigDict(protected_namespaces=())
-
-    id: str
-    slug: str
-    params: dict[str, ParamValue] = Field(default_factory=dict)
-    # The models-repository commit this render read. Carried onto the output it
-    # produces, so an output can always name the revision it came from (#80/#90).
-    model_version: str | None = None
-    state: JobState = "pending"
-    created_at: datetime
-    started_at: datetime | None = None
-    finished_at: datetime | None = None
-    log_tail: list[str] = Field(default_factory=list)
-    error: str | None = None
-    result: JobResult | None = None
-
-
-def _now() -> datetime:
-    return datetime.now(UTC)
-
-
-class JobStore:
-    def __init__(self, paths: DataPaths) -> None:
-        self.paths = paths
-
-    def write(self, job: Job) -> None:
-        self.paths.jobs.mkdir(parents=True, exist_ok=True)
-        self.paths.job_file(job.id).write_text(
-            json.dumps(job.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
-        )
-
-    def read(self, job_id: str) -> Job:
-        return Job.model_validate_json(self.paths.job_file(job_id).read_text(encoding="utf-8"))
-
-    def list_jobs(self) -> list[Job]:
-        if not self.paths.jobs.is_dir():
-            return []
-        jobs = [
-            Job.model_validate_json(path.read_text(encoding="utf-8"))
-            for path in sorted(self.paths.jobs.glob("*.json"))
-        ]
-        return sorted(jobs, key=lambda job: job.created_at)
-
-    def has_unfinished(self, slug: str) -> bool:
-        """Is a render of ``slug`` queued or running?"""
-        return any(
-            job.slug == slug and job.state in ("pending", "running") for job in self.list_jobs()
-        )
-
-    def delete(self, job_id: str) -> None:
-        self.paths.job_file(job_id).unlink(missing_ok=True)
-        shutil.rmtree(self.paths.job_work_dir(job_id), ignore_errors=True)
-
-    def fail_unfinished(self) -> list[Job]:
-        failed: list[Job] = []
-        for job in self.list_jobs():
-            if job.state not in ("pending", "running"):
-                continue
-            job.state = "failed"
-            job.finished_at = _now()
-            job.error = "interrupted by a restart"
-            self.write(job)
-            failed.append(job)
-        return failed
-
-    def prune(self, ttl: float, *, now: datetime | None = None) -> list[str]:
-        cutoff = (now or _now()).timestamp() - ttl
-        removed: list[str] = []
-        for job in self.list_jobs():
-            stamp = job.finished_at or job.created_at
-            if stamp.timestamp() < cutoff:
-                self.delete(job.id)
-                removed.append(job.id)
-        return removed
 
 
 def unreadable_colour_warnings(
@@ -514,51 +415,15 @@ async def render_job(
 
 RenderCallable = Callable[[Job], Awaitable[tuple[JobResult, list[str]]]]
 
-#: Two requests with the same key are the same render: the slug, the revision the
-#: submit resolved (`None` when there is no repository) and the parameters.
-RenderKey = tuple[str, str | None, str]
-
-#: What Retry-After says before any render has finished to measure.
-INITIAL_RENDER_ESTIMATE = 10.0
-#: Weight of the newest render in the running mean that sizes Retry-After.
-RENDER_ESTIMATE_WEIGHT = 0.2
-
-
-def render_key(slug: str, params: Mapping[str, ParamValue], model_version: str | None) -> RenderKey:
-    return (slug, model_version, json.dumps(dict(params), sort_keys=True))
-
-
-class QueueFullError(Exception):
-    """SCADBUDDY_RENDER_QUEUE_MAX jobs are already waiting: the render is refused now
-    rather than accepted behind work it would wait minutes for."""
-
-    def __init__(self, depth: int, retry_after: int) -> None:
-        super().__init__(
-            f"the render queue is full ({depth} jobs waiting for a worker); "
-            f"try again in {retry_after} s"
-        )
-        self.depth = depth
-        self.retry_after = retry_after
-
-
-@dataclass
-class _Waiting:
-    """A submitted job no worker has taken yet."""
-
-    job: Job
-    key: RenderKey
-    enqueued: float = field(default_factory=time.monotonic)
-    #: Submissions answered with this job: one, plus one per coalesced duplicate. A
-    #: supersede releases one claim and the job is dropped only when none remain,
-    #: so one tab moving on cannot cancel a render another tab is waiting for.
-    claims: int = 1
-
 
 class RenderQueue:
-    """The in-process render queue: `render_concurrency` workers behind a bounded
-    wait list.
+    """The render queue: every submit is accepted, and `render_concurrency` workers
+    per process render them oldest first.
 
-    What keeps a render's latency bounded under load, in the order a submit meets it:
+    Where the jobs live is the `store` (`job_store.JobBackend`): JSON files and an
+    in-process wait list by default, or Postgres when ``SCADBUDDY_DATABASE_URL`` is
+    set, where accepted jobs survive a restart and several replicas can share the
+    queue. What keeps a render's latency down without ever refusing one:
 
     - **Supersede.** The preview submits on a debounce while a slider moves, and each
       submit makes the previous one moot. It names that job, and if no worker has
@@ -566,14 +431,13 @@ class RenderQueue:
     - **Coalesce.** A submit identical to a job still waiting is answered with that
       job. Only waiting jobs: a running one has already read its source, and an
       edit since would be rendered stale.
-    - **Admission.** Past `render_queue_max` waiting jobs a submit is refused with
-      `QueueFullError` (503 + Retry-After) rather than queued behind work it cannot
-      finish in time.
-    - **Deadline.** A job that waited longer than `render_queue_timeout` for a worker
-      is failed unrendered; whoever asked for it has long moved on.
+    - **Deadline** (optional, `render_queue_timeout`). A job that waited longer than
+      that for a worker is failed unrendered rather than rendered for nobody.
+    - **Leases** (Postgres). A worker heartbeats its job; one whose worker died is
+      requeued after `render_lease_timeout`, up to `render_max_attempts` tries.
 
-    The wait list is in memory, like the `asyncio.Queue` it shadows: a restart fails
-    every unfinished job anyway (`JobStore.fail_unfinished`).
+    The depth and latency SLO targets are not limits: they are exported beside the
+    measurements so alerts can compare the two.
     """
 
     def __init__(
@@ -581,7 +445,7 @@ class RenderQueue:
         config: Config,
         paths: DataPaths,
         *,
-        store: JobStore | None = None,
+        store: JobBackend | None = None,
         render: RenderCallable | None = None,
         history: ModelHistory | None = None,
         metrics: Metrics | None = None,
@@ -589,10 +453,11 @@ class RenderQueue:
         self.config = config
         self.paths = paths
         self.history = history
-        self.store = store or JobStore(paths)
+        self.store: JobBackend = store if store is not None else JobStore(paths)
         self.metrics = metrics if metrics is not None else Metrics()
         self.metrics.workers.set(config.render_concurrency)
-        self.metrics.queue_capacity.set(config.render_queue_max)
+        self.metrics.queue_depth_slo.set(config.render_queue_depth_slo)
+        self.metrics.latency_slo.set(config.render_latency_slo)
         # The cover rasteriser's own threads, sized like the workers that feed it.
         self._thumbnails = ThreadPoolExecutor(
             max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
@@ -607,32 +472,29 @@ class RenderQueue:
                 metrics=self.metrics,
             )
         )
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
-        self._workers: list[asyncio.Task[None]] = []
-        self._waiting: dict[str, _Waiting] = {}
-        self._by_key: dict[RenderKey, str] = {}
-        self._render_estimate = INITIAL_RENDER_ESTIMATE
-
-    @property
-    def depth(self) -> int:
-        """Jobs waiting for a worker."""
-        return len(self._waiting)
+        self._tasks: list[asyncio.Task[None]] = []
+        # Set on every submit so an idle worker claims at once rather than at its
+        # next poll; the poll is what finds jobs another replica submitted.
+        self._wakeup = asyncio.Event()
+        self._busy = 0
 
     async def start(self) -> None:
         self.paths.ensure()
-        self.store.fail_unfinished()
-        self.store.prune(self.config.job_ttl)
-        prune_revision_exports(self.paths, self.config.job_ttl)
-        self._workers = [
+        await asyncio.to_thread(self.store.open)
+        await asyncio.to_thread(self.store.abandon_orphans)
+        await self._prune()
+        self._tasks = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
+        self._tasks.append(asyncio.create_task(self._reaper()))
 
     async def aclose(self) -> None:
-        for worker in self._workers:
-            worker.cancel()
-        await asyncio.gather(*self._workers, return_exceptions=True)
-        self._workers.clear()
+        for task in self._tasks:
+            task.cancel()
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        self._tasks.clear()
         self.close_thumbnails()
+        await asyncio.to_thread(self.store.close)
 
     def close_thumbnails(self) -> None:
         """Release the cover pool. Not waited on: an abandoned cover thread cannot be
@@ -648,27 +510,10 @@ class RenderQueue:
         supersedes: str | None = None,
     ) -> Job:
         """Queue a render, or hand back the waiting job that already is this render.
+        Never refused.
 
         ``supersedes`` names the job this submit replaces; it is dropped if no worker
-        has taken it yet. Done first, so a slider drag is never refused for want of
-        the room its own stale previews take up.
-
-        Raises `QueueFullError` when the wait list is full."""
-        key = render_key(slug, params, model_version)
-        if supersedes is not None:
-            previous = self._waiting.get(supersedes)
-            if previous is not None and previous.key == key:
-                return previous.job  # asked again for the very render it is waiting on
-            self.supersede(supersedes)
-        existing = self._by_key.get(key)
-        if existing is not None:
-            waiting = self._waiting[existing]
-            waiting.claims += 1
-            self.metrics.render_coalesced.inc()
-            return waiting.job
-        if len(self._waiting) >= self.config.render_queue_max:
-            self.metrics.render_rejected.inc()
-            raise QueueFullError(len(self._waiting), self.retry_after())
+        has taken it yet."""
         job = Job(
             id=uuid.uuid4().hex,
             slug=slug,
@@ -676,68 +521,110 @@ class RenderQueue:
             model_version=model_version,
             created_at=_now(),
         )
-        self.store.write(job)
-        self._waiting[job.id] = _Waiting(job=job, key=key)
-        self._by_key[key] = job.id
-        self.metrics.queue_depth.set(len(self._waiting))
-        self.metrics.render_submitted.inc()
-        await self._queue.put(job.id)
-        return job
+        submitted = await asyncio.to_thread(
+            self.store.submit,
+            job,
+            render_key(slug, params, model_version),
+            supersedes=supersedes,
+        )
+        if submitted.superseded is not None:
+            self._settled(submitted.superseded, "superseded")
+        if submitted.coalesced:
+            self.metrics.render_coalesced.inc()
+        else:
+            self.metrics.render_submitted.inc()
+            self._wakeup.set()
+        return submitted.job
 
-    def supersede(self, job_id: str) -> bool:
-        """Release one claim on a job no worker has taken; drop it with the last.
-
-        A job already running or settled is left alone: it is nearly paid for, and
-        killing an `openscad` mid-render to save the rest is not worth a job that
-        half-wrote its work directory. Returns whether the job was dropped."""
-        waiting = self._waiting.get(job_id)
-        if waiting is None:
-            return False
-        waiting.claims -= 1
-        if waiting.claims > 0:
-            return False
-        self._take(job_id)
-        job = waiting.job
-        job.state = "failed"
-        job.error = SUPERSEDED_ERROR
-        job.finished_at = _now()
-        self.store.write(job)
-        self._settled(waiting, "superseded")
-        return True
-
-    def retry_after(self) -> int:
-        """Seconds a refused client should wait: about one render, the time it takes
-        a worker to free a place in the wait list."""
-        return max(1, math.ceil(self._render_estimate))
+    def refresh_metrics(self) -> None:
+        """Read the queue's gauges from the store. Called per scrape, from a sync
+        route: with Postgres they count every replica's jobs, not this one's."""
+        counts = self.store.counts()
+        self.metrics.queue_depth.set(counts.pending)
+        self.metrics.running.set(counts.running)
+        oldest = counts.oldest_pending
+        self.metrics.oldest_pending.set(
+            max(0.0, (_now() - oldest).total_seconds()) if oldest is not None else 0.0
+        )
 
     async def join(self) -> None:
-        await self._queue.join()
+        """Wait until nothing is pending or running. For tests and shutdown drains."""
+        while True:
+            counts = await asyncio.to_thread(self.store.counts)
+            if counts.pending == 0 and counts.running == 0 and self._busy == 0:
+                return
+            await asyncio.sleep(0.01)
 
-    def _take(self, job_id: str) -> _Waiting | None:
-        """Remove a job from the wait list; `None` if it is no longer on it."""
-        waiting = self._waiting.pop(job_id, None)
-        if waiting is not None and self._by_key.get(waiting.key) == job_id:
-            del self._by_key[waiting.key]
-        self.metrics.queue_depth.set(len(self._waiting))
-        return waiting
+    async def _prune(self) -> None:
+        await asyncio.to_thread(self.store.prune, self.config.job_ttl)
+        await asyncio.to_thread(prune_revision_exports, self.paths, self.config.job_ttl)
 
-    def _settled(self, waiting: _Waiting, outcome: RenderOutcome) -> None:
+    def _settled(self, job: Job, outcome: RenderOutcome) -> None:
         self.metrics.render_finished.labels(outcome).inc()
-        self.metrics.job_latency.labels(outcome).observe(time.monotonic() - waiting.enqueued)
+        self.metrics.job_latency.labels(outcome).observe(
+            max(0.0, ((job.finished_at or _now()) - job.created_at).total_seconds())
+        )
 
     async def _worker(self) -> None:
         while True:
-            job_id = await self._queue.get()
+            # Cleared BEFORE the claim: a submit landing between an empty claim and
+            # the wait below sets it again, so the wait returns at once.
+            self._wakeup.clear()
+            self._busy += 1
             try:
-                waiting = self._take(job_id)
-                if waiting is not None:  # None: superseded while it waited
-                    await self._run(waiting)
+                job = await asyncio.to_thread(self.store.claim)
+                if job is not None:
+                    await self._run(job)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # a store outage must not kill the worker
+                logger.exception("render worker failed to claim or record a job")
+                job = None
+                await asyncio.sleep(self.config.render_poll_interval)
             finally:
-                self._queue.task_done()
+                self._busy -= 1
+            if job is None:
+                with suppress(TimeoutError):
+                    await asyncio.wait_for(
+                        self._wakeup.wait(), timeout=self.config.render_poll_interval
+                    )
 
-    async def _run(self, waiting: _Waiting) -> None:
-        job = self.store.read(waiting.job.id)
-        waited = time.monotonic() - waiting.enqueued
+    async def _reaper(self) -> None:
+        """Recover jobs whose worker died, every third of a lease."""
+        interval = self.config.render_lease_timeout / 3
+        while True:
+            try:
+                reaped = await asyncio.to_thread(
+                    self.store.reap,
+                    lease=self.config.render_lease_timeout,
+                    max_attempts=self.config.render_max_attempts,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("could not reap render jobs with expired leases")
+            else:
+                for job in reaped.requeued:
+                    logger.warning("requeued a render whose worker stopped", extra={"job": job.id})
+                    self.metrics.render_retried.inc()
+                if reaped.requeued:
+                    self._wakeup.set()
+                for job in reaped.failed:
+                    logger.warning("failed a render whose worker stopped", extra={"job": job.id})
+                    self._settled(job, "failed")
+            await asyncio.sleep(interval)
+
+    async def _heartbeat(self, job: Job) -> None:
+        interval = self.config.render_lease_timeout / 3
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                await asyncio.to_thread(self.store.heartbeat, job)
+            except Exception:
+                logger.exception("could not heartbeat a render job", extra={"job": job.id})
+
+    async def _run(self, job: Job) -> None:
+        waited = max(0.0, ((job.started_at or _now()) - job.created_at).total_seconds())
         self.metrics.queue_wait.observe(waited)
         deadline = self.config.render_queue_timeout
         if deadline and waited > deadline:
@@ -747,16 +634,13 @@ class RenderQueue:
                 "SCADBUDDY_RENDER_QUEUE_TIMEOUT; the server is busy, try again"
             )
             job.finished_at = _now()
-            self.store.write(job)
-            self._settled(waiting, "expired")
+            if await asyncio.to_thread(self.store.finish, job):
+                self._settled(job, "expired")
             return
 
-        job.state = "running"
-        job.started_at = _now()
-        self.store.write(job)
         outcome: RenderOutcome
         started = time.monotonic()
-        self.metrics.running.inc()
+        heartbeat = asyncio.create_task(self._heartbeat(job))
         try:
             result, log_tail = await self._render(job)
         except OpenSCADError as error:
@@ -774,12 +658,16 @@ class RenderQueue:
             job.result = result
             job.log_tail = log_tail
         finally:
-            self.metrics.running.dec()
-        elapsed = time.monotonic() - started
-        self.metrics.render_duration.labels(outcome).observe(elapsed)
-        self._render_estimate += RENDER_ESTIMATE_WEIGHT * (elapsed - self._render_estimate)
+            heartbeat.cancel()
+            with suppress(asyncio.CancelledError):
+                await heartbeat
+        self.metrics.render_duration.labels(outcome).observe(time.monotonic() - started)
         job.finished_at = _now()
-        self.store.write(job)
-        self._settled(waiting, outcome)
-        self.store.prune(self.config.job_ttl)
-        prune_revision_exports(self.paths, self.config.job_ttl)
+        if await asyncio.to_thread(self.store.finish, job):
+            self._settled(job, outcome)
+        else:
+            logger.warning(
+                "a render finished after its lease was reaped; the retry's result stands",
+                extra={"job": job.id},
+            )
+        await self._prune()

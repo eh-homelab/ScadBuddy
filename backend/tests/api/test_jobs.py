@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-from unittest import mock
-
 from fastapi.testclient import TestClient
 
-from scadbuddy.render.jobs import QueueFullError, RenderQueue
 from tests.api.conftest import FAIL_WIDTH, wait_for_job
 
 
@@ -86,18 +83,6 @@ def test_a_failed_job_has_no_preview(client: TestClient, model: str) -> None:
 def test_an_unknown_job_is_a_404(client: TestClient) -> None:
     assert client.get("/api/v1/jobs/" + "0" * 32).status_code == 404
     assert client.get("/api/v1/jobs/not-a-job-id").status_code == 422
-
-
-def test_a_full_render_queue_is_a_503_with_retry_after(client: TestClient, model: str) -> None:
-    full = mock.AsyncMock(side_effect=QueueFullError(depth=16, retry_after=7))
-    with mock.patch.object(RenderQueue, "submit", full):
-        response = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
-    assert response.status_code == 503
-    assert response.headers["retry-after"] == "7"
-    assert response.headers["content-type"] == "application/problem+json"
-    body = response.json()
-    assert body["retry_after"] == 7
-    assert "queue is full" in body["detail"]
 
 
 def test_a_render_can_supersede_the_previous_one(client: TestClient, model: str) -> None:

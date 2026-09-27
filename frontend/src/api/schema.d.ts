@@ -3605,13 +3605,6 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
-            /** @description The render queue is full; retry after `Retry-After` seconds */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
         };
     };
     get_schema_api_v1_models__slug__schema_get: {

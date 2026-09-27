@@ -59,9 +59,9 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
-        self.render_rejected = Counter(
-            "scadbuddy_render_jobs_rejected",
-            "Render requests refused because the queue was full.",
+        self.render_retried = Counter(
+            "scadbuddy_render_jobs_retried",
+            "Running jobs requeued because their worker stopped heartbeating.",
             registry=r,
         )
         self.render_finished = Counter(
@@ -75,9 +75,19 @@ class Metrics:
             "Render jobs waiting for a worker.",
             registry=r,
         )
-        self.queue_capacity = Gauge(
-            "scadbuddy_render_queue_capacity",
-            "SCADBUDDY_RENDER_QUEUE_MAX: waiting jobs past which a submit is refused.",
+        self.oldest_pending = Gauge(
+            "scadbuddy_render_queue_oldest_seconds",
+            "How long the longest-waiting job has waited for a worker; 0 with none.",
+            registry=r,
+        )
+        self.queue_depth_slo = Gauge(
+            "scadbuddy_render_queue_depth_slo",
+            "SCADBUDDY_RENDER_QUEUE_DEPTH_SLO: the waiting-job count to alert above.",
+            registry=r,
+        )
+        self.latency_slo = Gauge(
+            "scadbuddy_render_latency_slo_seconds",
+            "SCADBUDDY_RENDER_LATENCY_SLO: the submit-to-settled latency target.",
             registry=r,
         )
         self.running = Gauge(

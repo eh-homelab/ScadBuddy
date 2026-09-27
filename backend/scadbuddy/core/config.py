@@ -8,14 +8,25 @@ from pathlib import Path
 DEFAULT_OPENSCAD = "openscad"
 DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
+# Jobs rendered at once by each process: each is one or more `openscad` processes.
 DEFAULT_RENDER_CONCURRENCY = 2
-# Admission control for the render queue: how many jobs may wait behind the workers
-# before a submit is refused (503 + Retry-After) rather than queued behind work that
-# cannot start for minutes. Coalesced and superseded submissions do not count.
-DEFAULT_RENDER_QUEUE_MAX = 16
-# How long a job may wait for a worker before it is failed unrendered. A preview
-# nobody has looked at for this long is not worth a worker; 0 disables the deadline.
-DEFAULT_RENDER_QUEUE_TIMEOUT = 300.0
+# How long a job may wait for a worker before it is failed unrendered; 0 (the
+# default) never expires one -- every submit is accepted and, in time, rendered.
+DEFAULT_RENDER_QUEUE_TIMEOUT = 0.0
+# How often an idle worker looks for work it was not woken for: jobs another replica
+# submitted, or ones a reaped lease put back.
+DEFAULT_RENDER_POLL_INTERVAL = 1.0
+# A running job whose worker has not heartbeated for this long is presumed lost and
+# requeued (Postgres only; heartbeats go every third of it).
+DEFAULT_RENDER_LEASE_TIMEOUT = 60.0
+# Tries a job gets before a lost worker fails it for good.
+DEFAULT_RENDER_MAX_ATTEMPTS = 2
+# SLO targets. Not limits -- nothing is refused or dropped on reaching them. They are
+# exported beside the measurements (`scadbuddy_render_queue_depth_slo`,
+# `scadbuddy_render_latency_slo_seconds`) for alerts to compare against.
+DEFAULT_RENDER_QUEUE_DEPTH_SLO = 16
+DEFAULT_RENDER_LATENCY_SLO = 60.0
+DEFAULT_DATABASE_POOL_SIZE = 10
 # The editor's parse check does not go through the render queue, so it carries its own
 # budget rather than borrowing the render one: the pod's worst case is the two added
 # together, and that is a number worth declaring rather than discovering. One is
@@ -37,8 +48,12 @@ class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
-    render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
+    render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
+    render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
+    render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
+    render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
+    render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
     # Never sent to the browser: the catalogue is fetched server-side (issue #82).
@@ -61,15 +76,22 @@ class Config:
             raise ValueError(
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
-        # Zero would refuse every render; say so by name rather than as a 503 storm.
-        if self.render_queue_max < 1:
+        for name, value in (
+            ("SCADBUDDY_RENDER_QUEUE_TIMEOUT", self.render_queue_timeout),
+            ("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO", self.render_queue_depth_slo),
+            ("SCADBUDDY_RENDER_LATENCY_SLO", self.render_latency_slo),
+        ):
+            if value < 0:
+                raise ValueError(f"{name} must be at least 0, not {value}")
+        for name, value in (
+            ("SCADBUDDY_RENDER_POLL_INTERVAL", self.render_poll_interval),
+            ("SCADBUDDY_RENDER_LEASE_TIMEOUT", self.render_lease_timeout),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be more than 0, not {value}")
+        if self.render_max_attempts < 1:
             raise ValueError(
-                f"SCADBUDDY_RENDER_QUEUE_MAX must be at least 1, not {self.render_queue_max}"
-            )
-        if self.render_queue_timeout < 0:
-            raise ValueError(
-                "SCADBUDDY_RENDER_QUEUE_TIMEOUT must be at least 0 (0 disables it), "
-                f"not {self.render_queue_timeout}"
+                f"SCADBUDDY_RENDER_MAX_ATTEMPTS must be at least 1, not {self.render_max_attempts}"
             )
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
@@ -86,9 +108,23 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         render_concurrency=int(
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
         ),
-        render_queue_max=int(source.get("SCADBUDDY_RENDER_QUEUE_MAX") or DEFAULT_RENDER_QUEUE_MAX),
         render_queue_timeout=float(
             source.get("SCADBUDDY_RENDER_QUEUE_TIMEOUT") or DEFAULT_RENDER_QUEUE_TIMEOUT
+        ),
+        render_poll_interval=float(
+            source.get("SCADBUDDY_RENDER_POLL_INTERVAL") or DEFAULT_RENDER_POLL_INTERVAL
+        ),
+        render_lease_timeout=float(
+            source.get("SCADBUDDY_RENDER_LEASE_TIMEOUT") or DEFAULT_RENDER_LEASE_TIMEOUT
+        ),
+        render_max_attempts=int(
+            source.get("SCADBUDDY_RENDER_MAX_ATTEMPTS") or DEFAULT_RENDER_MAX_ATTEMPTS
+        ),
+        render_queue_depth_slo=int(
+            source.get("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO") or DEFAULT_RENDER_QUEUE_DEPTH_SLO
+        ),
+        render_latency_slo=float(
+            source.get("SCADBUDDY_RENDER_LATENCY_SLO") or DEFAULT_RENDER_LATENCY_SLO
         ),
         check_concurrency=int(
             source.get("SCADBUDDY_CHECK_CONCURRENCY") or DEFAULT_CHECK_CONCURRENCY

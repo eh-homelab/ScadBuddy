@@ -277,7 +277,7 @@ export const api = {
   /**
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
-   * has started it yet. A full render queue answers 503 with `Retry-After`.
+   * has started it yet. Never refused for load: the queue accepts every render.
    */
   render: (
     slug: string,

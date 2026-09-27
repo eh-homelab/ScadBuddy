@@ -11,6 +11,8 @@ dependencies = [
     "networkx>=3.4",
     "numpy>=2.1",
     "prometheus-client>=0.21",
+    "psycopg-pool>=3.2",
+    "psycopg[binary]>=3.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.20",
@@ -54,4 +56,5 @@ markers = [
     "requires_openscad: needs a real openscad binary on PATH",
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
+    "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
 ]

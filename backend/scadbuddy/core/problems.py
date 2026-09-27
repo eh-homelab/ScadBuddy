@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -38,7 +37,6 @@ class ApiError(Exception):
         *,
         title: str | None = None,
         type_: str = "about:blank",
-        headers: Mapping[str, str] | None = None,
         **extensions: Any,
     ) -> None:
         super().__init__(detail)
@@ -46,8 +44,6 @@ class ApiError(Exception):
         self.detail = detail
         self.title = title or _TITLES.get(status, "Error")
         self.type = type_
-        #: Response headers, e.g. a 503's Retry-After.
-        self.headers = dict(headers or {})
         self.extensions = extensions
 
 
@@ -59,7 +55,6 @@ def problem_response(
     title: str | None = None,
     type_: str = "about:blank",
     extensions: dict[str, Any] | None = None,
-    headers: Mapping[str, str] | None = None,
 ) -> JSONResponse:
     body: dict[str, Any] = {
         "type": type_,
@@ -69,7 +64,7 @@ def problem_response(
         "instance": request.url.path,
     }
     body.update(extensions or {})
-    return JSONResponse(body, status_code=status, media_type=PROBLEM_MEDIA_TYPE, headers=headers)
+    return JSONResponse(body, status_code=status, media_type=PROBLEM_MEDIA_TYPE)
 
 
 def install_problem_handlers(app: FastAPI) -> None:
@@ -82,7 +77,6 @@ def install_problem_handlers(app: FastAPI) -> None:
             title=exc.title,
             type_=exc.type,
             extensions=exc.extensions,
-            headers=exc.headers,
         )
 
     @app.exception_handler(StarletteHTTPException)

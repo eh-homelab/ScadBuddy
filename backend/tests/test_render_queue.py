@@ -1,13 +1,17 @@
-"""The render queue's latency controls: supersede, coalesce, admission, deadline --
-and the metrics that show whether they hold."""
+"""The render queue's latency controls -- supersede, coalesce, deadline, leases --
+against both job stores, and the metrics that show whether they hold."""
 
 from __future__ import annotations
 
 import asyncio
+import threading
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
+import psycopg
 import pytest
 import pytest_asyncio
 
@@ -15,20 +19,21 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.glb import BoundingBox
+from scadbuddy.render.job_store import LOST_WORKER_ERROR, JobBackend, render_key
 from scadbuddy.render.jobs import (
     SUPERSEDED_ERROR,
     Job,
     JobResult,
+    JobStore,
     PartInfo,
-    QueueFullError,
     RenderQueue,
 )
+from scadbuddy.render.pg_store import MIGRATIONS, PostgresJobStore
 
 CONFIG = Config(
     data_dir=Path("/unused"),
     render_concurrency=1,
-    render_queue_max=3,
-    render_queue_timeout=0.0,
+    render_poll_interval=0.05,
     job_ttl=3600.0,
 )
 
@@ -40,6 +45,10 @@ def _result() -> JobResult:
         parts=[PartInfo(name="Color 1", colour="#FF6AC1", extruder=1, watertight=True)],
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
     )
+
+
+def _job(**params: int) -> Job:
+    return Job(id=uuid.uuid4().hex, slug="demo", params=dict(params), created_at=datetime.now(UTC))
 
 
 class Gate:
@@ -62,15 +71,26 @@ def paths(tmp_path: Path) -> DataPaths:
     return data
 
 
+StoreFactory = Callable[[], JobBackend]
+
+
+@pytest.fixture(params=["files", pytest.param("postgres", marks=pytest.mark.requires_postgres)])
+def make_store(request: pytest.FixtureRequest, paths: DataPaths) -> StoreFactory:
+    if request.param == "files":
+        return lambda: JobStore(paths)
+    conninfo: str = request.getfixturevalue("pg_conninfo")
+    return lambda: PostgresJobStore(conninfo, paths, pool_size=4)
+
+
 QueueFactory = Callable[..., Awaitable[RenderQueue]]
 
 
 @pytest_asyncio.fixture
-async def make_queue(paths: DataPaths) -> AsyncIterator[QueueFactory]:
+async def make_queue(paths: DataPaths, make_store: StoreFactory) -> AsyncIterator[QueueFactory]:
     queues: list[RenderQueue] = []
 
     async def make(render: Gate, config: Config = CONFIG) -> RenderQueue:
-        queue = RenderQueue(config, paths, render=render)
+        queue = RenderQueue(config, paths, store=make_store(), render=render)
         await queue.start()
         queues.append(queue)
         return queue
@@ -82,12 +102,16 @@ async def make_queue(paths: DataPaths) -> AsyncIterator[QueueFactory]:
 
 async def _occupy_the_worker(queue: RenderQueue, gate: Gate) -> Job:
     running = await queue.submit("demo", {"n": 0})
-    for _ in range(100):
+    for _ in range(200):
         if gate.started:
             break
         await asyncio.sleep(0.01)
     assert gate.started == [running.id]
     return running
+
+
+def _pending(queue: RenderQueue) -> int:
+    return queue.store.counts().pending
 
 
 def _sample(metrics: Metrics, name: str, **labels: str) -> float:
@@ -104,7 +128,7 @@ async def test_an_identical_waiting_render_is_coalesced(make_queue: QueueFactory
     second = await queue.submit("demo", {"label": "hi", "n": 1})
 
     assert second.id == first.id
-    assert queue.depth == 1
+    assert _pending(queue) == 1
     assert _sample(queue.metrics, "scadbuddy_render_jobs_coalesced_total") == 1
     gate.release.set()
     await queue.join()
@@ -202,39 +226,66 @@ async def test_resubmitting_the_render_it_supersedes_keeps_that_job(
     assert queue.store.read(first.id).state == "done"
 
 
-async def test_a_full_queue_refuses_with_a_retry_hint(make_queue: QueueFactory) -> None:
+async def test_every_render_is_accepted_however_deep_the_queue(
+    make_queue: QueueFactory,
+) -> None:
+    """There is no admission limit: a busy server queues, it never refuses."""
+    gate = Gate()
+    queue = await make_queue(gate, replace(CONFIG, render_queue_depth_slo=2))
+    await _occupy_the_worker(queue, gate)
+
+    waiting = [await queue.submit("demo", {"n": n}) for n in range(1, 41)]
+
+    assert _pending(queue) == 40
+    queue.refresh_metrics()
+    assert _sample(queue.metrics, "scadbuddy_render_queue_depth") == 40
+    assert _sample(queue.metrics, "scadbuddy_render_queue_depth_slo") == 2
+    assert _sample(queue.metrics, "scadbuddy_render_queue_oldest_seconds") > 0
+    gate.release.set()
+    await queue.join()
+    assert all(queue.store.read(job.id).state == "done" for job in waiting)
+
+
+async def test_jobs_are_rendered_oldest_first(make_queue: QueueFactory) -> None:
     gate = Gate()
     queue = await make_queue(gate)
-    await _occupy_the_worker(queue, gate)
-    for n in range(1, 4):
+    running = await _occupy_the_worker(queue, gate)
+
+    waiting = [await queue.submit("demo", {"n": n}) for n in range(1, 5)]
+    gate.release.set()
+    await queue.join()
+
+    assert gate.started == [running.id, *(job.id for job in waiting)]
+
+
+async def test_concurrency_is_the_number_of_jobs_rendered_at_once(
+    make_queue: QueueFactory,
+) -> None:
+    in_flight = 0
+    peak = 0
+    release = asyncio.Event()
+
+    class Counting(Gate):
+        async def __call__(self, job: Job) -> tuple[JobResult, list[str]]:
+            nonlocal in_flight, peak
+            in_flight += 1
+            peak = max(peak, in_flight)
+            await release.wait()
+            in_flight -= 1
+            return _result(), []
+
+    queue = await make_queue(Counting(), replace(CONFIG, render_concurrency=3))
+    for n in range(8):
         await queue.submit("demo", {"n": n})
-
-    with pytest.raises(QueueFullError) as refused:
-        await queue.submit("demo", {"n": 4})
-
-    assert refused.value.depth == 3
-    assert refused.value.retry_after >= 1
-    assert _sample(queue.metrics, "scadbuddy_render_jobs_rejected_total") == 1
-    assert _sample(queue.metrics, "scadbuddy_render_queue_depth") == 3
-    # A coalesced request takes no room, so it is still answered.
-    assert (await queue.submit("demo", {"n": 3})).slug == "demo"
-    gate.release.set()
+    for _ in range(200):
+        if peak == 3:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.1)
+    assert peak == 3
+    release.set()
     await queue.join()
-
-
-async def test_superseding_makes_room_before_admission(make_queue: QueueFactory) -> None:
-    """A slider drag is never refused for the room its own stale previews take up."""
-    gate = Gate()
-    queue = await make_queue(gate)
-    await _occupy_the_worker(queue, gate)
-    waiting = [await queue.submit("demo", {"n": n}) for n in range(1, 4)]
-
-    fresh = await queue.submit("demo", {"n": 9}, supersedes=waiting[-1].id)
-
-    assert queue.depth == 3
-    gate.release.set()
-    await queue.join()
-    assert queue.store.read(fresh.id).state == "done"
+    assert peak == 3
 
 
 async def test_a_job_past_its_queue_deadline_is_failed_unrendered(
@@ -245,7 +296,7 @@ async def test_a_job_past_its_queue_deadline_is_failed_unrendered(
     await _occupy_the_worker(queue, gate)
 
     late = await queue.submit("demo", {"n": 1})
-    await asyncio.sleep(0.1)
+    await asyncio.sleep(0.15)
     gate.release.set()
     await queue.join()
 
@@ -260,10 +311,11 @@ async def test_a_job_past_its_queue_deadline_is_failed_unrendered(
 async def test_the_queue_reports_its_latency(make_queue: QueueFactory) -> None:
     gate = Gate()
     gate.release.set()
-    queue = await make_queue(gate)
+    queue = await make_queue(gate, replace(CONFIG, render_latency_slo=45.0))
 
     await queue.submit("demo", {"n": 1})
     await queue.join()
+    queue.refresh_metrics()
 
     metrics = queue.metrics
     assert _sample(metrics, "scadbuddy_render_jobs_submitted_total") == 1
@@ -273,8 +325,151 @@ async def test_the_queue_reports_its_latency(make_queue: QueueFactory) -> None:
     assert _sample(metrics, "scadbuddy_render_job_latency_seconds_count", outcome="done") == 1
     assert _sample(metrics, "scadbuddy_render_jobs_running") == 0
     assert _sample(metrics, "scadbuddy_render_queue_depth") == 0
+    assert _sample(metrics, "scadbuddy_render_queue_oldest_seconds") == 0
     assert _sample(metrics, "scadbuddy_render_workers") == 1
-    assert _sample(metrics, "scadbuddy_render_queue_capacity") == 3
+    assert _sample(metrics, "scadbuddy_render_latency_slo_seconds") == 45
+
+
+def test_a_missing_job_is_a_lookup_error(make_store: StoreFactory) -> None:
+    store = make_store()
+    store.open()
+    try:
+        with pytest.raises(LookupError):
+            store.read("f" * 32)
+    finally:
+        store.close()
+
+
+# --- Postgres only -----------------------------------------------------------------
+
+
+@pytest.mark.requires_postgres
+def test_migrations_apply_once(pg_conninfo: str, paths: DataPaths) -> None:
+    first = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    first.open()
+    first.close()
+    second = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    second.open()
+    second.close()
+    with psycopg.connect(pg_conninfo) as conn:
+        versions = [row[0] for row in conn.execute("SELECT version FROM scadbuddy_migrations")]
+    assert versions == list(range(1, len(MIGRATIONS) + 1))
+
+
+@pytest.mark.requires_postgres
+def test_accepted_jobs_survive_a_restart(pg_conninfo: str, paths: DataPaths) -> None:
+    """The point of the table: a deploy mid-queue renders the queue after it."""
+    before = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    before.open()
+    job = _job(n=1)
+    before.submit(job, render_key("demo", job.params, None))
+    before.close()
+
+    after = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    after.open()
+    try:
+        assert after.abandon_orphans() == []
+        claimed = after.claim()
+        assert claimed is not None and claimed.id == job.id
+        assert claimed.state == "running"
+    finally:
+        after.close()
+
+
+@pytest.mark.requires_postgres
+def test_concurrent_identical_submits_make_one_job(pg_conninfo: str, paths: DataPaths) -> None:
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=8)
+    store.open()
+    ids: list[str] = []
+    lock = threading.Lock()
+
+    def submit() -> None:
+        job = _job(n=7)
+        answered = store.submit(job, render_key("demo", job.params, None)).job
+        with lock:
+            ids.append(answered.id)
+
+    try:
+        threads = [threading.Thread(target=submit) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert len(set(ids)) == 1
+        assert store.counts().pending == 1
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
+def test_a_lost_worker_s_job_is_requeued_then_failed(pg_conninfo: str, paths: DataPaths) -> None:
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        job = _job(n=1)
+        store.submit(job, render_key("demo", job.params, None))
+        assert store.claim() is not None  # ...and the worker dies without a heartbeat
+
+        first = store.reap(lease=0.0001, max_attempts=2)
+        assert [j.id for j in first.requeued] == [job.id]
+        assert store.read(job.id).state == "pending"
+
+        again = store.claim()
+        assert again is not None
+        second = store.reap(lease=0.0001, max_attempts=2)
+        assert [j.id for j in second.failed] == [job.id]
+        dead = store.read(job.id)
+        assert dead.state == "failed"
+        assert dead.error == LOST_WORKER_ERROR
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
+def test_a_reaped_worker_cannot_overwrite_the_retry(pg_conninfo: str, paths: DataPaths) -> None:
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        job = _job(n=1)
+        store.submit(job, render_key("demo", job.params, None))
+        stale = store.claim()
+        assert stale is not None
+        store.reap(lease=0.0001, max_attempts=3)
+        retry = store.claim()
+        assert retry is not None
+
+        stale.state = "failed"
+        stale.error = "late"
+        assert store.finish(stale) is False
+        retry.state = "done"
+        retry.result = _result()
+        assert store.finish(retry) is True
+        assert store.read(job.id).state == "done"
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
+async def test_a_heartbeating_job_is_not_reaped(pg_conninfo: str, paths: DataPaths) -> None:
+    gate = Gate()
+    config = replace(CONFIG, render_lease_timeout=0.3)
+    queue = RenderQueue(
+        config, paths, store=PostgresJobStore(pg_conninfo, paths, pool_size=4), render=gate
+    )
+    await queue.start()
+    try:
+        running = await _occupy_the_worker(queue, gate)
+        await asyncio.sleep(1.0)  # three leases: the reaper has run several times
+        assert queue.store.read(running.id).state == "running"
+        assert _sample(queue.metrics, "scadbuddy_render_jobs_retried_total") == 0
+        gate.release.set()
+        await queue.join()
+        assert queue.store.read(running.id).state == "done"
+    finally:
+        await queue.aclose()
+
+
+# --- metrics and config --------------------------------------------------------------
 
 
 def test_a_stage_is_timed_even_when_it_raises() -> None:
@@ -291,8 +486,16 @@ def test_every_outcome_series_exists_before_the_first_job() -> None:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"), [("render_queue_max", 0), ("render_queue_timeout", -1.0)]
+    ("field", "value", "env"),
+    [
+        ("render_queue_timeout", -1.0, "SCADBUDDY_RENDER_QUEUE_TIMEOUT"),
+        ("render_poll_interval", 0.0, "SCADBUDDY_RENDER_POLL_INTERVAL"),
+        ("render_lease_timeout", 0.0, "SCADBUDDY_RENDER_LEASE_TIMEOUT"),
+        ("render_max_attempts", 0, "SCADBUDDY_RENDER_MAX_ATTEMPTS"),
+        ("render_queue_depth_slo", -1, "SCADBUDDY_RENDER_QUEUE_DEPTH_SLO"),
+        ("render_latency_slo", -1.0, "SCADBUDDY_RENDER_LATENCY_SLO"),
+    ],
 )
-def test_queue_limits_are_validated_by_name(field: str, value: float) -> None:
-    with pytest.raises(ValueError, match="SCADBUDDY_RENDER_QUEUE_"):
+def test_queue_settings_are_validated_by_name(field: str, value: float, env: str) -> None:
+    with pytest.raises(ValueError, match=env):
         Config(**{field: value})  # type: ignore[arg-type]

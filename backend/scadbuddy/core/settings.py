@@ -8,13 +8,18 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from scadbuddy.core.config import (
     DEFAULT_CHECK_CONCURRENCY,
     DEFAULT_DATA_DIR,
+    DEFAULT_DATABASE_POOL_SIZE,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
     DEFAULT_LSP_SESSIONS,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_RENDER_CONCURRENCY,
-    DEFAULT_RENDER_QUEUE_MAX,
+    DEFAULT_RENDER_LATENCY_SLO,
+    DEFAULT_RENDER_LEASE_TIMEOUT,
+    DEFAULT_RENDER_MAX_ATTEMPTS,
+    DEFAULT_RENDER_POLL_INTERVAL,
+    DEFAULT_RENDER_QUEUE_DEPTH_SLO,
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     Config,
@@ -36,8 +41,12 @@ class Settings(BaseSettings):
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
-    render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
+    render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
+    render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
+    render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
+    render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
+    render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
@@ -61,6 +70,12 @@ class Settings(BaseSettings):
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
 
+    # SCADBUDDY_DATABASE_URL: a libpq URL or DSN. Set, the render queue lives in
+    # Postgres (durable, shareable by replicas); unset, in files and this process.
+    # Server-side only, like the Bambuddy key.
+    database_url: str | None = None
+    database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE
+
     log_level: str = Field(default="INFO")
 
     # Stamped into the image by .github/workflows/build-image.yml
@@ -77,8 +92,12 @@ class Settings(BaseSettings):
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
-            render_queue_max=self.render_queue_max,
             render_queue_timeout=self.render_queue_timeout,
+            render_poll_interval=self.render_poll_interval,
+            render_lease_timeout=self.render_lease_timeout,
+            render_max_attempts=self.render_max_attempts,
+            render_queue_depth_slo=self.render_queue_depth_slo,
+            render_latency_slo=self.render_latency_slo,
             check_concurrency=self.check_concurrency,
             job_ttl=self.job_ttl,
             google_fonts_api_key=self.google_fonts_api_key,
