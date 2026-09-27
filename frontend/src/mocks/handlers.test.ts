@@ -203,6 +203,29 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body.detail).toBe('tags is not valid JSON')
   })
 
+  async function uploadSource(source: string) {
+    const response = await fetch('/api/v1/models', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart([{ name: 'file', value: source, filename: 'widget.scad' }]),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('takes an uploaded source of exactly MAX_SOURCE_CHARS characters', async () => {
+    const { status } = await uploadSource('\u{1F600}'.repeat(1_000_000))
+    expect(status).toBe(201)
+  })
+
+  it('refuses an uploaded source one character over the cap, and creates nothing', async () => {
+    const { status, body } = await uploadSource('x'.repeat(1_000_001))
+    expect(status).toBe(422)
+    expect(body.detail).toBe(
+      'the source is too large: 1000001 characters, and this route reads at most 1000000',
+    )
+    expect((await api.listModels()).some((model) => model.slug === 'widget')).toBe(false)
+  })
+
   /** A readable model.json of exactly `size` bytes; JSON allows trailing spaces. */
   function metaOf(size: number): string {
     const body = JSON.stringify({ name: 'Widget' })

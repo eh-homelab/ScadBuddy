@@ -215,6 +215,22 @@ describe('UploadDialog', () => {
     expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
   })
 
+  it('refuses a .scad over the server limit before anything is sent', async () => {
+    const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
+    const { dialog, user } = render()
+
+    await user.upload(
+      within(dialog).getByLabelText('OpenSCAD source file'),
+      file('widget.scad', 'x'.repeat(1_000_001)),
+    )
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The source must be at most 1,000,000 characters. widget.scad cannot be uploaded.',
+    )
+    expect(within(dialog).getByRole('button', { name: 'Add model' })).toBeDisabled()
+    expect(upload).not.toHaveBeenCalled()
+  })
+
   it('refuses a README over the server limit, attached or in a folder', async () => {
     const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
     const { dialog, user } = render()

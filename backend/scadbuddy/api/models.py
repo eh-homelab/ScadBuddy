@@ -420,6 +420,9 @@ async def create_model(
         source = decode_source(await file.read())
     except NotOpenSCADError as error:
         raise _rejected(error) from None
+    # The cap the JSON and text/plain branches hold a source to, before the parse
+    # check spends an openscad run -- and a check permit -- on it.
+    _require_within_cap(source, "the source")
 
     thumbnail_bytes: bytes | None = None
     if thumbnail is not None:

@@ -74,6 +74,21 @@ export function readmeProblem(text: string): string | null {
   return `The README must be at most ${MAX_README_CHARS.toLocaleString('en')} characters.`
 }
 
+/** The server's `MAX_SOURCE_CHARS` itself: an uploaded .scad is held to it as a paste is. */
+export const MAX_SOURCE_CHARS = MAX_README_CHARS
+
+/**
+ * Why a .scad cannot be uploaded, or null when it can. Counted in code points, as
+ * `readmeProblem` counts; a file of at most that many bytes cannot hold more
+ * characters, so only a larger one is read.
+ */
+export async function sourceProblem(file: File): Promise<string | null> {
+  if (file.size <= MAX_SOURCE_CHARS) return null
+  const text = await file.text()
+  if (text.length <= MAX_SOURCE_CHARS || [...text].length <= MAX_SOURCE_CHARS) return null
+  return `The source must be at most ${MAX_SOURCE_CHARS.toLocaleString('en')} characters.`
+}
+
 /** Code-unit order: the same on every browser, OS and locale, unlike `localeCompare`. */
 function byName(a: File, b: File): number {
   const [x, y] = [a.name, b.name]

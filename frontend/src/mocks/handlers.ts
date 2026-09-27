@@ -43,6 +43,7 @@ import { editPath } from '../lib/deeplink'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
+  MAX_SOURCE_CHARS,
   MAX_THUMBNAIL_BYTES,
   MAX_THUMBNAIL_SIZE,
 } from '../lib/modelFolder'
@@ -567,6 +568,16 @@ export const handlers = [
     }
     if (!filename.endsWith('.scad')) {
       return problem(415, 'Unsupported file type', 'ScadBuddy accepts .scad source files.')
+    }
+    // As `create_model`: the uploaded source is held to MAX_SOURCE_CHARS, in code points.
+    const characters = [...(await (file as File).text())].length
+    if (characters > MAX_SOURCE_CHARS) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `the source is too large: ${characters} characters, ` +
+          `and this route reads at most ${MAX_SOURCE_CHARS}`,
+      )
     }
     const slug = filename
       .replace(/\.scad$/, '')

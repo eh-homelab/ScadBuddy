@@ -7,6 +7,7 @@ import {
   metaProblem,
   readMetaName,
   readmeProblem,
+  sourceProblem,
   thumbnailProblem,
   uploadFilename,
 } from './modelFolder'
@@ -152,6 +153,18 @@ describe('metaProblem', () => {
     const meta = (size: number) => new File([new Uint8Array(size)], 'model.json')
     expect(metaProblem(meta(64 * 1024))).toBeNull()
     expect(metaProblem(meta(64 * 1024 + 1))).toBe('The model.json must be 64 KiB or smaller.')
+  })
+})
+
+describe('sourceProblem', () => {
+  it('takes a .scad up to 1,000,000 characters, counting code points as the server does', async () => {
+    const scad = (text: string) => new File([text], 'widget.scad')
+    expect(await sourceProblem(scad('x'.repeat(1_000_000)))).toBeNull()
+    // Four bytes each: over the cap in bytes, within it in characters.
+    expect(await sourceProblem(scad('\u{1F600}'.repeat(1_000_000)))).toBeNull()
+    expect(await sourceProblem(scad('x'.repeat(1_000_001)))).toBe(
+      'The source must be at most 1,000,000 characters.',
+    )
   })
 })
 
