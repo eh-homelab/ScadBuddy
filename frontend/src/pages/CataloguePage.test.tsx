@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
 
@@ -250,5 +251,28 @@ describe('CataloguePage', () => {
       'href',
       `/m/${encodeURIComponent(BUILTIN_SLUG)}`,
     )
+  })
+
+  it('badges a duplicate whose upstream has an update (#160)', async () => {
+    await duplicateWithUpdate()
+    renderPage(<CataloguePage />)
+
+    const copy = (await screen.findByRole('heading', { name: 'Keychain for Nova' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(copy).getByTestId('update-badge')).toHaveTextContent('Update available')
+    expect(screen.getAllByTestId('update-badge')).toHaveLength(1)
+  })
+
+  it('says so on a duplicate whose upstream is gone (#160)', async () => {
+    await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
+    await api.deleteModel(UPSTREAM, true)
+    renderPage(<CataloguePage />)
+
+    const copy = (await screen.findByRole('heading', { name: 'Keychain for Nova' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(copy).getByTestId('upstream-gone')).toHaveTextContent('Upstream gone')
+    expect((await api.getModel(COPY)).upstream_state).toBe('gone')
   })
 })

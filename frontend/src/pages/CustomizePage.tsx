@@ -10,6 +10,7 @@ import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
+import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
@@ -230,6 +231,18 @@ export function CustomizePage() {
             >
               Built-in template — read-only
             </span>
+          )}
+          {origin === 'mine' && (
+            <UpstreamUpdateButton
+              slug={slug}
+              state={modelState.data?.upstream_state}
+              // Every action rewrites the record. Only a merge changes the source, so only
+              // a merge re-reads the schema (which re-seeds the values and re-renders).
+              onChanged={(action) => {
+                modelState.reload()
+                if (action === 'merge') schemaState.reload()
+              }}
+            />
           )}
           {origin && (
             <Link

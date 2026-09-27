@@ -6,6 +6,7 @@ import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateMod
 import { ImportDialog } from '../components/ImportDialog'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
+import { UpstreamBadge } from '../components/UpstreamUpdate'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
@@ -105,7 +106,10 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
           alt={model.name}
         />
 
-        <h2 className="mt-3 text-[14px] font-medium">{model.name}</h2>
+        <div className="mt-3 flex items-center gap-2">
+          <h2 className="min-w-0 truncate text-[14px] font-medium">{model.name}</h2>
+          <UpstreamBadge state={model.upstream_state} />
+        </div>
         {model.origin === 'builtin' && (
           <p data-testid="builtin-badge" className="mt-0.5 text-[11px] text-faint">
             Built-in template — read-only
