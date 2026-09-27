@@ -66,10 +66,37 @@ CASES = [
     ("name-only", dict(pattern="none", name="Samantha")),
     ("small-fat-longname", dict(diameter=30, stem_d=10, stem_length=10,
                                 style="ufo_disc", name="Maximilian12")),
+    ("name-narrow-letters", dict(pattern="none", name="Oliver")),
     ("big-thin-tight", dict(diameter=80, stem_d=4, stem_length=35, tip="point",
                             fit_clearance=0, style="flower", pattern="dots")),
     ("ufo-rays-loose", dict(style="ufo_disc", pattern="rays", fit_clearance=0.4)),
 ]
+
+
+# DejaVu Sans Bold advance widths at size 10, read from model.scad.
+ADV10 = [float(x) for x in re.search(r"ADV10 = \[(.*?)\];", open("model.scad").read(),
+                                      re.S).group(1).split(",")]
+
+
+def letter_gaps(tris, r_mid):
+    """Arc-length gaps between neighbouring letters of the copy on the +y side.
+
+    Letters are the angular extents of the pattern's triangles, merged where
+    they overlap (the dot of an i joins its stem)."""
+    spans = []
+    for t in tris:
+        if min(v[1] for v in t) <= 0:
+            continue
+        a = [math.degrees(math.atan2(v[1], v[0])) for v in t]
+        spans.append([min(a), max(a)])
+    spans.sort()
+    merged = []
+    for a0, a1 in spans:
+        if merged and a0 <= merged[-1][1] + 1e-6:
+            merged[-1][1] = max(merged[-1][1], a1)
+        else:
+            merged.append([a0, a1])
+    return [math.radians(b[0] - a[1]) * r_mid for a, b in zip(merged, merged[1:])]
 
 
 def scad(v):
@@ -165,7 +192,9 @@ def decor_expected(ov):
     r1 = face_r
     if p["name"]:
         name_r = face_r - 3.5 / 2
-        s = min(3.5, math.pi * name_r * 0.8 / (len(p["name"]) * 0.78))
+        adv = sum(ADV10[ord(c) - 32] if 32 <= ord(c) <= 126 else ADV10[78 - 32]
+                  for c in p["name"])
+        s = min(3.5, math.pi * name_r * 0.8 * 10 / adv)
         name_ok = s >= 1.5 and name_r - s > r0 + 1
         if name_ok:
             r1 = name_r - s / 2 - 1.5
@@ -249,6 +278,13 @@ for name, ov in CASES:
     union_v, _ = mass_props(read_stl("%s/%s_all.stl" % (OUT, name)))
     check(abs(union_v - total_v) <= 0.001 * total_v,
           "parts do not overlap: union %.1f == sum of parts %.1f mm^3" % (union_v, total_v))
+
+    if name == "name-narrow-letters":
+        # Letters sit at their own advance widths, not a fixed pitch: the gap
+        # after the narrow l and i must match the others.
+        gaps = letter_gaps(parts[PATTERN], (0.8 * R + 0.5))
+        check(len(gaps) == len(p_name := ov["name"]) - 1 and max(gaps) - min(gaps) <= 0.6,
+              "%d letters, evenly spaced: gaps %s mm" % (len(p_name), [round(x, 2) for x in gaps]))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

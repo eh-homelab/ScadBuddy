@@ -12,7 +12,7 @@ from scadbuddy.bambuddy.models import Folder, Pipeline, PresetRef, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import SettingsPatch, StoredSettings
+from scadbuddy.library.settings_store import DisplayUnit, SettingsPatch, StoredSettings
 
 router = APIRouter(tags=["settings"])
 
@@ -33,6 +33,7 @@ class SettingsView(BaseModel):
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
     default_plate: str | None = None
+    display_unit: DisplayUnit = "mm"
 
 
 class PrintOptionsView(BaseModel):
@@ -112,6 +113,7 @@ def _view(settings: StoredSettings) -> SettingsView:
         filament_presets=settings.filament_presets,
         bed_type=settings.bed_type,
         default_plate=settings.default_plate,
+        display_unit=settings.display_unit,
     )
 
 

@@ -29,6 +29,7 @@ def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
         "filament_presets": [],
         "bed_type": None,
         "default_plate": None,
+        "display_unit": "mm",
     }
 
 
@@ -65,6 +66,26 @@ def test_an_omitted_key_is_kept_and_an_empty_one_clears_it(client: TestClient) -
     assert (
         client.put("/api/v1/settings", json={"bambuddy_api_key": ""}).json()["has_api_key"] is False
     )
+
+
+def test_the_display_unit_is_stored_and_a_clear_puts_millimetres_back(
+    client: TestClient, data_dir: Path
+) -> None:
+    assert (
+        client.put("/api/v1/settings", json={"display_unit": "in"}).json()["display_unit"] == "in"
+    )
+    # Another field's save leaves it alone.
+    assert client.put("/api/v1/settings", json={"pipeline_id": 3}).json()["display_unit"] == "in"
+    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    assert stored["display_unit"] == "in"
+
+    assert (
+        client.put("/api/v1/settings", json={"display_unit": None}).json()["display_unit"] == "mm"
+    )
+
+
+def test_an_unknown_display_unit_is_refused(client: TestClient) -> None:
+    assert client.put("/api/v1/settings", json={"display_unit": "cm"}).status_code == 422
 
 
 def test_the_environment_seeds_the_settings_and_the_file_then_wins(

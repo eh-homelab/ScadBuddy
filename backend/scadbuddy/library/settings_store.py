@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,10 @@ from scadbuddy.core.settings import Settings
 
 SETTINGS_NAME = "settings.json"
 KEY_FILE_MODE = 0o600
+
+#: How the UI shows lengths. Only a display choice: geometry, the plate table and every
+#: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
+DisplayUnit = Literal["mm", "in"]
 
 #: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
 ENV_SEEDED = ("bambuddy_url", "bambuddy_api_key", "public_url", "default_plate")
@@ -51,6 +56,8 @@ class StoredSettings(BambuddyIds):
     #: The printer model the preview's plate falls back to when no printer is chosen
     #: or it is not one ScadBuddy knows (#81). ``None`` is the 256 mm fallback plate.
     default_plate: str | None = None
+    #: The unit the UI shows dimensions in, for every model.
+    display_unit: DisplayUnit = "mm"
 
     # Used by "Slice and queue" when no pipeline is configured.
     printer_preset: PresetRef | None = None
@@ -110,6 +117,8 @@ class SettingsPatch(BaseModel):
     filament_presets: list[PresetRef] | None = None
     bed_type: str | None = None
     default_plate: str | None = None
+    #: ``null`` puts it back to millimetres.
+    display_unit: DisplayUnit | None = None
 
 
 class SettingsStore:
@@ -154,6 +163,8 @@ class SettingsStore:
         changes = patch.model_dump(mode="json", exclude_unset=True)
         if changes.get("bambuddy_api_key") == "":
             changes["bambuddy_api_key"] = None
+        if "display_unit" in changes and changes["display_unit"] is None:
+            changes["display_unit"] = "mm"
         cleared = set(current["cleared"])
         for name in ENV_SEEDED:
             if name not in changes:

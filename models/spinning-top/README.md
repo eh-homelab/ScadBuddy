@@ -56,7 +56,7 @@ spin axis — even if the pattern filament is heavier than the body's.
 | Parameter | Default | What it does |
 |---|---|---|
 | `pattern` | `spiral` | `spiral` (four arms at half coverage), `rays` (eight wedges), `dots` (rings of 6 and 12), or `none`. Inlaid 0.6 mm (three layers) into the face, flush. |
-| `name` | *(empty)* | Up to 12 characters around the rim, twice, 180° apart, reading clockwise. Letters are 3.5 mm tall and shrink to fit half the circumference; the pattern moves inwards to make room. |
+| `name` | *(empty)* | Up to 12 characters around the rim, twice, 180° apart, reading clockwise. Letters are 3.5 mm tall, spaced by their own widths, and shrink to fit half the circumference; the pattern moves inwards to make room. |
 
 Guards: if the pattern's ring would be narrower than 3 mm (a small disc with a
 fat spindle and a name), the pattern is left off; if the name would have to be
@@ -103,8 +103,8 @@ is the one for small hands.
 ./verify.sh
 ```
 
-Renders the defaults and eight variations (every style, pattern and tip, a
-name, no decor, the smallest disc with the fattest spindle and a long name, the
+Renders the defaults and nine variations (every style, pattern and tip, a
+name, a name with narrow letters, no decor, the smallest disc with the fattest spindle and a long name, the
 biggest disc with the thinnest spindle and zero clearance) in
 `scadbuddy-verify:local`, and checks:
 
@@ -116,6 +116,8 @@ biggest disc with the thinnest spindle and zero clearance) in
   parameters imply, the parts do not overlap (the volume of the union equals
   the sum of the parts), and **each part's centre of mass, and the whole
   top's, lies on the spin axis within 0.05 mm**.
+- the letters of a name with narrow `l` and `i` are evenly spaced around the
+  rim (they used to be placed at a fixed pitch, which left gaps).
 
 The 3MF and STL parsing and the mass properties run on the host with `python3`
 and the standard library only.

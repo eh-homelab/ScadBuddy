@@ -4,6 +4,7 @@ import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { useAsync } from '../lib/useAsync'
+import { plateSize, setDisplayUnit, type DisplayUnit } from '../lib/units'
 
 /** `<select>`/`<input>` values are strings; Bambuddy's ids are integers. */
 function asId(value: string): number | null {
@@ -24,6 +25,7 @@ export function SettingsPage() {
   const [pipelineId, setPipelineId] = useState('')
   const [printerId, setPrinterId] = useState('')
   const [defaultPlate, setDefaultPlate] = useState('')
+  const [unit, setUnit] = useState<DisplayUnit>('mm')
 
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState<string | null>(null)
@@ -53,6 +55,7 @@ export function SettingsPage() {
     setPipelineId(idValue(settings.pipeline_id))
     setPrinterId(idValue(settings.printer_id))
     setDefaultPlate(settings.default_plate ?? '')
+    setUnit(settings.display_unit)
   }, [settings])
 
   function draft(): SettingsUpdate {
@@ -63,6 +66,7 @@ export function SettingsPage() {
       pipeline_id: asId(pipelineId),
       printer_id: asId(printerId),
       default_plate: defaultPlate || null,
+      display_unit: unit,
     }
     // Omitted entirely, so an unchanged field leaves the stored key alone.
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
@@ -75,6 +79,7 @@ export function SettingsPage() {
     try {
       const next = await api.putSettings(draft())
       settingsState.setData(next)
+      setDisplayUnit(next.display_unit)
       setApiKey('')
       setSavedAt(new Date().toLocaleTimeString())
       targetsState.reload()
@@ -257,6 +262,25 @@ export function SettingsPage() {
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">Preview</h2>
           <div className="space-y-4 p-4">
             <div>
+              <label htmlFor="display-unit" className="block text-[13px]">
+                Show dimensions in
+              </label>
+              <select
+                id="display-unit"
+                value={unit}
+                onChange={(event) => setUnit(event.target.value as DisplayUnit)}
+                className="sb-field mt-1.5 cursor-pointer"
+              >
+                <option value="mm">Millimetres (mm)</option>
+                <option value="in">Inches (in)</option>
+              </select>
+              <p className="mt-1.5 text-[12px] text-muted">
+                For every model: the bounding box, plate sizes and fit warnings. Models,
+                parameters and the files sent to Bambuddy stay in millimetres.
+              </p>
+            </div>
+
+            <div>
               <label htmlFor="default-plate" className="block text-[13px]">
                 Default plate
               </label>
@@ -266,14 +290,14 @@ export function SettingsPage() {
                 onChange={(event) => setDefaultPlate(event.target.value)}
                 className="sb-field mt-1.5 cursor-pointer"
               >
-                <option value="">256 × 256 mm</option>
+                <option value="">{plateSize([256, 256], unit)}</option>
                 {/* A value set through SCADBUDDY_DEFAULT_PLATE may be a code ("A1M"). */}
                 {defaultPlate && !plateNames.includes(defaultPlate) && (
                   <option value={defaultPlate}>{defaultPlate}</option>
                 )}
                 {(platesState.data?.plates ?? []).map((plate) => (
                   <option key={plate.name} value={plate.name}>
-                    {plate.name} ({plate.size[0]} × {plate.size[1]} mm)
+                    {plate.name} ({plateSize(plate.size, unit)})
                   </option>
                 ))}
               </select>

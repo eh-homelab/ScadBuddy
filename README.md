@@ -21,6 +21,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 
 - **MakerWorld-parity customizer**: tabs from `/* [Group] */`, sliders, dropdowns,
   toggles, text limits, and `// color` / `// font` pickers.
+- **Presets**: save named parameter sets per template — built-ins too — and start
+  from one, changing only what differs this time (a name, a colour, a size). A
+  preset keeps only the values that differ from the defaults. A template can ship
+  its own read-only presets in a `presets.json` beside `model.scad`
+  (`{"presets": [{"name": "…", "params": {…}}]}`).
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -63,7 +68,8 @@ for the project picker).
   Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, settings, downloaded fonts and caches. Back up the volume.
+  outputs, saved presets (`presets/`, outside the git repository), settings,
+  downloaded fonts and caches. Back up the volume.
 - **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`

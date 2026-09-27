@@ -177,10 +177,13 @@ def git_env() -> dict[str, str]:
 
 
 def _gitignore_body(wrapper_prefix: str) -> str:
+    # Every transient file a render drops beside a model: the colour wrappers and,
+    # since #204, the uploaded assets staged for `import()` -- which are not .scad.
+    transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
         "# source, so versioning it would only add noise to the history.\n"
-        f"{wrapper_prefix}*.scad\n"
+        f"{transient}\n"
         f"{LOCK_NAME}\n"
     )
 
@@ -359,7 +362,7 @@ class ModelHistory:
         """Stage ``paths`` and commit them. ``None`` when nothing actually changed.
 
         ``prepare`` runs under the write lock first, which makes a read-modify-write
-        of a shared file -- ``libraries.lock`` (#93) -- atomic with its commit.
+        -- of a ``model.json``, say -- atomic with its commit.
         """
         with self._exclusive():
             if prepare is not None:
@@ -405,8 +408,8 @@ class ModelHistory:
         """Put ``slug`` back as it was at ``commit``, as a new commit. Never a rewrite.
 
         ``also`` is called with the resolved commit under the write lock, and the
-        paths it returns go into the same commit -- how a model's library pins come
-        back with it (#93).
+        paths it returns go into the same commit -- how a revision from before
+        per-model library pins comes back pinned (#93).
         """
         resolved = self.resolve(commit)
         with self._exclusive():
