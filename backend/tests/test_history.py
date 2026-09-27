@@ -293,6 +293,26 @@ def test_diff_defaults_to_the_parent_and_handles_the_root_commit(
     ] == ["A"]
 
 
+def test_a_diff_through_a_file_git_takes_for_text_but_is_not_utf8_still_renders(
+    models: Path, history: ModelHistory
+) -> None:
+    """A thumbnail with the PNG signature and no NUL is all `_require_png` asks of
+    one (#179), and git diffs it as text -- the 0x89 must not fail the whole patch,
+    in the versions diff or in an upstream preview's tree diff (#239)."""
+    write_model(models, "keychain", "cube(10);\n")
+    first = history.ensure_repo()
+    (models / "keychain" / "thumbnail.png").write_bytes(b"\x89PNG\r\n\x1a\nno nul here")
+    second = history.commit("Set keychain thumbnail", "keychain")
+    assert first is not None and second is not None
+
+    patch = history.diff(history.revision_range(None, second), "keychain")
+    tree_patch = history.diff_dirs(first, "keychain", second, "keychain", label="keychain")
+
+    for shown in (patch, tree_patch):
+        assert "thumbnail.png" in shown
+        assert "\ufffdPNG" in shown
+
+
 def test_a_default_diff_resolves_its_endpoints_once(
     models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
