@@ -30,6 +30,7 @@ from scadbuddy.library.outputs import (
     download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["outputs"])
@@ -252,6 +253,29 @@ def get_output_plate_thumbnail(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"plate {index} of {output_id!r} has no cover")
     with zipfile.ZipFile(path) as archive:
         return Response(archive.read(cover), media_type="image/png")
+
+
+@router.get(
+    "/outputs/{output_id}/geometry",
+    response_model=GeometryAnalysis,
+    summary="Mesh geometry analysis",
+)
+def get_output_geometry(output_id: OutputIdPath, outputs: OutputsDep) -> GeometryAnalysis:
+    """Printability measurements of the output's closed per-colour solids (#284):
+    open and non-manifold edges with their locations, bounding box, bed contact,
+    height-to-base ratio, overhang area by angle, and estimates of the thinnest
+    wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
+    the preview. Computed on first ask and cached beside the output."""
+    require_output(outputs, output_id)
+    try:
+        return outputs.geometry(output_id)
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
+    except (ValueError, zipfile.BadZipFile) as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the 3MF of output {output_id!r} cannot be analysed: {error}",
+        ) from None
 
 
 @router.put(
