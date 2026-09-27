@@ -213,24 +213,44 @@ models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
 models/<slug>/model.json          name, description, tags, thumbnail, origin_url (NOT the schema)
 models/<slug>/thumbnail.png
-outputs/<slug>/<output-id>/       params.json, model.3mf, preview.glb, thumbnail.png, meta.json
+models/_builtin/<slug>/           a built-in template, mirrored from the image on boot (§4.3)
+outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
-cache/schema/<slug>.json          the DERIVED customizer schema, keyed by source hash
-cache/revisions/<slug>/<commit>/  an old model revision exported out of git, derived
+cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
+cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
 (not wherever redirects ended), for the catalogue's link back and a later re-pull.
-It is `null` for anything uploaded, pasted or seeded, and it is not editable:
+It is `null` for anything uploaded or pasted, and for a built-in, and it is not editable:
 `PATCH /models/{slug}` does not take it.
+
+`<id>` is the template's id: its slug for a template of mine, `builtin:<slug>` for a
+built-in. Derived files are keyed by the id, so a built-in's live exactly as long as
+its `_builtin/<slug>/` does, and the orphan sweep needs no special case for them.
 
 ### 4.3 Model history: git is the version store (#90)
 
 `models/` is a git repository, initialised on first start. Every catalogue action
-is exactly one commit — upload, source edit, metadata change, delete, seed,
-restore — and there is no parallel index of revisions anywhere: `git log`,
+is exactly one commit — upload, source edit, metadata change, delete, built-in
+sync, restore — and there is no parallel index of revisions anywhere: `git log`,
 `git show` and `git diff` are the read side. Whatever the server reports, a shell
 on the volume sees the same thing.
+
+- **Built-in templates are mirrored, not seeded (#155).** On boot, after
+  `ensure_repo`, every bundled model (`/app/models`, the repo's `models/` in dev)
+  is copied over `models/_builtin/<slug>/`, and a built-in the image no longer has
+  is removed; anything that changed lands as one `Sync built-in templates from the
+  image` commit. The image is the source of truth, so a newer image's fixes reach
+  existing installs, and nothing else writes `_builtin/` — its history is each
+  built-in's version history. A built-in's id is `builtin:<slug>`: every route that
+  takes a model reads it (model, source, schema, thumbnail, versions, diff, render,
+  outputs), and the write routes (source `PUT`, metadata `PATCH`, `DELETE`,
+  restore) answer 403. `:` and `_` are not slug characters, so neither the id nor
+  the directory can collide with a template of mine, and a template of mine with
+  the same slug as a built-in is left alone. `GET /models` lists both, each with
+  `origin: "builtin" | "mine"`. This replaces the old copy-if-absent seed, which
+  turned a bundled model into an ordinary one the first time it was copied.
 
 - **Shelling out to `git`, not dulwich/pygit2.** The product surface here *is*
   git porcelain, so a library would mean reimplementing log/diff/restore — a
@@ -591,7 +611,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README), slug from filename; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
-| GET/PATCH/DELETE | `/models/{slug}` | metadata |
+| GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT and restore answer 403 for one (§4.3) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema |

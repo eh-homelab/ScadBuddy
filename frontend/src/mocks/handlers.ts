@@ -263,6 +263,7 @@ export const handlers = [
         updated_at: new Date().toISOString(),
         has_thumbnail: false,
         has_readme: false,
+        origin: 'mine',
       }
       state.models = [pasted, ...state.models]
       // A forced save stores source OpenSCAD cannot parse, so no schema is derived —
@@ -297,6 +298,7 @@ export const handlers = [
       updated_at: new Date().toISOString(),
       has_thumbnail: false,
       has_readme: false,
+      origin: 'mine',
     }
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
     state.schemas[slug] = fixtures.keychainSchema
@@ -343,6 +345,7 @@ export const handlers = [
       updated_at: new Date().toISOString(),
       has_thumbnail: false,
       has_readme: false,
+      origin: 'mine',
     }
     state.models = [imported, ...state.models]
     state.schemas[slug] = fixtures.keychainSchema

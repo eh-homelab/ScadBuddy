@@ -149,6 +149,32 @@ def test_the_server_runs_in_the_model_directory_under_its_real_path(
     assert seen["workspaceFolders"] == [{"uri": real + "/", "name": "model"}]
 
 
+@pytest.mark.requires_git
+def test_a_builtin_runs_the_server_in_its_mirror(
+    app: FastAPI, seed_dir: Path, paths: DataPaths
+) -> None:
+    """A built-in is read-only but still gets completion and hover: its id reaches the
+    route percent-encoded, as the editor sends it, and the server runs in the
+    `_builtin/` mirror where its sibling files are."""
+    bundled = seed_dir / "keychain"
+    bundled.mkdir()
+    (bundled / "model.scad").write_text("cube(1);\n", encoding="utf-8")
+    (bundled / "model.json").write_text(json.dumps({"name": "Keychain"}), encoding="utf-8")
+    root = "file:///models/builtin%3Akeychain/"
+
+    with (
+        TestClient(app) as client,
+        client.websocket_connect("/api/v1/models/builtin%3Akeychain/lsp") as session,
+    ):
+        result = _initialize(session, root)["result"]
+
+    mirror = paths.builtins / "keychain"
+    assert paths.model_dir("builtin:keychain") == mirror
+    assert json.loads(result["cwd"]) == str(mirror)
+    assert json.loads(result["seen"])["rootUri"] == mirror.as_uri() + "/"
+    assert result["location"]["uri"] == root + "helper.scad"
+
+
 def test_document_uris_are_translated_both_ways(client: TestClient, model: str) -> None:
     with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
         _initialize(session)

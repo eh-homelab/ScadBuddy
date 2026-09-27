@@ -153,6 +153,7 @@ export const models: ModelSummary[] = [
     updated_at: '2026-09-21T18:04:00Z',
     has_thumbnail: true,
     has_readme: true,
+    origin: 'mine',
   },
   {
     slug: 'gridfinity-bin',
@@ -162,6 +163,7 @@ export const models: ModelSummary[] = [
     updated_at: '2026-09-14T09:12:00Z',
     has_thumbnail: false,
     has_readme: false,
+    origin: 'mine',
   },
 ]
 
