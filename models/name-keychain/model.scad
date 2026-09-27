@@ -73,16 +73,19 @@ function ring_centre() = [-(outline + ring_radius() * 0.6), 0];
 bed_x = 300;
 max_word = bed_x - 4 - 2 * outline - (hole ? 1.6 * ring_radius() : 0);
 
-// Shrink-only fit: resize() the children together with a hair-thin bar from
-// x = 0 to w, then cut the children's layer back out. A word shorter than w
-// is left alone; a longer one is scaled down uniformly (about the origin, so
-// it stays centred on the keyring tab) until it is exactly w long.
+// Shrink-only fit: resize() the children together with their mirror image
+// and a hair-thin bar from x = -w to w, all on separate layers, then cut the
+// children's layer back out. The bounding box is symmetric about x = 0, so a
+// word that ends before x = w is left alone (a glyph reaching a little left
+// of the origin does not count) and a longer one is scaled down uniformly
+// about the origin, keeping it centred on the keyring tab, until it ends at w.
 module fit_x(w) {
     projection(cut = true) translate([0, 0, -0.5])
-        resize([w, 0, 0], auto = [false, true, false])
+        resize([2 * w, 0, 0], auto = [false, true, false])
             union() {
                 linear_extrude(1) children();
-                translate([0, 0, 10]) cube([w, 0.01, 0.01]);
+                translate([0, 0, 5]) linear_extrude(1) mirror([1, 0]) children();
+                translate([-w, 0, 10]) cube([2 * w, 0.01, 0.01]);
             }
 }
 
