@@ -435,19 +435,19 @@ async def render_job(
     )
     warnings += thumbnail_warnings
 
-    model_path = work / MODEL_NAME
+    model_3mf = work / MODEL_NAME
     # A built-in's bare slug, as download_filename names the file: the id's
     # `builtin:` prefix is not something to show as the model's title.
     await asyncio.to_thread(
         write_bambu_3mf,
         parts,
-        model_path,
+        model_3mf,
         thumbnails=thumbnails,
         model_name=job.slug.removeprefix(BUILTIN_PREFIX),
     )
 
     result = JobResult(
-        model_3mf=str(model_path.relative_to(paths.root)),
+        model_3mf=str(model_3mf.relative_to(paths.root)),
         preview_glb=str(preview_path.relative_to(paths.root)),
         source_version=version,
         parts=[
