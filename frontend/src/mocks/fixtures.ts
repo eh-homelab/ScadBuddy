@@ -331,7 +331,7 @@ index 0000000..1111111
 export const presets: Record<string, ParamPreset[]> = {
   'name-keychain': [
     {
-      id: 'template-0',
+      id: 'template-tiny',
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
@@ -352,7 +352,7 @@ export const presets: Record<string, ParamPreset[]> = {
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-0', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
   ],
 }
 

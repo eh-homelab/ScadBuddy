@@ -982,7 +982,33 @@ export const handlers = [
     const slug = String(params['slug'])
     const refused = refuseBuiltin(slug)
     if (refused) return refused
-    const patch = (await request.json()) as ModelPatch
+    const { presets: defined, ...patch } = (await request.json()) as ModelPatch
+    if (defined) {
+      // #326: the template's own presets, replaced whole and checked as a save is.
+      const names = new Set<string>()
+      for (const preset of defined) {
+        const folded = preset.name.toLowerCase()
+        if (names.has(folded)) {
+          return problem(422, 'Unprocessable Content', `two presets are named '${preset.name}'`)
+        }
+        names.add(folded)
+        const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
+        const unknown = Object.keys(preset.params ?? {}).filter((key) => !known.has(key))
+        if (unknown.length > 0) {
+          return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
+            parameters: unknown,
+          })
+        }
+      }
+      const shipped: ParamPreset[] = defined.map((preset) => ({
+        id: `template-${preset.id ?? slugify(preset.name)}`,
+        name: preset.name,
+        origin: 'template',
+        params: preset.params ?? {},
+      }))
+      const saved = (state.presets[slug] ?? []).filter((preset) => preset.origin === 'mine')
+      state.presets[slug] = [...shipped, ...saved]
+    }
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
     ) as Partial<ModelSummary>

@@ -15,8 +15,8 @@ from scadbuddy.api.deps import (
     PresetsDep,
     SlugPath,
 )
-from scadbuddy.api.jobs import require_valid_params, schema_of
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import require_valid_preset_params, schema_of
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -37,7 +37,8 @@ from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
 
-PresetIdPath = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,64}$")]
+#: A saved preset's 32 hex digits, or ``template-`` plus a template preset's key.
+PresetIdPath = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,128}$")]
 
 
 async def _require_valid(
@@ -51,18 +52,7 @@ async def _require_valid(
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
     _, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
-    require_valid_params(schema, params)
-    # Stricter than a render, which takes any value of the right type: a preset is
-    # kept and replayed, so it holds only what the dropdown itself could pick.
-    by_name = {parameter.name: parameter for parameter in schema.parameters}
-    for name, value in params.items():
-        options = [option.value for option in by_name[name].options]
-        if options and value not in options:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"{value!r} is not one of the options of {name!r}",
-                parameters=[name],
-            )
+    require_valid_preset_params(schema, params)
 
 
 def _unreadable(error: InvalidPresetsFileError) -> ApiError:

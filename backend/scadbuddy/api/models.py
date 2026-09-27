@@ -34,6 +34,7 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.params import require_valid_preset_params, schema_of
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
@@ -62,6 +63,7 @@ from scadbuddy.library.libraries import (
     parse_declaration,
     search_path,
 )
+from scadbuddy.library.presets import with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -728,12 +730,37 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
     return require_model(catalogue, slug)
 
 
-@router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
+@router.patch(
+    "/models/{slug}",
+    response_model=ModelRecord,
+    summary="Edit model metadata",
+    description=(
+        "`presets` replaces the template's own presets (#326) whole. Each preset's values "
+        "are checked against the template's current schema as a saved preset's are (422), "
+        "and every preset is written with its key as `id`, so reordering or renaming it "
+        "later keeps it the same preset."
+    ),
+)
+async def patch_model(
+    slug: SlugPath,
+    patch: ModelPatch,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+) -> ModelRecord:
     require_mine(slug)
-    require_model(catalogue, slug)
+    # The record, not only existence: a model.json that no longer reads as metadata is
+    # refused (409) before anything is written into it. Off the loop: a `git log`.
+    await asyncio.to_thread(require_model, catalogue, slug)
+    if patch.presets is not None:
+        _, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
+        for preset in patch.presets:
+            require_valid_preset_params(schema, preset.params)
+        patch.presets = with_keys(patch.presets)
     try:
-        return catalogue.update(slug, patch)
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        return await asyncio.to_thread(catalogue.update, slug, patch)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None

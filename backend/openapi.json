@@ -1661,6 +1661,20 @@
             ],
             "title": "Name"
           },
+          "presets": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/TemplatePreset"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Presets"
+          },
           "tags": {
             "anyOf": [
               {
@@ -2193,7 +2207,7 @@
             "type": "string"
           },
           "origin": {
-            "description": "`template`: shipped in the template's presets.json, read-only. `mine`: saved here, editable -- on built-ins too.",
+            "description": "`template`: defined by the template in its model.json, read-only. `mine`: saved here, editable -- on built-ins too.",
             "enum": [
               "template",
               "mine"
@@ -5362,6 +5376,66 @@
         "title": "SpoolOption",
         "type": "object"
       },
+      "TemplatePreset": {
+        "description": "One preset a template defines in its ``model.json``.\n\n``id`` is what keeps it the same preset when the list is reordered or it is\nrenamed; without one, the key is derived from the name (:func:`template_preset_keys`).\n``description`` and ``tags`` are carried for #327, which puts them in the API.",
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "pattern": "^[a-z0-9][a-z0-9-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Id"
+          },
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "params": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Params",
+            "type": "object"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "TemplatePreset",
+        "type": "object"
+      },
       "Upstream": {
         "description": "The template a duplicate was copied from, and the revision of it it includes.",
         "properties": {
@@ -6143,6 +6217,7 @@
         ]
       },
       "patch": {
+        "description": "`presets` replaces the template's own presets (#326) whole. Each preset's values are checked against the template's current schema as a saved preset's are (422), and every preset is written with its key as `id`, so reordering or renaming it later keeps it the same preset.",
         "operationId": "patch_model_api_v1_models__slug__patch",
         "parameters": [
           {
@@ -6756,7 +6831,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,64}$",
+              "pattern": "^[a-z0-9-]{1,128}$",
               "title": "Preset Id",
               "type": "string"
             }
@@ -6802,7 +6877,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,64}$",
+              "pattern": "^[a-z0-9-]{1,128}$",
               "title": "Preset Id",
               "type": "string"
             }
@@ -6867,7 +6942,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,64}$",
+              "pattern": "^[a-z0-9-]{1,128}$",
               "title": "Preset Id",
               "type": "string"
             }

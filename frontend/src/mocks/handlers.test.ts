@@ -614,17 +614,45 @@ describe('mock API: duplicating a preset', () => {
   beforeEach(() => resetMockState())
 
   it('copies a shipped preset to a saved one with its values', async () => {
-    const copy = await api.duplicatePreset('name-keychain', 'template-0', { name: 'Tiny copy' })
+    const copy = await api.duplicatePreset('name-keychain', 'template-tiny', { name: 'Tiny copy' })
     expect(copy).toMatchObject({ origin: 'mine', params: { text_size: 10, keyring_hole: false } })
   })
 
   it('refuses a taken name, and a preset whose values the template no longer takes', async () => {
     await expect(
-      api.duplicatePreset('name-keychain', 'template-0', { name: 'mum' }),
+      api.duplicatePreset('name-keychain', 'template-tiny', { name: 'mum' }),
     ).rejects.toMatchObject({ status: 409 })
     // "Old engraving" names engrave_depth, which the schema has dropped.
     await expect(
       api.duplicatePreset('name-keychain', 'b1b2c3d4e5f60718293a4b5c6d7e8f90', { name: 'Copy' }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+})
+
+describe('mock API: a template of mine defines its presets in its metadata (#326)', () => {
+  beforeEach(() => resetMockState())
+
+  it('replaces the template presets and keeps the saved ones', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [{ id: 'wide', name: 'Wide', params: { text_size: 20 } }, { name: 'Bag tag' }],
+    })
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-wide',
+      'template-bag-tag',
+    ])
+    expect(presets.filter((p) => p.origin === 'mine').map((p) => p.name)).toEqual([
+      'Mum',
+      'Old engraving',
+    ])
+  })
+
+  it('refuses an unknown parameter and a repeated name', async () => {
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: 'X', params: { nope: 1 } }] }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: 'X' }, { name: 'x' }] }),
     ).rejects.toMatchObject({ status: 422 })
   })
 })

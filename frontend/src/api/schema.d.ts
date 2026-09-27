@@ -188,7 +188,10 @@ export interface paths {
         delete: operations["delete_model_api_v1_models__slug__delete"];
         options?: never;
         head?: never;
-        /** Edit model metadata */
+        /**
+         * Edit model metadata
+         * @description `presets` replaces the template's own presets (#326) whole. Each preset's values are checked against the template's current schema as a saved preset's are (422), and every preset is written with its key as `id`, so reordering or renaming it later keeps it the same preset.
+         */
         patch: operations["patch_model_api_v1_models__slug__patch"];
         trace?: never;
     };
@@ -1962,6 +1965,8 @@ export interface components {
             description?: string | null;
             /** Name */
             name?: string | null;
+            /** Presets */
+            presets?: components["schemas"]["TemplatePreset"][] | null;
             /** Tags */
             tags?: string[] | null;
         };
@@ -2147,7 +2152,7 @@ export interface components {
             name: string;
             /**
              * Origin
-             * @description `template`: shipped in the template's presets.json, read-only. `mine`: saved here, editable -- on built-ins too.
+             * @description `template`: defined by the template in its model.json, read-only. `mine`: saved here, editable -- on built-ins too.
              * @enum {string}
              */
             origin: "template" | "mine";
@@ -3229,6 +3234,28 @@ export interface components {
             storage_location?: string | null;
             /** Subtype */
             subtype?: string | null;
+        };
+        /**
+         * TemplatePreset
+         * @description One preset a template defines in its ``model.json``.
+         *
+         *     ``id`` is what keeps it the same preset when the list is reordered or it is
+         *     renamed; without one, the key is derived from the name (:func:`template_preset_keys`).
+         *     ``description`` and ``tags`` are carried for #327, which puts them in the API.
+         */
+        TemplatePreset: {
+            /** Description */
+            description?: string;
+            /** Id */
+            id?: string | null;
+            /** Name */
+            name: string;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            };
+            /** Tags */
+            tags?: string[];
         };
         /**
          * Upstream

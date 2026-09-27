@@ -13,9 +13,11 @@ MODEL_META_NAME = "model.json"
 # so keeping it in the versioned tree would leave the repository permanently
 # dirty and fold a cache blob into the next unrelated metadata commit.
 SCHEMA_CACHE_NAME = "schema.json"
-#: Presets a template ships with, beside its source: read-only through the API. The
-#: presets people save are not kept here -- see :meth:`DataPaths.model_presets`.
-TEMPLATE_PRESETS_NAME = "presets.json"
+#: The file a template's presets used to ship in, beside its source. They are defined
+#: in ``model.json`` now (#326); this one is still read for a template that has it.
+#: The presets people save are not kept with a template -- see
+#: :meth:`DataPaths.model_presets`.
+LEGACY_PRESETS_NAME = "presets.json"
 #: Where the built-in templates are mirrored from the image, inside the models
 #: repository. Slugs are `[a-z0-9-]`, so it can never be one.
 BUILTIN_DIR = "_builtin"

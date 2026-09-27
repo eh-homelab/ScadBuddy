@@ -32,6 +32,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.presets import TemplatePreset, TemplatePresets
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -181,6 +182,16 @@ class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    #: The template's own presets (#326), replacing the list whole. Names unique
+    #: ignoring case, explicit ids unique; the route writes every key down.
+    presets: list[TemplatePreset] | None = None
+
+    @field_validator("presets")
+    @classmethod
+    def _presets_are_distinct(
+        cls, presets: list[TemplatePreset] | None
+    ) -> list[TemplatePreset] | None:
+        return None if presets is None else TemplatePresets(presets=presets).presets
 
     @field_validator("name")
     @classmethod
