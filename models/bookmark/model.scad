@@ -8,7 +8,8 @@
 // Everything prints flat, face up, without supports. The page-corner pocket
 // has a roof that bridges between its two joined edges.
 //
-// Pictures are uploaded through ScadBuddy's file widget (`// file:svg,png`),
+// Pictures are uploaded through ScadBuddy's file widget (`// file:svg,png`,
+// #204 / PR #231; older versions show a text box for a bare file name),
 // which stores the upload beside model.scad under a generated bare name, or
 // named directly from files in the model's own directory: an SVG is imported
 // as its outline; a PNG is read through surface() and the pixels darker than

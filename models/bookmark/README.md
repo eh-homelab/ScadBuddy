@@ -303,7 +303,11 @@ Last run: `OK: all cases passed` (31 cases, 363 checks).
 
 ## Upload widget (#204)
 
-The file widget from #204 applies here: both
+The upload widget needs a ScadBuddy with file parameters (#204, shipped by
+PR #231). On an older ScadBuddy both fields are plain text boxes: type a bare
+file name that sits in this model's directory, such as `sample-cat.svg`.
+
+With the widget, both
 file parameters are annotated `// file:svg,png`, the model accepts the
 generated upload names (`verify.sh` renders a case with two of them), and the
 `auto` type means a PNG upload needs no other change. What this template
