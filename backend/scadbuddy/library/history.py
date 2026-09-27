@@ -41,6 +41,7 @@ import re
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -437,6 +438,12 @@ class ModelHistory:
             raise RevisionNotFoundError(commit)
         return resolved
 
+    def touched(self, commit: str, path: str) -> bool:
+        """Whether ``commit`` (a full id, as :meth:`resolve` answers) changed ``path``."""
+        completed = self._run("log", "-1", "--format=%H", commit, "--", path, check=False)
+        assert isinstance(completed.stdout, str)
+        return completed.returncode == 0 and completed.stdout.strip() == commit
+
     def last_commit(self, slug: str) -> str | None:
         """The revision a model is currently at: the last commit that touched it.
 
@@ -468,6 +475,14 @@ class ModelHistory:
             if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
                 return None
         return None
+
+    def blobs(self, commit: str, path: str) -> dict[str, str]:
+        """Each file under ``path`` at ``commit``, relative to ``path``, to its blob id."""
+        blobs: dict[str, str] = {}
+        for line in self._out("ls-tree", "-r", commit, "--", f"{path}/").splitlines():
+            meta, _, name = line.partition("\t")
+            blobs[name.removeprefix(f"{path}/")] = meta.split()[2]
+        return blobs
 
     def last_commits(self) -> dict[str, str]:
         """Every model's current revision, from ONE walk of the history.
@@ -579,6 +594,38 @@ class ModelHistory:
                 if member.name.startswith(prefix) and member.name != prefix
             ]
             archive.extractall(dest, members=members, filter="data")
+
+    def files_at(self, commit: str, path: str) -> list[str]:
+        """The files under ``path`` at ``commit``, relative to ``path``."""
+        prefix = f"{path}/"
+        return [name[len(prefix) :] for name in self._files_at(commit, path)]
+
+    def merge_file(
+        self, ours: str, base: str, theirs: str, *, labels: tuple[str, str, str]
+    ) -> tuple[str, int]:
+        """``git merge-file -p --diff3`` over three texts: the result and its conflict count.
+
+        Needs no repository -- the three sides are temporary files -- but runs through
+        the same hermetic invocation as everything else here.
+        """
+        with tempfile.TemporaryDirectory(prefix="scadbuddy-merge-") as scratch:
+            sides = []
+            for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+                side = Path(scratch) / name
+                side.write_bytes(text.encode())
+                sides.append(str(side))
+            label_args = [arg for label in labels for arg in ("-L", label)]
+            # Bytes both ways: text mode would turn a CRLF result into LF.
+            completed = self._run(
+                "merge-file", "-p", "--diff3", *label_args, *sides, check=False, text=False
+            )
+        assert isinstance(completed.stdout, bytes)
+        # The exit status is the number of conflicts (capped at 127); a negative
+        # one -- 255 as an unsigned status -- is a failure to merge at all.
+        if completed.returncode < 0 or completed.returncode > 127:
+            stderr = completed.stderr.decode("utf-8", "replace")
+            raise GitError(f"git merge-file failed: {stderr.strip()}", stderr)
+        return completed.stdout.decode(), completed.returncode
 
     def _files_at(self, commit: str, slug: str) -> list[str]:
         return [

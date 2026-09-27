@@ -223,6 +223,31 @@ def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
     assert history.last_commits() == {}
 
 
+def test_merge_file_merges_clean_edits_and_counts_conflicts(history: ModelHistory) -> None:
+    base = "a = 1;\nb = 2;\nc = 3;\nd = 4;\ne = 5;\n"
+    ours = base.replace("a = 1;", "a = 10;")
+
+    merged, conflicts = history.merge_file(
+        ours, base, base.replace("e = 5;", "e = 50;"), labels=("ours", "base", "theirs")
+    )
+    assert (merged, conflicts) == (ours.replace("e = 5;", "e = 50;"), 0)
+
+    marked, conflicts = history.merge_file(
+        ours, base, base.replace("a = 1;", "a = 11;"), labels=("ours", "base", "theirs")
+    )
+    assert conflicts == 1
+    assert marked.startswith("<<<<<<< ours\na = 10;\n||||||| base\na = 1;\n=======\na = 11;\n")
+
+
+def test_files_at_lists_a_directory_relative_to_itself(models: Path, history: ModelHistory) -> None:
+    write_model(models, "_builtin/keychain", "cube(10);\n")
+    (models / "_builtin/keychain/README.md").write_text("hi\n", encoding="utf-8")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    assert history.files_at(commit, "_builtin/keychain") == ["README.md", "model.scad"]
+
+
 def test_show_reads_a_file_at_a_revision(models: Path, history: ModelHistory) -> None:
     write_model(models, "keychain", "cube(10);\n")
     first = history.ensure_repo()
@@ -931,3 +956,73 @@ def test_one_template_that_cannot_be_linked_does_not_stop_the_rest(
     assert [getattr(record, "slug", None) for record in caplog.records if record.exc_info] == [
         "tag"
     ]
+
+
+def test_a_freshly_linked_seeded_template_has_no_update_until_its_built_in_changes(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+
+    catalogue.link_seeded()
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.state == "current"
+    assert status.upstream.path == "_builtin/name-keychain"
+    assert status.upstream.base == status.revision
+    assert _merge(catalogue, "name-keychain") == KEYCHAIN
+
+
+def test_a_linked_seeded_template_takes_a_built_in_update(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    _seeded(catalogue, "name-keychain", KEYCHAIN)
+    catalogue.write_source("name-keychain", KEYCHAIN.replace('"hi"', '"mine"'))
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", KEYCHAIN)
+    catalogue.sync_builtins(image)
+    catalogue.link_seeded()
+    _bundle(image, "name-keychain", KEYCHAIN.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.state == "update"
+    assert status.preview is not None and status.preview.clean
+
+    record, plan = catalogue.merge_upstream("name-keychain")
+
+    assert plan.conflicts == 0
+    assert catalogue.paths.model_source("name-keychain").read_text(encoding="utf-8") == (
+        KEYCHAIN.replace('"hi"', '"mine"').replace("size = 10", "size = 12")
+    )
+    assert record.upstream is not None
+    assert record.upstream.path == "_builtin/name-keychain"
+    assert record.upstream.base == status.revision
+    assert catalogue.upstream_status("name-keychain").state == "current"
+
+
+def test_a_crlf_template_takes_a_built_in_update_and_keeps_its_line_endings(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    crlf = KEYCHAIN.replace("\n", "\r\n")
+    _seeded(catalogue, "name-keychain", crlf)
+    catalogue.write_source("name-keychain", crlf.replace('"hi"', '"mine"'))
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", crlf)
+    catalogue.sync_builtins(image)
+    catalogue.link_seeded()
+    _bundle(image, "name-keychain", crlf.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.preview is not None and status.preview.clean
+
+    _, plan = catalogue.merge_upstream("name-keychain")
+
+    assert plan.conflicts == 0
+    assert catalogue.paths.model_source("name-keychain").read_bytes() == (
+        crlf.replace('"hi"', '"mine"').replace("size = 10", "size = 12").encode()
+    )

@@ -34,7 +34,12 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
     SidecarNotFoundError,
 )
-from scadbuddy.library.history import MAX_SUBJECT, GitError
+from scadbuddy.library.history import (
+    COMMIT_ID_PATTERN,
+    MAX_SUBJECT,
+    GitError,
+    GitUnavailableError,
+)
 from scadbuddy.library.libraries import model_search_path, read_lock, search_path
 from scadbuddy.library.scad import (
     CheckedSource,
@@ -51,6 +56,11 @@ from scadbuddy.library.slugs import (
     InvalidSlugError,
     slug_from_filename,
     slugify,
+)
+from scadbuddy.library.upstream import (
+    InvalidMergeBaseError,
+    NoUpstreamError,
+    has_conflict_markers,
 )
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
@@ -705,10 +715,36 @@ def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: Catalogue
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
-@router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
-def delete_model(slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep) -> Response:
+@router.delete(
+    "/models/{slug}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a model",
+    description=(
+        "409 while templates of mine are duplicates of it, with how many as "
+        "`duplicates` (and which, as `slugs`); `?force=true` deletes it anyway, and "
+        "they report their upstream as `gone`."
+    ),
+)
+def delete_model(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    queue: QueueDep,
+    force: Annotated[
+        bool, Query(description="Delete even when duplicates track this template")
+    ] = False,
+) -> Response:
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    if not force:
+        duplicates = catalogue.duplicates_of(slug)
+        if duplicates:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{len(duplicates)} template(s) are duplicates of {slug!r} and would lose "
+                "their upstream; delete with ?force=true to go ahead",
+                duplicates=len(duplicates),
+                slugs=duplicates,
+            )
     # Best effort, not a lock: a render submitted after this check reads a model
     # that is gone and fails as an ordinary job error, which is harmless.
     if queue.store.has_unfinished(slug):
@@ -742,7 +778,11 @@ def get_source(slug: SlugPath, catalogue: CatalogueDep, paths: PathsDep) -> File
         "Parse-checks the replacement against the model's own directory (skipped with "
         "`force`), then writes it as one revision in the model's history, named by "
         "`message` when given, and re-derives the customizer schema so the next "
-        "customizer open does not pay for it."
+        "customizer open does not pay for it. `merge_base` saves the resolution of a "
+        "conflicted upstream merge: the source must carry no conflict markers (`force` "
+        "does not skip that), `merge_base` must be a revision of the upstream (422 "
+        "otherwise, writing nothing), and the duplicate's `base` becomes it in the same "
+        "commit, `Merge <upstream id> into <slug>` unless `message` names it."
     ),
 )
 async def put_source(
@@ -753,12 +793,24 @@ async def put_source(
     config: ConfigDep,
     checks: ChecksDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
+    merge_base: Annotated[
+        str | None,
+        Query(
+            pattern=COMMIT_ID_PATTERN,
+            description="The upstream revision this resolves a merge of: the 409's `merge_base`",
+        ),
+    ] = None,
 ) -> ModelRecord:
     # `require_model_exists`, not `require_model`: building a record costs a
     # `git log` for the model's revision, and this handler is `async def`. The
     # record `write_source` returns carries the new revision anyway.
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    if merge_base is not None and has_conflict_markers(body.source):
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source still has conflict markers; resolve every conflict first",
+        )
     library_path = await asyncio.to_thread(model_search_path, paths, slug)
     checked = await _guard_source(
         body.source,
@@ -772,11 +824,24 @@ async def put_source(
     )
     try:
         record = await asyncio.to_thread(
-            catalogue.write_source, slug, body.source, message=body.message
+            catalogue.write_source, slug, body.source, message=body.message, merge_base=merge_base
         )
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except NoUpstreamError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, f"{slug!r} is not a duplicate, so it has no merge to resolve"
+        ) from None
+    except InvalidMergeBaseError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except GitUnavailableError:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "model history is unavailable: no git repository under the models directory",
+        ) from None
+    except GitError as error:
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     if checked is not None and checked.schema is not None:
         # After the write: `write_source` drops the old cache entry.
         store_cached_schema(
