@@ -247,17 +247,19 @@ class Catalogue:
     ) -> ModelRecord:
         if self.exists(slug):
             raise ModelExistsError(slug)
-        directory = self.paths.model_dir(slug)
-        directory.mkdir(parents=True, exist_ok=True)
-        # After the mkdir, so the window between `exists` and claiming the slug
-        # is no wider than it was.
-        self._clear_derived(slug)
-        self.paths.model_source(slug).write_text(source, encoding="utf-8")
-        self.write_raw_meta(slug, meta.model_dump())
-        if thumbnail is not None:
-            self.thumbnail_path(slug).write_bytes(thumbnail)
-        if readme is not None:
-            self.readme_path(slug).write_text(readme, encoding="utf-8")
+        directory = self._claim(slug)
+        try:
+            self.paths.model_source(slug).write_text(source, encoding="utf-8")
+            self.write_raw_meta(slug, meta.model_dump())
+            if thumbnail is not None:
+                self.thumbnail_path(slug).write_bytes(thumbnail)
+            if readme is not None:
+                self.readme_path(slug).write_text(readme, encoding="utf-8")
+        except BaseException:
+            # The claim is exclusive, so the directory is this create's alone: a
+            # half-written one left behind would hold the slug for good.
+            _remove_tree(directory)
+            raise
         self._commit(f"Add {slug}", slug)
         return self.record(slug)
 
@@ -307,20 +309,19 @@ class Catalogue:
                 id=upstream_id, path=model_path(upstream_id), base=base
             ).model_dump()
             meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-            # Claim the slug with an empty directory first, as `create` does, and
-            # only then clear what an earlier model of this slug left behind: the
-            # copy must never be visible beside a previous occupant's schema cache,
-            # outputs or revisions.
-            try:
-                target.mkdir()
-            except FileExistsError:
-                raise ModelExistsError(slug) from None
-            self._clear_derived(slug)
-            # Onto the empty directory just made, the rename replaces it whole.
+            # Claimed as `create` claims, so the copy is never visible beside a
+            # previous occupant's schema cache, outputs or revisions.
+            self._claim(slug)
+            # Onto the empty directory just claimed, the rename replaces it whole.
             try:
                 staged.rename(target)
-            except OSError:
-                target.rmdir()
+            except OSError as error:
+                # Only an empty claim is still ours to give back: `rmdir` refuses
+                # anything something else has written into, and that is left alone.
+                try:
+                    target.rmdir()
+                except OSError:
+                    raise ModelExistsError(slug) from error
                 raise
         finally:
             _remove_tree(staging)
@@ -460,6 +461,24 @@ class Catalogue:
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
         return removed
+
+    def _claim(self, slug: str) -> Path:
+        """Make ``slug``'s directory, or raise ModelExistsError if anything has it.
+
+        The one way a new model takes its slug, and exclusive (no ``exist_ok``):
+        of two creates or duplicates racing for a slug, the second is refused
+        rather than writing into, or renamed over, the first one's directory.
+        What an earlier model of the slug left behind is cleared only once the
+        claim is held.
+        """
+        directory = self.paths.model_dir(slug)
+        directory.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            raise ModelExistsError(slug) from None
+        self._clear_derived(slug)
+        return directory
 
     def _clear_derived(self, slug: str) -> None:
         """Remove what an earlier model of this slug left behind, before it is reused.

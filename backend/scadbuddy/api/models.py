@@ -31,7 +31,7 @@ from scadbuddy.library.catalogue import (
     ModelPatch,
     ModelRecord,
 )
-from scadbuddy.library.history import MAX_SUBJECT
+from scadbuddy.library.history import MAX_SUBJECT, GitError
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -533,6 +533,10 @@ def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: Catalogue
     except ModelNotFoundError:
         # A concurrent delete of the upstream got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except GitError as error:
+        # Reading the upstream at `base` failed; as every other route that reads
+        # the history maps it. Nothing of the duplicate is left behind.
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")

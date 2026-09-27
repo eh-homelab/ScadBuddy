@@ -12,6 +12,8 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from tests.api.conftest import PNG_BYTES
 
 pytestmark = pytest.mark.requires_git
@@ -185,3 +187,132 @@ def test_a_duplicate_is_the_revision_it_records_as_base(
 
     assert again["upstream"]["base"] == mine["version"]
     assert client.get(f"/api/v1/models/{again['slug']}/source").text == SOURCE
+
+
+def _no_staging_left(paths: DataPaths) -> bool:
+    return not any(path.name.startswith("duplicate-") for path in paths.cache.iterdir())
+
+
+def _interrupt_first_claim(monkeypatch: pytest.MonkeyPatch, interloper: Any) -> None:
+    """Run ``interloper`` once, right after the first slug claim, before its writer
+    fills or renames into the directory: the window two racing requests share."""
+    claim = Catalogue._claim
+    fired: list[bool] = []
+
+    def claiming(self: Catalogue, slug: str) -> Path:
+        directory = claim(self, slug)
+        if not fired:
+            fired.append(True)
+            interloper(directory)
+        return directory
+
+    monkeypatch.setattr(Catalogue, "_claim", claiming)
+
+
+def test_a_create_racing_a_duplicate_for_its_slug_is_a_409(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raced: list[Any] = []
+    _interrupt_first_claim(
+        monkeypatch,
+        lambda _: raced.append(
+            client.post(
+                "/api/v1/models", json={"name": "Copy", "source": "cube(1);\n", "force": True}
+            )
+        ),
+    )
+
+    record = _duplicate(client, BUILTIN, "Copy")
+
+    assert raced[0].status_code == 409, raced[0].text
+    assert record["upstream"]["id"] == BUILTIN
+    assert client.get("/api/v1/models/copy/source").text == SOURCE
+    assert _no_staging_left(paths)
+
+
+def test_a_duplicate_racing_a_create_for_its_slug_is_a_409(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raced: list[Any] = []
+    _interrupt_first_claim(
+        monkeypatch,
+        lambda _: raced.append(
+            client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+        ),
+    )
+
+    created = client.post(
+        "/api/v1/models", json={"name": "Copy", "source": "cube(1);\n", "force": True}
+    )
+
+    assert created.status_code == 201, created.text
+    assert raced[0].status_code == 409, raced[0].text
+    assert client.get("/api/v1/models/copy/source").text == "cube(1);\n"
+    assert client.get("/api/v1/models/copy").json()["upstream"] is None
+    assert _no_staging_left(paths)
+
+
+def test_a_claim_written_into_refuses_the_rename_and_keeps_what_was_written(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Something that bypassed the claim wrote into it: the rename fails, and what it
+    wrote is neither overwritten nor removed with the claim."""
+    _interrupt_first_claim(
+        monkeypatch,
+        lambda directory: (directory / "model.scad").write_text("cube(2);\n", encoding="utf-8"),
+    )
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 409, response.text
+    assert paths.model_source("copy").read_text(encoding="utf-8") == "cube(2);\n"
+    assert _no_staging_left(paths)
+
+
+def test_a_git_failure_reading_the_upstream_is_a_problem_and_leaves_nothing(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def export(self: ModelHistory, slug: str, commit: str, dest: Path) -> None:
+        raise GitTimeoutError("git archive timed out after 1s")
+
+    monkeypatch.setattr(ModelHistory, "export", export)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "git archive timed out after 1s"
+    assert not paths.model_dir("copy").exists()
+    assert _no_staging_left(paths)
+    # The slug is still free.
+    monkeypatch.undo()
+    _duplicate(client, BUILTIN, "Copy")
+
+
+def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
+    catalogue = Catalogue(paths)
+    catalogue.create(
+        "keychain", SOURCE, ModelMeta(name="Keychain", tags=["t"]), thumbnail=THUMBNAIL
+    )
+    # A source write in flight, which the copy must leave out.
+    (paths.model_dir("keychain") / ".model-x.scad").write_text("torn", encoding="utf-8")
+
+    record = catalogue.duplicate("keychain", "copy", "Copy")
+
+    assert record.version is None
+    assert record.upstream is not None
+    assert record.upstream.model_dump() == {
+        "id": "keychain",
+        "path": "keychain",
+        "base": None,
+        "dismissed": None,
+    }
+    assert record.name == "Copy"
+    assert record.tags == ["t"]
+    assert paths.model_source("copy").read_text(encoding="utf-8") == SOURCE
+    assert catalogue.thumbnail_path("copy").read_bytes() == THUMBNAIL
+    assert sorted(path.name for path in paths.model_dir("copy").iterdir()) == [
+        "model.json",
+        "model.scad",
+        "thumbnail.png",
+    ]
+    assert _no_staging_left(paths)
