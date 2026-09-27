@@ -1,5 +1,7 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
+import { BUILTIN_SLUG, versionIds } from './fixtures'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -148,5 +150,59 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     const { status, body } = await upload({ tags: '[not json' })
     expect(status).toBe(422)
     expect(body.detail).toBe('tags is not valid JSON')
+  })
+})
+
+const refusal = `'${BUILTIN_SLUG}' is a built-in template and is read-only`
+
+describe('mock API: a built-in template (#192)', () => {
+  it.each([
+    ['delete', () => api.deleteModel(BUILTIN_SLUG)],
+    ['replace the source of', () => api.replaceSource(BUILTIN_SLUG, 'cube(1);\n')],
+    ['restore a revision of', () => api.restoreVersion(BUILTIN_SLUG, versionIds.builtinFirst)],
+  ])('refuses to %s one with the 403 require_mine answers', async (_, write) => {
+    const error: unknown = await write().catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  it('refuses a metadata edit the same way', async () => {
+    const response = await fetch(`/api/v1/models/${encodeURIComponent(BUILTIN_SLUG)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: 'Mine now' }),
+    })
+    expect(response.status).toBe(403)
+    expect(response.headers.get('Content-Type')).toBe('application/problem+json')
+    expect(await response.json()).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  // #179's details writes, refused the same way, before anything is read or written.
+  it.each([
+    ['remove the thumbnail of', () => api.removeThumbnail(BUILTIN_SLUG)],
+    ['set the README of', () => api.setReadme(BUILTIN_SLUG, '# Mine now\n')],
+    ['remove the README of', () => api.removeReadme(BUILTIN_SLUG)],
+  ])('refuses to %s one with the same 403', async (_, write) => {
+    const error: unknown = await write().catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  it('refuses a new thumbnail the same way', async () => {
+    // A bare body: the refusal comes before the upload is read.
+    const response = await fetch(`/api/v1/models/${encodeURIComponent(BUILTIN_SLUG)}/thumbnail`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'image/png' },
+      body: 'png',
+    })
+    expect(response.status).toBe(403)
+    expect(await response.json()).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  it('still serves every read', async () => {
+    expect((await api.getModel(BUILTIN_SLUG)).origin).toBe('builtin')
+    expect(await api.listVersions(BUILTIN_SLUG)).toHaveLength(2)
+    expect((await api.getSchema(BUILTIN_SLUG)).title).toBe('Keychain Template')
+    expect(await api.getSource(BUILTIN_SLUG)).toContain('/* [Text] */')
   })
 })

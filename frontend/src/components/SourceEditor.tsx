@@ -22,6 +22,7 @@ interface Props {
   /** The openscad-lsp WebSocket path; without one the editor has no completion or hover. */
   languageServer?: string
   label: string
+  readOnly?: boolean
 }
 
 const OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
@@ -37,12 +38,22 @@ const OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
   padding: { top: 8, bottom: 8 },
 }
 
+const READ_ONLY_OPTIONS = { ...OPTIONS, readOnly: true }
+
 /**
  * The one place that knows an editor is involved. Its props are `value`/`onChange`/
  * `errors`, so swapping the implementation — or bolting a language client onto it —
  * touches nothing else.
  */
-export function SourceEditor({ value, onChange, errors = [], uri, languageServer, label }: Props) {
+export function SourceEditor({
+  value,
+  onChange,
+  errors = [],
+  uri,
+  languageServer,
+  label,
+  readOnly = false,
+}: Props) {
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
   const [textModel, setTextModel] = useState<Monaco.editor.ITextModel | null>(null)
 
@@ -91,7 +102,7 @@ export function SourceEditor({ value, onChange, errors = [], uri, languageServer
         setTextModel(instance.getModel())
         instance.onDidChangeModel(() => setTextModel(instance.getModel()))
       }}
-      options={OPTIONS}
+      options={readOnly ? READ_ONLY_OPTIONS : OPTIONS}
       loading={<span className="text-[13px] text-muted">Loading the editor</span>}
     />
   )

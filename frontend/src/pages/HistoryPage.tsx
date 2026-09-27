@@ -6,7 +6,7 @@ import { ColorStrip } from '../components/ColorStrip'
 import { SendDialog } from '../components/SendDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
-import { editPath, editTargetFor, type EditNavigationState } from '../lib/deeplink'
+import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
@@ -48,7 +48,7 @@ export function HistoryPage() {
             Models
           </Link>
           <span className="text-faint">/</span>
-          <Link to={`/m/${slug}`} className="text-[12px] text-muted hover:text-ink">
+          <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
             {schemaState.data?.title ?? slug}
           </Link>
           <span className="text-faint">/</span>
@@ -67,7 +67,7 @@ export function HistoryPage() {
             <p className="mt-2 text-[13px] text-muted">
               Every output you generate is kept here with the parameters that made it.
             </p>
-            <Button variant="primary" className="mt-4" onClick={() => void navigate(`/m/${slug}`)}>
+            <Button variant="primary" className="mt-4" onClick={() => void navigate(modelPath(slug))}>
               Open the customizer
             </Button>
           </div>

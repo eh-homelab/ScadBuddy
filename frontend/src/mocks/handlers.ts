@@ -49,7 +49,10 @@ const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
-  sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
+  sources: {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  } as Record<string, string>,
   /** #179 — README text per model; a model's `has_readme` follows it. */
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
@@ -79,7 +82,10 @@ export function resetMockState(): void {
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
-  state.sources = { 'name-keychain': fixtures.keychainSource }
+  state.sources = {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
@@ -259,6 +265,16 @@ function firstName(...candidates: (string | undefined)[]): string {
     if (candidate?.trim()) return candidate.trim()
   }
   return ''
+}
+
+/**
+ * `require_mine` in `api/models.py`: a built-in is refused before the model is even
+ * looked up, with the backend's problem (403 is not in its title table, so "Error").
+ */
+function refuseBuiltin(slug: string) {
+  return slug.startsWith('builtin:')
+    ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
+    : undefined
 }
 
 function slugify(value: string): string {
@@ -453,6 +469,8 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Model not found')
     const body = (await request.json()) as {
@@ -475,6 +493,8 @@ export const handlers = [
 
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const patch = (await request.json()) as ModelPatch
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
@@ -488,6 +508,8 @@ export const handlers = [
   // Multipart with a `file` part, like the output thumbnail PUT.
   http.put(`${base}/models/:slug/thumbnail`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
     const updated = reviseModel(
       slug,
@@ -500,6 +522,8 @@ export const handlers = [
 
   http.delete(`${base}/models/:slug/thumbnail`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Model not found')
     if (model.thumbnail_source !== 'model') {
@@ -531,6 +555,8 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/readme`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const { content } = (await request.json()) as { content: string }
     const had = state.readmes[slug] !== undefined
     const updated = reviseModel(slug, `Set ${slug} README`, [
@@ -543,6 +569,8 @@ export const handlers = [
 
   http.delete(`${base}/models/:slug/readme`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     if (state.readmes[slug] === undefined) {
       return problem(404, 'Not Found', `'${slug}' has no README to remove`)
@@ -560,6 +588,8 @@ export const handlers = [
   }),
 
   http.delete(`${base}/models/:slug`, ({ params }) => {
+    const refused = refuseBuiltin(String(params['slug']))
+    if (refused) return refused
     if (!state.models.some((m) => m.slug === params['slug'])) {
       return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
     }
@@ -600,6 +630,8 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/versions/:commit/restore`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const commit = String(params['commit'])
     const entries = state.versions[slug] ?? []
     const target = entries.find((v) => v.commit === commit)

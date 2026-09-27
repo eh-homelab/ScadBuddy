@@ -4,7 +4,7 @@ import { HttpResponse, http } from 'msw'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { BROKEN_SOURCE, keychainSource } from '../mocks/fixtures'
+import { BROKEN_SOURCE, BUILTIN_SLUG, keychainSource } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { EditSourcePage } from './EditSourcePage'
 
@@ -13,13 +13,16 @@ vi.mock('../components/SourceEditor', () => ({
     value,
     onChange,
     label,
+    readOnly,
   }: {
     value: string
     onChange: (next: string) => void
     label: string
+    readOnly?: boolean
   }) => (
     <textarea
       aria-label={label}
+      readOnly={readOnly}
       value={value}
       onChange={(event) => onChange(event.target.value)}
     />
@@ -103,5 +106,51 @@ describe('EditSourcePage', () => {
       expect(last?.[1]).toBe('name-keychain')
     })
     check.mockRestore()
+  })
+
+  it('offers to save the source of a model of the user\'s own', async () => {
+    renderEdit()
+    expect(await screen.findByLabelText('OpenSCAD source')).not.toHaveAttribute('readonly')
+    expect(screen.getByRole('button', { name: 'Save source' })).toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+  })
+
+  it('says so when the model record fails to load, and a retry brings Save back', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        fail
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = renderEdit()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(screen.getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
+    // Enabled once the parse check on open has settled.
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Save source' })).toBeEnabled())
+    expect(screen.queryByText('Could not load this model')).not.toBeInTheDocument()
+  })
+
+  it('shows a built-in template read-only, with nothing to save (#184)', async () => {
+    renderEdit(encodeURIComponent(BUILTIN_SLUG))
+    const editor = await screen.findByLabelText('OpenSCAD source')
+
+    expect(editor).toHaveValue(keychainSource)
+    expect(editor).toHaveAttribute('readonly')
+    expect(screen.getByRole('heading', { name: 'View source' })).toBeInTheDocument()
+    expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
+    expect(screen.queryByRole('button', { name: 'Save source' })).not.toBeInTheDocument()
+    expect(screen.getByRole('link', { name: BUILTIN_SLUG })).toHaveAttribute(
+      'href',
+      '/m/builtin%3Akeychain-template',
+    )
   })
 })

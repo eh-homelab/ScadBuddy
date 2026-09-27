@@ -7,12 +7,12 @@ import { DeleteModelButton } from '../components/DeleteModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
+import { Button } from '../components/ui/Button'
 
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
-import { isBuiltin } from '../lib/builtin'
-import { editPath, type EditNavigationState } from '../lib/deeplink'
+import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { fitMessages } from '../lib/plate'
 import { useAsync } from '../lib/useAsync'
@@ -32,6 +32,10 @@ export function CustomizePage() {
   const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #184 — a built-in is read-only on the server; the write actions only show once
+  // the record says the model is the user's, so a built-in never flashes them.
+  const modelState = useAsync(() => api.getModel(slug), [slug])
+  const origin = modelState.data?.origin
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
   // own provenance when the output record is gone. EditPage has usually resolved it
   // already and passed it in state, so arriving that way costs no second request.
@@ -145,7 +149,7 @@ export function CustomizePage() {
   if (foreign) {
     return (
       <Navigate
-        to={`/m/${foreign.slug}?from=${foreign.output_id}`}
+        to={`${modelPath(foreign.slug)}?from=${foreign.output_id}`}
         state={{ editTarget: foreign } satisfies EditNavigationState}
         replace
       />
@@ -175,7 +179,7 @@ export function CustomizePage() {
   }
 
   return (
-    <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)]">
+    <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
         <div className="flex min-w-0 items-baseline gap-2">
           <Link to="/" className="shrink-0 text-[12px] text-muted hover:text-ink">
@@ -211,20 +215,30 @@ export function CustomizePage() {
               Back to current
             </button>
           )}
+          {origin === 'builtin' && (
+            <span
+              data-testid="builtin-badge"
+              className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+            >
+              Built-in template — read-only
+            </span>
+          )}
+          {origin && (
+            <Link
+              to={modelPath(slug, 'source')}
+              className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+            >
+              {origin === 'builtin' ? 'View source' : 'Edit source'}
+            </Link>
+          )}
           <Link
-            to={`/m/${slug}/source`}
-            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-          >
-            Edit source
-          </Link>
-          <Link
-            to={`/m/${slug}/versions`}
+            to={modelPath(slug, 'versions')}
             className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
           >
             Versions
           </Link>
           <Link
-            to={`/m/${slug}/history`}
+            to={modelPath(slug, 'history')}
             className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
           >
             History
@@ -232,10 +246,25 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
-          {/* A built-in's details are the image's; the server refuses every write. */}
-          {!isBuiltin(slug) && <EditDetailsButton slug={slug} />}
-          <DeleteModelButton slug={slug} name={schema.title ?? slug} />
+          {/* #184: only a template of mine is writable, so its details are too. */}
+          {origin === 'mine' && <EditDetailsButton slug={slug} />}
+          {origin === 'mine' && <DeleteModelButton slug={slug} name={schema.title ?? slug} />}
         </div>
+      </div>
+
+      {/* The write actions wait on the record, so a failed fetch has to say so. */}
+      <div>
+        {modelState.error && (
+          <div
+            role="alert"
+            className="flex items-center gap-3 border-b border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
+          >
+            <span>Could not load this model&apos;s details: {modelState.error.message}</span>
+            <Button size="sm" onClick={modelState.reload}>
+              Try again
+            </Button>
+          </div>
+        )}
       </div>
 
       <div className="grid min-h-0 grid-cols-1 lg:grid-cols-[minmax(300px,360px)_minmax(0,1fr)]">

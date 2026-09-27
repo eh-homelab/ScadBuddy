@@ -7,6 +7,7 @@ import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
@@ -19,7 +20,7 @@ export function CataloguePage() {
 
   function added(model: ModelSummary) {
     setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
-    void navigate(`/m/${model.slug}`)
+    void navigate(modelPath(model.slug))
   }
 
   return (
@@ -93,13 +94,18 @@ function ModelCard({ model }: { model: ModelSummary }) {
   const origin = safeHttpUrl(model.origin_url)
   return (
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
-      <Link to={`/m/${model.slug}`} className="block p-3 focus-visible:rounded-[6px]">
+      <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
         <ModelThumbnail
           src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
           alt={model.name}
         />
 
         <h2 className="mt-3 text-[14px] font-medium">{model.name}</h2>
+        {model.origin === 'builtin' && (
+          <p data-testid="builtin-badge" className="mt-0.5 text-[11px] text-faint">
+            Built-in template — read-only
+          </p>
+        )}
         {model.description && (
           <p className="mt-1 line-clamp-2 text-[13px] leading-snug text-muted">
             {model.description}
