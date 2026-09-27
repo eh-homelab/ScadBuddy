@@ -985,3 +985,27 @@ def test_a_linked_seeded_template_takes_a_built_in_update(
     assert record.upstream.path == "_builtin/name-keychain"
     assert record.upstream.base == status.revision
     assert catalogue.upstream_status("name-keychain").state == "current"
+
+
+def test_a_crlf_template_takes_a_built_in_update_and_keeps_its_line_endings(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    crlf = KEYCHAIN.replace("\n", "\r\n")
+    _seeded(catalogue, "name-keychain", crlf)
+    catalogue.write_source("name-keychain", crlf.replace('"hi"', '"mine"'))
+    image = tmp_path / "image"
+    _bundle(image, "name-keychain", crlf)
+    catalogue.sync_builtins(image)
+    catalogue.link_seeded()
+    _bundle(image, "name-keychain", crlf.replace("size = 10", "size = 12"))
+    catalogue.sync_builtins(image)
+
+    status = catalogue.upstream_status("name-keychain")
+    assert status.preview is not None and status.preview.clean
+
+    _, plan = catalogue.merge_upstream("name-keychain")
+
+    assert plan.conflicts == 0
+    assert catalogue.paths.model_source("name-keychain").read_bytes() == (
+        crlf.replace('"hi"', '"mine"').replace("size = 10", "size = 12").encode()
+    )

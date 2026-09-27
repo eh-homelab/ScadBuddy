@@ -145,7 +145,9 @@ def plan_merge(
     revision -- and ``theirs`` from where the upstream lives now.
     """
     theirs_path = model_path(upstream.id)
-    ours = (directory / SOURCE_NAME).read_text(encoding="utf-8")
+    # All three sides as bytes, decoded alike: no newline translation, so a CRLF
+    # source compares line for line and keeps its line endings.
+    ours = (directory / SOURCE_NAME).read_bytes().decode()
     base = (_read(history, upstream.base, f"{upstream.path}/{SOURCE_NAME}") or b"").decode()
     theirs = (_read(history, revision, f"{theirs_path}/{SOURCE_NAME}") or b"").decode()
     base_label = f"{upstream.id}@{upstream.base[:7]}" if upstream.base else "base"

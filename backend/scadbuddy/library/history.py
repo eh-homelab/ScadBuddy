@@ -612,16 +612,20 @@ class ModelHistory:
             sides = []
             for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
                 side = Path(scratch) / name
-                side.write_text(text, encoding="utf-8")
+                side.write_bytes(text.encode())
                 sides.append(str(side))
             label_args = [arg for label in labels for arg in ("-L", label)]
-            completed = self._run("merge-file", "-p", "--diff3", *label_args, *sides, check=False)
-        assert isinstance(completed.stdout, str)
+            # Bytes both ways: text mode would turn a CRLF result into LF.
+            completed = self._run(
+                "merge-file", "-p", "--diff3", *label_args, *sides, check=False, text=False
+            )
+        assert isinstance(completed.stdout, bytes)
         # The exit status is the number of conflicts (capped at 127); a negative
         # one -- 255 as an unsigned status -- is a failure to merge at all.
         if completed.returncode < 0 or completed.returncode > 127:
-            raise GitError(f"git merge-file failed: {completed.stderr.strip()}", completed.stderr)
-        return completed.stdout, completed.returncode
+            stderr = completed.stderr.decode("utf-8", "replace")
+            raise GitError(f"git merge-file failed: {stderr.strip()}", stderr)
+        return completed.stdout.decode(), completed.returncode
 
     def _files_at(self, commit: str, slug: str) -> list[str]:
         return [
