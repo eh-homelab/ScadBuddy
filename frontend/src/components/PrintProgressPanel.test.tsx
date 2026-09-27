@@ -166,6 +166,25 @@ describe('PrintProgressPanel', () => {
     expect(panel).not.toHaveTextContent('plates queued')
   })
 
+  it('says a single-plate slice failed rather than that it is still slicing', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          queue_item_id: null,
+          stage: 'failed',
+          settled: true,
+          copies_detail: [],
+        }}
+        polling={false}
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('Slice — failed')
+    expect(panel).not.toHaveTextContent('Slicing…')
+  })
+
   it('spins only while the caller is still polling', () => {
     const { container, rerender } = render(
       <PrintProgressPanel progress={fixtures.pipelineProgress} polling />,

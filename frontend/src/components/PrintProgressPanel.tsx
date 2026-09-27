@@ -69,6 +69,10 @@ function headline(progress: PrintProgress): string {
     return `${progress.copies} plates queued`
   }
   if (progress.queue_item_id === null || progress.queue_item_id === undefined) {
+    // A slice that failed or was cancelled never becomes a queue item.
+    if (progress.stage === 'failed' || progress.stage === 'cancelled') {
+      return `Slice — ${progress.stage}`
+    }
     return 'Slicing…'
   }
   return `Queue entry #${progress.queue_item_id}`
