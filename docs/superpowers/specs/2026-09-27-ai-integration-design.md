@@ -433,7 +433,7 @@ Each of these is in §3.2 until verified.
 4. #254 browser bridge, #256 assistant panel, #300 sessions, #299 ScadBuddy plugin.
 5. #252 authoring, #253 dependencies, #258 safety (grows with each tool), #267–#270
    realtime conversions.
-6. #284 analyzers (after the dynamic profile work), #297 plugins, #262 OIDC, #257 voice,
+6. #284 analyzers (after the print-workflow ("easy print") work, #84, §11), #297 plugins, #262 OIDC, #257 voice,
    #259 evals and docs throughout.
 
 ## 13. Test strategy
