@@ -44,6 +44,13 @@ describe('openapi coverage', () => {
     expect([...pending].filter((op) => byTool.has(op))).toEqual([])
   })
 
+  it('has no pending route that has already landed in the spec', () => {
+    // A PENDING_ROUTES operation that is in backend/openapi.json has merged:
+    // it needs its tool, or a NOT_A_TOOL entry, now.
+    const known = new Set(operations)
+    expect([...pending].filter((op) => known.has(op)), 'write the tool and drop the PENDING_ROUTES entry').toEqual([])
+  })
+
   it('gives every allowlist and pending entry a reason', () => {
     for (const entry of [...NOT_A_TOOL, ...PENDING_ROUTES]) expect(entry.reason.length, entry.operation).toBeGreaterThan(20)
   })

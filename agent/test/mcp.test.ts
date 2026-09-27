@@ -3,8 +3,10 @@ import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/cl
 import { http, HttpResponse } from 'msw'
 import { setupServer } from 'msw/node'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { createApp } from '../src/app.js'
+import { nodeClientAddress } from '../src/mcp/http.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
-import { appFetch, BACKEND, connect, firstText, LAN, LOOPBACK, MCP_URL, testApp } from './helpers/mcp.js'
+import { appFetch, BACKEND, connect, firstText, LAN, LOOPBACK, MCP_URL, services, testApp } from './helpers/mcp.js'
 
 // /mcp end to end with the MCP SDK's own Streamable HTTP client (issue #251
 // "Checks and tests"; spec §13): transport rules, auth per mode, the approval
@@ -234,6 +236,31 @@ describe('/mcp: disabled mode', () => {
     expect(firstText(result)).toMatchObject({ status: 'pending_approval' })
   })
 
+  it('keeps concurrent anonymous sessions apart: the session id is the capability', async () => {
+    const { app } = testApp({ settings: { mode: 'disabled' } })
+    const a = await open(app)
+    const b = await open(app)
+    const idA = (a.transport as unknown as StreamableHTTPClientTransport).sessionId!
+    const idB = (b.transport as unknown as StreamableHTTPClientTransport).sessionId!
+    // 256 CSPRNG bits, base64url: 43 characters, and distinct.
+    expect(idA).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(idB).toMatch(/^[A-Za-z0-9_-]{43}$/)
+    expect(idA).not.toBe(idB)
+
+    const { pending_action_id } = firstText(
+      await a.callTool({ name: 'delete_model', arguments: { slug: 'keychain' } }),
+    ) as { pending_action_id: string }
+    await b.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'out-b' } })
+
+    const listA = firstText(await a.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
+    const listB = firstText(await b.callTool({ name: 'list_pending_actions', arguments: {} })) as { tool: string }[]
+    expect(listA.map((x) => x.tool)).toEqual(['delete_model'])
+    expect(listB.map((x) => x.tool)).toEqual(['send_to_bambuddy'])
+
+    const crossConfirm = await b.callTool({ name: 'confirm_action', arguments: { pending_action_id } })
+    expect(firstText(crossConfirm)).toContain('no pending action')
+  })
+
   it('enforces a lowered anonymous cap', async () => {
     const { app } = testApp({ settings: { mode: 'disabled', anonymousCap: 'read' } })
     const client = await open(app)
@@ -301,5 +328,42 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
     const res = await client.callTool({ name: 'send_to_bambuddy', arguments: { output_id: 'out-1' } })
     expect(res.isError).toBe(true)
     expect(firstText(res)).toContain('needs the "outward" tier')
+  })
+})
+
+describe('/mcp: fail closed', () => {
+  it('answers 503 "AI disabled: no database" when no database is configured (spec §9)', async () => {
+    const app = createApp({
+      database: undefined,
+      backend: async () => true,
+      mcp: {
+        tools: ALL_TOOLS,
+        services: services(),
+        tokens: testApp().tokens,
+        authSettings: () => ({ mode: 'disabled', anonymousCap: 'outward', allowedOrigins: [] }),
+        clientAddress: nodeClientAddress,
+      },
+    })
+    const res = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
+    expect(res.status).toBe(503)
+    expect(await res.text()).toContain('AI disabled: no database')
+    await expect(connect(app)).rejects.toMatchObject({ code: 503 })
+  })
+
+  it('falls back to bearer with no valid tokens when the auth settings cannot be read', async () => {
+    const tokens = testApp().tokens
+    const { token } = await tokens.mint({ name: 'valid', tier: 'outward' })
+    const { app } = testApp({
+      tokens,
+      authSettings: () => {
+        throw new Error('settings table unreachable')
+      },
+    })
+    // Not `disabled`, whatever the operator had configured: no anonymous access …
+    const anon = await appFetch(app)(MCP_URL, { method: 'POST', body: '{}' })
+    expect(anon.status).toBe(401)
+    expect(anon.headers.get('www-authenticate')).toMatch(/^Bearer /)
+    // … and not even a token that is valid in the configured store.
+    await expect(connect(app, { headers: { authorization: `Bearer ${token}` } })).rejects.toMatchObject({ code: 401 })
   })
 })

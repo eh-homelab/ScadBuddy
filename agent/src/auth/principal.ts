@@ -14,7 +14,7 @@ export type Tier = (typeof TIERS)[number]
 export type PrincipalKind = 'bearer' | 'anonymous' | 'browser'
 
 export type Principal = {
-  /** Stable per principal: a token id, `anonymous`, or the browser user. */
+  /** Stable per principal: `token:<id>`, `anonymous:<mcp session id>`, or the browser user. */
   readonly id: string
   readonly kind: PrincipalKind
   readonly tiers: readonly Tier[]

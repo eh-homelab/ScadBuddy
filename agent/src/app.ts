@@ -48,7 +48,17 @@ export function createApp(deps: AppDeps): Hono {
     return c.json(body)
   })
 
-  if (deps.mcp) mountMcp(app, deps.mcp)
+  if (deps.mcp) {
+    if (deps.database) {
+      mountMcp(app, deps.mcp)
+    } else {
+      // Spec §9, "No database": AI features are disabled. /mcp answers why
+      // instead of 404, so an MCP client's error names the fix.
+      app.all('/mcp', (c) =>
+        c.json({ error: 'AI disabled: no database (SCADBUDDY_DATABASE_URL is not set)' }, 503),
+      )
+    }
+  }
 
   return app
 }

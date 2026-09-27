@@ -36,15 +36,22 @@ export function services(overrides: Partial<ToolServices> = {}): ToolServices {
 export type TestApp = { app: Hono; tokens: TokenStore; settings: McpAuthSettings; services: ToolServices }
 
 export function testApp(
-  options: { settings?: Partial<McpAuthSettings>; tokens?: TokenStore; services?: ToolServices } = {},
+  options: {
+    settings?: Partial<McpAuthSettings>
+    tokens?: TokenStore
+    services?: ToolServices
+    /** Replaces the settings reader, e.g. with one that throws. */
+    authSettings?: () => McpAuthSettings | Promise<McpAuthSettings>
+  } = {},
 ): TestApp {
   const settings = { ...DEFAULT_MCP_AUTH, ...options.settings }
   const tokens = options.tokens ?? new InMemoryTokenStore()
   const svc = options.services ?? services()
   const app = createApp({
-    database: undefined,
+    // /mcp is only mounted with a database (spec §9); tests never touch it.
+    database: { ping: async () => true },
     backend: async () => true,
-    mcp: { tools: ALL_TOOLS, services: svc, tokens, authSettings: () => settings, clientAddress: nodeClientAddress },
+    mcp: { tools: ALL_TOOLS, services: svc, tokens, authSettings: options.authSettings ?? (() => settings), clientAddress: nodeClientAddress },
   })
   return { app, tokens, settings, services: svc }
 }

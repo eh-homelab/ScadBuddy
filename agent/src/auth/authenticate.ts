@@ -114,6 +114,9 @@ export async function authenticate(
     case 'disabled':
       // The operator chose to trust the network (spec §8.3). Outward tools
       // still stop at the approval gate, which is independent of auth.
+      // `anonymous` is only the base id: ../mcp/http.ts rebinds it to
+      // `anonymous:<sessionId>` so anonymous sessions stay apart, which makes
+      // the session id the one thing separating LAN clients in this mode.
       return {
         ok: true,
         principal: {

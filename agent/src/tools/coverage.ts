@@ -26,9 +26,10 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
 
 /**
  * Tools whose backend routes are in open PRs, so they are not in
- * backend/openapi.json on main yet. Listed so the gap is visible, and so a PR
- * that adds one of these routes does not fail this check before its tool is
- * written; each becomes a tool once its PR merges.
+ * backend/openapi.json on main yet. Listed so the gap is visible. An entry
+ * must not outlive its route landing: test/coverage.test.ts fails as soon as
+ * one of these operations appears in the spec, until it gets its tool (or a
+ * NOT_A_TOOL entry) and leaves this list.
  */
 export const PENDING_ROUTES: readonly { operation: string; pr: number; tool: string; reason: string }[] = [
   {
