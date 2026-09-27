@@ -223,6 +223,31 @@ def test_last_commits_is_empty_before_the_first_commit(models: Path) -> None:
     assert history.last_commits() == {}
 
 
+def test_merge_file_merges_clean_edits_and_counts_conflicts(history: ModelHistory) -> None:
+    base = "a = 1;\nb = 2;\nc = 3;\nd = 4;\ne = 5;\n"
+    ours = base.replace("a = 1;", "a = 10;")
+
+    merged, conflicts = history.merge_file(
+        ours, base, base.replace("e = 5;", "e = 50;"), labels=("ours", "base", "theirs")
+    )
+    assert (merged, conflicts) == (ours.replace("e = 5;", "e = 50;"), 0)
+
+    marked, conflicts = history.merge_file(
+        ours, base, base.replace("a = 1;", "a = 11;"), labels=("ours", "base", "theirs")
+    )
+    assert conflicts == 1
+    assert marked.startswith("<<<<<<< ours\na = 10;\n||||||| base\na = 1;\n=======\na = 11;\n")
+
+
+def test_files_at_lists_a_directory_relative_to_itself(models: Path, history: ModelHistory) -> None:
+    write_model(models, "_builtin/keychain", "cube(10);\n")
+    (models / "_builtin/keychain/README.md").write_text("hi\n", encoding="utf-8")
+    commit = history.ensure_repo()
+    assert commit is not None
+
+    assert history.files_at(commit, "_builtin/keychain") == ["README.md", "model.scad"]
+
+
 def test_show_reads_a_file_at_a_revision(models: Path, history: ModelHistory) -> None:
     write_model(models, "keychain", "cube(10);\n")
     first = history.ensure_repo()

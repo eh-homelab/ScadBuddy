@@ -8,6 +8,7 @@ import os
 import shutil
 import tempfile
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -23,7 +24,23 @@ from scadbuddy.core.paths import (
     is_builtin,
     model_path,
 )
-from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
+from scadbuddy.library.history import (
+    GitError,
+    GitUnavailableError,
+    ModelHistory,
+    RevisionNotFoundError,
+)
+from scadbuddy.library.upstream import (
+    MergeConflictError,
+    MergePlan,
+    NoUpstreamError,
+    Upstream,
+    UpstreamState,
+    UpstreamStateError,
+    UpstreamStatus,
+    plan_merge,
+    state_of,
+)
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -76,21 +93,6 @@ class ModelExistsError(ValueError):
     pass
 
 
-class Upstream(BaseModel):
-    """The template a duplicate was copied from, and the revision of it it includes."""
-
-    id: str = Field(description="The upstream template's id: a slug, or `builtin:<slug>`")
-    #: Stored, not derived from `id`: a merge base may name a commit where the
-    #: upstream's source lived somewhere else.
-    path: str = Field(description="The upstream's directory in the models repository")
-    base: str | None = Field(
-        description="The upstream commit this template includes; None without history"
-    )
-    dismissed: str | None = Field(
-        default=None, description="An upstream commit the user chose not to take"
-    )
-
-
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -126,6 +128,9 @@ class ModelRecord(ModelMeta):
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
     version: str | None = None
+    # Where a duplicate stands against its upstream (#157); None for a template
+    # that is not one, or when history is unavailable.
+    upstream_state: UpstreamState | None = None
 
 
 class Catalogue:
@@ -211,12 +216,25 @@ class Catalogue:
             raise ModelNotFoundError(slug) from None
 
     def record(self, slug: str) -> ModelRecord:
-        return self._record(slug, self.version(slug))
+        return self._record(slug, self.version, self._has_history)
 
-    def _record(self, slug: str, version: str | None) -> ModelRecord:
+    def _record(
+        self, slug: str, version_of: Callable[[str], str | None], history: bool
+    ) -> ModelRecord:
+        """``version_of`` answers a template's revision -- per call, or from the one
+        walk a listing makes -- and is asked for an upstream's as well as this one's."""
         self._require(slug)
         raw = self.read_raw_meta(slug)
         meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
+        version = version_of(slug)
+        upstream_state: UpstreamState | None = None
+        if meta.upstream is not None and history:
+            exists = self.exists(meta.upstream.id)
+            upstream_state = state_of(
+                meta.upstream,
+                exists=exists,
+                revision=version_of(meta.upstream.id) if exists else None,
+            )
         try:
             modified = self.paths.model_source(slug).stat().st_mtime
         except FileNotFoundError:
@@ -230,7 +248,12 @@ class Catalogue:
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
+            upstream_state=upstream_state,
         )
+
+    @property
+    def _has_history(self) -> bool:
+        return self.history is not None and self.history.available
 
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
@@ -238,9 +261,11 @@ class Catalogue:
         slugs = _templates_in(self.paths.models) + [
             f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
         ]
-        # ONE git call for the page, not one per model: see `last_commits`.
+        # ONE git call for the page, not one per model: see `last_commits`. The same
+        # walk answers every duplicate's upstream revision too.
         versions = self.versions()
-        return [self._record(slug, versions.get(slug)) for slug in slugs]
+        history = self._has_history
+        return [self._record(slug, versions.get, history) for slug in slugs]
 
     def create(
         self,
@@ -355,7 +380,14 @@ class Catalogue:
         self._commit(f"Update {slug} metadata", slug)
         return self.record(slug)
 
-    def write_source(self, slug: str, source: str, *, message: str | None = None) -> ModelRecord:
+    def write_source(
+        self,
+        slug: str,
+        source: str,
+        *,
+        message: str | None = None,
+        merge_base: str | None = None,
+    ) -> ModelRecord:
         """Replace a model's ``.scad`` as one revision.
 
         The hook the paste/edit path (#92) calls: everything that rewrites model
@@ -369,8 +401,23 @@ class Catalogue:
         torn file and fails for a reason that has nothing to do with its own
         source. `os.replace` is atomic, and a temp file in the same directory
         keeps it on one filesystem so it stays that way.
+
+        ``merge_base`` saves the resolution of a conflicted upstream merge (#157):
+        the upstream revision it resolves becomes ``base``, in the same commit.
         """
         self._require(slug)
+        upstream: Upstream | None = None
+        if merge_base is not None:
+            upstream = self._upstream(slug)
+        self._replace_source(slug, source)
+        if upstream is not None and merge_base is not None:
+            self._advance_base(slug, upstream, merge_base)
+            message = message or f"Merge {upstream.id} into {slug}"
+        self._commit(message or f"Edit {slug} source", slug)
+        return self.record(slug)
+
+    def _replace_source(self, slug: str, source: str) -> None:
+        """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
         # A delete can rename the directory away at any point in here; staging
         # and swapping inside it then fail rather than recreate it, and the
         # failure is the same 404 the delete itself would give.
@@ -391,8 +438,119 @@ class Catalogue:
             Path(staged).unlink(missing_ok=True)
             raise
         self.paths.model_schema_cache(slug).unlink(missing_ok=True)
-        self._commit(message or f"Edit {slug} source", slug)
+
+    # ── upstream (#157) ───────────────────────────────────────────────────────
+
+    def _upstream(self, slug: str) -> Upstream:
+        upstream = ModelMeta.model_validate({"name": slug, **self.read_raw_meta(slug)}).upstream
+        if upstream is None:
+            raise NoUpstreamError(slug)
+        return upstream
+
+    def _require_history(self) -> ModelHistory:
+        if self.history is None or not self.history.available:
+            raise GitUnavailableError("model history is unavailable")
+        return self.history
+
+    def _upstream_now(self, slug: str) -> tuple[Upstream, str | None, UpstreamState]:
+        """The upstream, its current revision (None when gone) and where this stands."""
+        history = self._require_history()
+        self._require(slug)
+        upstream = self._upstream(slug)
+        exists = self.exists(upstream.id)
+        revision = history.last_commit(model_path(upstream.id)) if exists else None
+        return upstream, revision, state_of(upstream, exists=exists, revision=revision)
+
+    def _write_upstream(self, slug: str, upstream: Upstream | None) -> None:
+        raw = self.read_raw_meta(slug)
+        if upstream is None:
+            raw.pop("upstream", None)
+        else:
+            raw["upstream"] = upstream.model_dump()
+        self.write_raw_meta(slug, raw)
+
+    def _advance_base(self, slug: str, upstream: Upstream, revision: str) -> None:
+        """This template now includes the upstream at ``revision``, which is where the
+        upstream lives now: the next merge reads its base from there."""
+        self._write_upstream(
+            slug, Upstream(id=upstream.id, path=model_path(upstream.id), base=revision)
+        )
+
+    def upstream_status(self, slug: str) -> UpstreamStatus:
+        upstream, revision, state = self._upstream_now(slug)
+        preview = None
+        if state == "update" and revision is not None:
+            preview = plan_merge(
+                self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
+            ).preview
+        return UpstreamStatus(state=state, upstream=upstream, revision=revision, preview=preview)
+
+    def merge_upstream(self, slug: str) -> tuple[ModelRecord, MergePlan]:
+        """Take the upstream's current revision as one commit, or raise
+        :class:`MergeConflictError` having written nothing.
+
+        Worked out and written under the history's write lock, so no other
+        catalogue commit lands between reading this template and committing it.
+        """
+        history = self._require_history()
+        self._require(slug)
+        upstream_id = self._upstream(slug).id
+        plans: list[MergePlan] = []
+
+        def merge() -> None:
+            upstream, revision, state = self._upstream_now(slug)
+            if state not in ("update", "dismissed") or revision is None:
+                raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
+            plan = plan_merge(history, slug, self.paths.model_dir(slug), upstream, revision)
+            if plan.conflicts:
+                raise MergeConflictError(plan)
+            if plan.preview.merged != plan.preview.ours:
+                self._replace_source(slug, plan.preview.merged)
+            directory = self.paths.model_dir(slug)
+            for name, content in plan.files.items():
+                target = directory / name
+                if content is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes(content)
+            self._advance_base(slug, upstream, revision)
+            plans.append(plan)
+
+        history.commit(f"Merge {upstream_id} into {slug}", slug, prepare=merge)
+        return self.record(slug), plans[0]
+
+    def dismiss_upstream(self, slug: str) -> ModelRecord:
+        """Don't offer the upstream's current revision again; a later one still is."""
+        upstream, revision, state = self._upstream_now(slug)
+        if state not in ("update", "dismissed") or revision is None:
+            raise UpstreamStateError(f"{slug!r} has no upstream update to dismiss", state)
+        self._write_upstream(slug, upstream.model_copy(update={"dismissed": revision}))
+        self._commit(f"Dismiss {upstream.id} update in {slug}", slug)
         return self.record(slug)
+
+    def detach_upstream(self, slug: str) -> ModelRecord:
+        """Forget an upstream that is gone; the template carries on as a plain one of mine."""
+        upstream, _, state = self._upstream_now(slug)
+        if state != "gone":
+            raise UpstreamStateError(
+                f"{upstream.id!r} still exists, so {slug!r} stays linked", state
+            )
+        self._write_upstream(slug, None)
+        self._commit(f"Detach {slug} from {upstream.id}", slug)
+        return self.record(slug)
+
+    def duplicates_of(self, model_id: str) -> list[str]:
+        """The templates of mine whose upstream is ``model_id``."""
+        found: list[str] = []
+        for slug in _templates_in(self.paths.models):
+            try:
+                upstream = self.read_raw_meta(slug).get("upstream")
+            except (OSError, ValueError):
+                continue
+            if isinstance(upstream, dict) and upstream.get("id") == model_id:
+                found.append(slug)
+        return found
 
     def delete(self, slug: str) -> None:
         self._require(slug)

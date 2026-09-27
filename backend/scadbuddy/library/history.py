@@ -40,6 +40,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterator, Sequence
@@ -555,6 +556,34 @@ class ModelHistory:
                 if member.name.startswith(prefix) and member.name != prefix
             ]
             archive.extractall(dest, members=members, filter="data")
+
+    def files_at(self, commit: str, path: str) -> list[str]:
+        """The files under ``path`` at ``commit``, relative to ``path``."""
+        prefix = f"{path}/"
+        return [name[len(prefix) :] for name in self._files_at(commit, path)]
+
+    def merge_file(
+        self, ours: str, base: str, theirs: str, *, labels: tuple[str, str, str]
+    ) -> tuple[str, int]:
+        """``git merge-file -p --diff3`` over three texts: the result and its conflict count.
+
+        Needs no repository -- the three sides are temporary files -- but runs through
+        the same hermetic invocation as everything else here.
+        """
+        with tempfile.TemporaryDirectory(prefix="scadbuddy-merge-") as scratch:
+            sides = []
+            for name, text in (("ours", ours), ("base", base), ("theirs", theirs)):
+                side = Path(scratch) / name
+                side.write_text(text, encoding="utf-8")
+                sides.append(str(side))
+            label_args = [arg for label in labels for arg in ("-L", label)]
+            completed = self._run("merge-file", "-p", "--diff3", *label_args, *sides, check=False)
+        assert isinstance(completed.stdout, str)
+        # The exit status is the number of conflicts (capped at 127); a negative
+        # one -- 255 as an unsigned status -- is a failure to merge at all.
+        if completed.returncode < 0 or completed.returncode > 127:
+            raise GitError(f"git merge-file failed: {completed.stderr.strip()}", completed.stderr)
+        return completed.stdout, completed.returncode
 
     def _files_at(self, commit: str, slug: str) -> list[str]:
         return [
