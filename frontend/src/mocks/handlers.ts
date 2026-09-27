@@ -625,7 +625,7 @@ export const handlers = [
     }
     const updated = { ...model, ...patch }
     state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
-    return HttpResponse.json(updated)
+    return HttpResponse.json(view(updated))
   }),
 
   http.post(`${base}/models/check`, async ({ request }) => {

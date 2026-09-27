@@ -36,9 +36,11 @@ export function UpstreamBadge({ state }: { state: UpstreamState | null | undefin
 interface Props {
   slug: string
   state: UpstreamState | null | undefined
-  /** After a merge, dismiss or detach: the record, and after a merge the source, changed. */
-  onChanged: () => void
+  /** After each action the record changed; only a merge changes the source too. */
+  onChanged: (action: UpstreamAction) => void
 }
+
+type UpstreamAction = 'merge' | 'dismiss' | 'detach'
 
 /**
  * #160 — the same badge in a duplicate's header, as a button: "Update available" opens
@@ -49,9 +51,9 @@ export function UpstreamUpdateButton({ slug, state, onChanged }: Props) {
   const [open, setOpen] = useState(false)
   if (state !== 'update' && state !== 'gone') return null
 
-  function done() {
+  function done(action: UpstreamAction) {
     setOpen(false)
-    onChanged()
+    onChanged(action)
   }
 
   return (
@@ -81,7 +83,7 @@ export function UpstreamUpdateButton({ slug, state, onChanged }: Props) {
 interface DialogProps {
   slug: string
   onClose: () => void
-  onDone: () => void
+  onDone: (action: UpstreamAction) => void
 }
 
 function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
@@ -100,7 +102,7 @@ function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
     setError(null)
     try {
       await api.mergeUpstream(slug)
-      onDone()
+      onDone('merge')
     } catch (caught) {
       // A conflicted merge writes nothing: its marked-up source is resolved in the editor.
       if (caught instanceof ApiError && caught.status === 409 && caught.problem['merge_base']) {
@@ -117,7 +119,7 @@ function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
     setError(null)
     try {
       await api.dismissUpstream(slug)
-      onDone()
+      onDone('dismiss')
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : String(caught))
       setBusy(null)
@@ -245,7 +247,7 @@ function DetachDialog({ slug, onClose, onDone }: DialogProps) {
     setError(null)
     try {
       await api.detachUpstream(slug)
-      onDone()
+      onDone('detach')
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : String(caught))
       setBusy(false)

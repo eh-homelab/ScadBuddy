@@ -59,7 +59,7 @@ describe('UpstreamUpdateButton (#160)', () => {
 
     await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
 
-    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith('merge'))
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect((await api.getModel(COPY)).upstream_state).toBe('current')
     expect(await api.getSource(COPY)).toBe(theirs)
@@ -94,7 +94,7 @@ describe('UpstreamUpdateButton (#160)', () => {
     await within(dialog).findByTestId('merge-result')
     await user.click(within(dialog).getByRole('button', { name: 'Not now' }))
 
-    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith('dismiss'))
     expect((await api.getModel(COPY)).upstream_state).toBe('dismissed')
     expect(await api.getSource(COPY)).not.toBe(theirs)
   })
@@ -109,7 +109,7 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect(dialog).toHaveTextContent('no longer exists')
     await user.click(within(dialog).getByRole('button', { name: 'Detach' }))
 
-    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledOnce())
+    await vi.waitFor(() => expect(onChanged).toHaveBeenCalledExactlyOnceWith('detach'))
     const detached = await api.getModel(COPY)
     expect(detached.upstream).toBeNull()
     expect(detached.upstream_state).toBeUndefined()

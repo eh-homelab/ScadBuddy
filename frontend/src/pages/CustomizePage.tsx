@@ -230,10 +230,11 @@ export function CustomizePage() {
             <UpstreamUpdateButton
               slug={slug}
               state={modelState.data?.upstream_state}
-              // A merge changes the source: re-read the schema too, as a library change does.
-              onChanged={() => {
+              // Every action rewrites the record. Only a merge changes the source, so only
+              // a merge re-reads the schema (which re-seeds the values and re-renders).
+              onChanged={(action) => {
                 modelState.reload()
-                schemaState.reload()
+                if (action === 'merge') schemaState.reload()
               }}
             />
           )}

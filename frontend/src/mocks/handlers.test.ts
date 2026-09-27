@@ -88,6 +88,11 @@ describe('mock API: upstream updates (#157)', () => {
     expect((await api.listModels()).find((m) => m.slug === COPY)?.upstream_state).toBe('update')
   })
 
+  it('serves upstream_state on a metadata edit, as on every other write', async () => {
+    await duplicateWithUpdate()
+    expect((await api.updateModel(COPY, { description: 'Mine' })).upstream_state).toBe('update')
+  })
+
   it('answers 404 for a template that is not a duplicate', async () => {
     const error: unknown = await api.getUpstream(UPSTREAM).catch((caught: unknown) => caught)
     expect(error).toMatchObject({
