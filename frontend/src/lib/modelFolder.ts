@@ -16,10 +16,17 @@ export interface ModelFiles {
   folder?: string
 }
 
+/** A chosen file that is not uploaded, and why when another file took its place. */
+export interface Skipped {
+  name: string
+  /** Set when it lost to another file of its kind, e.g. `thumbnail is cover.png`. */
+  reason?: string
+}
+
 export interface Classified {
   files: ModelFiles | null
-  /** Names that were not used: a second source, an unrelated file. */
-  ignored: string[]
+  /** Files that were not used: a second source, image or README, an unrelated file. */
+  ignored: Skipped[]
 }
 
 const lower = (file: File) => file.name.toLowerCase()
@@ -28,20 +35,46 @@ export const isScad = (file: File) => lower(file).endsWith('.scad')
 export const isPng = (file: File) => lower(file).endsWith('.png') || file.type === 'image/png'
 export const isMarkdown = (file: File) => /\.(md|markdown)$/.test(lower(file))
 
-/** The preferred file among candidates: the one with the bundled layout's name, else the first. */
+/** Code-unit order: the same on every browser, OS and locale, unlike `localeCompare`. */
+function byName(a: File, b: File): number {
+  const [x, y] = [a.name, b.name]
+  if (x !== y) return x < y ? -1 : 1
+  const [p, q] = [a.webkitRelativePath, b.webkitRelativePath]
+  return p < q ? -1 : p > q ? 1 : 0
+}
+
+/**
+ * The preferred file among candidates: the one with the bundled layout's name, else
+ * the first by name. Never the first as listed: a directory's entries come back in
+ * whatever order the browser and file system give, so that would pick differently
+ * for the same folder.
+ */
 function pick(candidates: File[], preferred: string): File | undefined {
-  return candidates.find((file) => lower(file) === preferred) ?? candidates[0]
+  const sorted = [...candidates].sort(byName)
+  return sorted.find((file) => lower(file) === preferred) ?? sorted[0]
 }
 
 /** Sort a set of chosen or dropped files into the parts of a model upload. */
 export function classifyFiles(chosen: File[], folder?: string): Classified {
   const scad = pick(chosen.filter(isScad), 'model.scad')
-  if (!scad) return { files: null, ignored: chosen.map((file) => file.name) }
+  if (!scad) return { files: null, ignored: [...chosen].sort(byName).map(({ name }) => ({ name })) }
   const meta = chosen.find((file) => lower(file) === 'model.json')
   const thumbnail = pick(chosen.filter(isPng), 'thumbnail.png')
   const readme = pick(chosen.filter(isMarkdown), 'readme.md')
   const used = new Set([scad, meta, thumbnail, readme])
-  const ignored = chosen.filter((file) => !used.has(file)).map((file) => file.name)
+  const reason = (file: File): string | undefined => {
+    if (isScad(file)) return `source is ${scad.name}`
+    if (thumbnail && isPng(file)) return `thumbnail is ${thumbnail.name}`
+    if (readme && isMarkdown(file)) return `README is ${readme.name}`
+    return undefined
+  }
+  const ignored = [...chosen]
+    .sort(byName)
+    .filter((file) => !used.has(file))
+    .map((file) => {
+      const why = reason(file)
+      return why ? { name: file.name, reason: why } : { name: file.name }
+    })
   return { files: { scad, meta, thumbnail, readme, folder }, ignored }
 }
 

@@ -125,6 +125,24 @@ describe('UploadDialog', () => {
     expect(upload.mock.calls[0]?.[1]?.thumbnail).toBeUndefined()
   })
 
+  it('says which image and README it took when a folder has several', async () => {
+    const { dialog, user } = render()
+
+    await user.upload(within(dialog).getByLabelText('Model folder'), [
+      inFolder('widget', 'model.scad'),
+      inFolder('widget', 'side.png'),
+      inFolder('widget', 'front.png'),
+      inFolder('widget', 'NOTES.md'),
+      inFolder('widget', 'build.md'),
+    ])
+
+    expect(await within(dialog).findByTestId('upload-thumbnail')).toHaveTextContent('front.png')
+    expect(within(dialog).getByTestId('upload-readme')).toHaveTextContent('NOTES.md')
+    expect(within(dialog).getByTestId('upload-ignored')).toHaveTextContent(
+      'Not uploaded: build.md (README is NOTES.md), side.png (thumbnail is front.png)',
+    )
+  })
+
   it('says so when a folder holds no source', async () => {
     const { dialog, user } = render()
 

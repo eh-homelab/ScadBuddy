@@ -10,6 +10,7 @@ import {
   readMetaName,
   uploadFilename,
   type ModelFiles,
+  type Skipped,
 } from '../lib/modelFolder'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
@@ -26,7 +27,7 @@ type Extra = 'meta' | 'thumbnail' | 'readme'
 export function UploadDialog({ open, onClose, onUploaded }: Props) {
   const [files, setFiles] = useState<ModelFiles | null>(null)
   const [metaName, setMetaName] = useState<string | undefined>(undefined)
-  const [ignored, setIgnored] = useState<string[]>([])
+  const [ignored, setIgnored] = useState<Skipped[]>([])
   const [dragging, setDragging] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [uploading, setUploading] = useState(false)
@@ -293,7 +294,14 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
 
       {ignored.length > 0 && (
         <p className="mt-3 text-[12px] text-muted" data-testid="upload-ignored">
-          Not uploaded: <span className="sb-num">{ignored.join(', ')}</span>
+          Not uploaded:{' '}
+          {ignored.map(({ name, reason }, index) => (
+            <span key={name + index}>
+              {index > 0 && ', '}
+              <span className="sb-num">{name}</span>
+              {reason && <> ({reason})</>}
+            </span>
+          ))}
         </p>
       )}
       {error && (

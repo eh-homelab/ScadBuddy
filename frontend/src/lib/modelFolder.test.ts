@@ -26,7 +26,7 @@ describe('classifyFiles', () => {
     const { files, ignored } = classifyFiles([verify, readme, thumbnail, meta, scad], 'widget')
 
     expect(files).toEqual({ scad, meta, thumbnail, readme, folder: 'widget' })
-    expect(ignored).toEqual(['verify.sh'])
+    expect(ignored).toEqual([{ name: 'verify.sh' }])
   })
 
   it('prefers the bundled names when there is more than one candidate', () => {
@@ -39,7 +39,10 @@ describe('classifyFiles', () => {
 
     expect(files?.scad).toBe(scad)
     expect(files?.thumbnail).toBe(thumbnail)
-    expect(ignored).toEqual(['helper.scad', 'photo.png'])
+    expect(ignored).toEqual([
+      { name: 'helper.scad', reason: 'source is model.scad' },
+      { name: 'photo.png', reason: 'thumbnail is thumbnail.png' },
+    ])
   })
 
   it('takes a lone .scad on its own', () => {
@@ -50,13 +53,53 @@ describe('classifyFiles', () => {
   it('has nothing to upload without a source', () => {
     const { files, ignored } = classifyFiles([file('thumbnail.png'), file('model.stl')])
     expect(files).toBeNull()
-    expect(ignored).toEqual(['thumbnail.png', 'model.stl'])
+    // Sorted by name, like everything else here.
+    expect(ignored).toEqual([{ name: 'model.stl' }, { name: 'thumbnail.png' }])
   })
 
   it('does not take any .json as the metadata', () => {
     const { files, ignored } = classifyFiles([file('model.scad'), file('package.json')])
     expect(files?.meta).toBeUndefined()
-    expect(ignored).toEqual(['package.json'])
+    expect(ignored).toEqual([{ name: 'package.json' }])
+  })
+})
+
+describe('classifyFiles with no preferred name among several', () => {
+  const names = ['zebra.png', 'Cover.png', 'alpha.png', 'notes.md', 'CHANGES.md', 'model.scad']
+  const set = () => names.map((name) => file(name))
+
+  it('picks the same thumbnail and README whatever order the files came in', () => {
+    const forward = classifyFiles(set())
+    const backward = classifyFiles(set().reverse())
+    const shuffled = classifyFiles([...set().slice(3), ...set().slice(0, 3)])
+
+    for (const result of [forward, backward, shuffled]) {
+      // Code-unit order: capitals first, whatever the locale.
+      expect(result.files?.thumbnail?.name).toBe('Cover.png')
+      expect(result.files?.readme?.name).toBe('CHANGES.md')
+      expect(result.ignored).toEqual([
+        { name: 'alpha.png', reason: 'thumbnail is Cover.png' },
+        { name: 'notes.md', reason: 'README is CHANGES.md' },
+        { name: 'zebra.png', reason: 'thumbnail is Cover.png' },
+      ])
+    }
+  })
+
+  it('still lets the preferred names win, in any order and any case', () => {
+    const preferred = ['a.png', 'THUMBNAIL.PNG', 'a.md', 'ReadMe.md', 'model.scad']
+    for (const order of [preferred, [...preferred].reverse()]) {
+      const { files } = classifyFiles(order.map((name) => file(name)))
+      expect(files?.thumbnail?.name).toBe('THUMBNAIL.PNG')
+      expect(files?.readme?.name).toBe('ReadMe.md')
+    }
+  })
+
+  it('picks the same source among several .scad files with no model.scad', () => {
+    const scads = ['b.scad', 'a.scad', 'c.scad']
+    expect(classifyFiles(scads.map((name) => file(name))).files?.scad.name).toBe('a.scad')
+    expect(
+      classifyFiles([...scads].reverse().map((name) => file(name))).files?.scad.name,
+    ).toBe('a.scad')
   })
 })
 
