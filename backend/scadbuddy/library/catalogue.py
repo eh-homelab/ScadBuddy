@@ -275,7 +275,14 @@ class Catalogue:
         self._require(upstream_id)
         if self.exists(slug):
             raise ModelExistsError(slug)
-        base = self.version(upstream_id)
+        # Not `self.version`, which logs a git failure and answers None: here that
+        # would record no base and copy the working tree instead of the revision.
+        # A failure reading it fails the duplicate, as a failed export does.
+        base = (
+            self.history.last_commit(model_path(upstream_id))
+            if self.history is not None and self.history.available
+            else None
+        )
         self.paths.cache.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
         staged = staging / slug

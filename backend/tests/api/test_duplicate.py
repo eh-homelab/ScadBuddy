@@ -288,6 +288,24 @@ def test_a_git_failure_reading_the_upstream_is_a_problem_and_leaves_nothing(
     _duplicate(client, BUILTIN, "Copy")
 
 
+def test_a_git_failure_reading_the_base_fails_the_duplicate(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Not a silent fall back to the working tree with no base recorded."""
+
+    def last_commit(self: ModelHistory, slug: str) -> str:
+        raise GitTimeoutError("git log timed out after 1s")
+
+    monkeypatch.setattr(ModelHistory, "last_commit", last_commit)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "git log timed out after 1s"
+    assert not paths.model_dir("copy").exists()
+    assert _no_staging_left(paths)
+
+
 def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
     catalogue = Catalogue(paths)
     catalogue.create(
