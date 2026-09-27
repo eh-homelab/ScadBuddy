@@ -22,8 +22,8 @@ parameters and the sample pictures shipped here.
 Written to the MakerWorld Parametric Model Maker customizer conventions, so the
 same file works unchanged on MakerWorld and in ScadBuddy. The picture handling
 (`*_file`, `*_type`, `image_threshold`, scale / x / y / rotation / invert, the
-missing-file behaviour) follows `flexi-fabric`'s overlay, so the two templates
-behave the same and a future upload widget applies to both.
+missing-file behaviour) is the shared ScadBuddy file-parameter convention
+(`// file:svg,png`, #204), so any template using it behaves the same.
 
 **Safety:** the beads are small parts — a choking hazard for children under 3.
 
@@ -302,7 +302,7 @@ Last run: `OK: all cases passed` (31 cases, 352 checks).
 
 ## Upload widget (#204)
 
-The file widget from #204 applies here as it does to `flexi-fabric`: both
+The file widget from #204 applies here: both
 file parameters are annotated `// file:svg,png`, the model accepts the
 generated upload names (`verify.sh` renders a case with two of them), and the
 `auto` type means a PNG upload needs no other change. What this template
