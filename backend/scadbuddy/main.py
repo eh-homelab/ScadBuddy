@@ -21,6 +21,7 @@ from scadbuddy.api import (
     plates,
     printing,
     settings,
+    upstream,
     versions,
 )
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
@@ -40,6 +41,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 def _api_router() -> APIRouter:
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(models.router)
+    router.include_router(upstream.router)
     router.include_router(versions.router)
     router.include_router(jobs.router)
     router.include_router(outputs.router)

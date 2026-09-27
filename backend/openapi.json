@@ -1512,6 +1512,59 @@
         "title": "LoadedAt",
         "type": "object"
       },
+      "MergePreview": {
+        "properties": {
+          "base": {
+            "description": "The upstream's `model.scad` at `base`",
+            "title": "Base",
+            "type": "string"
+          },
+          "clean": {
+            "title": "Clean",
+            "type": "boolean"
+          },
+          "kept": {
+            "description": "Other files changed both here and upstream since `base`: ours stay",
+            "items": {
+              "type": "string"
+            },
+            "title": "Kept",
+            "type": "array"
+          },
+          "merged": {
+            "description": "`git merge-file -p --diff3 ours base theirs`: conflict markers when not clean",
+            "title": "Merged",
+            "type": "string"
+          },
+          "ours": {
+            "description": "This template's `model.scad`",
+            "title": "Ours",
+            "type": "string"
+          },
+          "taken": {
+            "description": "Other files that follow the upstream: unchanged here since `base`",
+            "items": {
+              "type": "string"
+            },
+            "title": "Taken",
+            "type": "array"
+          },
+          "theirs": {
+            "description": "The upstream's current `model.scad`",
+            "title": "Theirs",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ours",
+          "base",
+          "theirs",
+          "merged",
+          "clean"
+        ],
+        "title": "MergePreview",
+        "type": "object"
+      },
       "ModelPatch": {
         "properties": {
           "description": {
@@ -1674,6 +1727,23 @@
                 "type": "null"
               }
             ]
+          },
+          "upstream_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "current",
+                  "update",
+                  "dismissed",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream State"
           },
           "version": {
             "anyOf": [
@@ -5042,6 +5112,82 @@
         "title": "Upstream",
         "type": "object"
       },
+      "UpstreamMerge": {
+        "properties": {
+          "kept": {
+            "description": "Other files changed both here and upstream since `base`: ours were kept",
+            "items": {
+              "type": "string"
+            },
+            "title": "Kept",
+            "type": "array"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelRecord",
+            "description": "The template after the merge"
+          },
+          "taken": {
+            "description": "Other files taken from the upstream",
+            "items": {
+              "type": "string"
+            },
+            "title": "Taken",
+            "type": "array"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "UpstreamMerge",
+        "type": "object"
+      },
+      "UpstreamStatus": {
+        "properties": {
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergePreview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The merge a `POST \u2026/upstream/merge` would make; on update only"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The upstream's current revision; None when it is gone",
+            "title": "Revision"
+          },
+          "state": {
+            "enum": [
+              "current",
+              "update",
+              "dismissed",
+              "gone"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "upstream": {
+            "$ref": "#/components/schemas/Upstream"
+          }
+        },
+        "required": [
+          "state",
+          "upstream",
+          "revision"
+        ],
+        "title": "UpstreamStatus",
+        "type": "object"
+      },
       "UrlImport": {
         "properties": {
           "force": {
@@ -5650,6 +5796,7 @@
     },
     "/api/v1/models/{slug}": {
       "delete": {
+        "description": "409 while templates of mine are duplicates of it, with how many as `duplicates` (and which, as `slugs`); `?force=true` deletes it anyway, and they report their upstream as `gone`.",
         "operationId": "delete_model_api_v1_models__slug__delete",
         "parameters": [
           {
@@ -5661,6 +5808,18 @@
               "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
+            }
+          },
+          {
+            "description": "Delete even when duplicates track this template",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Delete even when duplicates track this template",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -6073,7 +6232,7 @@
         ]
       },
       "put": {
-        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.",
+        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it. `merge_base` saves the resolution of a conflicted upstream merge: the source must carry no conflict markers (`force` does not skip that), `merge_base` must be a revision of the upstream (422 otherwise, writing nothing), and the duplicate's `base` becomes it in the same commit, `Merge <upstream id> into <slug>` unless `message` names it.",
         "operationId": "put_source_api_v1_models__slug__source_put",
         "parameters": [
           {
@@ -6097,6 +6256,25 @@
               "description": "Save even when the parse check fails",
               "title": "Force",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "The upstream revision this resolves a merge of: the 409's `merge_base`",
+            "in": "query",
+            "name": "merge_base",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The upstream revision this resolves a merge of: the 409's `merge_base`",
+              "title": "Merge Base"
             }
           }
         ],
@@ -6173,6 +6351,186 @@
           }
         },
         "summary": "Model thumbnail",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream": {
+      "get": {
+        "description": "`state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.",
+        "operationId": "get_upstream_api_v1_models__slug__upstream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A duplicate's upstream: state and merge preview",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/detach": {
+      "post": {
+        "description": "Clears `upstream` from a duplicate whose upstream no longer exists, leaving an ordinary template of mine. One commit, `Detach <slug> from <upstream id>`. 409 while the upstream still exists.",
+        "operationId": "detach_upstream_api_v1_models__slug__upstream_detach_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detach from an upstream that is gone",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/dismiss": {
+      "post": {
+        "description": "Sets `dismissed` to the upstream's current revision, so it is no longer offered; a later upstream revision is. One commit, `Dismiss <upstream id> update in <slug>`. 409 when there is no update.",
+        "operationId": "dismiss_upstream_api_v1_models__slug__upstream_dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss the upstream's current revision",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/merge": {
+      "post": {
+        "description": "Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.",
+        "operationId": "merge_upstream_api_v1_models__slug__upstream_merge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamMerge"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Merge the upstream's current revision",
         "tags": [
           "models"
         ]
