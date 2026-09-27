@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
 from scadbuddy.library.slugs import InvalidSlugError, slugify
 from scadbuddy.render.glb import BoundingBox
@@ -254,4 +254,5 @@ def download_filename(meta: OutputMeta) -> str:
         suffix = slugify(meta.name) if meta.name else meta.id
     except InvalidSlugError:
         suffix = meta.id
-    return f"{meta.slug}-{suffix}.3mf"
+    # A built-in's bare slug: `:` is not a character a saved file name can carry.
+    return f"{meta.slug.removeprefix(BUILTIN_PREFIX)}-{suffix}.3mf"

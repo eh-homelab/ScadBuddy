@@ -80,9 +80,9 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
     state.paths.ensure()
-    # Before the seed: an existing models directory becomes revision 1, so a
-    # re-seed on an image upgrade is a commit on top of it rather than an
-    # unversioned overwrite.
+    # Before the built-in sync: an existing models directory becomes revision 1,
+    # so what a newer image changes in a built-in is a commit on top of it rather
+    # than an unversioned overwrite.
     await asyncio.to_thread(state.history.ensure_repo)
     # Before anything shells out to openscad or fc-list: it is what points
     # fontconfig at the fonts on the data volume.
@@ -90,7 +90,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state.openscad_version = await probe_openscad_version(state.config)
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
-        await asyncio.to_thread(state.catalogue.seed, seed_dir)
+        await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:

@@ -13,6 +13,24 @@ MODEL_META_NAME = "model.json"
 # so keeping it in the versioned tree would leave the repository permanently
 # dirty and fold a cache blob into the next unrelated metadata commit.
 SCHEMA_CACHE_NAME = "schema.json"
+#: Where the built-in templates are mirrored from the image, inside the models
+#: repository. Slugs are `[a-z0-9-]`, so it can never be one.
+BUILTIN_DIR = "_builtin"
+#: A built-in's id is this plus its slug. `:` is not a slug character either, so a
+#: built-in and a template of mine can share a slug, and a bare slug keeps meaning
+#: what it always has. Derived files (outputs, caches) are keyed by the id.
+BUILTIN_PREFIX = "builtin:"
+
+
+def is_builtin(model_id: str) -> bool:
+    return model_id.startswith(BUILTIN_PREFIX)
+
+
+def model_path(model_id: str) -> str:
+    """A template's directory relative to ``models/`` -- which is also its path in git."""
+    if is_builtin(model_id):
+        return f"{BUILTIN_DIR}/{model_id.removeprefix(BUILTIN_PREFIX)}"
+    return model_id
 
 
 @dataclass(frozen=True)
@@ -45,8 +63,12 @@ class DataPaths:
         are pinned by ``models/libraries.lock``, not versioned themselves."""
         return self.root / "libraries"
 
+    @property
+    def builtins(self) -> Path:
+        return self.models / BUILTIN_DIR
+
     def model_dir(self, slug: str) -> Path:
-        return self.models / slug
+        return self.models / model_path(slug)
 
     def model_source(self, slug: str) -> Path:
         return self.model_dir(slug) / SOURCE_NAME

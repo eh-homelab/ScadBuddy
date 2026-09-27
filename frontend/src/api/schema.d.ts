@@ -1608,6 +1608,11 @@ export interface components {
             libraries?: string[];
             /** Name */
             name: string;
+            /**
+             * Origin
+             * @enum {string}
+             */
+            origin: "builtin" | "mine";
             /** Origin Url */
             origin_url?: string | null;
             /** Slug */

@@ -19,7 +19,13 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import SCHEMA_CACHE_NAME, SOURCE_NAME, DataPaths
+from scadbuddy.core.paths import (
+    BUILTIN_PREFIX,
+    SCHEMA_CACHE_NAME,
+    SOURCE_NAME,
+    DataPaths,
+    model_path,
+)
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     declared_libraries,
@@ -319,7 +325,7 @@ async def resolve_source(
     are immutable, so a populated export is never stale.
     """
     current = (
-        await asyncio.to_thread(history.last_commit, slug)
+        await asyncio.to_thread(history.last_commit, model_path(slug))
         if history is not None and history.available
         else None
     )
@@ -397,7 +403,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
     staging = directory.with_name(f"{directory.name}.{os.getpid()}.{threading.get_ident()}")
     shutil.rmtree(staging, ignore_errors=True)
     try:
-        history.export(slug, version, staging)
+        history.export(model_path(slug), version, staging)
         directory.parent.mkdir(parents=True, exist_ok=True)
         try:
             os.replace(staging, directory)
@@ -452,13 +458,19 @@ async def render_job(
     )
     warnings += thumbnail_warnings
 
-    model_path = work / MODEL_NAME
+    model_3mf = work / MODEL_NAME
+    # A built-in's bare slug, as download_filename names the file: the id's
+    # `builtin:` prefix is not something to show as the model's title.
     await asyncio.to_thread(
-        write_bambu_3mf, parts, model_path, thumbnails=thumbnails, model_name=job.slug
+        write_bambu_3mf,
+        parts,
+        model_3mf,
+        thumbnails=thumbnails,
+        model_name=job.slug.removeprefix(BUILTIN_PREFIX),
     )
 
     result = JobResult(
-        model_3mf=str(model_path.relative_to(paths.root)),
+        model_3mf=str(model_3mf.relative_to(paths.root)),
         preview_glb=str(preview_path.relative_to(paths.root)),
         source_version=version,
         parts=[

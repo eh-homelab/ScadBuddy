@@ -17,7 +17,7 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
-from scadbuddy.library.slugs import SLUG_PATTERN
+from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -173,7 +173,8 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 
-SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
+# A template id: a slug of mine, or `builtin:<slug>`.
+SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
 OutputIdPath = Annotated[str, Path(pattern=OUTPUT_ID_PATTERN)]
 # Abbreviated ids are accepted the way git accepts them; the API always answers
