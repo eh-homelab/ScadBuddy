@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Sample overlay for coaster-set: a sun over two mountains, 100 x 70 units. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="70mm" viewBox="0 0 100 70">
+  <circle fill="#000000" cx="68" cy="18" r="12"/>
+  <path fill="#000000" d="M 0 70 L 30 22 L 44 42 L 58 30 L 100 70 Z"/>
+</svg>
