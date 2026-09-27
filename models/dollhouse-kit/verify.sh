@@ -59,12 +59,12 @@ COLOURS = [
     ("trim_color", "#FFFFFF"), ("wall_inside_color", "#FFF8E1"), ("wallpaper_color", "#F06292"),
     ("wallpaper_color_2", "#CE93D8"), ("wainscot_color", "#FFFFFF"), ("baseboard_color", "#FFFFFF"),
     ("crown_color", "#FFFFFF"), ("window_frame_color", "#FFFFFF"), ("window_pane_color", "#B3E5FC"),
-    ("shutter_color", "#BA68C8"), ("flower_box_color", "#8D6E63"), ("flower_color", "#FF4081"),
+    ("shutter_color", "#BA68C8"), ("flower_box_color", "#A1887F"), ("flower_color", "#FF4081"),
     ("flower_color_2", "#FFEB3B"), ("leaf_color", "#66BB6A"), ("door_frame_color", "#FFFFFF"),
-    ("door_color", "#BA68C8"), ("door_knob_color", "#FFD54F"), ("floor_color", "#D7A86E"),
+    ("door_color", "#9575CD"), ("door_knob_color", "#FFD54F"), ("floor_color", "#D7A86E"),
     ("floor_accent_color", "#8D6E63"), ("rug_color", "#80DEEA"), ("rug_border_color", "#FFFFFF"),
-    ("roof_color", "#7E57C2"), ("roof_accent_color", "#B39DDB"), ("stair_tread_color", "#D7A86E"),
-    ("stair_riser_color", "#FFFFFF"), ("railing_color", "#FFFFFF"), ("spindle_color", "#F8BBD0"),
+    ("roof_color", "#7E57C2"), ("roof_accent_color", "#B39DDB"), ("stair_tread_color", "#C8945A"),
+    ("stair_riser_color", "#FFFFFF"), ("railing_color", "#FFFFFF"), ("spindle_color", "#F06292"),
     ("clip_color", "#FFFFFF"),
 ]
 DEFAULT_COL = dict(COLOURS)
@@ -130,6 +130,9 @@ CASES = [
     ("floor-tiles-rect-rug", dict(piece="floor_tile", floor_texture="tiles", rug="rectangle"),
      ["floor_color", "floor_accent_color", "rug_color", "rug_border_color"]),
     ("floor-plain", dict(piece="floor_tile", floor_texture="plain", depth_units=0.5), ["floor_color"]),
+    # Too small for a rug: it is left off instead of drawn with a negative size.
+    ("floor-rug-no-room", dict(piece="floor_tile", module_size=100, width_units=0.5, depth_units=0.5,
+                               wall_thickness=7, floor_texture="plain", rug="rectangle"), ["floor_color"]),
     ("roof-shingles", dict(piece="roof_panel"), ["roof_color", "roof_accent_color"]),
     ("roof-tiles", dict(piece="roof_panel", roof_style="tiles", width_units=2), ["roof_color", "roof_accent_color"]),
     ("roof-flat", dict(piece="roof_panel", roof_style="flat"), ["roof_color", "roof_accent_color"]),

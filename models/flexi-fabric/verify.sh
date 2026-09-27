@@ -41,7 +41,7 @@ options() {
 }
 PATTERNS=$(options pattern)
 MODES=$(options colour_mode)
-[ -n "$PATTERNS" ] && [ -n "$MODES" ] || { echo "FAIL: could not read the dropdowns"; exit 1; }
+if [ -z "$PATTERNS" ] || [ -z "$MODES" ]; then echo "FAIL: could not read the dropdowns"; exit 1; fi
 
 # name | -D overrides separated by ";"
 CASES=()
@@ -60,6 +60,7 @@ CASES+=(
     "overlay-hex|pattern=\"hex_scales\";colour_mode=\"rows\";overlay_file=\"sample-overlay.svg\""
     "overlay-triflex-inlay|pattern=\"triflex_triangles\";overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";overlay_detail=\"inlay\""
     "overlay-png-auto|overlay_file=\"sample-overlay.png\";image_threshold=50"
+    "overlay-png-auto-mixed-case|overlay_file=\"Sample-Overlay.PnG\";image_threshold=50"
     "overlay-missing|overlay_file=\"no-such-file.svg\""
     "overlay-refused-parent|overlay_file=\"../flexi-fabric/sample-overlay.svg\""
     "overlay-refused-absolute|overlay_file=\"/etc/hostname\""
@@ -77,9 +78,11 @@ CASES+=(
 )
 
 # Colours of the palette / top / overlay parameters, for the per-colour renders.
-default_of() { sed -n "s/^$1 = \"\(#[0-9A-Fa-f]*\)\".*/\1/p" model.scad; }
 
 : > "$OUT/cases.txt"
+# A mixed-case extension, as an upload may carry: "auto" must still read it as a PNG.
+cp sample-overlay.png Sample-Overlay.PnG
+trap 'rm -f Sample-Overlay.PnG' EXIT
 for c in "${CASES[@]}"; do
     name="${c%%|*}"
     # ONLY=<regex> runs a subset while iterating.

@@ -445,9 +445,10 @@ OVERLAY_ON = safe_file(overlay_file);
 function ends_with(f, suffix) =
     len(f) >= len(suffix)
     && [for (i = [0 : len(suffix) - 1]) f[len(f) - len(suffix) + i]] == [for (c = suffix) c];
-// "auto" reads the extension, so an uploaded PNG needs no second setting.
+function lower(s) = s == "" ? "" : chr([for (c = s) let(o = ord(c)) o >= 65 && o <= 90 ? o + 32 : o]);
+// "auto" reads the extension (any case), so an uploaded PNG needs no second setting.
 OVERLAY_IS_IMAGE = overlay_type == "image_threshold"
-    || (overlay_type == "auto" && (ends_with(overlay_file, ".png") || ends_with(overlay_file, ".PNG")));
+    || (overlay_type == "auto" && ends_with(lower(overlay_file), ".png"));
 PIXEL = OVERLAY_ON && overlay_detail == "links";
 FINE = OVERLAY_ON && overlay_detail == "inlay";
 

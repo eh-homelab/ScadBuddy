@@ -228,7 +228,7 @@ window_pane_color = "#B3E5FC"; // color
 shutter_color = "#BA68C8"; // color
 
 // Flower box
-flower_box_color = "#8D6E63"; // color
+flower_box_color = "#A1887F"; // color
 
 // Flowers
 flower_color = "#FF4081"; // color
@@ -243,7 +243,7 @@ leaf_color = "#66BB6A"; // color
 door_frame_color = "#FFFFFF"; // color
 
 // Door leaf
-door_color = "#BA68C8"; // color
+door_color = "#9575CD"; // color
 
 // Door knob
 door_knob_color = "#FFD54F"; // color
@@ -271,7 +271,7 @@ roof_color = "#7E57C2"; // color
 roof_accent_color = "#B39DDB"; // color
 
 // Stair treads
-stair_tread_color = "#D7A86E"; // color
+stair_tread_color = "#C8945A"; // color
 
 // Stair risers and stringers
 stair_riser_color = "#FFFFFF"; // color
@@ -280,7 +280,7 @@ stair_riser_color = "#FFFFFF"; // color
 railing_color = "#FFFFFF"; // color
 
 // Railing spindles
-spindle_color = "#F8BBD0"; // color
+spindle_color = "#F06292"; // color
 
 // Keys, pegs and hinge pins
 clip_color = "#FFFFFF"; // color
@@ -984,9 +984,13 @@ module floor_accent2d(Lx, Ly) {
 }
 
 function rug_m(Lx, Ly) = T + 12 + 0.12 * min(Lx, Ly);
+// The rug needs room for its 6 mm border plus a visible centre; on a tile too
+// small for that it is left off rather than drawn with a negative size.
+function rug_fits(Lx, Ly) = min(Lx, Ly) - 2 * rug_m(Lx, Ly) >= 20;
 module rug2d(Lx, Ly) {
     m = rug_m(Lx, Ly);
-    if (rug == "rectangle") rect(m, m, Lx - m, Ly - m);
+    if (!rug_fits(Lx, Ly)) {}
+    else if (rug == "rectangle") rect(m, m, Lx - m, Ly - m);
     else if (rug == "oval") translate([Lx / 2, Ly / 2]) scale([(Lx - 2 * m) / 2, (Ly - 2 * m) / 2]) circle(r = 1, $fn = 96);
 }
 module rug_inner2d(Lx, Ly) { offset(delta = -6) rug2d(Lx, Ly); }

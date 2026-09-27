@@ -234,7 +234,7 @@ Keep these the same for every piece of one house.
 
 **The order of the colour parameters is the extruder order.** A piece only
 produces the colours it uses, and parameters with the same value merge into
-one part (the defaults use white for eight of them). Tabs:
+one part (the defaults use white for eleven of them). Tabs:
 
 | # | Parameter | Default | Used on |
 |---|---|---|---|
@@ -251,12 +251,12 @@ one part (the defaults use white for eight of them). Tabs:
 | 11 | `window_frame_color` | `#FFFFFF` | window lining, architrave, glazing bars |
 | 12 | `window_pane_color` | `#B3E5FC` | window and french-door glass |
 | 13 | `shutter_color` | `#BA68C8` | shutters |
-| 14 | `flower_box_color` | `#8D6E63` | flower box |
+| 14 | `flower_box_color` | `#A1887F` | flower box |
 | 15 | `flower_color` | `#FF4081` | blossoms |
 | 16 | `flower_color_2` | `#FFEB3B` | blossoms, alternate |
 | 17 | `leaf_color` | `#66BB6A` | leaves |
 | 18 | `door_frame_color` | `#FFFFFF` | door lining, architrave, hinge blocks |
-| 19 | `door_color` | `#BA68C8` | door leaves |
+| 19 | `door_color` | `#9575CD` | door leaves |
 | 20 | `door_knob_color` | `#FFD54F` | knob (both faces) |
 | 21 | `floor_color` | `#D7A86E` | floor |
 | 22 | `floor_accent_color` | `#8D6E63` | seams, herringbone, grout, checkerboard |
@@ -264,10 +264,10 @@ one part (the defaults use white for eight of them). Tabs:
 | 24 | `rug_border_color` | `#FFFFFF` | rug border |
 | 25 | `roof_color` | `#7E57C2` | roof |
 | 26 | `roof_accent_color` | `#B39DDB` | odd shingles, tile valleys, flat-roof border |
-| 27 | `stair_tread_color` | `#D7A86E` | treads |
+| 27 | `stair_tread_color` | `#C8945A` | treads |
 | 28 | `stair_riser_color` | `#FFFFFF` | risers and stringers |
 | 29 | `railing_color` | `#FFFFFF` | railing posts and rails |
-| 30 | `spindle_color` | `#F8BBD0` | spindles |
+| 30 | `spindle_color` | `#F06292` | spindles |
 | 31 | `clip_color` | `#FFFFFF` | keys, pegs, hinge pins |
 
 The busiest piece, a lower-course window wall with brick, wallpaper, wainscot,

@@ -143,8 +143,9 @@ for hexagons.
 | `image_threshold` | `50` | Brightness cut-off (%) for images. |
 | `overlay_invert` | `false` | Swap picture and background. |
 
-**Getting a picture in.** In ScadBuddy, drop an SVG or PNG on the `overlay_file`
-field: the customizer uploads it (#204) and the render stages it next to
+**Getting a picture in.** In a ScadBuddy with file parameters (#204, shipped by
+PR #231), drop an SVG or PNG on the `overlay_file` field; on an older ScadBuddy the
+field is a plain text box, so type a bare file name as below. The customizer uploads it and the render stages it next to
 `model.scad` under a generated bare name, so a PNG is picked up by
 `overlay_type = auto` without changing anything else. Outside ScadBuddy (or to
 use a file shipped with the model), type a bare file name in this model's
@@ -229,7 +230,7 @@ is checked for:
   through a `color()`-filtering wrapper like ScadBuddy's closed-part renderer,
   and the closed parts' volumes add up to the whole render's.
 
-Last run: `OK: all cases passed` (31 cases). Sampled minimum gaps at 0.3 mm
+Last run: `OK: all cases passed` (36 cases). Sampled minimum gaps at 0.3 mm
 clearance: square 0.600 (the vertical gap), rings 0.404, diamond 0.419, hexagon
 0.458, TriFlex 0.353.
 
