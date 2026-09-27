@@ -1,0 +1,6 @@
+{
+  "name": "Stackable Marble Run",
+  "description": "Square marble-run tiles that stack into a tower on four corner pegs. Six pieces share one connection standard, so any piece stacks on any other: a funnel to start, a straight drop, a zigzag run, a three-quarter spiral, a three-inlet cross junction and a finish cup. Every channel is open at the top and covered by the tile above, so each piece prints without supports. Sized for a standard 16 mm marble. The body prints on extruder 1; the top rim and pegs on extruder 2.",
+  "tags": ["marble run", "toy", "kids", "stackable", "modular", "two-colour"],
+  "source": "inspired by Printables Marble Run (#725269, 4,069 downloads) and Wall-Mounted Modular Marble Run - No Screws (#1724688, 441 likes)"
+}

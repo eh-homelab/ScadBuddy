@@ -1,0 +1,6 @@
+{
+  "name": "Christmas Name Ornament",
+  "description": "A flat Christmas ornament — bauble, star, tiered tree, heart or snowflake disc — with a name and an optional year line. Letters are raised or inlaid flush and shrink to fit the shape. Hangs from a loop above the top or a hole through the body. Three colours: body on extruder 1, text on extruder 2, and the border, bauble cap, tree star, loop and snowflakes on extruder 3.",
+  "tags": ["ornament", "christmas", "holiday", "text", "multi-colour"],
+  "source": "inspired by Printables Customizable Christmas Name Ornament"
+}
