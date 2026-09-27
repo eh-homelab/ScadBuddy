@@ -382,8 +382,10 @@ explains that they need the database. The rest of ScadBuddy works as today (§7)
 
 Analyzers are skills in the ScadBuddy plugin, or in user and template scope folders.
 They run in the print flow as sessions with `flow` principals (§8.1). They diff against
-the **dynamic profile** work's resolved base profile. That work is not yet filed
-anywhere visible in this repo, so #284 is blocked until it is linked. #284 holds the
+the resolved base profile from the in-flight **"easy print"** work (dynamic print
+profiles: pick a model, a level of detail and filaments). As of 2026-09-27 it is not
+filed in this repo: searches of issues, PRs, branches and commit messages for "easy
+print" and "dynamic profile" found nothing. #284 is blocked until it is linked. #284 holds the
 design: scopes, `checks.yaml`, CEL conditions, diagnostics and fixers, and citations.
 
 ## 12. Order of work
