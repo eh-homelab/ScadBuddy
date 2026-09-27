@@ -26,10 +26,10 @@
 // Which piece
 type = "straight"; // [straight:Straight, curve:Curve, ramp:Ramp (ascending), crossing:Crossing (90°), end_stop:End stop, name_tile:Name tile]
 
-// Length in mm of a straight, ramp, crossing arm, end stop or name tile (54, 108, 144, 216 are the standard sizes)
+// Length in mm of a straight, ramp, crossing arm, end stop or name tile (54, 108, 144, 216 are the standard sizes; socket-socket pieces and crossings with sockets are at least 54)
 length = 144; // [36:18:216]
 
-// Curve inner-edge radius in mm (182 = the standard large curve, 90 = the short curve)
+// Curve inner-edge radius in mm (182 = the standard large curve, 90 = the short curve; a short socket-socket curve gets a larger radius)
 curve_radius = 182; // [80:2:300]
 
 // Curve angle in degrees (45 = the standard curve, 8 make a circle)
@@ -84,14 +84,31 @@ SOCKET_THROAT_W = 7 + 2 * connector_clearance;
 MOUTH_CH = 0.8;         // flare at the socket mouth
 TEXT_DEPTH = 1;
 
-L = length;
-RI = curve_radius;
-RC = curve_radius + W / 2;          // centre-line radius
+kind_a = connectors == "female_female" ? "female" : "male";
+kind_b = connectors == "male_male" ? "male" : "female";
+
+// Two sockets must leave material between them, or they cut the piece in two.
+// A socket reaches SOCK_IN from its end face. Two facing sockets need
+// 2 x SOCK_IN + 3 mm; a crossing's sockets on neighbouring arms need each
+// socket to stop a socket radius + 1 mm short of the centre. Too short a piece
+// is lengthened to the next 18 mm step, and too tight a socket-socket curve
+// gets a larger radius (the angle is kept, so curves still make a circle).
+SOCK_IN = HEAD_C + SOCKET_D / 2;
+two_sockets = connectors == "female_female";
+min_len = type == "crossing" && connectors != "male_male" ? 2 * (SOCK_IN + SOCKET_D / 2 + 1)
+        : (type == "straight" || type == "name_tile" || type == "ramp") && two_sockets
+          ? 2 * SOCK_IN + 3 : 0;
+L = length >= min_len ? length : 18 * ceil(min_len / 18);
+min_rc = type == "curve" && two_sockets ? (2 * SOCK_IN + 3) / (curve_angle * PI / 180) : 0;
+RI = curve_radius + W / 2 >= min_rc ? curve_radius : 2 * ceil((min_rc - W / 2) / 2);
+RC = RI + W / 2;                    // centre-line radius
 A = curve_angle;
 RISE = ramp_rise;
 
-kind_a = connectors == "female_female" ? "female" : "male";
-kind_b = connectors == "male_male" ? "male" : "female";
+if (L != length)
+    echo(str("NOTE: length raised from ", length, " to ", L, " mm so the two sockets do not cut the piece in two"));
+if (RI != curve_radius)
+    echo(str("NOTE: curve_radius raised from ", curve_radius, " to ", RI, " mm so the two sockets do not cut the curve in two"));
 
 // ---------------------------------------------------------------- profile
 
