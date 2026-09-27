@@ -161,7 +161,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional PNG, at most 2 MiB",
+            "description": "Optional PNG, at most 10 MiB",
             "title": "Thumbnail"
           }
         },
@@ -187,7 +187,7 @@
         "properties": {
           "file": {
             "contentMediaType": "application/octet-stream",
-            "description": "The thumbnail, a PNG of at most 2 MiB",
+            "description": "The thumbnail, a PNG of at most 10 MiB",
             "title": "File",
             "type": "string"
           }

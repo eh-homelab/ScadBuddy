@@ -81,7 +81,7 @@ function png(size = 16): Uint8Array {
 }
 
 const TOO_LARGE =
-  'the thumbnail is too large: 2097153 bytes, and a thumbnail is at most 2097152 bytes (2 MiB)'
+  'the thumbnail is too large: 10485761 bytes, and a thumbnail is at most 10485760 bytes (10 MiB)'
 
 async function upload(
   fields: Record<string, string> = {},
@@ -256,7 +256,7 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
 
   it.each([
     ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
-    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+    ['is over the limit', png(10 * 1024 * 1024 + 1), TOO_LARGE],
   ])('refuses a thumbnail that %s, as _require_png does, and creates nothing', async (_, bytes, detail) => {
     const { status, body } = await uploadThumbnail(bytes)
     expect(status).toBe(422)
@@ -285,7 +285,7 @@ describe('mock PUT /models/:slug/thumbnail, as _require_png holds it', () => {
 
   it.each([
     ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
-    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+    ['is over the limit', png(10 * 1024 * 1024 + 1), TOO_LARGE],
   ])('refuses one that %s with the backend\'s 422, and changes nothing', async (_, bytes, detail) => {
     const before = await api.getModel('name-keychain')
     const { status, body } = await put(bytes)

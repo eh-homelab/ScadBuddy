@@ -137,10 +137,12 @@ describe('classifyFiles with no preferred name among several', () => {
 })
 
 describe('thumbnailProblem', () => {
-  it('takes a PNG up to 2 MiB, and names what is wrong otherwise', () => {
+  it('takes a PNG up to 10 MiB, and names what is wrong otherwise', () => {
     const png = (size: number) => new File([new Uint8Array(size)], 'cover.png')
-    expect(thumbnailProblem(png(2 * 1024 * 1024))).toBeNull()
-    expect(thumbnailProblem(png(2 * 1024 * 1024 + 1))).toBe('The thumbnail must be 2 MiB or smaller.')
+    expect(thumbnailProblem(png(10 * 1024 * 1024))).toBeNull()
+    expect(thumbnailProblem(png(10 * 1024 * 1024 + 1))).toBe(
+      'The thumbnail must be 10 MiB or smaller.',
+    )
     expect(thumbnailProblem(file('cover.jpg'))).toBe('The thumbnail must be a PNG.')
   })
 })

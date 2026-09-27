@@ -36,7 +36,7 @@ export const isPng = (file: File) => lower(file).endsWith('.png') || file.type =
 export const isMarkdown = (file: File) => /\.(md|markdown)$/.test(lower(file))
 
 /** The server's `MAX_THUMBNAIL_BYTES`: each thumbnail set is kept in the history. */
-export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+export const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
 /** The limit as people read it, derived so the message cannot drift from it. */
 export const MAX_THUMBNAIL_SIZE = `${MAX_THUMBNAIL_BYTES / (1024 * 1024)} MiB`
 
