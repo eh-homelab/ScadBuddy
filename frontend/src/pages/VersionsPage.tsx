@@ -5,6 +5,7 @@ import type { ModelVersion, VersionDiff } from '../api/types'
 import { UnifiedDiff } from '../components/UnifiedDiff'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 
@@ -25,6 +26,8 @@ export function VersionsPage() {
   const [error, setError] = useState<string | undefined>(undefined)
 
   const versions = versionsState.data
+  // #184 — a built-in's history is readable, but the server refuses a restore.
+  const canRestore = modelState.data?.origin === 'mine'
   const current = versions?.find((version) => version.current)
 
   // Open on the newest revision, and re-home the selection if the one being
@@ -76,7 +79,8 @@ export function VersionsPage() {
     }
   }
 
-  if (versionsState.loading) {
+  // The model too: whether Restore is offered depends on its origin.
+  if (versionsState.loading || modelState.loading) {
     return (
       <p className="flex items-center gap-2 px-4 py-16 text-[13px] text-muted">
         <Spinner /> Loading versions
@@ -89,7 +93,7 @@ export function VersionsPage() {
       <div role="alert" className="mx-auto max-w-lg px-4 py-16 text-center">
         <h1 className="text-[15px] font-medium">No version history</h1>
         <p className="mt-2 text-[13px] text-muted">{versionsState.error.message}</p>
-        <Link to={`/m/${slug}`} className="mt-4 inline-block text-[13px] text-accent underline">
+        <Link to={modelPath(slug)} className="mt-4 inline-block text-[13px] text-accent underline">
           Back to the customizer
         </Link>
       </div>
@@ -104,11 +108,19 @@ export function VersionsPage() {
             Models
           </Link>
           <span className="text-faint">/</span>
-          <Link to={`/m/${slug}`} className="text-[12px] text-muted hover:text-ink">
+          <Link to={modelPath(slug)} className="text-[12px] text-muted hover:text-ink">
             {modelState.data?.name ?? slug}
           </Link>
           <span className="text-faint">/</span>
           <h1 className="text-[13px] font-medium">Versions</h1>
+          {modelState.data?.origin === 'builtin' && (
+            <span
+              data-testid="builtin-badge"
+              className="rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+            >
+              Built-in template — read-only
+            </span>
+          )}
         </div>
 
         {error && (
@@ -135,13 +147,14 @@ export function VersionsPage() {
                   version={version}
                   selected={version.commit === selected}
                   busy={busy}
+                  canRestore={canRestore}
                   onSelect={() => {
                     setSelected(version.commit)
                     setBase(PARENT)
                   }}
                   onRestore={() => void restore(version.commit)}
                   onCustomize={() =>
-                    void navigate(`/m/${slug}?version=${encodeURIComponent(version.commit)}`)
+                    void navigate(`${modelPath(slug)}?version=${encodeURIComponent(version.commit)}`)
                   }
                 />
               ))}
@@ -198,6 +211,7 @@ function VersionRow({
   version,
   selected,
   busy,
+  canRestore,
   onSelect,
   onRestore,
   onCustomize,
@@ -205,6 +219,7 @@ function VersionRow({
   version: ModelVersion
   selected: boolean
   busy: boolean
+  canRestore: boolean
   onSelect: () => void
   onRestore: () => void
   onCustomize: () => void
@@ -242,9 +257,11 @@ function VersionRow({
         <Button size="sm" onClick={onCustomize}>
           Customize this version
         </Button>
-        <Button size="sm" onClick={onRestore} disabled={busy || version.current}>
-          Restore this version
-        </Button>
+        {canRestore && (
+          <Button size="sm" onClick={onRestore} disabled={busy || version.current}>
+            Restore this version
+          </Button>
+        )}
       </div>
     </li>
   )

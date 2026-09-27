@@ -10,7 +10,7 @@ import type { PreviewCapture } from '../components/Preview'
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
 import { Spinner } from '../components/ui/Spinner'
-import { editPath, type EditNavigationState } from '../lib/deeplink'
+import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { fitMessages } from '../lib/plate'
 import { useAsync } from '../lib/useAsync'
@@ -30,6 +30,10 @@ export function CustomizePage() {
   const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
   const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #184 — a built-in is read-only on the server; the write actions only show once
+  // the record says the model is the user's, so a built-in never flashes them.
+  const modelState = useAsync(() => api.getModel(slug), [slug])
+  const origin = modelState.data?.origin
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
   // own provenance when the output record is gone. EditPage has usually resolved it
   // already and passed it in state, so arriving that way costs no second request.
@@ -143,7 +147,7 @@ export function CustomizePage() {
   if (foreign) {
     return (
       <Navigate
-        to={`/m/${foreign.slug}?from=${foreign.output_id}`}
+        to={`${modelPath(foreign.slug)}?from=${foreign.output_id}`}
         state={{ editTarget: foreign } satisfies EditNavigationState}
         replace
       />
@@ -209,20 +213,30 @@ export function CustomizePage() {
               Back to current
             </button>
           )}
+          {origin === 'builtin' && (
+            <span
+              data-testid="builtin-badge"
+              className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+            >
+              Built-in template — read-only
+            </span>
+          )}
+          {origin && (
+            <Link
+              to={modelPath(slug, 'source')}
+              className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
+            >
+              {origin === 'builtin' ? 'View source' : 'Edit source'}
+            </Link>
+          )}
           <Link
-            to={`/m/${slug}/source`}
-            className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
-          >
-            Edit source
-          </Link>
-          <Link
-            to={`/m/${slug}/versions`}
+            to={modelPath(slug, 'versions')}
             className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
           >
             Versions
           </Link>
           <Link
-            to={`/m/${slug}/history`}
+            to={modelPath(slug, 'history')}
             className="rounded-[6px] px-2 py-1 text-[12px] text-muted hover:bg-surface-2 hover:text-ink"
           >
             History
@@ -230,7 +244,7 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
-          <DeleteModelButton slug={slug} name={schema.title ?? slug} />
+          {origin === 'mine' && <DeleteModelButton slug={slug} name={schema.title ?? slug} />}
         </div>
       </div>
 

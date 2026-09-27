@@ -1,14 +1,14 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it } from 'vitest'
-import { versionIds } from '../mocks/fixtures'
+import { BUILTIN_SLUG, versionIds } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { VersionsPage } from './VersionsPage'
 
-function render() {
+function render(slug = 'name-keychain') {
   return renderPage(<VersionsPage />, {
-    route: '/m/name-keychain/versions',
+    route: `/m/${encodeURIComponent(slug)}/versions`,
     path: '/m/:slug/versions',
   })
 }
@@ -146,5 +146,24 @@ describe('VersionsPage', () => {
     render()
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Model history is unavailable')
+  })
+
+  it('offers no restore on a built-in template, but still customizes a revision (#184)', async () => {
+    render(BUILTIN_SLUG)
+    const listed = await rows()
+
+    expect(listed).toHaveLength(2)
+    expect(screen.getByTestId('builtin-badge')).toHaveTextContent('Built-in template — read-only')
+    expect(screen.queryByRole('button', { name: 'Restore this version' })).not.toBeInTheDocument()
+    expect(
+      within(listed[1] as HTMLElement).getByRole('button', { name: 'Customize this version' }),
+    ).toBeEnabled()
+  })
+
+  it('offers a restore on every revision of a model of the user\'s own', async () => {
+    render()
+    await rows()
+    expect(screen.getAllByRole('button', { name: 'Restore this version' })).toHaveLength(3)
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
   })
 })

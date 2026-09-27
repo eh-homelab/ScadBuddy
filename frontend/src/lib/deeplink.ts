@@ -10,6 +10,15 @@ export function editPath(outputId: string): string {
 }
 
 /**
+ * A model's page in the app. The id is one path segment, and a built-in's
+ * (`builtin:<slug>`) carries a colon, so it is encoded like any other segment.
+ */
+export function modelPath(slug: string, page?: 'source' | 'versions' | 'history'): string {
+  const path = `/m/${encodeURIComponent(slug)}`
+  return page ? `${path}/${page}` : path
+}
+
+/**
  * What `/edit/{id}` hands the customizer through router state, so one Edit click is
  * one `GET /outputs/{id}/edit`. Absent when the customizer is opened directly — a
  * pasted `/m/{slug}?from={id}`, or a reload — so the customizer still fetches.
