@@ -509,6 +509,20 @@
         "title": "Diagnostic",
         "type": "object"
       },
+      "DuplicateRequest": {
+        "properties": {
+          "name": {
+            "description": "Display name of the duplicate; its slug is derived from it",
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "DuplicateRequest",
+        "type": "object"
+      },
       "EditTarget": {
         "description": "What ``/edit/{output_id}`` needs to reopen the customizer.",
         "properties": {
@@ -1323,6 +1337,146 @@
         "title": "JobStatus",
         "type": "object"
       },
+      "LibraryAdd": {
+        "properties": {
+          "name": {
+            "description": "The directory `use <NAME/...>` names",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "anyOf": [
+              {
+                "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A tag or branch to pin; the catalogue's default when omitted",
+            "title": "Ref"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An https git URL; the catalogue's when omitted",
+            "title": "Url"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "LibraryAdd",
+        "type": "object"
+      },
+      "LibraryEntry": {
+        "description": "The catalogue and the lockfile, joined: what can be added, and what is.",
+        "properties": {
+          "curated": {
+            "title": "Curated",
+            "type": "boolean"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again",
+            "title": "Error"
+          },
+          "homepage": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Homepage"
+          },
+          "licence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Licence"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LibraryPin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "ref",
+          "curated"
+        ],
+        "title": "LibraryEntry",
+        "type": "object"
+      },
+      "LibraryPin": {
+        "description": "One entry of ``libraries.lock``: where it came from, what was asked for, what\nthat resolved to.",
+        "properties": {
+          "commit": {
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "ref": {
+            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "ref",
+          "commit"
+        ],
+        "title": "LibraryPin",
+        "type": "object"
+      },
       "LoadedAt": {
         "description": "Where a spool physically is, when Bambuddy says it is loaded somewhere.\n\nPurely a label. It is not an address: nothing here turns it into a tray number.",
         "properties": {
@@ -1370,6 +1524,20 @@
               }
             ],
             "title": "Description"
+          },
+          "libraries": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Libraries"
           },
           "name": {
             "anyOf": [
@@ -1440,6 +1608,13 @@
             "title": "Has Thumbnail",
             "type": "boolean"
           },
+          "libraries": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Libraries",
+            "type": "array"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -1489,6 +1664,16 @@
             "format": "date-time",
             "title": "Updated At",
             "type": "string"
+          },
+          "upstream": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Upstream"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "version": {
             "anyOf": [
@@ -4811,6 +4996,52 @@
         "title": "SpoolOption",
         "type": "object"
       },
+      "Upstream": {
+        "description": "The template a duplicate was copied from, and the revision of it it includes.",
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The upstream commit this template includes; None without history",
+            "title": "Base"
+          },
+          "dismissed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "An upstream commit the user chose not to take",
+            "title": "Dismissed"
+          },
+          "id": {
+            "description": "The upstream template's id: a slug, or `builtin:<slug>`",
+            "title": "Id",
+            "type": "string"
+          },
+          "path": {
+            "description": "The upstream's directory in the models repository",
+            "title": "Path",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "base"
+        ],
+        "title": "Upstream",
+        "type": "object"
+      },
       "UrlImport": {
         "properties": {
           "force": {
@@ -5162,6 +5393,71 @@
         ]
       }
     },
+    "/api/v1/libraries": {
+      "get": {
+        "operationId": "list_libraries_api_v1_libraries_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/LibraryEntry"
+                  },
+                  "title": "Response List Libraries Api V1 Libraries Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Libraries and their pins",
+        "tags": [
+          "libraries"
+        ]
+      },
+      "post": {
+        "description": "Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.",
+        "operationId": "add_library_api_v1_libraries_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryAdd"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LibraryEntry"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Add a library, or pin it to another ref",
+        "tags": [
+          "libraries"
+        ]
+      }
+    },
     "/api/v1/models": {
       "get": {
         "operationId": "list_models_api_v1_models_get",
@@ -5478,6 +5774,61 @@
           }
         },
         "summary": "Edit model metadata",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/duplicate": {
+      "post": {
+        "description": "Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.",
+        "operationId": "duplicate_model_api_v1_models__slug__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DuplicateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Duplicate a template",
         "tags": [
           "models"
         ]

@@ -89,6 +89,27 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/libraries": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Libraries and their pins */
+        get: operations["list_libraries_api_v1_libraries_get"];
+        put?: never;
+        /**
+         * Add a library, or pin it to another ref
+         * @description Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.
+         */
+        post: operations["add_library_api_v1_libraries_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models": {
         parameters: {
             query?: never;
@@ -167,6 +188,26 @@ export interface paths {
         head?: never;
         /** Edit model metadata */
         patch: operations["patch_model_api_v1_models__slug__patch"];
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a template
+         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.
+         */
+        post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
         trace?: never;
     };
     "/api/v1/models/{slug}/outputs": {
@@ -1179,6 +1220,14 @@ export interface components {
              */
             severity: "error" | "warning" | "trace";
         };
+        /** DuplicateRequest */
+        DuplicateRequest: {
+            /**
+             * Name
+             * @description Display name of the duplicate; its slug is derived from it
+             */
+            name: string;
+        };
         /**
          * EditTarget
          * @description What ``/edit/{output_id}`` needs to reopen the customizer.
@@ -1480,6 +1529,61 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
+        /** LibraryAdd */
+        LibraryAdd: {
+            /**
+             * Name
+             * @description The directory `use <NAME/...>` names
+             */
+            name: string;
+            /**
+             * Ref
+             * @description A tag or branch to pin; the catalogue's default when omitted
+             */
+            ref?: string | null;
+            /**
+             * Url
+             * @description An https git URL; the catalogue's when omitted
+             */
+            url?: string | null;
+        };
+        /**
+         * LibraryEntry
+         * @description The catalogue and the lockfile, joined: what can be added, and what is.
+         */
+        LibraryEntry: {
+            /** Curated */
+            curated: boolean;
+            /**
+             * Error
+             * @description Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again
+             */
+            error?: string | null;
+            /** Homepage */
+            homepage?: string | null;
+            /** Licence */
+            licence?: string | null;
+            /** Name */
+            name: string;
+            pin?: components["schemas"]["LibraryPin"] | null;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
+        /**
+         * LibraryPin
+         * @description One entry of ``libraries.lock``: where it came from, what was asked for, what
+         *     that resolved to.
+         */
+        LibraryPin: {
+            /** Commit */
+            commit: string;
+            /** Ref */
+            ref: string;
+            /** Url */
+            url: string;
+        };
         /**
          * LoadedAt
          * @description Where a spool physically is, when Bambuddy says it is loaded somewhere.
@@ -1500,6 +1604,8 @@ export interface components {
         ModelPatch: {
             /** Description */
             description?: string | null;
+            /** Libraries */
+            libraries?: string[] | null;
             /** Name */
             name?: string | null;
             /** Tags */
@@ -1531,6 +1637,8 @@ export interface components {
             has_readme: boolean;
             /** Has Thumbnail */
             has_thumbnail: boolean;
+            /** Libraries */
+            libraries?: string[];
             /** Name */
             name: string;
             /**
@@ -1551,6 +1659,7 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            upstream?: components["schemas"]["Upstream"] | null;
             /** Version */
             version?: string | null;
         };
@@ -2693,6 +2802,32 @@ export interface components {
             /** Subtype */
             subtype?: string | null;
         };
+        /**
+         * Upstream
+         * @description The template a duplicate was copied from, and the revision of it it includes.
+         */
+        Upstream: {
+            /**
+             * Base
+             * @description The upstream commit this template includes; None without history
+             */
+            base: string | null;
+            /**
+             * Dismissed
+             * @description An upstream commit the user chose not to take
+             */
+            dismissed?: string | null;
+            /**
+             * Id
+             * @description The upstream template's id: a slug, or `builtin:<slug>`
+             */
+            id: string;
+            /**
+             * Path
+             * @description The upstream's directory in the models repository
+             */
+            path: string;
+        };
         /** UrlImport */
         UrlImport: {
             /**
@@ -2892,6 +3027,59 @@ export interface operations {
                 };
                 content: {
                     "model/gltf-binary": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_libraries_api_v1_libraries_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryEntry"][];
+                };
+            };
+        };
+    };
+    add_library_api_v1_libraries_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryAdd"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LibraryEntry"];
                 };
             };
             /** @description Validation Error */
@@ -3109,6 +3297,41 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    duplicate_model_api_v1_models__slug__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DuplicateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };

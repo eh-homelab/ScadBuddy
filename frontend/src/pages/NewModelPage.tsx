@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import { SourceWorkbench } from '../components/SourceWorkbench'
+import { modelPath } from '../lib/deeplink'
 
 /** Paste `.scad` source, name it, save it. The schema is derived exactly as on upload. */
 export function NewModelPage() {
@@ -16,7 +17,7 @@ export function NewModelPage() {
       description: '',
       force,
     })
-    await navigate(`/m/${model.slug}`)
+    await navigate(modelPath(model.slug))
   }
 
   return (

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -14,6 +15,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from tests.api.conftest import PNG_BYTES, wait_for_job
@@ -214,3 +216,32 @@ def test_the_id_of_a_longest_legal_slug_is_not_refused_for_length(client: TestCl
 
     assert client.get(f"/api/v1/models/builtin:{slug}").status_code == 404
     assert client.get(f"/api/v1/models/builtin:{slug}x").status_code == 422
+
+
+def test_boot_links_a_template_the_old_seed_copied_in(
+    settings: Settings, bundled: Path, paths: DataPaths
+) -> None:
+    """An install seeded before #155: its copy becomes a duplicate of the built-in (#158)."""
+    history = ModelHistory(paths.models)
+    history.ensure_repo()
+    shutil.copytree(bundled, paths.model_dir("keychain"))
+    seed = history.commit("Seed keychain from the image", "keychain")
+
+    with TestClient(create_app(settings)) as client:
+        model = client.get("/api/v1/models/keychain").json()
+        assert model["origin"] == "mine"
+        assert model["upstream"] == {
+            "id": BUILTIN,
+            "path": "keychain",
+            "base": seed,
+            "dismissed": None,
+        }
+        assert _versions(client, "keychain")[0]["message"] == (
+            "Link seeded templates to their built-ins"
+        )
+    head = history.head()
+
+    # A second boot finds nothing to link and commits nothing.
+    with TestClient(create_app(settings)):
+        pass
+    assert history.head() == head

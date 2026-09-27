@@ -2,11 +2,13 @@ import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
+import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { ImportDialog } from '../components/ImportDialog'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
+import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { useAsync } from '../lib/useAsync'
 
@@ -18,7 +20,7 @@ export function CataloguePage() {
 
   function added(model: ModelSummary) {
     setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
-    void navigate(`/m/${model.slug}`)
+    void navigate(modelPath(model.slug))
   }
 
   return (
@@ -62,7 +64,11 @@ export function CataloguePage() {
         {data && data.length > 0 && (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {data.map((model) => (
-              <ModelCard key={model.slug} model={model} />
+              <ModelCard
+                key={model.slug}
+                model={model}
+                upstreamName={data.find((m) => m.slug === model.upstream?.id)?.name}
+              />
             ))}
           </ul>
         )}
@@ -88,16 +94,21 @@ export function CataloguePage() {
   )
 }
 
-function ModelCard({ model }: { model: ModelSummary }) {
+function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?: string }) {
   return (
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
-      <Link to={`/m/${model.slug}`} className="block p-3 focus-visible:rounded-[6px]">
+      <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
         <ModelThumbnail
           src={model.has_thumbnail ? api.modelThumbnailUrl(model.slug) : undefined}
           alt={model.name}
         />
 
         <h2 className="mt-3 text-[14px] font-medium">{model.name}</h2>
+        {model.origin === 'builtin' && (
+          <p data-testid="builtin-badge" className="mt-0.5 text-[11px] text-faint">
+            Built-in template — read-only
+          </p>
+        )}
         {model.description && (
           <p className="mt-1 line-clamp-2 text-[13px] leading-snug text-muted">
             {model.description}
@@ -135,6 +146,12 @@ function ModelCard({ model }: { model: ModelSummary }) {
           </a>
         </p>
       )}
+      <div className="flex items-center justify-between gap-2 px-3 pb-2">
+        <DuplicatedFrom upstream={model.upstream} name={upstreamName} className="min-w-0 truncate" />
+        <span className="ml-auto">
+          <DuplicateModelButton slug={model.slug} name={model.name} />
+        </span>
+      </div>
     </li>
   )
 }

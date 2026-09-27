@@ -148,6 +148,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
   pre-slice check reads **object-level `extruder`** from `model_settings.config`
   and ignores `paint_color`, so per-object assignment is the only reliable
   path.
+- **The image's `git` must be at least 2.37**, asserted as a floor in the
+  Dockerfile (`MIN_GIT_VERSION`) rather than pinned: 2.9 for `core.hooksPath`,
+  2.28 for `--initial-branch`, 2.35.2 for `safe.directory` as protected
+  command-line scope, and 2.37 for `http.curloptResolve`, which holds a library
+  clone (#93) to the addresses its host was vetted at. An older git ignores that
+  key and resolves the host again, so the vetting would not bind the clone.
 - **MakerWorld does not serve a model's source to an anonymous server**
   (checked 2026-09-26, #153/#174). Model pages sit behind a Cloudflare challenge
   (403). `api.bambulab.com/v1/design-service/design/<id>` answers without a login
@@ -251,6 +257,19 @@ on the volume sees the same thing.
   the same slug as a built-in is left alone. `GET /models` lists both, each with
   `origin: "builtin" | "mine"`. This replaces the old copy-if-absent seed, which
   turned a bundled model into an ordinary one the first time it was copied.
+- **Seeded templates are linked to their built-ins (#158).** Right after the sync,
+  every template of mine with a built-in's slug and no `upstream` whose own
+  history reaches a `Seed … from the image` commit (the old seed's subject)
+  becomes a duplicate of it: `upstream = {id: builtin:<slug>, path: <slug>, base:
+  <that seed commit>}`, where `path` is where the source lived at `base`. The
+  seeded source is the true merge base, so an unedited copy merges cleanly to the
+  current built-in and an edited one keeps its edits. All of them land as one
+  `Link seeded templates to their built-ins` commit. It is idempotent (a linked
+  template has an `upstream`) and renames nothing, so outputs, `model_version`
+  stamps and deep links are untouched. A template whose newest origin is not a
+  seed (uploaded under that slug, or re-created after a delete) is logged and left
+  alone; one that fails to link is logged and the rest still link, so the boot
+  never fails on it.
 
 - **Shelling out to `git`, not dulwich/pygit2.** The product surface here *is*
   git porcelain, so a library would mean reimplementing log/diff/restore — a
@@ -612,6 +631,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT and restore answer 403 for one (§4.3) |
+| POST | `/models/{slug}/duplicate` | body `{name}` → copies any template, built-in or mine, to a new template of mine (slug derived from `name` as on `POST /models`, with the same 422/409), recording `upstream: {id, path, base, dismissed}` in its `model.json`, where `base` is the upstream's last commit. One commit, `Duplicate <id> as <new-slug>`; derived files (schema cache, outputs, revisions) are not copied, and a metadata PATCH never touches `upstream` (201) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema |

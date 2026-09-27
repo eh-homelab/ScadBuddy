@@ -14,6 +14,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
+from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
@@ -27,6 +28,9 @@ VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
+INSTALL_CONCURRENCY = 2
+
+
 @dataclass
 class AppState:
     settings: Settings
@@ -37,12 +41,22 @@ class AppState:
     outputs: OutputStore
     settings_store: SettingsStore
     fonts: FontService
+    libraries: LibraryStore
     queue: RenderQueue
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: At most INSTALL_CONCURRENCY library clones at once. Each runs in a worker
+    #: thread for up to the git timeout; uncapped, a burst of installs would hold the
+    #: default executor that every other `to_thread` route shares. More than one, so
+    #: a long clone (NopSCADlib) doesn't hold up adding another library; the store's
+    #: per-name locks still order two adds of the same name. A queued install waits
+    #: on the loop, not in a thread.
+    installs: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
+    )
     #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
     #: held for as long as the editor stays open rather than for one piece of work —
     #: the third term in the pod's worst case above.
@@ -67,6 +81,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
+        libraries=LibraryStore(paths, history),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
@@ -130,12 +145,20 @@ def get_fonts(state: StateDep) -> FontService:
     return state.fonts
 
 
+def get_libraries(state: StateDep) -> LibraryStore:
+    return state.libraries
+
+
 def get_queue(state: StateDep) -> RenderQueue:
     return state.queue
 
 
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
+
+
+def get_installs(state: StateDep) -> asyncio.Semaphore:
+    return state.installs
 
 
 ConfigDep = Annotated[Config, Depends(get_config)]
@@ -145,8 +168,10 @@ HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
+LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
+InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

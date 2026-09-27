@@ -22,6 +22,10 @@ interface Props {
   slug?: string
   saveLabel: string
   canSave: boolean
+  /** #184 — a built-in template: no save, and the editor refuses input. */
+  readOnly?: boolean
+  /** #159 — what a read-only source offers in place of Save ("Duplicate to edit"). */
+  readOnlyActions?: ReactNode
   onSave: (force: boolean) => Promise<void>
 }
 
@@ -46,6 +50,8 @@ export function SourceWorkbench({
   slug,
   saveLabel,
   canSave,
+  readOnly = false,
+  readOnlyActions,
   onSave,
 }: Props) {
   const [verdict, setVerdict] = useState<Verdict | undefined>(undefined)
@@ -110,22 +116,34 @@ export function SourceWorkbench({
       <div className="border-b border-line bg-surface">
         <div className="flex items-center justify-between gap-3 px-3 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">{breadcrumb}</div>
-          <div className="flex shrink-0 items-center gap-2">
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => void save(false)}
-              disabled={busy || !canSave || !source.trim()}
-            >
-              {saving && <Spinner />}
-              {saveLabel}
-            </Button>
-            {refused && (
-              <Button size="sm" variant="danger" onClick={() => void save(true)} disabled={busy || !canSave}>
-                Save anyway
+          {readOnly ? (
+            <div className="flex shrink-0 items-center gap-2">
+              <span
+                data-testid="builtin-badge"
+                className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+              >
+                Built-in template — read-only
+              </span>
+              {readOnlyActions}
+            </div>
+          ) : (
+            <div className="flex shrink-0 items-center gap-2">
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => void save(false)}
+                disabled={busy || !canSave || !source.trim()}
+              >
+                {saving && <Spinner />}
+                {saveLabel}
               </Button>
-            )}
-          </div>
+              {refused && (
+                <Button size="sm" variant="danger" onClick={() => void save(true)} disabled={busy || !canSave}>
+                  Save anyway
+                </Button>
+              )}
+            </div>
+          )}
         </div>
         {fields}
       </div>
@@ -138,6 +156,7 @@ export function SourceWorkbench({
           uri={uri}
           languageServer={api.languageServerPath(slug)}
           label="OpenSCAD source"
+          readOnly={readOnly}
         />
       </div>
 
