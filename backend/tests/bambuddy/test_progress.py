@@ -275,3 +275,74 @@ async def test_a_bambuddy_that_refuses_the_read_is_not_swallowed(
     with pytest.raises(ApiError) as raised:
         await progress_for(bambuddy, meta(pipeline_run_id=1, print_route="pipeline"))
     assert "the database is locked" in raised.value.detail
+
+
+# --- every plate of an all-plates print (#200) ------------------------------
+
+
+def plates_meta() -> OutputMeta:
+    return meta(
+        print_route="slice_queue",
+        queue_item_id=52,
+        slice_job_id=10,
+        plates=[
+            {"plate_id": 1, "queue_item_id": 51, "slice_job_id": 9},
+            {"plate_id": 2, "queue_item_id": 52, "slice_job_id": 10},
+        ],
+    )
+
+
+def sliced() -> None:
+    for job in (9, 10):
+        respx.get(f"{API}/slice-jobs/{job}").mock(
+            return_value=httpx.Response(200, json={"id": job, "status": "completed"})
+        )
+
+
+@respx.mock
+async def test_every_plate_is_polled_not_only_the_last(bambuddy: BambuddyClient) -> None:
+    """The single ids are the last plate's. An earlier plate still printing must keep
+    the poll going, and each plate's entry is shown."""
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing"})
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "completed"})
+    )
+    progress = await progress_for(bambuddy, plates_meta())
+    assert progress is not None
+    assert progress.settled is False
+    assert progress.stage == "running"
+    assert progress.copies == 2
+    assert progress.copies_completed == 1
+    assert progress.copies_in_progress == 1
+    assert [(c.plate_id, c.queue_entry_id, c.stage) for c in progress.copies_detail] == [
+        (1, 51, "running"),
+        (2, 52, "done"),
+    ]
+
+
+@respx.mock
+async def test_an_earlier_plate_failing_is_the_prints_failure(bambuddy: BambuddyClient) -> None:
+    """A failure on the first plate is reported even though the last is fine; a dropped
+    entry reads as done, as it does for a single plate."""
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200, json={"id": 51, "status": "failed", "error_message": "AMS slot empty"}
+        )
+    )
+    respx.get(f"{API}/queue/52").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    progress = await progress_for(bambuddy, plates_meta())
+    assert progress is not None
+    assert progress.settled is True
+    assert progress.stage == "failed"
+    assert progress.error_message == "AMS slot empty"
+    assert progress.fix == QUEUED_THEN_FAILED_FIX
+    assert progress.copies_failed == 1
+    assert progress.copies_completed == 1
+    assert [(c.plate_id, c.queue_entry_id, c.stage) for c in progress.copies_detail] == [
+        (1, 51, "failed"),
+        (2, 52, "done"),
+    ]

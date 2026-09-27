@@ -67,6 +67,31 @@ describe('PrintProgressPanel', () => {
     expect(screen.queryByTestId('print-progress-fix')).not.toBeInTheDocument()
   })
 
+  it('follows every plate of an all-plates print, not only the last', () => {
+    const plate = fixtures.queuedSliceProgress.copies_detail![0]!
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies: 2,
+          copies_detail: [
+            { ...plate, plate_id: 1, queue_entry_id: 4470, stage: 'running' },
+            { ...plate, plate_id: 2 },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress')).toHaveTextContent('2 plates queued')
+    expect(screen.getByTestId('print-progress-copy-0')).toHaveTextContent(
+      'Plate 1 on 3DP-31B-598 as queue #4470 · running',
+    )
+    expect(screen.getByTestId('print-progress-copy-1')).toHaveTextContent(
+      'Plate 2 on 3DP-31B-598 as queue #4471 · queued',
+    )
+  })
+
   it('says it is slicing before the queue entry exists', () => {
     render(
       <PrintProgressPanel

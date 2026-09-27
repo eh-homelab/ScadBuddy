@@ -72,6 +72,8 @@ class CopyProgress(BaseModel):
     """
 
     copy_index: int | None = None
+    #: Which plate of an all-plates print this entry is (#200); ``None`` otherwise.
+    plate_id: int | None = None
     printer_name: str | None = None
     queue_entry_id: int | None = None
     stage: Stage = "unknown"
@@ -245,6 +247,84 @@ def from_queue(
     )
 
 
+async def _queued_progress(
+    client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+) -> PrintProgress:
+    """One slice job and the queue item it became, read off Bambuddy."""
+    slice_job = None
+    if slice_job_id is not None:
+        slice_job = await client.slice_job(slice_job_id)
+    item = None
+    if queue_item_id is not None:
+        try:
+            item = await client.queue_item(queue_item_id)
+        except ApiError as error:
+            if error.status != 404:
+                raise
+            # Bambuddy drops a queue entry once it has been dispatched and archived;
+            # that is not a failure, and reporting one would contradict the print
+            # the user can see running.
+            return PrintProgress(
+                route="slice_queue",
+                stage="done",
+                settled=True,
+                slice_job_id=slice_job_id,
+                queue_item_id=queue_item_id,
+                copies_completed=1,
+                bambuddy_url=url,
+            )
+    return from_queue(item, slice_job=slice_job, slice_job_id=slice_job_id, bambuddy_url=url)
+
+
+def from_plates(
+    plates: list[PrintProgress],
+    plate_ids: list[int],
+    *,
+    slice_job_id: int | None,
+    queue_item_id: int | None,
+    bambuddy_url: str,
+) -> PrintProgress:
+    """Every plate of an all-plates print as one progress (#200).
+
+    Each plate is its own slice job and queue item, so each is read on its own and the
+    counters summed. The print is settled only once every plate is, and the first
+    failing plate supplies the error and the fix. Each plate's entries are tagged with
+    its ``plate_id`` so the panel can say which plate is doing what.
+    """
+    detail: list[CopyProgress] = []
+    for plate_id, plate in zip(plate_ids, plates, strict=True):
+        copies = plate.copies_detail or [
+            CopyProgress(queue_entry_id=plate.queue_item_id, stage=plate.stage)
+        ]
+        detail += [copy.model_copy(update={"plate_id": plate_id}) for copy in copies]
+    failed = next((plate for plate in plates if plate.stage == "failed"), None)
+    unsettled = next((plate for plate in plates if not plate.settled), None)
+    if failed is not None:
+        stage: Stage = "failed"
+    elif unsettled is not None:
+        stage = unsettled.stage
+    elif all(plate.stage == "cancelled" for plate in plates):
+        stage = "cancelled"
+    else:
+        stage = "done"
+    return PrintProgress(
+        route="slice_queue",
+        stage=stage,
+        settled=unsettled is None,
+        slice_job_id=slice_job_id,
+        queue_item_id=queue_item_id,
+        copies=len(plates),
+        copies_completed=sum(plate.copies_completed for plate in plates),
+        copies_failed=sum(plate.copies_failed for plate in plates),
+        copies_cancelled=sum(plate.copies_cancelled for plate in plates),
+        copies_in_progress=sum(plate.copies_in_progress for plate in plates),
+        error_message=failed.error_message if failed else None,
+        fix=failed.fix if failed else None,
+        copies_detail=detail,
+        bambuddy_url=bambuddy_url,
+    )
+
+
 async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgress | None:
     """Read the progress of whatever this output last printed, or ``None``.
 
@@ -270,30 +350,17 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
         return from_run(await client.pipeline_run(meta.pipeline_run_id), bambuddy_url=url)
 
     if route == "slice_queue":
-        slice_job = None
-        if meta.slice_job_id is not None:
-            slice_job = await client.slice_job(meta.slice_job_id)
-        item = None
-        if meta.queue_item_id is not None:
-            try:
-                item = await client.queue_item(meta.queue_item_id)
-            except ApiError as error:
-                if error.status != 404:
-                    raise
-                # Bambuddy drops a queue entry once it has been dispatched and archived;
-                # that is not a failure, and reporting one would contradict the print
-                # the user can see running.
-                return PrintProgress(
-                    route="slice_queue",
-                    stage="done",
-                    settled=True,
-                    slice_job_id=meta.slice_job_id,
-                    queue_item_id=meta.queue_item_id,
-                    copies_completed=1,
-                    bambuddy_url=url,
-                )
-        return from_queue(
-            item, slice_job=slice_job, slice_job_id=meta.slice_job_id, bambuddy_url=url
-        )
+        if len(meta.plates) > 1:
+            return from_plates(
+                [
+                    await _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
+                    for plate in meta.plates
+                ],
+                [plate.plate_id for plate in meta.plates],
+                slice_job_id=meta.slice_job_id,
+                queue_item_id=meta.queue_item_id,
+                bambuddy_url=url,
+            )
+        return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url)
 
     return None
