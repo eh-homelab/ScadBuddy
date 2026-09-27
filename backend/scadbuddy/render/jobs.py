@@ -514,8 +514,17 @@ class RenderQueue:
     async def start(self) -> None:
         self.paths.ensure()
         await asyncio.to_thread(self.store.open)
-        await asyncio.to_thread(self.store.abandon_orphans)
-        await self._prune()
+        # Past this point the store holds resources (the Postgres pool's
+        # connections and threads). If the rest of startup fails, release them
+        # here: the caller's `aclose` is typically in a `finally` that a failed
+        # start never reaches, and a process that builds many apps -- the test
+        # suite -- would otherwise leak a pool per failure.
+        try:
+            await asyncio.to_thread(self.store.abandon_orphans)
+            await self._prune()
+        except BaseException:
+            await asyncio.to_thread(self.store.close)
+            raise
         self._tasks = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]

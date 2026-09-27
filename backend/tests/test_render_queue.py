@@ -638,3 +638,23 @@ async def test_a_store_that_cannot_be_read_says_so(make_queue: QueueFactory) -> 
 
     assert _sample(queue.metrics, "scadbuddy_render_store_up") == 0
     assert _sample(queue.metrics, "scadbuddy_render_store_errors_total", operation="read") == 1
+
+
+async def test_a_failed_start_releases_the_store(paths: DataPaths) -> None:
+    """Startup fails after the store opened (a first query, a prune): the store is
+    closed again rather than left holding its pool for the life of the process."""
+    closed: list[bool] = []
+
+    class Failing(JobStore):
+        def abandon_orphans(self) -> list[Job]:
+            raise ConnectionError("the database went away mid-startup")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    queue = RenderQueue(CONFIG, paths, store=Failing(paths), render=Gate())
+    with pytest.raises(ConnectionError):
+        await queue.start()
+
+    assert closed == [True]
+    queue.close_thumbnails()

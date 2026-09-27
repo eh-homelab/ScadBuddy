@@ -507,7 +507,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   503 and `Retry-After` (about one mean render). The check comes after a supersede
   frees its place, a request that coalesces is never refused, and a refusal changes
   nothing (the Postgres store rolls its transaction back). A soft limit across
-  replicas.
+  replicas. The preview treats such a 503 as a wait, not a failure: it shows
+  "the render queue is full" and resubmits after `retry_after`, unless a newer
+  render supersedes it first.
 - SLO targets `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and
   `SCADBUDDY_RENDER_LATENCY_SLO` (60 s) are exported as gauges for alerts to
   compare against; they limit nothing.

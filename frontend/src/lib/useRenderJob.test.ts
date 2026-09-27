@@ -1,6 +1,6 @@
 import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
 import { useRenderJob } from './useRenderJob'
 
@@ -86,6 +86,61 @@ describe('useRenderJob', () => {
     await settle()
 
     expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, JOB_A)
+  })
+
+  it('retries a render the full queue refused, after the delay it names', async () => {
+    const full = new ApiError({
+      title: 'Service Unavailable',
+      status: 503,
+      detail: 'the render queue is full (16 jobs waiting for a worker); try again in 3 s',
+      retry_after: 3,
+    })
+    submit.mockRejectedValueOnce(full)
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+
+    expect(result.current.busy).toBe(3)
+    expect(result.current.error).toBeUndefined()
+    expect(result.current.rendering).toBe(true)
+    expect(submit).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
+
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 1 }, undefined, undefined)
+    expect(result.current.busy).toBeUndefined()
+    expect(result.current.error).toBeUndefined()
+  })
+
+  it('treats any other refusal as an error, not a wait', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'openscad is not available' }),
+    )
+    const { result } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+
+    expect(result.current.busy).toBeUndefined()
+    expect(result.current.error?.message).toBe('openscad is not available')
+    expect(result.current.rendering).toBe(false)
+  })
+
+  it('stops waiting out a refusal once a newer render supersedes it', async () => {
+    submit.mockRejectedValueOnce(
+      new ApiError({ title: 'Service Unavailable', status: 503, detail: 'full', retry_after: 30 }),
+    )
+    const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
+    await settle()
+    rerender({ slug: 'demo', params: { n: 2 } })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    // The newer render went out within a stale-check, not after the 30 s wait,
+    // and the refused one was never retried.
+    expect(submit).toHaveBeenCalledTimes(2)
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, undefined)
   })
 
   it('never supersedes a render of another model or revision', async () => {

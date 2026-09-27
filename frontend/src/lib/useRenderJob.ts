@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { api } from '../api/client'
+import { ApiError, api } from '../api/client'
 import type { Job } from '../api/types'
 import type { ParamValues } from './params'
 
@@ -20,7 +20,22 @@ export interface RenderState {
   /** True from submit until the job reaches `done` or `failed`. */
   rendering: boolean
   error: Error | undefined
+  /**
+   * Seconds until the submit is tried again, while the server's render queue is
+   * full (503 with `retry_after`, only when SCADBUDDY_RENDER_QUEUE_MAX is set).
+   * Not an error: the preview is still coming.
+   */
+  busy: number | undefined
 }
+
+/** How long a refused render asks to wait: only a queue-full 503 carries it. */
+function retryAfterSeconds(cause: unknown): number | undefined {
+  if (!(cause instanceof ApiError) || cause.status !== 503) return undefined
+  const seconds = cause.problem['retry_after']
+  return typeof seconds === 'number' && seconds > 0 ? seconds : undefined
+}
+
+const STALE_CHECK_MS = 250
 
 /**
  * Submits a render for `params` and polls until it settles (spec §5.3: the preview
@@ -38,6 +53,7 @@ export function useRenderJob(
   const [job, setJob] = useState<Job | undefined>(undefined)
   const [rendering, setRendering] = useState(false)
   const [error, setError] = useState<Error | undefined>(undefined)
+  const [busy, setBusy] = useState<number | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
 
@@ -52,6 +68,15 @@ export function useRenderJob(
 
     setRendering(true)
     setError(undefined)
+    setBusy(undefined)
+
+    /** Wait out a refusal, but give up as soon as a newer submit supersedes this one. */
+    async function waitUnlessStale(seconds: number) {
+      const until = Date.now() + seconds * 1000
+      while (Date.now() < until && !isStale()) {
+        await new Promise((resolve) => setTimeout(resolve, STALE_CHECK_MS))
+      }
+    }
 
     async function poll(jobId: string) {
       try {
@@ -77,8 +102,22 @@ export function useRenderJob(
     const supersedable = prior && prior.slug === slug && prior.version === version
     const submitted = (async () => {
       const supersedes = supersedable ? await prior.jobId : undefined
-      const { job_id } = await api.render(slug, params, version, supersedes)
-      return job_id
+      // A full queue is transient ("about one render"): retry after the delay it
+      // names rather than showing a failure. A refused submit created no job, so
+      // the same `supersedes` still applies.
+      for (;;) {
+        try {
+          const { job_id } = await api.render(slug, params, version, supersedes)
+          if (!isStale()) setBusy(undefined)
+          return job_id
+        } catch (cause) {
+          const wait = retryAfterSeconds(cause)
+          if (wait === undefined || isStale()) throw cause
+          setBusy(wait)
+          await waitUnlessStale(wait)
+          if (isStale()) throw cause
+        }
+      }
     })()
     last.current = { slug, version, jobId: submitted.catch(() => undefined) }
 
@@ -89,6 +128,7 @@ export function useRenderJob(
       })
       .catch((cause: unknown) => {
         if (isStale()) return
+        setBusy(undefined)
         setError(cause instanceof Error ? cause : new Error(String(cause)))
         setRendering(false)
       })
@@ -99,5 +139,5 @@ export function useRenderJob(
     }
   }, [slug, params, version])
 
-  return { job, rendering, error }
+  return { job, rendering, error, busy }
 }
