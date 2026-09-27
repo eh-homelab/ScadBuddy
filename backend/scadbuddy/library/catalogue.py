@@ -57,6 +57,8 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
+#: A duplicate's staging folder under ``cache/`` (#156, #212).
+DUPLICATE_STAGING_PREFIX = "duplicate-"
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -495,7 +497,7 @@ class Catalogue:
                 # no commit; either way there is no revision to copy or to record.
                 raise GitError(f"could not read the current revision of {upstream_id!r}")
         self.paths.cache.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
+        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix=DUPLICATE_STAGING_PREFIX))
         staged = staging / slug
         target = self.paths.model_dir(slug)
         try:
@@ -886,6 +888,21 @@ class Catalogue:
         for tombstone in sorted(root.iterdir()):
             if _remove_tree(tombstone):
                 removed.append(tombstone.name)
+        return removed
+
+    def sweep_duplicate_staging(self) -> list[str]:
+        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
+
+        Only safe while no duplicate can run -- at boot, before the first request --
+        since a live one stages in one of these too.
+        """
+        root = self.paths.cache
+        if not root.is_dir():
+            return []
+        removed: list[str] = []
+        for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
+            if _remove_tree(entry):
+                removed.append(entry.name)
         return removed
 
     def sweep_orphans(self) -> list[str]:

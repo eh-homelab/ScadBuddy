@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -301,6 +302,45 @@ def test_a_git_failure_reading_the_upstream_is_a_problem_and_leaves_nothing(
     # The slug is still free.
     monkeypatch.undo()
     _duplicate(client, BUILTIN, "Copy")
+
+
+def test_a_copy_deleted_right_after_its_commit_is_a_404_naming_the_copy(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upstream is still there: the 404 names the copy that went, not it (#215)."""
+    commit = Catalogue._commit
+
+    def commit_then_delete(self: Catalogue, message: str, *slugs: str) -> str | None:
+        revision = commit(self, message, *slugs)
+        if message.startswith("Duplicate "):
+            shutil.rmtree(paths.model_dir("copy"))
+        return revision
+
+    monkeypatch.setattr(Catalogue, "_commit", commit_then_delete)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "no model named 'copy'"
+    assert client.get(f"/api/v1/models/{BUILTIN}").status_code == 200
+
+
+def test_the_boot_sweeps_a_crashed_duplicates_staging(
+    app: FastAPI, bundled: Path, paths: DataPaths
+) -> None:
+    """A duplicate killed mid-copy leaves its staging folder; the next boot clears it,
+    and leaves the rest of the cache alone (#212)."""
+    staged = paths.cache / "duplicate-dead" / "copy"
+    staged.mkdir(parents=True)
+    (staged / "model.scad").write_text(SOURCE, encoding="utf-8")
+    kept = paths.cache / "keep-me"
+    kept.mkdir()
+
+    with TestClient(app):
+        pass
+
+    assert _no_staging_left(paths)
+    assert kept.is_dir()
 
 
 def test_a_git_failure_reading_the_base_fails_the_duplicate(
