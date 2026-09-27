@@ -38,7 +38,7 @@ from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
 )
-from scadbuddy.library.libraries import model_search_path, read_lock
+from scadbuddy.library.libraries import model_search_path
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -511,25 +511,9 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(
-    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, paths: PathsDep
-) -> ModelRecord:
+def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
     require_mine(slug)
     require_model(catalogue, slug)
-    if patch.libraries is not None:
-        # Only a pinned library can be declared: the render has nothing to put on
-        # OPENSCADPATH for any other (#93).
-        lock = read_lock(paths)
-        # A library whose lock entry is broken is refused as it would fail every
-        # render (LockfileError); one with no entry at all needs adding first.
-        missing = [name for name in patch.libraries if lock.pin(name) is None]
-        if missing:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"not added yet: {', '.join(missing)}; add them under Libraries first",
-                libraries=missing,
-            )
-        patch.libraries = list(dict.fromkeys(patch.libraries))
     try:
         return catalogue.update(slug, patch)
     except ModelNotFoundError:

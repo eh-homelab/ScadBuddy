@@ -273,6 +273,40 @@
         "title": "CatalogueEntry",
         "type": "object"
       },
+      "CatalogueLibrary": {
+        "description": "One library ScadBuddy knows how to fetch, and the ref it suggests.",
+        "properties": {
+          "homepage": {
+            "title": "Homepage",
+            "type": "string"
+          },
+          "licence": {
+            "title": "Licence",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "url",
+          "ref",
+          "licence",
+          "homepage"
+        ],
+        "title": "CatalogueLibrary",
+        "type": "object"
+      },
       "CheckRequest": {
         "properties": {
           "slug": {
@@ -1337,14 +1371,8 @@
         "title": "JobStatus",
         "type": "object"
       },
-      "LibraryAdd": {
+      "LibraryPinRequest": {
         "properties": {
-          "name": {
-            "description": "The directory `use <NAME/...>` names",
-            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
-            "title": "Name",
-            "type": "string"
-          },
           "ref": {
             "anyOf": [
               {
@@ -1372,109 +1400,7 @@
             "title": "Url"
           }
         },
-        "required": [
-          "name"
-        ],
-        "title": "LibraryAdd",
-        "type": "object"
-      },
-      "LibraryEntry": {
-        "description": "The catalogue and the lockfile, joined: what can be added, and what is.",
-        "properties": {
-          "curated": {
-            "title": "Curated",
-            "type": "boolean"
-          },
-          "error": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "description": "Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again",
-            "title": "Error"
-          },
-          "homepage": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Homepage"
-          },
-          "licence": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Licence"
-          },
-          "name": {
-            "title": "Name",
-            "type": "string"
-          },
-          "pin": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/LibraryPin"
-              },
-              {
-                "type": "null"
-              }
-            ]
-          },
-          "ref": {
-            "title": "Ref",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "name",
-          "url",
-          "ref",
-          "curated"
-        ],
-        "title": "LibraryEntry",
-        "type": "object"
-      },
-      "LibraryPin": {
-        "description": "One entry of ``libraries.lock``: where it came from, what was asked for, what\nthat resolved to.",
-        "properties": {
-          "commit": {
-            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
-            "title": "Commit",
-            "type": "string"
-          },
-          "ref": {
-            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
-            "title": "Ref",
-            "type": "string"
-          },
-          "url": {
-            "title": "Url",
-            "type": "string"
-          }
-        },
-        "required": [
-          "url",
-          "ref",
-          "commit"
-        ],
-        "title": "LibraryPin",
+        "title": "LibraryPinRequest",
         "type": "object"
       },
       "LoadedAt": {
@@ -1571,6 +1497,39 @@
         "title": "MergePreview",
         "type": "object"
       },
+      "ModelLibrary": {
+        "description": "One entry of a model's ``libraries``: a library pinned for that model.",
+        "properties": {
+          "commit": {
+            "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$",
+            "title": "Commit",
+            "type": "string"
+          },
+          "name": {
+            "description": "The directory `use <NAME/...>` names",
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+            "title": "Name",
+            "type": "string"
+          },
+          "ref": {
+            "pattern": "^(?!.*\\.\\.)[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$",
+            "title": "Ref",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "ref",
+          "commit",
+          "name"
+        ],
+        "title": "ModelLibrary",
+        "type": "object"
+      },
       "ModelPatch": {
         "properties": {
           "description": {
@@ -1583,20 +1542,6 @@
               }
             ],
             "title": "Description"
-          },
-          "libraries": {
-            "anyOf": [
-              {
-                "items": {
-                  "type": "string"
-                },
-                "type": "array"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Libraries"
           },
           "name": {
             "anyOf": [
@@ -1669,7 +1614,7 @@
           },
           "libraries": {
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/ModelLibrary"
             },
             "title": "Libraries",
             "type": "array"
@@ -5547,6 +5492,7 @@
     },
     "/api/v1/libraries": {
       "get": {
+        "description": "Libraries ScadBuddy knows how to fetch, each with the ref it suggests. Any other can be pinned to a model by URL.",
         "operationId": "list_libraries_api_v1_libraries_get",
         "responses": {
           "200": {
@@ -5554,7 +5500,7 @@
               "application/json": {
                 "schema": {
                   "items": {
-                    "$ref": "#/components/schemas/LibraryEntry"
+                    "$ref": "#/components/schemas/CatalogueLibrary"
                   },
                   "title": "Response List Libraries Api V1 Libraries Get",
                   "type": "array"
@@ -5564,47 +5510,7 @@
             "description": "Successful Response"
           }
         },
-        "summary": "Libraries and their pins",
-        "tags": [
-          "libraries"
-        ]
-      },
-      "post": {
-        "description": "Clones the library at `ref` onto the data volume and records the commit that resolved to in `libraries.lock`, as one revision of the models repository. Models that declare it render against the new pin from then on.",
-        "operationId": "add_library_api_v1_libraries_post",
-        "requestBody": {
-          "content": {
-            "application/json": {
-              "schema": {
-                "$ref": "#/components/schemas/LibraryAdd"
-              }
-            }
-          },
-          "required": true
-        },
-        "responses": {
-          "200": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LibraryEntry"
-                }
-              }
-            },
-            "description": "Successful Response"
-          },
-          "422": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/HTTPValidationError"
-                }
-              }
-            },
-            "description": "Validation Error"
-          }
-        },
-        "summary": "Add a library, or pin it to another ref",
+        "summary": "The library catalogue",
         "tags": [
           "libraries"
         ]
@@ -5996,6 +5902,128 @@
         "summary": "Duplicate a template",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/libraries/{name}": {
+      "delete": {
+        "description": "The checkout stays on the volume: an older revision may still pin it.",
+        "operationId": "unpin_library_api_v1_models__slug__libraries__name__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The directory `use <NAME/...>` names",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "The directory `use <NAME/...>` names",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a library from a model",
+        "tags": [
+          "libraries"
+        ]
+      },
+      "put": {
+        "description": "Clones the library at `ref` onto the data volume and records the commit that resolved to in this model's `model.json`, as one revision of the model. The model renders against that pin from then on; no other model moves.",
+        "operationId": "pin_library_api_v1_models__slug__libraries__name__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The directory `use <NAME/...>` names",
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "description": "The directory `use <NAME/...>` names",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+              "title": "Name",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LibraryPinRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Pin a library to a model, or re-pin it at another ref",
+        "tags": [
+          "libraries"
         ]
       }
     },

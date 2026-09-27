@@ -59,8 +59,9 @@ class DataPaths:
 
     @property
     def libraries(self) -> Path:
-        """Third-party OpenSCAD library checkouts (#93). Not under ``models/``: they
-        are pinned by ``models/libraries.lock``, not versioned themselves."""
+        """Third-party OpenSCAD library checkouts (#93). Not under ``models/``: each
+        model pins the ones it uses in its ``model.json``; they are not versioned
+        themselves."""
         return self.root / "libraries"
 
     @property

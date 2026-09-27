@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
@@ -30,6 +30,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
+from scadbuddy.library.libraries import ModelLibrary, entry_name
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -110,6 +111,10 @@ class ModelExistsError(ValueError):
     pass
 
 
+class LibraryNotDeclaredError(KeyError):
+    """The model has no library of that name to remove."""
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -123,16 +128,30 @@ class ModelMeta(BaseModel):
     #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
     #: never clobbers it.
     upstream: Upstream | None = None
-    # The third-party libraries (#93) this model renders with: the only ones on
-    # its OPENSCADPATH, each at the commit `libraries.lock` pins.
-    libraries: list[str] = Field(default_factory=list)
+    #: The third-party libraries (#93) this model renders with, each pinned for this
+    #: model alone: the only ones on its OPENSCADPATH. Not in `ModelPatch`: a pin is
+    #: a fetched commit, set by `pin_library`, never typed in.
+    libraries: list[ModelLibrary] = Field(default_factory=list)
+
+    @field_validator("libraries", mode="before")
+    @classmethod
+    def _readable_pins(cls, value: Any) -> Any:
+        """Only the entries that are pins. A bare name from before per-model pins,
+        or a hand-edited entry, must not stop the model listing; its render says
+        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        if not isinstance(value, list):
+            return []
+        readable: list[ModelLibrary] = []
+        for entry in value:
+            with contextlib.suppress(ValidationError):
+                readable.append(ModelLibrary.model_validate(entry))
+        return readable
 
 
 class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
-    libraries: list[str] | None = None
 
 
 class ModelRecord(ModelMeta):
@@ -422,6 +441,48 @@ class Catalogue:
             self.write_raw_meta(slug, raw)
 
         self._commit_change(f"Update {slug} metadata", change, slug)
+        return self.record(slug)
+
+    def pin_library(self, slug: str, library: ModelLibrary) -> ModelRecord:
+        """Pin ``library`` for this model: in place of any entry of the same name,
+        or at the end. One revision of the model; no other model moves."""
+        self._require(slug)
+
+        def change() -> None:
+            raw = self.read_raw_meta(slug)
+            current = raw.get("libraries")
+            entries: list[Any] = list(current) if isinstance(current, list) else []
+            # Where the old entry was, so a re-pin is a one-line diff; any duplicate a
+            # hand edit left goes with it.
+            index = next(
+                (i for i, entry in enumerate(entries) if entry_name(entry) == library.name),
+                len(entries),
+            )
+            entries = [entry for entry in entries if entry_name(entry) != library.name]
+            entries.insert(index, library.model_dump())
+            raw["libraries"] = entries
+            self.write_raw_meta(slug, raw)
+
+        message = f"Pin {library.name} to {library.ref} ({library.commit[:7]}) for {slug}"
+        self._commit_change(message, change, slug)
+        return self.record(slug)
+
+    def unpin_library(self, slug: str, name: str) -> ModelRecord:
+        """Take ``name`` off this model's libraries. :class:`KeyError` when the
+        model does not declare it."""
+        self._require(slug)
+
+        def change() -> None:
+            raw = self.read_raw_meta(slug)
+            current = raw.get("libraries")
+            entries: list[Any] = list(current) if isinstance(current, list) else []
+            kept = [entry for entry in entries if entry_name(entry) != name]
+            if len(kept) == len(entries):
+                raise LibraryNotDeclaredError(name)
+            raw["libraries"] = kept
+            self.write_raw_meta(slug, raw)
+
+        self._commit_change(f"Remove library {name} from {slug}", change, slug)
         return self.record(slug)
 
     def write_source(

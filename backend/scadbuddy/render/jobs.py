@@ -27,12 +27,7 @@ from scadbuddy.core.paths import (
     model_path,
 )
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import (
-    declared_libraries,
-    lock_at,
-    model_search_path,
-    search_path,
-)
+from scadbuddy.library.libraries import model_search_path, revision_search_path
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, write_glb
@@ -341,7 +336,7 @@ async def resolve_source(
             scad=paths.model_source(slug),
             schema_cache=paths.model_schema_cache(slug),
             version=current,
-            # Off the loop: `model.json`, the lockfile and each checkout are reads
+            # Off the loop: `model.json` and each checkout are reads
             # on the same PVC the history's calls are offloaded for.
             library_path=await asyncio.to_thread(model_search_path, paths, slug),
         )
@@ -354,15 +349,14 @@ async def resolve_source(
         await asyncio.to_thread(_touch, directory)
     else:
         await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
-    # The lockfile as it was at that revision, not as it is now: an old revision
+    # The pins that revision declares, not the live model's: an old revision
     # renders against the library versions it was written with.
-    lock = await asyncio.to_thread(lock_at, history, requested)
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
         library_path=await asyncio.to_thread(
-            lambda: search_path(paths, declared_libraries(directory), lock)
+            revision_search_path, history, paths, directory, requested
         ),
     )
 
