@@ -277,7 +277,7 @@ resolves to a principal through `authenticate(request) → principal { id, tiers
 | browser user | the UI's own chat or session | `outward` (approves in the UI) |
 | bearer token | `/mcp` in `bearer` mode, minted in Settings, stored hashed | per token |
 | OIDC subject | `/mcp` in `oidc` mode (#262), scopes `scadbuddy:read|write|outward` | per scope |
-| `anonymous` | `/mcp` in `disabled` mode | configurable, **`read` by default**; an operator must opt in to `write` |
+| `anonymous` | `/mcp` in `disabled` mode | **full access (`outward`) by default**; an operator can lower the cap in Settings |
 | flow | analyzer (#284) or plugin hook (#297) session | the skill's declared `permissions` |
 
 Tiers: `read`, `write` (reversible through history), and `outward` (send, print,
@@ -305,9 +305,14 @@ settings write, so it needs approval.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
-- **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`,
-  capped at `read` unless an operator raises the cap in Settings (least privilege, D7);
-  a persistent warning banner shows; the audit log records the client IP.
+- **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`
+  with **full access** by default: choosing `disabled` is the operator's explicit decision
+  to trust the network, so it isn't second-guessed with a lower cap. The cap stays
+  configurable in Settings for operators who want `read` or `write` only. Outward
+  actions still need a human approval in the UI (§8.2); that rule is independent of auth.
+  A persistent warning banner shows, and the audit log records the client IP. D7's least
+  privilege applies to the harness's built-in tools, not to what an operator chooses to
+  grant callers.
 - **`oidc` (#262).** `/mcp` becomes an OAuth 2.1 resource server per the
   [MCP authorization spec][mcp-auth]: protected-resource metadata, and JWTs validated
   against the IdP's JWKS. Bearer tokens keep working alongside it. The mode can't be
@@ -340,7 +345,7 @@ not skip pairing.
 | Threat | Mitigation |
 |---|---|
 | Prompt injection via model READMEs, upstream sources, library code, plugin output, Bambuddy data | Tool results wrap such content as untrusted; outward actions always need a human approval; `tools: []` means injected text can't reach a shell or the filesystem |
-| Stray or hostile MCP client on the LAN | `bearer` default; `anonymous` capped at `read` by default in `disabled` mode; HTTPS in every mode; audit log; rate limits on agent-triggered renders |
+| Stray or hostile MCP client on the LAN | `bearer` is the default; `disabled` is an explicit operator choice to trust the network (full access, lowerable cap); outward actions always need a human approval; HTTPS in every mode; audit log; rate limits on agent-triggered renders |
 | Credential leakage | Credentials encrypted at rest (§9), never returned by any route, passed per query, redacted in logs and audit |
 | Malicious or changed plugin | Fetched at a pinned commit; reviewed part by part before enabling; command hooks refused; unknown tools default to `outward`; re-pinning shows a diff |
 | Runaway agent | `maxTurns`, per-session budget, render rate limits, interrupt from any watcher |
