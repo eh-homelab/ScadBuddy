@@ -1,6 +1,60 @@
 {
   "components": {
     "schemas": {
+      "AssetMeta": {
+        "properties": {
+          "height": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "svg",
+              "png"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "size": {
+            "title": "Size",
+            "type": "integer"
+          },
+          "width": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Width"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "kind",
+          "size"
+        ],
+        "title": "AssetMeta",
+        "type": "object"
+      },
       "AttachResult": {
         "description": "What was attached, so the UI can say so rather than claiming more than happened.",
         "properties": {
@@ -168,6 +222,21 @@
           "file"
         ],
         "title": "Body_put_output_thumbnail_api_v1_outputs__output_id__thumbnail_put",
+        "type": "object"
+      },
+      "Body_upload_asset_api_v1_models__slug__assets_post": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "An SVG or PNG",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_upload_asset_api_v1_models__slug__assets_post",
         "type": "object"
       },
       "BoundingBox": {
@@ -2030,6 +2099,13 @@
       },
       "Parameter": {
         "properties": {
+          "accept": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accept",
+            "type": "array"
+          },
           "caption": {
             "anyOf": [
               {
@@ -2130,7 +2206,8 @@
               "select",
               "color",
               "font",
-              "slider"
+              "slider",
+              "file"
             ],
             "title": "Type",
             "type": "string"
@@ -5776,6 +5853,166 @@
         "summary": "Edit model metadata",
         "tags": [
           "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/assets": {
+      "post": {
+        "description": "Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.",
+        "operationId": "upload_asset_api_v1_models__slug__assets_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_upload_asset_api_v1_models__slug__assets_post"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Upload a file for a file parameter",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/assets/{asset_id}": {
+      "get": {
+        "operationId": "get_asset_api_v1_models__slug__assets__asset_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetMeta"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "An uploaded file's metadata",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/assets/{asset_id}/content": {
+      "get": {
+        "operationId": "get_asset_content_api_v1_models__slug__assets__asset_id__content_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "asset_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{64}$",
+              "title": "Asset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {},
+              "image/svg+xml": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "An uploaded file's bytes",
+        "tags": [
+          "assets"
         ]
       }
     },

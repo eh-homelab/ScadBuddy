@@ -190,6 +190,60 @@ export interface paths {
         patch: operations["patch_model_api_v1_models__slug__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/assets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a file for a file parameter
+         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.
+         */
+        post: operations["upload_asset_api_v1_models__slug__assets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/assets/{asset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** An uploaded file's metadata */
+        get: operations["get_asset_api_v1_models__slug__assets__asset_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/assets/{asset_id}/content": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** An uploaded file's bytes */
+        get: operations["get_asset_content_api_v1_models__slug__assets__asset_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/duplicate": {
         parameters: {
             query?: never;
@@ -1024,6 +1078,24 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /** AssetMeta */
+        AssetMeta: {
+            /** Height */
+            height?: number | null;
+            /** Id */
+            id: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "svg" | "png";
+            /** Name */
+            name: string;
+            /** Size */
+            size: number;
+            /** Width */
+            width?: number | null;
+        };
         /**
          * AttachResult
          * @description What was attached, so the UI can say so rather than claiming more than happened.
@@ -1091,6 +1163,14 @@ export interface components {
             /**
              * File
              * @description PNG captured by the viewer
+             */
+            file: string;
+        };
+        /** Body_upload_asset_api_v1_models__slug__assets_post */
+        Body_upload_asset_api_v1_models__slug__assets_post: {
+            /**
+             * File
+             * @description An SVG or PNG
              */
             file: string;
         };
@@ -1781,6 +1861,8 @@ export interface components {
         };
         /** Parameter */
         Parameter: {
+            /** Accept */
+            accept?: string[];
             /** Caption */
             caption?: string | null;
             /**
@@ -1806,7 +1888,7 @@ export interface components {
              * Type
              * @enum {string}
              */
-            type: "number" | "integer" | "string" | "boolean" | "select" | "color" | "font" | "slider";
+            type: "number" | "integer" | "string" | "boolean" | "select" | "color" | "font" | "slider" | "file";
         };
         /** PartInfo */
         PartInfo: {
@@ -3302,6 +3384,106 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    upload_asset_api_v1_models__slug__assets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_upload_asset_api_v1_models__slug__assets_post"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetMeta"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_asset_api_v1_models__slug__assets__asset_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetMeta"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_asset_content_api_v1_models__slug__assets__asset_id__content_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                asset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                    "image/svg+xml": unknown;
                 };
             };
             /** @description Validation Error */

@@ -8,13 +8,15 @@ const GLOBAL_GROUP = 'Global'
 
 interface Props {
   schema: CustomizerSchema
+  /** The model being customized; `file` parameters upload against it (#204). */
+  slug: string
   values: ParamValues
   fonts: FontFamily[]
   onChange: (name: string, value: ParamValue) => void
   onReset: () => void
 }
 
-export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Props) {
+export function ParameterPanel({ schema, slug, values, fonts, onChange, onReset }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
   const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
@@ -74,6 +76,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
                   <ParamWidget
                     param={param}
                     value={values[param.name] ?? (param.initial as ParamValue)}
+                    slug={slug}
                     fonts={fonts}
                     sampleText={sampleText}
                     extruder={extruderOf(param.name)}
@@ -92,6 +95,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
                 <ParamWidget
                   param={param}
                   value={values[param.name] ?? (param.initial as ParamValue)}
+                  slug={slug}
                   fonts={fonts}
                   sampleText={sampleText}
                   extruder={extruderOf(param.name)}

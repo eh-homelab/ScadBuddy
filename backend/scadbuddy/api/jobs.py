@@ -19,6 +19,7 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import COMMIT_ID_PATTERN, GitError, RevisionNotFoundError
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import Job, JobState, PartInfo, RenderQueue, resolve_source
@@ -151,6 +152,9 @@ async def render_model(
             parameters=unknown,
         )
     try:
+        # A `file` parameter's value must name an upload (#204): checked here, so a
+        # bad one is a 422 rather than a job that fails later or renders without it.
+        await asyncio.to_thread(file_assets, schema, body.params, AssetStore(paths.assets))
         build_defines(schema, body.params)
     except UnknownParameterError as error:  # pragma: no cover - covered by the check above
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None

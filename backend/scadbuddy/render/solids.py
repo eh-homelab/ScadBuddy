@@ -170,6 +170,10 @@ CSS_COLOURS: dict[str, str] = {
 #: directory is also a git repository, so `library/history.py` writes this same
 #: prefix into its .gitignore: three places, one constant.
 WRAPPER_PREFIX = "_scadbuddy_solid_"
+#: An uploaded asset staged beside the model for one render (#204). It shares the
+#: wrapper's prefix so the same three places skip it -- the source hash, the
+#: .gitignore and a duplicate's copy -- without a second constant to keep in step.
+STAGED_ASSET_PREFIX = f"{WRAPPER_PREFIX}asset_"
 
 # A user-defined `color` module shadows the builtin, so a wrapper that keeps only the
 # children whose innermost color() matches a target renders that colour on its own --
