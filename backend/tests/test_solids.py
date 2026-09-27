@@ -6,8 +6,9 @@ from pathlib import Path
 import pytest
 
 from scadbuddy.core.config import load_config
+from scadbuddy.render.colours import CSS_COLOURS
 from scadbuddy.render.schema import CustomizerSchema
-from scadbuddy.render.solids import CSS_COLOURS, render_solids, targets_for, wrapper_source
+from scadbuddy.render.solids import render_solids, targets_for, wrapper_source
 from tests.conftest import FIXTURES
 
 
