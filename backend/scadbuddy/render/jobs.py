@@ -16,6 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -51,6 +52,16 @@ from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 # lived here before the stores were split out, and routes and tests import them here.
 
 logger = logging.getLogger(__name__)
+
+#: The event each way a job leaves the queue is published as. An expired job is a
+#: failed one to its subscribers; a superseded one gets its own kind, so a client
+#: still following it knows a newer render replaced it rather than that it broke.
+OUTCOME_EVENT_KINDS: dict[RenderOutcome, JobKind] = {
+    "done": "job.done",
+    "failed": "job.failed",
+    "expired": "job.failed",
+    "superseded": "job.superseded",
+}
 
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
@@ -511,10 +522,13 @@ class RenderQueue:
         render: RenderCallable | None = None,
         history: ModelHistory | None = None,
         metrics: Metrics | None = None,
+        events: EventBus | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
         self.history = history
+        #: Told of every state a job enters (`job.*`), whichever path moved it.
+        self.events = events
         self.store: JobBackend = store if store is not None else JobStore(paths)
         self.metrics = metrics if metrics is not None else Metrics()
         self.metrics.workers.set(config.render_concurrency)
@@ -555,11 +569,13 @@ class RenderQueue:
         # start never reaches, and a process that builds many apps -- the test
         # suite -- would otherwise leak a pool per failure.
         try:
-            await asyncio.to_thread(self.store.abandon_orphans)
+            abandoned = await asyncio.to_thread(self.store.abandon_orphans)
             await self._prune()
         except BaseException:
             await asyncio.to_thread(self.store.close)
             raise
+        for job in abandoned:
+            self._announce(job, "job.failed")
         self._tasks = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
@@ -615,11 +631,17 @@ class RenderQueue:
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
         if submitted.coalesced:
+            # The answer is a job already waiting, whose `job.pending` went out when
+            # it was submitted: nothing about it changed.
             self.metrics.render_coalesced.inc()
         else:
             self.metrics.render_submitted.inc()
+            self._announce(submitted.job, "job.pending")
             self._wakeup.set()
         return submitted.job
+
+    def _announce(self, job: Job, kind: JobKind) -> None:
+        emit(self.events, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
     def retry_after(self) -> int:
         """Seconds a refused client should wait: about one render, the time it takes
@@ -661,6 +683,9 @@ class RenderQueue:
         await asyncio.to_thread(prune_revision_exports, self.paths, self.config.job_ttl)
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
+        """Every way a job leaves the queue comes through here: done, failed,
+        expired, superseded, and failed by the reaper."""
+        self._announce(job, OUTCOME_EVENT_KINDS[outcome])
         self.metrics.render_finished.labels(outcome).inc()
         self.metrics.job_latency.labels(outcome).observe(
             max(0.0, ((job.finished_at or _now()) - job.created_at).total_seconds())
@@ -717,6 +742,8 @@ class RenderQueue:
                 for job in reaped.requeued:
                     logger.warning("requeued a render whose worker stopped", extra={"job": job.id})
                     self.metrics.render_retried.inc()
+                    # Waiting again: `job.running` follows when a worker retakes it.
+                    self._announce(job, "job.pending")
                 if reaped.requeued:
                     self._wakeup.set()
                 for job in reaped.failed:
@@ -752,6 +779,7 @@ class RenderQueue:
                 self._settled(job, "expired")
             return
 
+        self._announce(job, "job.running")
         outcome: RenderOutcome
         started = time.monotonic()
         heartbeat = asyncio.create_task(self._heartbeat(job))

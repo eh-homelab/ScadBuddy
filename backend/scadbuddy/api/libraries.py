@@ -14,8 +14,9 @@ from fastapi import APIRouter, FastAPI, Path, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
-from scadbuddy.api.deps import CatalogueDep, InstallsDep, LibrariesDep, SlugPath
+from scadbuddy.api.deps import CatalogueDep, EventsDep, InstallsDep, LibrariesDep, SlugPath
 from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.core.events import EventBus, LibraryChanged, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import LibraryNotDeclaredError, ModelNotFoundError, ModelRecord
 from scadbuddy.library.history import GitError
@@ -81,6 +82,7 @@ async def pin_library(
     catalogue: CatalogueDep,
     libraries: LibrariesDep,
     installs: InstallsDep,
+    events: EventsDep,
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
@@ -88,7 +90,7 @@ async def pin_library(
         # A clone is a network fetch; off the loop, and a bounded number at a time.
         async with installs:
             pin = await asyncio.to_thread(libraries.resolve, name, url=body.url, ref=body.ref)
-        return await asyncio.to_thread(catalogue.pin_library, slug, pin)
+        record = await asyncio.to_thread(catalogue.pin_library, slug, pin)
     except LibraryNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,
@@ -103,6 +105,8 @@ async def pin_library(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    _library_changed(events, slug, name)
+    return record
 
 
 @router.delete(
@@ -111,11 +115,13 @@ async def pin_library(
     summary="Remove a library from a model",
     description="The checkout stays on the volume: an older revision may still pin it.",
 )
-def unpin_library(slug: SlugPath, name: LibraryName, catalogue: CatalogueDep) -> ModelRecord:
+def unpin_library(
+    slug: SlugPath, name: LibraryName, catalogue: CatalogueDep, events: EventsDep
+) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     try:
-        return catalogue.unpin_library(slug, name)
+        record = catalogue.unpin_library(slug, name)
     except LibraryNotDeclaredError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
@@ -124,6 +130,13 @@ def unpin_library(slug: SlugPath, name: LibraryName, catalogue: CatalogueDep) ->
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    _library_changed(events, slug, name)
+    return record
+
+
+def _library_changed(events: EventBus, slug: str, name: str) -> None:
+    emit(events, LibraryChanged(slug=slug, name=name))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
 
 
 def install_library_handlers(app: FastAPI) -> None:

@@ -208,6 +208,10 @@ class ModelHistory:
         self.wrapper_prefix = wrapper_prefix
         self.timeout = timeout
         self._lock = threading.Lock()
+        #: Called with each new commit and the templates it touched, after the write
+        #: lock is released -- how the app publishes ``version.committed``. It must
+        #: not raise; a failure is logged, never reported as a failed commit.
+        self.on_commit: Callable[[str, list[str]], None] | None = None
 
     # ── plumbing ──────────────────────────────────────────────────────────────
 
@@ -367,7 +371,10 @@ class ModelHistory:
         with self._exclusive():
             if prepare is not None:
                 prepare()
-            return self._commit_locked(message, *paths)
+            created = self._commit_locked(message, *paths)
+            touched = self._touched_by(created)
+        self._announce(created, touched)
+        return created
 
     def _commit_locked(self, message: str, *paths: str) -> str | None:
         targets = list(paths) or ["."]
@@ -379,6 +386,32 @@ class ModelHistory:
             return None
         self._run("commit", "--no-verify", "-m", subject_line(message))
         return self.head()
+
+    def _touched_by(self, commit: str | None) -> list[str]:
+        """The templates ``commit`` changed, when anyone is listening for it."""
+        if commit is None or self.on_commit is None:
+            return []
+        try:
+            names = self._out(
+                "diff-tree", "--no-commit-id", "--name-only", "-r", "--root", commit
+            ).splitlines()
+        except GitError:
+            logger.exception("could not list what a commit touched", extra={"commit": commit})
+            return []
+        touched: list[str] = []
+        for name in names:
+            model_id = _model_id(name.strip())
+            if model_id is not None and model_id not in touched:
+                touched.append(model_id)
+        return touched
+
+    def _announce(self, commit: str | None, touched: list[str]) -> None:
+        if commit is None or self.on_commit is None:
+            return
+        try:
+            self.on_commit(commit, touched)
+        except Exception:
+            logger.exception("a commit listener failed", extra={"commit": commit})
 
     def _stage(self, targets: list[str]) -> None:
         """``git add -A`` over the paths an action touched.
@@ -424,6 +457,8 @@ class ModelHistory:
                     (self.root / path).unlink(missing_ok=True)
             extra = also(resolved) if also is not None else []
             created = self._commit_locked(f"Restore {slug} to {resolved[:7]}", slug, *extra)
+            touched = self._touched_by(created)
+        self._announce(created, touched)
         if created is None:
             # Already identical: the caller still wants a revision id to point
             # at, and it is this model's own, not the repository HEAD -- which
