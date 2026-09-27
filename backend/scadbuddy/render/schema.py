@@ -9,6 +9,8 @@ from typing import Any, Literal, TypeGuard
 
 from pydantic import BaseModel, Field
 
+from scadbuddy.render.colours import CSS_COLOURS
+
 ParameterType = Literal[
     "number", "integer", "string", "boolean", "select", "color", "font", "slider"
 ]
@@ -46,6 +48,11 @@ class CustomizerSchema(BaseModel):
     source_sha256: str = ""
     groups: list[str] = Field(default_factory=list)
     parameters: list[Parameter] = Field(default_factory=list)
+
+
+#: Bumped when `build_schema` derives something new from the same source, so an entry
+#: written by an older derivation misses. 2: CSS-name colour defaults as hex (#187).
+SCHEMA_CACHE_VERSION = 2
 
 
 def source_sha256(source: str) -> str:
@@ -87,6 +94,10 @@ def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, str]) -> Pa
     initial = raw.get("initial")
     if resolved == "integer" and _is_whole(initial):
         initial = int(initial)
+    # #187: a CSS-name default is served as the hex OpenSCAD renders it as, so the
+    # frontend's colour widget and extruder numbering never need the name table.
+    if resolved == "color" and isinstance(initial, str):
+        initial = CSS_COLOURS.get(initial.strip().lower(), initial)
     return Parameter(
         name=name,
         type=resolved,
@@ -144,6 +155,8 @@ def load_cached_schema(
     cached = body.get("schema")
     if not isinstance(cached, dict) or cached.get("source_sha256") != expected_sha:
         return None
+    if body.get("version") != SCHEMA_CACHE_VERSION:
+        return None
     # Absent on an entry written before #93, which had no libraries.
     if body.get("library_path", []) != [str(path) for path in library_path]:
         return None
@@ -155,6 +168,7 @@ def store_cached_schema(
 ) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     body: dict[str, Any] = {
+        "version": SCHEMA_CACHE_VERSION,
         "schema": schema.model_dump(mode="json"),
         "library_path": [str(path) for path in library_path],
     }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from scadbuddy.render.schema import (
@@ -162,6 +163,33 @@ def test_schema_cache_round_trip(tmp_path: Path) -> None:
     assert load_cached_schema(meta, source_sha256(source)) == schema
     assert load_cached_schema(meta, source_sha256(source + "\n")) is None
     assert load_cached_schema(tmp_path / "missing.json", schema.source_sha256) is None
+
+
+def test_colour_defaults_named_in_css_are_served_as_hex() -> None:
+    """#187: the frontend has no CSS name table, so the schema resolves the name."""
+    raw = {
+        "parameters": [
+            {"name": "named", "type": "string", "initial": "Red", "group": "G"},
+            {"name": "hex", "type": "string", "initial": "#abc", "group": "G"},
+            {"name": "odd", "type": "string", "initial": "#12345", "group": "G"},
+            {"name": "text", "type": "string", "initial": "red", "group": "G"},
+        ],
+    }
+    source = 'named = "Red"; // color\nhex = "#abc"; // color\nodd = "#12345"; // color\n'
+    by_name = {p.name: p.initial for p in build_schema(raw, source).parameters}
+    assert by_name == {"named": "#FF0000", "hex": "#abc", "odd": "#12345", "text": "red"}
+
+
+def test_schema_cache_written_by_an_older_derivation_misses(tmp_path: Path) -> None:
+    source = load_fixture_source("plain")
+    schema = build_schema(load_fixture_param("plain"), source)
+    cache = tmp_path / "schema.json"
+    store_cached_schema(cache, schema)
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    del body["version"]
+    cache.write_text(json.dumps(body), encoding="utf-8")
+
+    assert load_cached_schema(cache, source_sha256(source)) is None
 
 
 def test_schema_cache_is_keyed_on_the_library_path_too(tmp_path: Path) -> None:
