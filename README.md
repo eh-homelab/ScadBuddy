@@ -69,7 +69,9 @@ for the project picker).
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
-  `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary).
+  `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary);
+  `SCADBUDDY_LIBRARY_MAX_BYTES` (default 200000000, the most one added library's
+  clone may take on the volume).
   Each concurrent render or check is its own `openscad` process, and each open
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an

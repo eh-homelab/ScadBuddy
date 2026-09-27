@@ -51,6 +51,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from scadbuddy.core.config import DEFAULT_LIBRARY_MAX_BYTES
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
 from scadbuddy.library.history import (
     GIT,
@@ -165,6 +166,10 @@ class LibraryError(RuntimeError):
 
 class LibraryFetchError(LibraryError):
     """git could not fetch it: an unknown ref, an unreachable URL, a timeout."""
+
+
+class LibraryTooLargeError(LibraryError):
+    """The clone is larger than the store allows (``SCADBUDDY_LIBRARY_MAX_BYTES``)."""
 
 
 class LibraryNotFoundError(KeyError):
@@ -356,6 +361,16 @@ def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str
 # ── installing ────────────────────────────────────────────────────────────────
 
 
+def _tree_size(root: Path) -> int:
+    """Bytes of every file under ``root``, ``.git`` included: what it takes on the
+    volume. Symlinks count as themselves, never what they point at."""
+    return sum(
+        (Path(directory) / file).lstat().st_size
+        for directory, _, files in os.walk(root)
+        for file in files
+    )
+
+
 def _same_repository(first: str, second: str) -> bool:
     """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository,
     whatever the case of the scheme and host (the path's case is significant)."""
@@ -391,6 +406,7 @@ class LibraryStore:
         protocols: Sequence[str] = ("https",),
         git: str = GIT,
         timeout: float = CLONE_TIMEOUT,
+        max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -398,6 +414,7 @@ class LibraryStore:
         self.protocols = tuple(protocols)
         self.git = git
         self.timeout = timeout
+        self.max_bytes = max_bytes
         # Serialises the lockfile's read-modify-write when there is no history
         # to do it under; with one, its own write lock does.
         self._lock = threading.Lock()
@@ -596,6 +613,12 @@ class LibraryStore:
                 )
             except LibraryFetchError as error:
                 raise LibraryFetchError(f"could not clone {ref!r} from {url}: {error}") from error
+            size = _tree_size(staging)
+            if size > self.max_bytes:
+                raise LibraryTooLargeError(
+                    f"{url} at {ref!r} is {size / 1e6:.0f} MB, over the "
+                    f"{self.max_bytes / 1e6:.0f} MB a library may take"
+                )
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
             destination = self.paths.libraries / name / commit
             destination.parent.mkdir(parents=True, exist_ok=True)

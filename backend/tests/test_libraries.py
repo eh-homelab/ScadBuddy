@@ -16,7 +16,9 @@ from typing import Any
 
 import pytest
 
+from scadbuddy.api.deps import build_state
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.library.libraries import (
@@ -29,6 +31,7 @@ from scadbuddy.library.libraries import (
     LibraryNotInstalledError,
     LibraryPin,
     LibraryStore,
+    LibraryTooLargeError,
     Lock,
     LockfileError,
     _write_pins,
@@ -677,6 +680,35 @@ def test_an_unknown_ref_leaves_nothing_behind(store: LibraryStore, paths: DataPa
 
     assert not (paths.models / LOCKFILE_NAME).exists()
     assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
+    store: LibraryStore, paths: DataPaths
+) -> None:
+    store.max_bytes = 1
+
+    with pytest.raises(LibraryTooLargeError, match="over the"):
+        store.install("BOSL2")
+
+    assert not (paths.models / LOCKFILE_NAME).exists()
+    assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_within_the_size_cap_is_installed(store: LibraryStore, paths: DataPaths) -> None:
+    store.max_bytes = 10_000_000
+
+    pin = store.install("BOSL2")
+
+    assert (paths.libraries / "BOSL2" / pin.commit / "BOSL2").is_dir()
+
+
+def test_the_size_cap_comes_from_the_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_LIBRARY_MAX_BYTES", "1234")
+    state = build_state(Settings(data_dir=tmp_path, frontend_dir=Path("/nonexistent")))
+
+    assert state.libraries.max_bytes == 1234
 
 
 def test_search_path_is_only_what_the_model_declares(
