@@ -474,11 +474,21 @@ export const handlers = [
     return model ? HttpResponse.json(model) : problem(404, 'Model not found')
   }),
 
-  http.delete(`${base}/models/:slug`, ({ params }) => {
+  http.delete(`${base}/models/:slug`, ({ params, request }) => {
     const refused = refuseBuiltin(String(params['slug']))
     if (refused) return refused
     if (!state.models.some((m) => m.slug === params['slug'])) {
       return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
+    }
+    const slugs = state.models.filter((m) => m.upstream?.id === params['slug']).map((m) => m.slug)
+    if (slugs.length && new URL(request.url).searchParams.get('force') !== 'true') {
+      return problem(
+        409,
+        'Conflict',
+        `${slugs.length} template(s) are duplicates of '${String(params['slug'])}' and would ` +
+          'lose their upstream; delete with ?force=true to go ahead',
+        { duplicates: slugs.length, slugs },
+      )
     }
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })

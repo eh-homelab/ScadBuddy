@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { eligibilityIssues, refusedCheck } from './problems'
+import { eligibilityIssues, refusedCheck, trackingDuplicates } from './problems'
 
 const base = { title: 'Conflict', status: 409 }
 
@@ -54,5 +54,15 @@ describe('refusedCheck', () => {
 
   it('is undefined when the problem carries no diagnostics', () => {
     expect(refusedCheck({ title: 'Conflict', status: 409 })).toBeUndefined()
+  })
+})
+
+describe('trackingDuplicates', () => {
+  it('reads the slugs of a delete refused for duplicates', () => {
+    expect(trackingDuplicates({ ...base, duplicates: 2, slugs: ['a', 'b'] })).toEqual(['a', 'b'])
+  })
+
+  it('is undefined for any other conflict', () => {
+    expect(trackingDuplicates({ ...base, detail: 'render in progress' })).toBeUndefined()
   })
 })

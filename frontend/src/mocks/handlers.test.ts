@@ -71,3 +71,18 @@ describe('mock API: duplicate (#156)', () => {
     expect(error).toMatchObject({ status: 404 })
   })
 })
+
+describe('mock API: delete a template duplicates track (#223)', () => {
+  it('answers 409 naming them, and deletes with force', async () => {
+    await api.duplicateModel('name-keychain', 'My Keychain')
+
+    const error: unknown = await api.deleteModel('name-keychain').catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).toMatchObject({ status: 409, problem: { duplicates: 1, slugs: ['my-keychain'] } })
+    expect((await api.getModel('name-keychain')).slug).toBe('name-keychain')
+
+    await api.deleteModel('name-keychain', true)
+    const gone: unknown = await api.getModel('name-keychain').catch((caught: unknown) => caught)
+    expect(gone).toMatchObject({ status: 404 })
+  })
+})
