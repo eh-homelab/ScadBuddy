@@ -1,0 +1,6 @@
+{
+  "name": "Building Brick",
+  "description": "A parametric stud-and-tube building brick, compatible with LEGO System bricks (8 mm pitch) or, in the big system, DUPLO bricks (16 mm pitch). Bricks, plates, smooth tiles and 45-degree slopes from 1x1 to 16x16, with stud and wall fit sliders for tuning the clutch on your printer, and an optional word inlaid in a tile's top or a brick's front face. Prints studs up without supports. The brick prints on extruder 1; the word, when there is one, on extruder 2.",
+  "tags": ["kids", "toy", "brick", "building", "two-colour"],
+  "source": "inspired by Printables \"Lego compatible Bricks all sizes upto 50x50!\" (#116754, 21.6k downloads) and \"Lego Duplo Brick Collection with Parametric Source Files\" (#340295, 3.2k downloads); dimensions after cfinke/LEGO.scad"
+}
