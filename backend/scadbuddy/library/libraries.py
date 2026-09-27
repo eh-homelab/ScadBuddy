@@ -52,7 +52,7 @@ import signal
 import subprocess
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -517,6 +517,95 @@ def _same_repository(first: str, second: str) -> bool:
         return urlunsplit(parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()))
 
     return bare(first) == bare(second)
+
+
+class CheckoutGate:
+    """Keeps removing a library checkout apart from pinning or rendering one (#253).
+
+    A pin clones (or finds) a checkout and THEN records it in a model; a removal
+    checks that no model records it and THEN deletes it. Interleaved, a removal
+    could delete the checkout a pin has just found but not yet recorded, leaving a
+    model pinned to nothing. So any number of pins may run together, and a removal
+    waits for them all and runs alone.
+
+    A render resolves its ``OPENSCADPATH`` once and then reads those checkouts for
+    as long as OpenSCAD runs, which can outlast the model's own pin. So it holds a
+    lease on them: taken only while no removal runs, and a removal refuses -- it
+    does not wait out a render that may take the whole render timeout -- while one
+    is held on anything it would delete (:meth:`leased`).
+    """
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._pins = 0
+        self._removing = False
+        #: holder (a job id) -> the checkout directories it reads.
+        self._leases: dict[str, tuple[Path, ...]] = {}
+
+    @contextlib.asynccontextmanager
+    async def pinning(self) -> AsyncIterator[None]:
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing)
+            self._pins += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._pins -= 1
+                self._condition.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def removing(self) -> AsyncIterator[None]:
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing and self._pins == 0)
+            self._removing = True
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._removing = False
+                self._condition.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def rendering(self, holder: str, checkouts: Sequence[Path]) -> AsyncIterator[None]:
+        """Hold ``checkouts`` for ``holder`` until the block exits. Waits out a
+        removal in progress, so the caller must check afterwards that what it
+        resolved is still there (:func:`require_checkouts`)."""
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing)
+            self.hold(holder, checkouts)
+        try:
+            yield
+        finally:
+            self.release(holder)
+
+    def hold(self, holder: str, checkouts: Sequence[Path]) -> None:
+        """The synchronous half of :meth:`rendering`: record the lease as it stands."""
+        self._leases[holder] = tuple(checkouts)
+
+    def release(self, holder: str) -> None:
+        self._leases.pop(holder, None)
+
+    def leased(self, directory: Path) -> list[str]:
+        """The holders reading ``directory`` -- one checkout, or a library's
+        directory of them -- in the order they took their leases."""
+        return [
+            holder
+            for holder, checkouts in self._leases.items()
+            if any(path == directory or path.parent == directory for path in checkouts)
+        ]
+
+
+def require_checkouts(checkouts: Sequence[Path]) -> None:
+    """:class:`LibraryNotInstalledError` for any of ``checkouts`` removed since it
+    was resolved -- the message :func:`search_path` gives for one never there."""
+    for directory in checkouts:
+        name = directory.parent.name
+        if not (directory / name).is_dir():
+            raise LibraryNotInstalledError(
+                f"{name!r} is pinned to {directory.name[:7]}, which is not on this volume; "
+                "pin it to this model again"
+            )
 
 
 class LibraryStore:

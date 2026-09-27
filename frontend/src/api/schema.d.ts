@@ -161,7 +161,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a library's checkouts from the volume
-         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
          */
         delete: operations["remove_library_api_v1_libraries__name__delete"];
         options?: never;
@@ -369,7 +369,7 @@ export interface paths {
         head?: never;
         /**
          * Re-pin a model's library from the upstream it already pins
-         * @description Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library.
+         * @description Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library, and a 409 when its entry is changed or removed by another request while the clone runs.
          */
         patch: operations["repin_library_api_v1_models__slug__libraries__name__patch"];
         trace?: never;
@@ -1918,6 +1918,8 @@ export interface components {
             created_at: string;
             /** Diagnostics */
             diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
             /** Error */
             error?: string | null;
             /** Finished At */
@@ -2032,6 +2034,8 @@ export interface components {
         ModelDiagnostics: {
             /** Diagnostics */
             diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
             /** Error */
             error?: string | null;
             /** Finished At */

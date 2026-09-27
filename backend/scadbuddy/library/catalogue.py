@@ -31,7 +31,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -108,6 +108,11 @@ class ModelExistsError(ValueError):
 
 class LibraryNotDeclaredError(KeyError):
     """The model has no library of that name to remove."""
+
+
+class LibraryPinChangedError(RuntimeError):
+    """A re-pin found the model's entry for the library changed, or gone, since it
+    was read: another request moved or removed it while the clone ran."""
 
 
 class InvalidModelMetaError(ValueError):
@@ -600,15 +605,26 @@ class Catalogue:
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
 
-    def pin_library(self, slug: str, library: ModelLibrary) -> ModelRecord:
+    def pin_library(
+        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+    ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
-        or at the end. One revision of the model; no other model moves."""
+        or at the end. One revision of the model; no other model moves.
+
+        With ``replacing``, only in place of that entry: checked in the same
+        read-modify-write as the pin (under the history's write lock), and
+        :class:`LibraryPinChangedError` when the entry is no longer what the
+        caller read -- so a re-pin cannot bring back a library an unpin removed
+        while its clone ran, nor overwrite a pin another request just moved.
+        """
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if replacing is not None and not _declares(entries, library.name, replacing):
+                raise LibraryPinChangedError(library.name)
             # Where the old entry was, so a re-pin is a one-line diff; any duplicate a
             # hand edit left goes with it.
             index = next(
@@ -1198,6 +1214,20 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     if not resolved or not any(history.touched(resolved, place) for place in places):
         raise InvalidMergeBaseError(f"merge_base {commit!r} is not a revision of {upstream.id!r}")
     return resolved
+
+
+def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+    """Is ``expected`` still the entry ``entries`` has for ``name``?"""
+    found = [entry for entry in entries if entry_name(entry) == name]
+    if len(found) != 1:
+        return False
+    [entry] = found
+    if isinstance(expected, str):
+        return bool(entry == expected)
+    try:
+        return ModelLibrary.model_validate(entry) == expected
+    except ValidationError:
+        return False
 
 
 def _templates_in(directory: Path) -> list[str]:

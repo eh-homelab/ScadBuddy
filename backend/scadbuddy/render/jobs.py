@@ -9,9 +9,9 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from contextlib import contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -29,7 +29,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import model_search_path, revision_search_path
+from scadbuddy.library.libraries import (
+    CheckoutGate,
+    model_search_path,
+    require_checkouts,
+    revision_search_path,
+)
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.diagnostics import Diagnostic
@@ -81,6 +86,8 @@ class JobResult(BaseModel):
     #: The main render's ERROR/WARNING lines, parsed (#252). The per-colour solid
     #: passes re-run the same source and would only repeat them.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
+    #: Diagnostics past the cap that ``diagnostics`` leaves out; 0 when it is all.
+    diagnostics_dropped: int = 0
 
 
 class Job(BaseModel):
@@ -103,6 +110,7 @@ class Job(BaseModel):
     #: What OpenSCAD reported, parsed (#252): the result's on success, the failed
     #: run's on failure -- a parser error is exactly when a client needs them.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
+    diagnostics_dropped: int = 0
     result: JobResult | None = None
 
 
@@ -467,6 +475,20 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
         shutil.rmtree(staging, ignore_errors=True)
 
 
+@asynccontextmanager
+async def _library_lease(
+    checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
+) -> AsyncIterator[None]:
+    """A lease on the checkouts a render resolved, when there are any to hold."""
+    if checkouts is None or not library_path:
+        yield
+        return
+    async with checkouts.rendering(holder, library_path):
+        # A removal that ran between resolving and leasing took one away.
+        require_checkouts(library_path)
+        yield
+
+
 async def render_job(
     job: Job,
     *,
@@ -474,6 +496,7 @@ async def render_job(
     paths: DataPaths,
     history: ModelHistory | None = None,
     thumbnail_executor: Executor | None = None,
+    checkouts: CheckoutGate | None = None,
 ) -> tuple[JobResult, list[str]]:
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then
@@ -490,26 +513,33 @@ async def render_job(
     if version is None:
         version = await asyncio.to_thread(source_version, scad.parent)
     config = source.configure(config)
-    schema = await cached_schema(scad, source.schema_cache, config=config)
-    work = paths.job_work_dir(job.id)
-    work.mkdir(parents=True, exist_ok=True)
+    # Held for every openscad run below: those are what read the checkouts on
+    # OPENSCADPATH, and a removal must not take one out from under them (#253).
+    async with _library_lease(checkouts, job.id, source.library_path):
+        schema = await cached_schema(scad, source.schema_cache, config=config)
+        work = paths.job_work_dir(job.id)
+        work.mkdir(parents=True, exist_ok=True)
 
-    with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
-        output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
-        preview_parts = extruder_order(split_by_material(work / RAW_RENDER_NAME), schema, params)
-        if not preview_parts:
-            raise OpenSCADError(
-                "the render produced no geometry",
-                output.log_tail,
-                diagnostics=output.diagnostics,
+        with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
+            output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
+            preview_parts = extruder_order(
+                split_by_material(work / RAW_RENDER_NAME), schema, params
+            )
+            if not preview_parts:
+                raise OpenSCADError(
+                    "the render produced no geometry",
+                    output.log_tail,
+                    diagnostics=output.diagnostics,
+                    diagnostics_dropped=output.diagnostics_dropped,
+                )
+
+            preview_path = work / PREVIEW_NAME
+            box = write_glb(preview_parts, preview_path)
+
+            parts, warnings = await solid_parts(
+                scad, schema, params, preview_parts, work, config=config
             )
 
-        preview_path = work / PREVIEW_NAME
-        box = write_glb(preview_parts, preview_path)
-
-        parts, warnings = await solid_parts(
-            scad, schema, params, preview_parts, work, config=config
-        )
     # Exit 0 with the picture missing is otherwise invisible: the preview simply
     # has no overlay, and nothing says why.
     warnings = [
@@ -550,6 +580,7 @@ async def render_job(
         colors=[part.colour for part in parts],
         warnings=warnings,
         diagnostics=list(output.diagnostics),
+        diagnostics_dropped=output.diagnostics_dropped,
     )
     return result, output.log_tail
 
@@ -566,6 +597,7 @@ class RenderQueue:
         store: JobStore | None = None,
         render: RenderCallable | None = None,
         history: ModelHistory | None = None,
+        checkouts: CheckoutGate | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
@@ -582,6 +614,7 @@ class RenderQueue:
                 paths=paths,
                 history=history,
                 thumbnail_executor=self._thumbnails,
+                checkouts=checkouts,
             )
         )
         self._queue: asyncio.Queue[str] = asyncio.Queue()
@@ -645,6 +678,7 @@ class RenderQueue:
             job.error = str(error)
             job.log_tail = error.log_tail
             job.diagnostics = error.diagnostics
+            job.diagnostics_dropped = error.diagnostics_dropped
         except Exception as error:  # the job carries the failure, the worker lives on
             job.state = "failed"
             job.error = f"{type(error).__name__}: {error}"
@@ -653,6 +687,7 @@ class RenderQueue:
             job.result = result
             job.log_tail = log_tail
             job.diagnostics = result.diagnostics
+            job.diagnostics_dropped = result.diagnostics_dropped
         job.finished_at = _now()
         self.store.write(job)
         self.store.prune(self.config.job_ttl)

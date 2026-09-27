@@ -49,12 +49,15 @@ class OpenSCADError(RuntimeError):
         log_tail: Sequence[str],
         returncode: int | None = None,
         diagnostics: Sequence[Diagnostic] = (),
+        diagnostics_dropped: int = 0,
     ):
         super().__init__(message)
         self.log_tail = list(log_tail)
         self.returncode = returncode
         #: The run's ERROR/WARNING lines, parsed (#252). Read off the whole log.
         self.diagnostics = list(diagnostics)
+        #: The diagnostics past the cap that ``diagnostics`` does not hold.
+        self.diagnostics_dropped = diagnostics_dropped
 
 
 class RenderTimeoutError(OpenSCADError):
@@ -76,6 +79,8 @@ class ProcessOutput:
     #: Every ERROR/WARNING-class line, parsed (#252). Also read off the whole log:
     #: a parser error is the first thing OpenSCAD prints.
     diagnostics: tuple[Diagnostic, ...] = ()
+    #: How many more there were past the cap (``MAX_DIAGNOSTICS``).
+    diagnostics_dropped: int = 0
 
 
 def missing_file(line: str) -> str | None:
@@ -192,6 +197,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
             f"openscad timed out after {config.render_timeout:g}s",
             tail,
             diagnostics=collector.diagnostics,
+            diagnostics_dropped=collector.dropped,
         ) from None
     except asyncio.CancelledError:
         # A cancelled caller (a superseded parse check, a shutting-down worker) must not
@@ -204,7 +210,11 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     duration = time.monotonic() - started
     if returncode != 0:
         raise OpenSCADError(
-            f"openscad exited with {returncode}", tail, returncode, collector.diagnostics
+            f"openscad exited with {returncode}",
+            tail,
+            returncode,
+            collector.diagnostics,
+            collector.dropped,
         )
     return ProcessOutput(
         returncode=returncode,
@@ -212,6 +222,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         duration_s=duration,
         missing_files=tuple(missing),
         diagnostics=tuple(collector.diagnostics),
+        diagnostics_dropped=collector.dropped,
     )
 
 

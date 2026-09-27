@@ -1372,6 +1372,10 @@
             "title": "Diagnostics",
             "type": "array"
           },
+          "diagnostics_dropped": {
+            "title": "Diagnostics Dropped",
+            "type": "integer"
+          },
           "error": {
             "anyOf": [
               {
@@ -1666,6 +1670,10 @@
             },
             "title": "Diagnostics",
             "type": "array"
+          },
+          "diagnostics_dropped": {
+            "title": "Diagnostics Dropped",
+            "type": "integer"
           },
           "error": {
             "anyOf": [
@@ -6058,7 +6066,7 @@
     },
     "/api/v1/libraries/{name}": {
       "delete": {
-        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.",
+        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.",
         "operationId": "remove_library_api_v1_libraries__name__delete",
         "parameters": [
           {
@@ -6765,7 +6773,7 @@
         ]
       },
       "patch": {
-        "description": "Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library.",
+        "description": "Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library, and a 409 when its entry is changed or removed by another request while the clone runs.",
         "operationId": "repin_library_api_v1_models__slug__libraries__name__patch",
         "parameters": [
           {

@@ -98,6 +98,10 @@ class JobStatus(BaseModel):
     parts: list[PartInfo] | None = None
     #: OpenSCAD's ERROR/WARNING lines, parsed, on a failed job as well as a done one.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
+    #: How many more OpenSCAD printed past the cap; 0 when ``diagnostics`` is all.
+    #: A factory default, as the lists have, so the generated client reads it as
+    #: optional: an older mock or cached response without it still type-checks.
+    diagnostics_dropped: int = Field(default_factory=int)
 
 
 class ModelDiagnostics(BaseModel):
@@ -111,6 +115,8 @@ class ModelDiagnostics(BaseModel):
     finished_at: datetime | None = None
     error: str | None = None
     diagnostics: list[Diagnostic] = Field(default_factory=list)
+    #: How many more OpenSCAD printed past the cap; 0 when ``diagnostics`` is all.
+    diagnostics_dropped: int = Field(default_factory=int)
 
 
 def _job_status(job: Job, preview_url: str | None) -> JobStatus:
@@ -132,6 +138,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         warnings=result.warnings if result else None,
         parts=result.parts if result else None,
         diagnostics=job.diagnostics,
+        diagnostics_dropped=job.diagnostics_dropped,
     )
 
 
@@ -288,6 +295,7 @@ async def get_model_diagnostics(
         finished_at=job.finished_at,
         error=job.error,
         diagnostics=job.diagnostics,
+        diagnostics_dropped=job.diagnostics_dropped,
     )
 
 

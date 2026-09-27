@@ -64,6 +64,7 @@ def test_the_model_diagnostics_are_the_latest_settled_render(
             finished_at=now + timedelta(minutes=1),
             error="openscad exited with 1",
             diagnostics=[ERROR],
+            diagnostics_dropped=3,
         )
     )
 
@@ -75,6 +76,7 @@ def test_the_model_diagnostics_are_the_latest_settled_render(
     assert body["status"] == "failed"
     assert body["error"] == "openscad exited with 1"
     assert body["diagnostics"] == [ERROR.model_dump(mode="json")]
+    assert body["diagnostics_dropped"] == 3
     # The job's own route says the same.
     assert client.get(f"/api/v1/jobs/{'f' * 32}").json()["diagnostics"] == body["diagnostics"]
 

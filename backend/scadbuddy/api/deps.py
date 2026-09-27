@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Annotated
 
@@ -16,7 +14,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import LibraryStore
+from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
@@ -32,46 +30,6 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
-
-
-class CheckoutGate:
-    """Keeps removing a library checkout apart from pinning one.
-
-    A pin clones (or finds) a checkout and THEN records it in a model; a removal
-    checks that no model records it and THEN deletes it. Interleaved, a removal
-    could delete the checkout a pin has just found but not yet recorded, leaving a
-    model pinned to nothing. So any number of pins may run together, and a removal
-    waits for them all and runs alone.
-    """
-
-    def __init__(self) -> None:
-        self._condition = asyncio.Condition()
-        self._pins = 0
-        self._removing = False
-
-    @asynccontextmanager
-    async def pinning(self) -> AsyncIterator[None]:
-        async with self._condition:
-            await self._condition.wait_for(lambda: not self._removing)
-            self._pins += 1
-        try:
-            yield
-        finally:
-            async with self._condition:
-                self._pins -= 1
-                self._condition.notify_all()
-
-    @asynccontextmanager
-    async def removing(self) -> AsyncIterator[None]:
-        async with self._condition:
-            await self._condition.wait_for(lambda: not self._removing and self._pins == 0)
-            self._removing = True
-        try:
-            yield
-        finally:
-            async with self._condition:
-                self._removing = False
-                self._condition.notify_all()
 
 
 @dataclass
@@ -103,7 +61,8 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
-    #: Pins share it; deleting a checkout takes it alone (#253).
+    #: Pins and renders share it; deleting a checkout takes it alone (#253). The
+    #: render queue holds the same one.
     checkouts: CheckoutGate = field(default_factory=CheckoutGate)
     #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
     #: held for as long as the editor stays open rather than for one piece of work —
@@ -117,6 +76,7 @@ def build_state(settings: Settings) -> AppState:
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     outputs = OutputStore(paths)
+    checkouts = CheckoutGate()
     return AppState(
         settings=settings,
         config=config,
@@ -133,7 +93,8 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        queue=RenderQueue(config, paths, history=history),
+        queue=RenderQueue(config, paths, history=history, checkouts=checkouts),
+        checkouts=checkouts,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
     )

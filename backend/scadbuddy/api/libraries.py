@@ -13,6 +13,7 @@ still pins one.
 from __future__ import annotations
 
 import asyncio
+from functools import partial
 from typing import Annotated
 
 from fastapi import APIRouter, FastAPI, Path, Query, Request, Response, status
@@ -21,7 +22,6 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
-    CheckoutGate,
     CheckoutsDep,
     InstallsDep,
     LibrariesDep,
@@ -33,6 +33,7 @@ from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
     Catalogue,
     LibraryNotDeclaredError,
+    LibraryPinChangedError,
     ModelNotFoundError,
     ModelRecord,
 )
@@ -42,6 +43,8 @@ from scadbuddy.library.libraries import (
     NAME_PATTERN,
     REF_PATTERN,
     CatalogueLibrary,
+    CheckoutGate,
+    Declared,
     LibraryCheckoutNotFoundError,
     LibraryDeclarationError,
     LibraryError,
@@ -149,16 +152,26 @@ async def _pin(
     libraries: LibraryStore,
     installs: asyncio.Semaphore,
     checkouts: CheckoutGate,
+    replacing: Declared | None = None,
 ) -> ModelRecord:
     """Clone ``name`` and record the pin in ``slug``, with the same checks and status
-    codes for a first pin and a re-pin."""
+    codes for a first pin and a re-pin. ``replacing`` is the entry a re-pin read:
+    the record is refused, a 409, if it changed while the clone ran."""
     try:
         # Held from the clone to the record, so no removal lands in between.
         async with checkouts.pinning():
             # A clone is a network fetch; off the loop, and a bounded number at a time.
             async with installs:
                 pin = await asyncio.to_thread(libraries.resolve, name, url=url, ref=ref)
-            return await asyncio.to_thread(catalogue.pin_library, slug, pin)
+            return await asyncio.to_thread(
+                partial(catalogue.pin_library, slug, pin, replacing=replacing)
+            )
+    except LibraryPinChangedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r}'s {name!r} was changed or removed while this re-pin ran; "
+            "nothing was recorded",
+        ) from None
     except LibraryNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,
@@ -184,7 +197,8 @@ async def _pin(
         "a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a "
         "branch pin moves to the branch's current commit), and records the commit as one "
         "revision of the model. The same checks and errors as pinning it in the first "
-        "place; a 404 when the model does not declare the library."
+        "place; a 404 when the model does not declare the library, and a 409 when its "
+        "entry is changed or removed by another request while the clone runs."
     ),
 )
 async def repin_library(
@@ -226,6 +240,7 @@ async def repin_library(
         libraries=libraries,
         installs=installs,
         checkouts=checkouts,
+        replacing=current,
     )
 
 
@@ -279,7 +294,8 @@ async def list_installed_libraries(
     summary="Remove a library's checkouts from the volume",
     description=(
         "Deletes the checkout at `commit`, or every checkout of the library. Refused "
-        "with a 409 naming the models while any model's live pin still reads one. "
+        "with a 409 naming the models while any model's live pin still reads one, and "
+        "with a 409 naming the jobs while a running render reads one. "
         "Older revisions are not counted: rendering one that pinned a removed checkout "
         "is the 409 that asks for the library to be pinned again."
     ),
@@ -295,8 +311,20 @@ async def remove_library(
     ] = None,
 ) -> Response:
     what = name if commit is None else f"{name} at {commit[:7]}"
-    # Alone: no pin can find this checkout and record it while it goes.
+    directory = libraries.paths.libraries / name
+    if commit is not None:
+        directory /= commit
+    # Alone: no pin can find this checkout and record it while it goes, and no
+    # render can take a lease on it.
     async with checkouts.removing():
+        jobs = checkouts.leased(directory)
+        if jobs:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{what} is being read by render job {', '.join(jobs)}; "
+                "try again once it has finished",
+                jobs=jobs,
+            )
         users = await asyncio.to_thread(catalogue.library_users, name, commit)
         if users:
             raise ApiError(

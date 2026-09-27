@@ -28,7 +28,6 @@ from scadbuddy.api.deps import (
     INSTALL_CONCURRENCY,
     STATE_ATTR,
     AppState,
-    CheckoutGate,
     get_libraries,
 )
 from scadbuddy.core.paths import DataPaths
@@ -37,7 +36,9 @@ from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
+    CheckoutGate,
     LibraryStore,
+    ModelLibrary,
 )
 from tests.conftest import make_library_upstream
 
@@ -859,3 +860,96 @@ async def test_a_removal_waits_for_pins_in_flight() -> None:
     await asyncio.gather(pin_task, remove_task)
 
     assert order == ["pinned", "removed"]
+
+
+# ── review follow-ups: races (#324) ──────────────────────────────────────────
+
+
+def _during_clone(libraries_app: FastAPI, meanwhile: Any) -> Any:
+    """``resolve`` that runs ``meanwhile`` first: another request landing while this
+    one's clone is in flight, at exactly that point."""
+    store = libraries_app.dependency_overrides[get_libraries]()
+    real = store.resolve
+
+    def resolve(name: str, **kwargs: Any) -> Any:
+        meanwhile()
+        return real(name, **kwargs)
+
+    return patch.object(store, "resolve", side_effect=resolve)
+
+
+def test_a_repin_does_not_bring_back_a_library_unpinned_while_it_cloned(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+
+    with _during_clone(libraries_app, lambda: state.catalogue.unpin_library(SLUG, "BOSL2")):
+        response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 409, response.text
+    assert "changed or removed" in response.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
+
+
+def test_a_repin_does_not_overwrite_a_pin_moved_while_it_cloned(
+    lib_client: TestClient, libraries_app: FastAPI, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    moved = ModelLibrary(name="BOSL2", url=url, ref="main", commit=commits["v2"])
+
+    with _during_clone(libraries_app, lambda: state.catalogue.pin_library(SLUG, moved)):
+        response = repin(lib_client, "BOSL2", ref="v2")
+
+    assert response.status_code == 409, response.text
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"][0]["ref"] == "main"
+
+
+def test_a_checkout_a_render_is_reading_is_not_removed(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """The model's pin is already gone, but a render that resolved it still runs."""
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    job_id = "a" * 32
+    state.checkouts.hold(job_id, [checkout])
+    assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
+
+    whole = lib_client.delete("/api/v1/libraries/BOSL2")
+    one = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    state.checkouts.release(job_id)
+    after = lib_client.delete("/api/v1/libraries/BOSL2")
+
+    for response in (whole, one):
+        assert response.status_code == 409, response.text
+        assert response.json()["jobs"] == [job_id]
+    assert after.status_code == 204, after.text
+    assert not checkout.exists()
+
+
+def test_a_lease_elsewhere_does_not_block_a_removal(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    pin(lib_client, "BOSL2", ref="v2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.checkouts.hold("b" * 32, [paths.libraries / "BOSL2" / commits["v2"]])
+
+    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+
+    assert removed.status_code == 204, removed.text

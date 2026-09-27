@@ -8,6 +8,7 @@ import pytest
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.fontconfig import conf_path, write_conf
+from scadbuddy.render.diagnostics import MAX_DIAGNOSTICS
 from scadbuddy.render.runner import (
     OpenSCADError,
     RenderTimeoutError,
@@ -294,3 +295,22 @@ async def test_a_failed_run_carries_its_diagnostics(
         "Ignoring unknown variable 'wdith'",
         "Assertion 'false' failed",
     ]
+    assert raised.value.diagnostics_dropped == 0
+
+
+FLOODING_OPENSCAD = """#!/bin/sh
+i=0
+while [ $i -lt 205 ]; do echo "WARNING: number $i in file model.scad, line 1"; i=$((i+1)); done
+"""
+
+
+async def test_a_run_says_how_many_diagnostics_it_left_out(tmp_path: Path) -> None:
+    binary = tmp_path / "flooding-openscad"
+    binary.write_text(FLOODING_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert len(output.diagnostics) == MAX_DIAGNOSTICS
+    assert output.diagnostics_dropped == 205 - MAX_DIAGNOSTICS
