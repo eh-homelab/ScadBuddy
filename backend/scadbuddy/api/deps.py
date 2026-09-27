@@ -108,7 +108,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        libraries=LibraryStore(paths, history),
+        libraries=LibraryStore(paths, history, max_bytes=config.library_max_bytes),
         queue=queue,
         previews=previews,
         checks=asyncio.Semaphore(config.check_concurrency),

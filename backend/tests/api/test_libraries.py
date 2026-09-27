@@ -330,6 +330,16 @@ def test_a_ref_that_does_not_exist_upstream_is_a_502(
     assert "fatal" not in detail
 
 
+def test_a_clone_over_the_size_cap_is_a_422(libraries_app: FastAPI, lib_client: TestClient) -> None:
+    store: LibraryStore = libraries_app.dependency_overrides[get_libraries]()
+    store.max_bytes = 1
+
+    response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2"})
+
+    assert response.status_code == 422
+    assert ", over the 1 bytes" in response.json()["detail"]
+
+
 def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
     lib_client: TestClient,
     libraries_app: FastAPI,
