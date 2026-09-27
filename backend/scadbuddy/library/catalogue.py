@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -401,19 +402,31 @@ class Catalogue:
 
         Runs at boot, before the render queue starts, so nothing reads a
         built-in while it is being replaced.
+
+        Best effort, like the sweeps: it runs in the app lifespan, so anything
+        it raised would stop the boot. A built-in that cannot be synced is
+        logged and keeps its previous mirror (or none), and the rest still sync.
         """
-        wanted = _templates_in(bundled)
-        mirror = self.paths.builtins
-        mirror.mkdir(parents=True, exist_ok=True)
-        for present in sorted(mirror.iterdir()):
-            if present.name not in wanted:
-                _remove_tree(present)
+        try:
+            wanted = _templates_in(bundled)
+            mirror = self.paths.builtins
+            mirror.mkdir(parents=True, exist_ok=True)
+            present = sorted(mirror.iterdir())
+        except OSError:
+            logger.exception("could not sync built-in templates", extra={"from": str(bundled)})
+            return None
+        for stale in present:
+            if stale.name not in wanted:
+                _remove_tree(stale)
         changed: list[str] = []
         for slug in wanted:
-            if _tree(bundled / slug) == _tree(mirror / slug):
+            try:
+                if _tree(bundled / slug) == _tree(mirror / slug):
+                    continue
+                self._replace_builtin(bundled / slug, mirror / slug)
+            except OSError:
+                logger.exception("could not sync a built-in template", extra={"slug": slug})
                 continue
-            _remove_tree(mirror / slug)
-            shutil.copytree(bundled / slug, mirror / slug, ignore=shutil.ignore_patterns(".*"))
             changed.append(slug)
         commit = self._commit(SYNC_MESSAGE, BUILTIN_DIR)
         if commit is not None:
@@ -421,6 +434,34 @@ class Catalogue:
                 "synced built-in templates", extra={"changed": changed, "from": str(bundled)}
             )
         return commit
+
+    def _replace_builtin(self, source: Path, target: Path) -> None:
+        """Copy ``source`` over ``target`` without ever leaving a half-copied mirror.
+
+        The copy is staged under ``cache/tombstones/`` (same volume, so the moves
+        are atomic renames) and the old mirror is renamed there before the staged
+        copy takes its place. A failure part-way leaves its debris in the
+        tombstones, which the boot's sweep clears, never in ``_builtin/``: a
+        failed copy keeps the previous mirror.
+        """
+        tombstones = self.paths.tombstones
+        tombstones.mkdir(parents=True, exist_ok=True)
+        staged = tombstones / f"{BUILTIN_DIR}-{target.name}.{uuid.uuid4().hex}"
+        retired = staged.with_name(f"{staged.name}.old")
+        try:
+            shutil.copytree(source, staged, ignore=shutil.ignore_patterns(".*"))
+            # A new built-in has nothing to retire.
+            with contextlib.suppress(FileNotFoundError):
+                os.replace(target, retired)
+            try:
+                os.replace(staged, target)
+            except OSError:
+                if retired.exists():
+                    os.replace(retired, target)
+                raise
+        finally:
+            _remove_tree(staged)
+            _remove_tree(retired)
 
 
 def _tree(directory: Path) -> dict[str, bytes]:

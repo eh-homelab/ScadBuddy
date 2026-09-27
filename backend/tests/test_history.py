@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -680,3 +681,70 @@ def test_revision_exports_are_evicted_by_last_use(tmp_path: Path) -> None:
 
 def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
     assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
+
+
+def test_a_built_in_that_cannot_be_replaced_keeps_its_mirror_and_the_rest_sync(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One built-in's failed swap is logged and skipped; it never stops the sync (or the boot)."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    (image / "keychain" / "model.scad").write_text("cube(11);\n", encoding="utf-8")
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_to_retire_tag(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(source) == mirror / "tag":
+            raise PermissionError("EACCES")
+        real_replace(source, target)
+
+    with patch("scadbuddy.library.catalogue.os.replace", fail_to_retire_tag):
+        assert catalogue.sync_builtins(image) is not None
+
+    assert (mirror / "keychain" / "model.scad").read_text(encoding="utf-8") == "cube(11);\n"
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(5);\n"
+    assert [getattr(record, "slug", None) for record in caplog.records if record.exc_info] == [
+        "tag"
+    ]
+    # The staged copy went to the tombstones, not into the mirror, and is cleared.
+    assert sorted(path.name for path in mirror.iterdir()) == ["keychain", "tag"]
+    assert list(catalogue.paths.tombstones.iterdir()) == []
+    # The next boot retries it.
+    assert catalogue.sync_builtins(image) is not None
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+
+
+def test_a_failed_swap_puts_the_previous_mirror_back(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image = tmp_path / "image"
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_to_install(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(target) == mirror / "tag" and not Path(source).name.endswith(".old"):
+            raise OSError("EIO")
+        real_replace(source, target)
+
+    with patch("scadbuddy.library.catalogue.os.replace", fail_to_install):
+        assert catalogue.sync_builtins(image) is None
+
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(5);\n"
+    assert "could not sync a built-in template" in caplog.text
+
+
+def test_a_mirror_that_cannot_be_made_does_not_raise(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image = tmp_path / "image"
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.paths.builtins.write_text("not a directory\n", encoding="utf-8")
+
+    assert catalogue.sync_builtins(image) is None
+    assert "could not sync built-in templates" in caplog.text
