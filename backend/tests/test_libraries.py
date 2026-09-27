@@ -23,7 +23,9 @@ from scadbuddy.library.libraries import (
     LibraryFetchError,
     LibraryNotFoundError,
     LibraryNotInstalledError,
+    LibraryPin,
     LibraryStore,
+    _write_pins,
     declared_libraries,
     pins_at,
     read_pins,
@@ -308,6 +310,25 @@ def test_concurrent_adds_of_one_new_name_cannot_both_bind_it(
     # The per-name lock is dropped once nobody holds or waits for it, so the table
     # does not grow with every name ever added -- or ever tried.
     assert store._names == {}
+
+
+def test_the_lock_is_swapped_in_whole(paths: DataPaths, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Renders read the lock without the install lock, so a write that fails part
+    way must leave the previous lock whole, and nothing staged behind."""
+    paths.models.mkdir(parents=True, exist_ok=True)
+    before = {"a": LibraryPin(url="https://example.invalid/a.git", ref="v1", commit="a" * 40)}
+    _write_pins(paths, before)
+
+    def fail(*_: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("scadbuddy.library.libraries.os.replace", fail)
+    after = {"b": LibraryPin(url="https://example.invalid/b.git", ref="v2", commit="b" * 40)}
+    with pytest.raises(OSError, match="disk full"):
+        _write_pins(paths, after)
+
+    assert read_pins(paths) == before
+    assert [p.name for p in paths.models.iterdir() if p.name.startswith(".libraries-")] == []
 
 
 def test_a_refused_add_leaves_no_lock_behind(store: LibraryStore) -> None:

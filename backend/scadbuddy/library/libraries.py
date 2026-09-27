@@ -38,6 +38,7 @@ import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import uuid
 from collections.abc import Mapping, Sequence
@@ -196,7 +197,17 @@ def pins_at(history: ModelHistory, commit: str) -> dict[str, LibraryPin]:
 
 
 def _write_pins(paths: DataPaths, pins: Mapping[str, LibraryPin]) -> None:
-    (paths.models / LOCKFILE_NAME).write_text(_lock_body(pins), encoding="utf-8")
+    """Swap the lock in whole. Renders, checks and edits read it without the
+    install lock; `write_text` truncates first, and a reader in that window would
+    fail on a torn file. A temp file beside it keeps `os.replace` atomic."""
+    handle, staged = tempfile.mkstemp(dir=paths.models, prefix=".libraries-", suffix=".lock")
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as writer:
+            writer.write(_lock_body(pins))
+        os.replace(staged, paths.models / LOCKFILE_NAME)
+    except BaseException:
+        Path(staged).unlink(missing_ok=True)
+        raise
 
 
 # ── a model's declaration ─────────────────────────────────────────────────────
