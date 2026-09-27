@@ -34,6 +34,7 @@ DOCKERFILE
 fi
 
 # case name | -D overrides (one per line in the array below)
+WARN=0
 render() {
     local name="$1"; shift
     local args=()
@@ -42,8 +43,11 @@ render() {
     local t0 t1
     t0=$(date +%s.%N)
     docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
-        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad 2>&1 \
-        | grep -E 'ERROR|WARNING' || true
+        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad >"$OUT/$name.log" 2>&1 \
+        || { echo "  FAIL  openscad exited non-zero (see $OUT/$name.log)"; WARN=1; }
+    if grep -E 'ERROR|WARNING' "$OUT/$name.log"; then
+        echo "  FAIL  OpenSCAD warnings (see $OUT/$name.log)"; WARN=1
+    fi
     t1=$(date +%s.%N)
     printf '    %.1f s\n' "$(echo "$t1 - $t0" | bc)"
 }
@@ -54,6 +58,9 @@ render wrap_band 'style="wrap_band"'
 render no_text 'text=""'
 render thick_cable 'cable_d=15' 'clip_opening_pct=85' 'flag_h=6' 'flag_len=20' 'clip_len=14'
 render band_thick 'style="wrap_band"' 'cable_d=12' 'flag_h=14' 'flag_len=50'
+render long_flag 'text="ETHERNET-SWITCH1"'
+render long_band 'style="wrap_band"' 'flag_len=20' 'text="ETHERNET-SWITCH1"'
+render tall_text 'text="HI"' 'text_size=12' 'flag_h=6' 'flag_len=15'
 
 python3 - "$OUT" <<'PY'
 import math, sys, zipfile, xml.etree.ElementTree as ET
@@ -75,7 +82,16 @@ CASES = {
     "no_text": dict(text=""),
     "thick_cable": dict(cable_d=15, clip_opening_pct=85, flag_h=6, flag_len=20, clip_len=14),
     "band_thick": dict(style="wrap_band", cable_d=12, flag_h=14, flag_len=50),
+    # Text too big for the face shrinks to fit instead of being cut off at the
+    # margin. `shrunk` bounds the extent (along, across the face) that only a
+    # scaled-down word stays under: cut-off letters keep their full height,
+    # and cut-off words their full length.
+    "long_flag": dict(text="ETHERNET-SWITCH1", shrunk=(None, 0.8 * 6)),
+    "long_band": dict(style="wrap_band", flag_len=20, text="ETHERNET-SWITCH1",
+                      shrunk=(None, 0.8 * 6)),
+    "tall_text": dict(text="HI", text_size=12, flag_h=6, flag_len=15, shrunk=(8, None)),
 }
+MARGIN = 1
 
 failures = []
 
@@ -162,9 +178,28 @@ for name, over in CASES.items():
             got_bottom = abs(tz[0]) <= TOL
             check(got_bottom == bottom, "text on the bottom face: %s (min z %.3f)"
                   % (bottom, tz[0]))
+        ty = span(tv, 1)
+        along = (tz[1] - tz[0]) if band else (tx[1] - tx[0])
+        across = ty[1] - ty[0]
+        area_along = p["flag_len"] - (3 if band else 2 * MARGIN)
+        check(along <= area_along + TOL and across <= p["flag_h"] - 2 * MARGIN + TOL,
+              "text %.2f x %.2f inside the %.1f x %.1f label face"
+              % (along, across, area_along, p["flag_h"] - 2 * MARGIN))
+        max_along, max_across = p.get("shrunk", (None, None))
+        if max_along is not None:
+            check(along < max_along, "text shrunk to fit, not cut off (length %.2f < %.2f)"
+                  % (along, max_along))
+        if max_across is not None:
+            check(across < max_across, "text shrunk to fit, not cut off (height %.2f < %.2f)"
+                  % (across, max_across))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
     sys.exit(1)
 print("\nOK")
 PY
+
+if [ "$WARN" -ne 0 ]; then
+    echo "FAILED: OpenSCAD warnings or errors above"
+    exit 1
+fi
