@@ -306,3 +306,41 @@ def test_an_unreadable_stamp_404s_rather_than_500s(
     response = client.get(f"/api/v1/outputs/{created['id']}/edit")
     assert response.status_code == 404
     assert created["id"] in response.json()["detail"]
+
+
+def test_the_geometry_of_an_output_is_measured_and_cached(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 200, response.text
+    body = response.json()
+    # The stub's 3MF is one closed 10 x 10 x 5 box.
+    assert [(part["source"], part["open_edges"]) for part in body["parts"]] == [("solid", 0)]
+    assert body["edges"] == []
+    assert body["height_mm"] == 5
+    assert body["bed_contact_area_mm2"] == 100
+    assert body["height_to_base_ratio"] == 0.5
+    assert body["thinnest_wall"]["thickness_mm"] == 5
+
+    cache = paths.output_dir(model, created["id"]) / "geometry.json"
+    assert json.loads(cache.read_text(encoding="utf-8")) == body
+    # Served from the cache from then on: a doctored cache comes back as written.
+    cache.write_text(json.dumps({**body, "height_mm": 42}), encoding="utf-8")
+    assert client.get(f"/api/v1/outputs/{created['id']}/geometry").json()["height_mm"] == 42
+
+
+def test_the_geometry_of_an_output_without_a_3mf_is_404(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    (paths.output_dir(model, created["id"]) / "model.3mf").unlink()
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 404
+    assert client.get(f"/api/v1/outputs/{'0' * 32}/geometry").status_code == 404
