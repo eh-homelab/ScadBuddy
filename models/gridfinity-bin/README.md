@@ -19,8 +19,8 @@ and in ScadBuddy.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `units_x` | `2` | Width in grid units, 1–8. The bin is `units_x × 42 − 0.5` mm wide. |
-| `units_y` | `1` | Depth in grid units, 1–8. The bin is `units_y × 42 − 0.5` mm deep. |
+| `units_x` | `2` | Width in grid units, 1–7 (7 units is 293.5 mm, the most that fits the H2C's 300 mm two-nozzle width). The bin is `units_x × 42 − 0.5` mm wide. |
+| `units_y` | `1` | Depth in grid units, 1–7. The bin is `units_y × 42 − 0.5` mm deep. |
 | `height_units` | `3` | Height in 7 mm units, 2–12, from the bottom of the feet to the top of the wall. The stacking lip adds 3.55 mm on top. |
 
 ### Features
@@ -42,14 +42,14 @@ and in ScadBuddy.
 | Parameter | Default | What it does |
 |---|---|---|
 | `label_text` | *(empty)* | Text inlaid 0.6 mm into the back-left label tab, up to 24 characters. Empty means no label part. |
-| `label_size` | `6` | Letter height in mm. A label that would not fit the tab is shrunk to fit (estimated from the character count); anything still too wide is clipped at the tab edge. |
+| `label_size` | `6` | Letter height in mm. A label too wide for the tab is shrunk uniformly until it fits; a short one is left at this size. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface. ScadBuddy fills this dropdown from the fonts installed in the container (`// font`). |
 
 ### Colors
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `bin_color` | `#3A3A3A` | The bin. |
+| `bin_color` | `#8E9089` | The bin. |
 | `label_color` | `#F2F2F2` | The inlaid label. |
 
 ## Colours and extruders
@@ -120,8 +120,8 @@ The whole bin is built without `minkowski`: rounded rectangles are
 `offset()`s of squares, the stepped foot profile is a stack of
 rounded-rectangle frustums written as polyhedra, and the lip is its 2D profile
 swept round the corners with `rotate_extrude` and along the sides with
-`linear_extrude`. An 8 × 8 × 12 ultralight bin with 64 compartments and
-magnets renders in about 1.6 s.
+`linear_extrude`. A 7 × 7 × 12 ultralight bin with 64 compartments and
+magnets renders in about 1.3 s.
 
 ## Verifying
 
@@ -129,20 +129,24 @@ magnets renders in about 1.6 s.
 ./verify.sh
 ```
 
-Renders the defaults and eight variations (label, divided, left tab, no tab,
-magnets + screws, ultralight, no lip at 1 × 1 × 2, and the 8 × 8 × 12 maximum)
+Renders the defaults and ten variations (label, divided, left tab, no tab,
+magnets + screws, ultralight, no lip at 1 × 1 × 2, the 7 × 7 × 12 maximum, and
+two labels too long for their tab)
 in `scadbuddy-verify:local`, building it from `openscad/openscad:dev` with the
 image's font packages when it is missing. For each render it checks:
 
+- no OpenSCAD warnings;
 - one non-empty material, or two when a label is expected, and nothing on
   `Default`;
 - the bounding box is exactly `units × 42 − 0.5` in X and Y and
   `height_units × 7` (+ 3.551 with the lip) in Z, sitting on z = 0;
 - the z = 0 footprint is `(n − 1) × 42 + 35.6` mm — the foot bottoms;
-- the label's exposed face is the tab top;
+- the bin fits the H2C bed (300 × 320 mm with both nozzles);
+- the label's exposed face is the tab top, it stays inside the tab's flat
+  top, and a long label keeps every letter (shrunk, never clipped);
 - magnet and screw holes are present at the right diameter, depth and
   position;
-- the 8 × 8 × 12 bin renders in under 60 s.
+- the 7 × 7 × 12 bin renders in under 60 s.
 
 It then drops a second default bin onto the first: 0.02 mm above the expected
 seat the two must not intersect, 0.1 mm below it they must.

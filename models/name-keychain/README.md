@@ -16,16 +16,16 @@ on MakerWorld and in ScadBuddy.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | `Reagan` | The word on the keychain, up to 20 characters. |
+| `name` | `Reagan` | The word on the keychain, up to 20 characters. Empty leaves just the keyring tab, in one colour. |
 | `font` | `Lobster Two:style=Bold` | Typeface. ScadBuddy fills this dropdown from the fonts installed in the container (`// font`). |
 
 ### Size
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `text_size` | `20` | Letter height in mm, capitals to descenders. Everything else scales around it. |
-| `letter_height` | `2.8` | How far the letters stand proud of the base. |
-| `base_thickness` | `4` | Thickness of the base plate. Total height is `base_thickness + letter_height`. |
+| `text_size` | `20` | Letter height in mm, capitals to descenders. A name that would make the keychain wider than the H2C's 300 mm two-nozzle width is shrunk uniformly until it fits. |
+| `letter_height` | `2.8` | How far the letters stand proud of the base, in mm. |
+| `base_thickness` | `4` | Thickness of the base plate in mm. Total height is `base_thickness + letter_height`. |
 | `outline` | `3.5` | How far the base is grown outwards from the word's footprint — the visible border. |
 
 ### Keyring
@@ -33,7 +33,7 @@ on MakerWorld and in ScadBuddy.
 | Parameter | Default | What it does |
 |---|---|---|
 | `hole` | `true` | Adds the keyring tab and punches the hole. With it off there is no tab at all. |
-| `hole_diameter` | `4` | Keyring hole diameter. |
+| `hole_diameter` | `4` | Keyring hole diameter in mm. |
 | `ring_wall` | `1.6` | Material left around the hole; the tab radius is `hole_diameter/2 + ring_wall`. |
 
 ### Colours
@@ -87,8 +87,15 @@ Renders `name="Reagan"` with the default parameters in `openscad/openscad:dev`
 and checks the result against the reference keychain that printed on
 2026-09-21 (95.7 × 34.6 × 6.8 mm): two non-empty materials besides `Default`,
 the bounding box within ±1.5 mm in X and Y and exactly 6.8 mm tall, the base
-0–4 mm and the letters 4–6.8 mm, and the letters one connected piece. Output
-lands in `.verify/`, including a preview PNG.
+0–4 mm and the letters 4–6.8 mm, and the letters one connected piece.
+
+It then renders five edge cases — a 20-character script name and 20 `W`s in
+DejaVu Sans Bold at the 40 mm maximum, a tiny name without a hole, the largest
+keyring tab with the thickest base, and an empty name — and checks each renders
+without OpenSCAD warnings, has two colour parts (one for the empty name) and
+nothing on `Default`, fits the 300 × 320 mm bed, sits on z = 0 and has its top
+at `base_thickness + letter_height`. Output lands in `.verify/`, including a
+preview PNG.
 
 The base image ships DejaVu only, so the script derives a throwaway image with
 the four font packages when `Lobster Two` is missing — without it OpenSCAD
