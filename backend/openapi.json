@@ -380,6 +380,17 @@
             ],
             "title": "Message"
           },
+          "plate_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plate Id"
+          },
           "printer_name": {
             "anyOf": [
               {

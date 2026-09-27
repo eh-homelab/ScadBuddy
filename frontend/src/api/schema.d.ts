@@ -1301,6 +1301,8 @@ export interface components {
             copy_index?: number | null;
             /** Message */
             message?: string | null;
+            /** Plate Id */
+            plate_id?: number | null;
             /** Printer Name */
             printer_name?: string | null;
             /** Queue Entry Id */
