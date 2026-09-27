@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router'
+import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
 import type { CustomizerSchema, Output } from '../api/types'
 import { ColorStrip } from '../components/ColorStrip'
@@ -203,7 +204,7 @@ function OutputRow({
           <Button size="sm" onClick={onSend}>
             Send again
           </Button>
-          <Button size="sm" variant="danger" onClick={onDelete} disabled={deleting}>
+          <Button size="sm" variant="danger" onClick={onDelete} disabled={deleting} {...USER_ONLY}>
             {deleting ? <Spinner /> : 'Delete'}
           </Button>
         </div>
