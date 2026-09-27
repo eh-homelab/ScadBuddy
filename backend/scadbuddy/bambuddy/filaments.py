@@ -382,6 +382,26 @@ def check(
     return warnings
 
 
+def across_plates(plates: list[FilamentOptions]) -> FilamentOptions:
+    """The first plate's options with each slot's grams summed over every plate (#198).
+
+    What an all-plates print needs from a spool is the total, not any one plate's
+    share: every plate can fit what is left and the run as a whole still not. A slot
+    only some plates use counts only on those, and a plate with no slice info adds
+    nothing, which is the same "unknown" a single plate's ``None`` is.
+    """
+    slots: dict[int, SlotNeed] = {}
+    for options in plates:
+        for slot in options.slots:
+            seen = slots.get(slot.slot_id)
+            if seen is None:
+                slots[slot.slot_id] = slot
+            elif slot.used_grams is not None:
+                total = (seen.used_grams or 0.0) + slot.used_grams
+                slots[slot.slot_id] = seen.model_copy(update={"used_grams": total})
+    return plates[0].model_copy(update={"slots": list(slots.values())})
+
+
 def _slot_warnings(
     options: FilamentOptions, slot: SlotNeed, option: SpoolOption, *, copies: int
 ) -> list[FilamentWarning]:

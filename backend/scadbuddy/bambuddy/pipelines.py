@@ -37,6 +37,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     FilamentWarning,
+    across_plates,
     check,
     gather_options,
     nozzle_warnings,
@@ -762,6 +763,7 @@ async def run_for_output(
     outcomes = []
     sent = []
     warnings = []
+    plate_options: list[FilamentOptions] = []
     # Each plate's slots are read on their own: a plate uses only some of the
     # project's filaments, and its requirements say which (#83). The one plan applies to
     # every plate because a slot is a project filament, not a plate position: extruders
@@ -803,7 +805,11 @@ async def run_for_output(
         )
         sent = _record_queued(store, meta, plate_id, outcome, project_id, sent)
         outcomes.append(outcome)
+        plate_options.append(options)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
+            # Checked once below, against what every plate needs together.
+            if warning.kind == "low-filament":
+                continue
             if warning.kind == "no-choice" and warning.slot_id is not None and len(plate_ids) > 1:
                 warning = warning.model_copy(
                     update={
@@ -816,6 +822,11 @@ async def run_for_output(
                 )
             if warning not in warnings:
                 warnings.append(warning)
+    warnings += [
+        warning
+        for warning in check(across_plates(plate_options), request.filament_plan, copies=copies)
+        if warning.kind == "low-filament"
+    ]
     return _queued(
         client,
         outcomes,

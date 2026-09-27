@@ -1,5 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
+import { MemoryRouter } from 'react-router'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Output, PrintRunResult } from '../api/types'
 import * as fixtures from '../mocks/fixtures'
@@ -1000,6 +1001,35 @@ describe('PrintPicker · Plate', () => {
     server.events.removeAllListeners()
 
     expect(runs[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  it("drops the previous output's plates while the next output's load", async () => {
+    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
+    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
+        if (params.id === second.id) await delay('infinite')
+        return HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ])
+      }),
+    )
+    const { rerender } = renderPage(
+      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await screen.findByTestId('plate-choice')
+    await screen.findByLabelText('Plate type')
+
+    // Inside the router `renderPage` wraps it in, or the picker would remount afresh.
+    rerender(
+      <MemoryRouter>
+        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+      </MemoryRouter>,
+    )
+    await screen.findByLabelText('Plate type')
+
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
   it('queues every plate as its own item when asked for all of them', async () => {

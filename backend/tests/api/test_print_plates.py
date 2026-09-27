@@ -365,8 +365,9 @@ def test_a_meta_json_without_plates_still_loads(
 # --- one filament plan across every plate -------------------------------------------
 
 
-def _plates_use(used: dict[int, set[int]]) -> None:
-    """Each plate's requirements: the recording's two slots, marked used per plate."""
+def _plates_use(used: dict[int, set[int]], grams: float = 0) -> None:
+    """Each plate's requirements: the recording's two slots, marked used per plate,
+    each needing ``grams`` (``0`` is Bambuddy's "unknown")."""
 
     def answer(request: httpx.Request) -> httpx.Response:
         body = recording("filament-requirements.json")
@@ -374,6 +375,7 @@ def _plates_use(used: dict[int, set[int]]) -> None:
         body["plate_id"] = plate
         for filament in body["filaments"]:
             filament["used_in_plate"] = filament["slot_id"] in used[plate]
+            filament["used_grams"] = grams
         return httpx.Response(200, json=body)
 
     # Registered after `inventory_routes`, so this one answers.
@@ -383,7 +385,11 @@ def _plates_use(used: dict[int, set[int]]) -> None:
 
 
 def _plan_run(
-    client: TestClient, model: str, paths: DataPaths, used: dict[int, set[int]]
+    client: TestClient,
+    model: str,
+    paths: DataPaths,
+    used: dict[int, set[int]],
+    grams: float = 0,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     configure(client)
     pipelines_route()
@@ -393,7 +399,7 @@ def _plan_run(
     add_plate(_output_3mf(paths, output_id), 2)
     upload_route()
     inventory_routes()
-    _plates_use(used)
+    _plates_use(used, grams)
     slice_routes()
     queue = filament_queue_route()
     body = client.post(
@@ -442,3 +448,25 @@ def test_a_slot_only_a_later_plate_uses_is_left_to_the_pipeline_and_said(
     assert warning["slot_id"] == 2
     assert "Plate 2" in warning["message"]
     assert "slot 2" in warning["message"]
+
+
+@respx.mock
+def test_the_filament_check_sums_what_every_plate_needs(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Spool 9 has 1000 g left: each plate's 600 g fits, the run's 1200 g does not (#198)."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=600)
+
+    assert len(queued) == 2
+    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "low-filament"]
+    assert warning["slot_id"] == 1
+    assert "needs 1200 g" in warning["message"]
+
+
+@respx.mock
+def test_plates_that_fit_the_spool_together_say_nothing_about_it(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    body, _ = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=400)
+
+    assert not any(warning["kind"] == "low-filament" for warning in body["warnings"])
