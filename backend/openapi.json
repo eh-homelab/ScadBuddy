@@ -153,7 +153,7 @@
                 "type": "null"
               }
             ],
-            "description": "The .scad source",
+            "description": "The .scad source, at most 1,000,000 characters",
             "title": "File"
           },
           "meta": {
@@ -215,7 +215,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional PNG, at most 2 MiB",
+            "description": "Optional PNG, at most 10 MiB",
             "title": "Thumbnail"
           }
         },
@@ -241,7 +241,7 @@
         "properties": {
           "file": {
             "contentMediaType": "application/octet-stream",
-            "description": "The thumbnail, a PNG of at most 2 MiB",
+            "description": "The thumbnail, a PNG of at most 10 MiB",
             "title": "File",
             "type": "string"
           }

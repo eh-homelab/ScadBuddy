@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import scadbuddy.api.models as models_api
+from scadbuddy.api import limits
 from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES, _mib
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
@@ -257,7 +258,7 @@ def test_a_thumbnail_one_byte_over_the_cap_is_refused_and_nothing_is_committed(
     assert response.headers["content-type"] == "application/problem+json"
     assert response.json()["detail"] == (
         f"the thumbnail is too large: {MAX_THUMBNAIL_BYTES + 1} bytes, "
-        f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes (2 MiB)"
+        f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes (10 MiB)"
     )
     assert not (paths.model_dir(SLUG) / "thumbnail.png").exists()
     assert client.get(f"/api/v1/models/{SLUG}/versions").json() == history
@@ -275,6 +276,72 @@ def test_a_thumbnail_one_byte_over_the_cap_is_refused_on_create(client: TestClie
     assert response.status_code == 422
     assert str(MAX_THUMBNAIL_BYTES) in response.json()["detail"]
     assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_one_create_at_every_part_cap_fits_the_multipart_limit(client: TestClient) -> None:
+    """A thumbnail at 10 MiB beside a source and a README each at MAX_SOURCE_CHARS in
+    four-byte characters, and a model.json at its cap, is under BodySizeGate's
+    multipart ceiling: no part's own cap is shadowed by the body's."""
+    widest = "\U0001f600"  # four bytes in UTF-8, one character to the caps
+    source = "// " + widest * (MAX_SOURCE_CHARS - 4) + "\n"
+    readme = widest * MAX_SOURCE_CHARS
+    meta = json.dumps({"name": "Widget"}).encode()
+    meta += b" " * (models_api.MAX_META_BYTES - len(meta))
+    parts = {
+        "file": (f"{SLUG}.scad", source.encode(), "application/octet-stream"),
+        "thumbnail": ("t.png", _png_of(MAX_THUMBNAIL_BYTES), "image/png"),
+        "readme": ("README.md", readme.encode(), "text/markdown"),
+        "meta": ("model.json", meta, "application/json"),
+    }
+    assert sum(len(part[1]) for part in parts.values()) < limits.MAX_MULTIPART_BODY_BYTES
+
+    created = client.post("/api/v1/models?force=true", files=parts)
+
+    assert created.status_code == 201, created.text
+    assert created.json()["has_thumbnail"] is True
+
+
+def _upload_source(client: TestClient, source: str) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models",
+        files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+    )
+    return response
+
+
+def test_an_uploaded_source_one_character_over_the_cap_is_a_422_and_never_checked(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The multipart `.scad` is held to MAX_SOURCE_CHARS, as a paste is -- before the
+    parse check spends an openscad run and a check permit on it."""
+    checked: list[str] = []
+
+    async def spy(source: str, **_: Any) -> None:
+        checked.append(source)
+
+    monkeypatch.setattr(models_api, "inspect_source", spy)
+    source = "x" * (MAX_SOURCE_CHARS + 1)
+
+    response = _upload_source(client, source)
+
+    assert _refused_without_a_model(response, client)["detail"] == (
+        f"the source is too large: {MAX_SOURCE_CHARS + 1} characters, "
+        f"and this route reads at most {MAX_SOURCE_CHARS}"
+    )
+    assert checked == []
+
+
+def test_an_uploaded_source_at_the_cap_is_accepted(client: TestClient) -> None:
+    # Characters, not bytes: four-byte ones are still one each against the cap.
+    source = "// " + "\U0001f600" * (MAX_SOURCE_CHARS - 4) + "\n"
+    assert len(source) == MAX_SOURCE_CHARS
+
+    created = client.post(
+        "/api/v1/models?force=true",
+        files={"file": (f"{SLUG}.scad", source.encode(), "application/octet-stream")},
+    )
+
+    assert created.status_code == 201, created.text
 
 
 def test_a_thumbnail_at_the_cap_is_accepted(client: TestClient) -> None:
