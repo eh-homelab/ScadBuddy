@@ -123,6 +123,25 @@ describe('PrintProgressPanel', () => {
     expect(screen.getByTestId('print-progress')).not.toHaveTextContent('plates queued')
   })
 
+  it('counts the plates that have reached the queue while the rest still slice', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies: 3,
+          copies_detail: [
+            { plate_id: 1, queue_entry_id: 4470, stage: 'queued' },
+            { plate_id: 2, queue_entry_id: null, stage: 'running' },
+            { plate_id: 3, queue_entry_id: null, stage: 'running' },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress')).toHaveTextContent('1 of 3 plates queued')
+  })
+
   it('spins only while the caller is still polling', () => {
     const { container, rerender } = render(
       <PrintProgressPanel progress={fixtures.pipelineProgress} polling />,

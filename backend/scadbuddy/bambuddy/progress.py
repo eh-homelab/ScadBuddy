@@ -36,7 +36,7 @@ QUEUE_PATH = "/queue"
 #: Normalised across both routes. ``unknown`` is a real state: Bambuddy's status
 #: vocabularies differ per object and a new value must render as "still going" rather
 #: than silently as "done", which would stop the polling on a print that is still live.
-Stage = Literal["pending", "running", "queued", "done", "failed", "cancelled", "unknown"]
+Stage = Literal["running", "queued", "done", "failed", "cancelled", "unknown"]
 
 #: Bambuddy's own words for a finished state, per object. Anything outside these is
 #: treated as still in flight.

@@ -416,7 +416,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
@@ -3888,7 +3887,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
