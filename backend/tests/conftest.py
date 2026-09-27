@@ -1,17 +1,22 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import struct
 import subprocess
+import uuid
 import zipfile
 import zlib
+from collections.abc import Iterator
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import psycopg
 import pytest
+from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core.config import load_config
 from scadbuddy.library import url_import
@@ -91,6 +96,41 @@ def _skip_without_openscad(request: pytest.FixtureRequest) -> None:
 def _skip_without_openscad_lsp(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_openscad_lsp") and openscad_lsp_binary() is None:
         pytest.skip("openscad-lsp is not on PATH")
+
+
+#: A Postgres the tests may create and drop schemas in. Unset, `requires_postgres`
+#: tests skip; CI sets it to a service container.
+TEST_DATABASE_URL_ENV = "SCADBUDDY_TEST_DATABASE_URL"
+
+
+# Read once, at import: the API tests scrub every SCADBUDDY_* variable from the
+# environment so none leaks into their Settings.
+_POSTGRES_URL = os.environ.get(TEST_DATABASE_URL_ENV) or None
+
+
+def postgres_url() -> str | None:
+    return _POSTGRES_URL
+
+
+@pytest.fixture(autouse=True)
+def _skip_without_postgres(request: pytest.FixtureRequest) -> None:
+    if request.node.get_closest_marker("requires_postgres") and postgres_url() is None:
+        pytest.skip(f"{TEST_DATABASE_URL_ENV} is not set")
+
+
+@pytest.fixture
+def pg_conninfo() -> Iterator[str]:
+    """A throwaway schema on the test Postgres, dropped afterwards."""
+    url = postgres_url()
+    assert url is not None
+    schema = f"test_{uuid.uuid4().hex[:12]}"
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(f'CREATE SCHEMA "{schema}"'.encode())
+    try:
+        yield make_conninfo(url, options=f"-c search_path={schema}")
+    finally:
+        with psycopg.connect(url, autocommit=True) as conn:
+            conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
 
 
 @pytest.fixture(autouse=True)

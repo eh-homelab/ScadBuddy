@@ -19,6 +19,7 @@ from scadbuddy.render.schema import (
     Parameter,
     ParamValue,
     build_schema,
+    is_bare_filename,
     load_cached_schema,
     source_sha256,
     store_cached_schema,
@@ -27,10 +28,6 @@ from scadbuddy.render.schema import (
 LOG_TAIL_LINES = 50
 
 _ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
-
-#: What a `file` parameter may hand OpenSCAD: a bare name in the model's directory,
-#: never a path. The render stages uploads under names that match (#204).
-_BARE_FILENAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}")
 
 #: OpenSCAD reports a file it could not read and carries on: `import()` logs an
 #: ERROR, `surface()` a WARNING, and the run still exits 0 whenever anything else
@@ -90,14 +87,14 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
         return "true" if value else "false"
     if parameter.type == "file":
-        # The model's own default is its business; anything else must be a bare
-        # name, so no value -- whatever the route checked -- reaches import() as a path.
+        # The model's own default is its business; anything else (a staged upload, a
+        # sample the template ships) must be a bare name, so no value -- whatever
+        # the route checked -- reaches import() as a path.
         if not isinstance(value, str) or (
-            value not in ("", parameter.initial)
-            and (not _BARE_FILENAME.fullmatch(value) or ".." in value)
+            value not in ("", parameter.initial) and not is_bare_filename(value)
         ):
             raise ValueError(
-                f"parameter {parameter.name!r} expects an uploaded file, got {value!r}"
+                f"parameter {parameter.name!r} expects an uploaded or sample file, got {value!r}"
             )
         return quote_string(value)
     if parameter.type in ("string", "color", "font"):

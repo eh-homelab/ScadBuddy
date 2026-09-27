@@ -103,6 +103,88 @@ describe('PrintProgressPanel', () => {
     expect(screen.getByTestId('print-progress')).toHaveTextContent('Slicing…')
   })
 
+  it('says an all-plates print is slicing before any plate reaches the queue', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          queue_item_id: null,
+          copies: 2,
+          copies_detail: [
+            { plate_id: 1, queue_entry_id: null, stage: 'running' },
+            { plate_id: 2, queue_entry_id: null, stage: 'running' },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress')).toHaveTextContent('Slicing…')
+    expect(screen.getByTestId('print-progress')).not.toHaveTextContent('plates queued')
+  })
+
+  it('counts the plates that have reached the queue while the rest still slice', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          copies: 3,
+          copies_detail: [
+            { plate_id: 1, queue_entry_id: 4470, stage: 'queued' },
+            { plate_id: 2, queue_entry_id: null, stage: 'running' },
+            { plate_id: 3, queue_entry_id: null, stage: 'running' },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    expect(screen.getByTestId('print-progress')).toHaveTextContent('1 of 3 plates queued')
+  })
+
+  it('says an all-plates print failed when a plate fails before it is queued', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          queue_item_id: null,
+          stage: 'failed',
+          settled: false,
+          copies: 2,
+          copies_detail: [
+            { plate_id: 1, queue_entry_id: null, stage: 'failed' },
+            { plate_id: 2, queue_entry_id: 4471, stage: 'running' },
+          ],
+        }}
+        polling
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('2 plates — failed')
+    expect(panel).not.toHaveTextContent('Slicing…')
+    expect(panel).not.toHaveTextContent('plates queued')
+  })
+
+  it('says a single-plate slice failed rather than that it is still slicing', () => {
+    render(
+      <PrintProgressPanel
+        progress={{
+          ...fixtures.queuedSliceProgress,
+          queue_item_id: null,
+          stage: 'failed',
+          settled: true,
+          copies_detail: [],
+        }}
+        polling={false}
+      />,
+    )
+
+    const panel = screen.getByTestId('print-progress')
+    expect(panel).toHaveTextContent('Slice — failed')
+    expect(panel).not.toHaveTextContent('Slicing…')
+  })
+
   it('spins only while the caller is still polling', () => {
     const { container, rerender } = render(
       <PrintProgressPanel progress={fixtures.pipelineProgress} polling />,

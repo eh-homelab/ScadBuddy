@@ -11,6 +11,9 @@ dependencies = [
     "networkx>=3.4",
     "numpy>=2.1",
     "pillow>=11",
+    "prometheus-client>=0.21",
+    "psycopg-pool>=3.2",
+    "psycopg>=3.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "python-multipart>=0.0.20",
@@ -27,6 +30,11 @@ packages = ["scadbuddy"]
 
 [dependency-groups]
 dev = [
+    # The wheel with its own libpq, for developing and testing without one on the
+    # system. Production uses plain `psycopg` against the image's apt-managed
+    # libpq5 (Dockerfile), so libpq/OpenSSL security fixes arrive with the OS
+    # packages rather than with a Python wheel release.
+    "psycopg[binary]>=3.2",
     "mypy>=1.13",
     "pytest>=8.3",
     "pytest-asyncio>=0.24",
@@ -55,4 +63,5 @@ markers = [
     "requires_openscad: needs a real openscad binary on PATH",
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
+    "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
 ]
