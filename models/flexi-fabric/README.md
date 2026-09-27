@@ -133,7 +133,7 @@ for hexagons.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `overlay_file` | *(empty)* | A file in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = no overlay. |
+| `overlay_file` | *(empty)* | A bare file name in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = no overlay. A path (`/`, `\`) or a leading dot is refused and turns the overlay off, so the parameter cannot read files outside the model. |
 | `overlay_type` | `svg` | `svg` imports the outline; `image_threshold` reads a PNG through `surface()` and keeps the pixels darker than `image_threshold`. |
 | `overlay_detail` | `links` | `links`: every link whose centre falls inside the picture takes `overlay_color` whole, so the picture appears in link-sized pixels. `inlay`: the exact outline, cut into the top `top_layers` of the links it covers. |
 | `overlay_color` | `#212121` | Overlay colour. |

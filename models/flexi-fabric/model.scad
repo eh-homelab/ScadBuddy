@@ -430,7 +430,17 @@ CELLS = [for (k = [0 : len(CELLS0) - 1])
 // Overlay mask
 // ===========================================================================
 
-OVERLAY_ON = overlay_file != "";
+// overlay_file reaches import() and surface() verbatim, and OpenSCAD reads any
+// path it is given: only a bare file name in the model's own directory is
+// accepted. A path, a leading dot or a backslash turns the overlay off.
+function safe_file(f) =
+    f != "" && len(search("/", f)) == 0 && len(search("\\", f)) == 0 && f[0] != ".";
+
+OVERLAY_REFUSED = overlay_file != "" && !safe_file(overlay_file);
+if (OVERLAY_REFUSED)
+    echo(str("NOTE: overlay_file \"", overlay_file,
+             "\" is not a bare file name in the model directory; overlay off"));
+OVERLAY_ON = safe_file(overlay_file);
 PIXEL = OVERLAY_ON && overlay_detail == "links";
 FINE = OVERLAY_ON && overlay_detail == "inlay";
 

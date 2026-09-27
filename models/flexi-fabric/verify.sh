@@ -60,6 +60,9 @@ CASES+=(
     "overlay-hex|pattern=\"hex_scales\";colour_mode=\"rows\";overlay_file=\"sample-overlay.svg\""
     "overlay-triflex-inlay|pattern=\"triflex_triangles\";overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";overlay_detail=\"inlay\""
     "overlay-missing|overlay_file=\"no-such-file.svg\""
+    "overlay-refused-parent|overlay_file=\"../flexi-fabric/sample-overlay.svg\""
+    "overlay-refused-absolute|overlay_file=\"/etc/hostname\""
+    "overlay-refused-subdir|overlay_file=\"sub/sample-overlay.svg\""
     "shape-heart|shape=\"heart\";pattern=\"chainmail_rings\";colour_mode=\"gradient_bands\""
     "shape-star|shape=\"star\";width=150;height=150;colour_mode=\"random_seeded\""
     "shape-star-triflex|shape=\"star\";pattern=\"triflex_triangles\";colour_mode=\"rainbow\""
@@ -336,7 +339,9 @@ for line in open(os.path.join(OUT, "cases.txt")):
     mode = p["colour_mode"]
     classes = {"hex_scales": 3}.get(pat, 2)
     expect_pal = {"single": 1, "overlay_only": 1, "checker": classes}.get(mode)
-    overlay = p["overlay_file"] != "" and os.path.exists(p["overlay_file"])
+    f = p["overlay_file"]
+    safe = f != "" and "/" not in f and "\\" not in f and not f.startswith(".")
+    overlay = safe and os.path.exists(f)
     extra = (1 if p["two_tone"] else 0) + (1 if overlay else 0)
 
     check(name, counts.get(0, 0) == 0, "Default material carries no geometry (%d triangles)" % counts.get(0, 0))
@@ -349,7 +354,12 @@ for line in open(os.path.join(OUT, "cases.txt")):
     if overlay:
         oc = p["overlay_color"].upper()
         check(name, any(mats[i][1] == oc for i in named), "overlay colour %s is present" % oc)
-    if p["overlay_file"] and not overlay:
+    if f and not safe:
+        check(name, "overlay off" in log and "Can't open" not in log,
+              "unsafe overlay_file %r is refused before any import()/surface() call" % f)
+        check(name, not any(mats[i][1] == p["overlay_color"].upper() for i in named),
+              "refused overlay file adds no overlay part")
+    elif f and not overlay:
         check(name, "no-such-file" in log, "missing overlay file is reported in the log and the render still completes")
         check(name, not any(mats[i][1] == p["overlay_color"].upper() for i in named),
               "missing overlay file adds no overlay part")
