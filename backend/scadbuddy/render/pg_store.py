@@ -123,6 +123,8 @@ def migrate(conn: Connection[Any]) -> list[int]:
 
 
 class PostgresJobStore:
+    backend = "postgres"
+
     def __init__(
         self,
         conninfo: str,

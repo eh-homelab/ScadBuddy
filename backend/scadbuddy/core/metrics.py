@@ -62,6 +62,13 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
+        self.store_info = Gauge(
+            "scadbuddy_render_store_info",
+            'Which job store holds the render queue: backend="postgres" when '
+            'SCADBUDDY_DATABASE_URL is set, "files" otherwise; always 1.',
+            ["backend"],
+            registry=r,
+        )
         self.store_up = Gauge(
             "scadbuddy_render_store_up",
             "1 when the last per-scrape read of the queue from its job store worked, 0 "

@@ -94,6 +94,9 @@ class Reaped:
 
 
 class JobBackend(Protocol):
+    #: What `scadbuddy_render_store_info` reports this store as.
+    backend: str
+
     def open(self) -> None:
         """Connect, and bring the schema up to date where there is one."""
 
@@ -170,6 +173,8 @@ class _Waiting:
 
 class JobStore:
     """Jobs as JSON files on the PVC, with the wait list in this process."""
+
+    backend = "files"
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths

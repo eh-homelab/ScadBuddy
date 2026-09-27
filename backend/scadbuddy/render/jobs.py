@@ -483,6 +483,9 @@ class RenderQueue:
         self.store: JobBackend = store if store is not None else JobStore(paths)
         self.metrics = metrics if metrics is not None else Metrics()
         self.metrics.workers.set(config.render_concurrency)
+        # So a deployment can tell the queue is where it was configured to be: an
+        # image that predates the Postgres store, or a missing URL, reads "files".
+        self.metrics.store_info.labels(self.store.backend).set(1)
         self.metrics.queue_depth_slo.set(config.render_queue_depth_slo)
         self.metrics.queue_max.set(config.render_queue_max)
         self.metrics.latency_slo.set(config.render_latency_slo)

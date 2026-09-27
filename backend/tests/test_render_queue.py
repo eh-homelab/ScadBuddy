@@ -381,6 +381,12 @@ async def test_a_job_past_its_queue_deadline_is_failed_unrendered(
     assert _sample(queue.metrics, "scadbuddy_render_jobs_finished_total", outcome="expired") == 1
 
 
+async def test_the_queue_says_which_store_holds_it(make_queue: QueueFactory) -> None:
+    queue = await make_queue(Gate())
+    assert _sample(queue.metrics, "scadbuddy_render_store_info", backend=queue.store.backend) == 1
+    assert queue.store.backend in ("files", "postgres")
+
+
 async def test_the_queue_reports_its_latency(make_queue: QueueFactory) -> None:
     gate = Gate()
     gate.release.set()
