@@ -333,7 +333,7 @@ def test_a_clone_over_the_size_cap_is_a_422(libraries_app: FastAPI, lib_client: 
     response = lib_client.post("/api/v1/libraries", json={"name": "BOSL2"})
 
     assert response.status_code == 422
-    assert "MB" in response.json()["detail"]
+    assert "over the 1 bytes" in response.json()["detail"]
 
 
 def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(

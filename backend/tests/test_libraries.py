@@ -687,7 +687,7 @@ def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
 ) -> None:
     store.max_bytes = 1
 
-    with pytest.raises(LibraryTooLargeError, match="over the"):
+    with pytest.raises(LibraryTooLargeError, match="over the 1 bytes"):
         store.install("BOSL2")
 
     assert not (paths.models / LOCKFILE_NAME).exists()

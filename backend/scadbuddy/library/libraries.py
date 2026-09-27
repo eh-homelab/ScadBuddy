@@ -371,6 +371,10 @@ def _tree_size(root: Path) -> int:
     )
 
 
+def _size(n: int) -> str:
+    return f"{n / 1e6:.0f} MB" if n >= 1_000_000 else f"{n} bytes"
+
+
 def _same_repository(first: str, second: str) -> bool:
     """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository,
     whatever the case of the scheme and host (the path's case is significant)."""
@@ -616,8 +620,8 @@ class LibraryStore:
             size = _tree_size(staging)
             if size > self.max_bytes:
                 raise LibraryTooLargeError(
-                    f"{url} at {ref!r} is {size / 1e6:.0f} MB, over the "
-                    f"{self.max_bytes / 1e6:.0f} MB a library may take"
+                    f"{url} at {ref!r} is {_size(size)}, over the "
+                    f"{_size(self.max_bytes)} a library may take"
                 )
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
             destination = self.paths.libraries / name / commit
