@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BROKEN_SOURCE, BUILTIN_SLUG, keychainSource } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { EditSourcePage } from './EditSourcePage'
 
 vi.mock('../components/SourceEditor', () => ({
@@ -29,10 +30,10 @@ vi.mock('../components/SourceEditor', () => ({
   ),
 }))
 
-function renderEdit(slug = 'name-keychain') {
+function renderEdit(slug = 'name-keychain', query = '') {
   const user = userEvent.setup()
   const view = render(
-    <MemoryRouter initialEntries={[`/m/${slug}/source`]}>
+    <MemoryRouter initialEntries={[`/m/${slug}/source${query}`]}>
       <Routes>
         <Route path="/m/:slug/source" element={<EditSourcePage />} />
         <Route path="/m/:slug" element={<h1>Customizer</h1>} />
@@ -180,5 +181,61 @@ describe('EditSourcePage', () => {
     renderEdit()
     await screen.findByRole('button', { name: 'Save source' })
     expect(screen.queryByRole('button', { name: 'Duplicate to edit' })).not.toBeInTheDocument()
+  })
+
+  it('opens a conflicted upstream merge marked up, and saves its resolution (#160)', async () => {
+    await duplicateWithUpdate({ conflict: true })
+    const resolve = vi.spyOn(api, 'resolveUpstreamMerge')
+    const { user } = renderEdit(COPY, '?merge')
+
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    expect((editor as HTMLTextAreaElement).value).toContain('<<<<<<< ')
+    expect(screen.getByRole('heading', { name: 'Resolve update' })).toBeInTheDocument()
+    const banner = screen.getByTestId('merge-banner')
+    expect(banner).toHaveTextContent(`Resolving the update from ${UPSTREAM}`)
+    expect(banner).toHaveTextContent('1 conflict left.')
+
+    // The markers still in it are refused, whatever the parse check says.
+    // Once the parse check on open has settled, so the click is not lost to it.
+    await screen.findByText(/Parses cleanly/)
+    const save = screen.getByRole('button', { name: 'Save resolution' })
+    await user.click(save)
+    expect(await screen.findByText(/still has conflict markers/)).toBeInTheDocument()
+
+    await user.clear(editor)
+    await user.click(editor)
+    await user.paste('text_size = 15;\ncube(text_size);\n')
+    expect(banner).toHaveTextContent('No conflicts left.')
+    await screen.findByText(/Parses cleanly/)
+    await user.click(save)
+
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    const revision = (await api.listVersions(UPSTREAM))[0]?.commit
+    expect(resolve).toHaveBeenLastCalledWith(
+      COPY,
+      'text_size = 15;\ncube(text_size);\n',
+      revision,
+      false,
+    )
+    const resolved = await api.getModel(COPY)
+    expect(resolved.upstream_state).toBe('current')
+    expect(resolved.upstream?.base).toBe(revision)
+    expect((await api.listVersions(COPY))[0]?.message).toBe(`Merge ${UPSTREAM} into ${COPY}`)
+    resolve.mockRestore()
+  })
+
+  it('opens the source as it is when there is no update left to resolve (#160)', async () => {
+    const replace = vi.spyOn(api, 'replaceSource')
+    await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
+    const { user } = renderEdit(COPY, '?merge')
+
+    expect(await screen.findByLabelText('OpenSCAD source')).toHaveValue(keychainSource)
+    expect(screen.getByTestId('merge-banner')).toHaveTextContent('no update to resolve')
+    expect(screen.getByRole('heading', { name: 'Edit source' })).toBeInTheDocument()
+    await screen.findByText(/Parses cleanly/)
+    await user.click(screen.getByRole('button', { name: 'Save source' }))
+    expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+    expect(replace).toHaveBeenCalledWith(COPY, keychainSource, false)
+    replace.mockRestore()
   })
 })
