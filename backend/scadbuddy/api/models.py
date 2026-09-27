@@ -39,6 +39,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
 from scadbuddy.core.problems import ApiError, problem_response
+from scadbuddy.library.assets import with_samples
 from scadbuddy.library.catalogue import (
     Catalogue,
     InvalidModelMetaError,
@@ -961,7 +962,7 @@ async def get_schema(
     require_model_exists(catalogue, slug)
     source = await resolve_source(slug, None, paths=paths, history=history)
     try:
-        return await cached_schema(
+        schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
         )
     except FileNotFoundError:
@@ -978,6 +979,9 @@ async def get_schema(
             log_tail=error.log_tail,
             diagnostics=[d.model_dump() for d in parse_diagnostics(error.log_tail)],
         ) from None
+    # Listed on every read, not cached with the schema: a sample file can come and
+    # go without the source changing (#204).
+    return await asyncio.to_thread(with_samples, schema, source.scad.parent)
 
 
 #: How a model thumbnail may be cached: kept, but revalidated on every use.

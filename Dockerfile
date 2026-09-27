@@ -68,6 +68,13 @@ FROM openscad/openscad:dev AS base
 # (fonts-dejavu 2.37-8, fonts-noto-core 20201225-2, fonts-lobster 2.0-2.1,
 # fonts-lobstertwo 2.0-2.1).
 #
+# `libpq5` is the Postgres client library the render queue's store talks through
+# (backend/scadbuddy/render/pg_store.py, SCADBUDDY_DATABASE_URL). The runtime
+# installs plain `psycopg`, which loads it from here, rather than psycopg's
+# binary wheel with its own bundled libpq and OpenSSL, so their security fixes
+# come with this layer's apt packages. It is loaded at import, so it is needed
+# even when no database is configured.
+#
 # `git` is a runtime dependency too, not tooling: the models directory on the data
 # volume IS a git repository (backend/scadbuddy/library/history.py), and every
 # upload, edit, restore and delete is a commit in it. Without the binary the app
@@ -93,6 +100,7 @@ RUN apt-get update \
         fonts-lobstertwo \
         fonts-noto-core \
         git \
+        libpq5 \
         python3 \
         python3-venv \
         tini \

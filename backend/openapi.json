@@ -519,7 +519,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
@@ -2279,6 +2278,22 @@
         "title": "ParamPresetCreate",
         "type": "object"
       },
+      "ParamPresetDuplicate": {
+        "description": "The copy's name; its values are the original's.",
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ParamPresetDuplicate",
+        "type": "object"
+      },
       "ParamPresetUpdate": {
         "description": "A rename, a new set of values, or both. ``params`` replaces the old ones whole.",
         "properties": {
@@ -2413,6 +2428,13 @@
               "$ref": "#/components/schemas/Option"
             },
             "title": "Options",
+            "type": "array"
+          },
+          "samples": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Samples",
             "type": "array"
           },
           "step": {
@@ -4053,7 +4075,6 @@
           "stage": {
             "default": "unknown",
             "enum": [
-              "pending",
               "running",
               "queued",
               "done",
@@ -4638,6 +4659,18 @@
             },
             "title": "Params",
             "type": "object"
+          },
+          "supersedes": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supersedes"
           },
           "version": {
             "anyOf": [
@@ -6825,6 +6858,71 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+      "post": {
+        "description": "Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).",
+        "operationId": "duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preset_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9-]{1,64}$",
+              "title": "Preset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParamPresetDuplicate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParamPreset"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Duplicate a preset",
+        "tags": [
+          "presets"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/readme": {
       "delete": {
         "description": "Removes the README, as one revision in the model's history.",
@@ -7011,11 +7109,83 @@
               }
             },
             "description": "Validation Error"
+          },
+          "503": {
+            "description": "SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds"
           }
         },
         "summary": "Queue a render",
         "tags": [
           "jobs"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/samples/{name}": {
+      "get": {
+        "description": "Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.",
+        "operationId": "get_sample_content_api_v1_models__slug__samples__name__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$",
+              "title": "Name",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "version",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {},
+              "image/svg+xml": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A sample file the template ships",
+        "tags": [
+          "assets"
         ]
       }
     },

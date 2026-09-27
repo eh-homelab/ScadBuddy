@@ -10,6 +10,8 @@ interface Props {
   schema: CustomizerSchema
   /** The model being customized; `file` parameters upload against it (#204). */
   slug: string
+  /** The revision being customized, if not the current one (#90). */
+  version?: string
   values: ParamValues
   fonts: FontFamily[]
   onChange: (name: string, value: ParamValue) => void
@@ -21,6 +23,7 @@ interface Props {
 export function ParameterPanel({
   schema,
   slug,
+  version,
   values,
   fonts,
   onChange,
@@ -88,6 +91,7 @@ export function ParameterPanel({
                     param={param}
                     value={values[param.name] ?? (param.initial as ParamValue)}
                     slug={slug}
+                    version={version}
                     fonts={fonts}
                     sampleText={sampleText}
                     extruder={extruderOf(param.name)}
@@ -107,6 +111,7 @@ export function ParameterPanel({
                   param={param}
                   value={values[param.name] ?? (param.initial as ParamValue)}
                   slug={slug}
+                  version={version}
                   fonts={fonts}
                   sampleText={sampleText}
                   extruder={extruderOf(param.name)}

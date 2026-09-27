@@ -27,6 +27,7 @@ from scadbuddy.library.presets import (
     InvalidPresetsFileError,
     ParamPreset,
     ParamPresetCreate,
+    ParamPresetDuplicate,
     ParamPresetUpdate,
     PresetExistsError,
     PresetNotFoundError,
@@ -82,7 +83,7 @@ def _require_saved(slug: str, preset_id: str) -> None:
     if preset_id.startswith(TEMPLATE_ID_PREFIX):
         raise ApiError(
             status.HTTP_403_FORBIDDEN,
-            f"{preset_id!r} ships with {slug!r} and is read-only; save a copy under a new name",
+            f"{preset_id!r} ships with {slug!r} and is read-only; duplicate it to change it",
         )
 
 
@@ -130,6 +131,48 @@ async def create_preset(
     await _require_valid(slug, body.params, paths=paths, history=history, config=config)
     try:
         return await asyncio.to_thread(presets.create, slug, body)
+    except PresetExistsError:
+        raise _taken(slug, body.name) from None
+    except TooManyPresetsError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+    except InvalidPresetsFileError as error:
+        raise _unreadable(error) from None
+
+
+@router.post(
+    "/models/{slug}/presets/{preset_id}/duplicate",
+    response_model=ParamPreset,
+    status_code=status.HTTP_201_CREATED,
+    summary="Duplicate a preset",
+    description=(
+        "Copies any preset of the template, shipped or saved, to a new saved preset "
+        "under `name`, with the original's values: the way to change a shipped preset, "
+        "which is read-only. The values are checked as a save checks them (422), so a "
+        "shipped preset naming a parameter the template has since dropped cannot be "
+        "copied as it is. Names are unique per template, ignoring case (409)."
+    ),
+)
+async def duplicate_preset(
+    slug: SlugPath,
+    preset_id: PresetIdPath,
+    body: ParamPresetDuplicate,
+    catalogue: CatalogueDep,
+    presets: PresetsDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+) -> ParamPreset:
+    require_model_exists(catalogue, slug)
+    try:
+        source = await asyncio.to_thread(presets.find, slug, preset_id)
+    except PresetNotFoundError:
+        raise _missing(slug, preset_id) from None
+    except InvalidPresetsFileError as error:
+        raise _unreadable(error) from None
+    await _require_valid(slug, source.params, paths=paths, history=history, config=config)
+    copy = ParamPresetCreate(name=body.name, params=source.params)
+    try:
+        return await asyncio.to_thread(presets.create, slug, copy)
     except PresetExistsError:
         raise _taken(slug, body.name) from None
     except TooManyPresetsError as error:

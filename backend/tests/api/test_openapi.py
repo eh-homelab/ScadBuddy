@@ -22,6 +22,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/readme",
     "/api/v1/models/{slug}/presets",
     "/api/v1/models/{slug}/presets/{preset_id}",
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate",
     "/api/v1/models/{slug}/render",
     "/api/v1/models/{slug}/versions",
     "/api/v1/models/{slug}/versions/{commit}/source",
@@ -65,6 +66,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/assets",
     "/api/v1/models/{slug}/assets/{asset_id}",
     "/api/v1/models/{slug}/assets/{asset_id}/content",
+    "/api/v1/models/{slug}/samples/{name}",
     "/api/v1/models/{slug}/libraries/{name}",
 }
 

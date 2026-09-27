@@ -19,7 +19,8 @@ consumer that sees ``dropped`` grow resyncs by re-reading, which is what #266's
 
 The Postgres seam (#241)
 ------------------------
-Once #241's database lands, a ``PgNotifyEventBus`` implements the same
+#241 gave the render queue a Postgres store (``SCADBUDDY_DATABASE_URL``). A
+``PgNotifyEventBus`` on that database, not built yet, implements the same
 :class:`EventBus` protocol:
 
 - ``publish`` sends ``pg_notify(PG_CHANNEL, encode_event(event))`` and does **not**
@@ -74,11 +75,17 @@ class BaseEvent(BaseModel):
     at: datetime = Field(default_factory=_now, description="When it was published")
 
 
-JobKind = Literal["job.pending", "job.running", "job.done", "job.failed"]
+JobKind = Literal["job.pending", "job.running", "job.done", "job.failed", "job.superseded"]
 
 
 class JobEvent(BaseEvent):
-    """A render job changed state; the kind is ``job.<its new state>``."""
+    """A render job changed state; the kind is ``job.<its new state>``.
+
+    ``job.pending`` is published for a new job and again for one requeued after its
+    worker was lost; a submit coalesced onto a waiting job publishes nothing, as that
+    job did not change. ``job.superseded`` ends a job a newer render replaced before
+    it started (its stored state is ``failed``), so nobody following it waits on.
+    Expired jobs are ``job.failed``."""
 
     kind: JobKind
     job_id: str

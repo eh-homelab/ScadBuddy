@@ -190,3 +190,118 @@ def test_a_built_in_template_takes_an_upload_and_renders_with_it(
     )
     assert accepted.status_code == 202, accepted.text
     assert wait_for_job(builtin_client, accepted.json()["job_id"])["status"] == "done"
+
+
+# ── samples: files the template ships beside its source ───────────────────────
+
+TINY_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00"
+    b"\x1f\x15\xc4\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18\xd8N\x00"
+    b"\x00\x00\x00IEND\xaeB`\x82"
+)
+
+
+@pytest.fixture
+def samples(paths: DataPaths, file_model: str) -> Path:
+    directory = paths.model_dir(file_model)
+    (directory / "sample-cat.svg").write_bytes(HEART_SVG)
+    (directory / "sample-leaf.png").write_bytes(TINY_PNG)
+    (directory / "thumbnail.png").write_bytes(TINY_PNG)
+    (directory / ".secret.svg").write_bytes(HEART_SVG)
+    (directory / "notes.txt").write_text("not a picture")
+    return directory
+
+
+def test_the_schema_lists_a_file_parameters_samples(client: TestClient, samples: Path) -> None:
+    schema = client.get(f"/api/v1/models/{MODEL_SLUG}/schema").json()
+    label = next(p for p in schema["parameters"] if p["name"] == "label")
+    assert label["samples"] == ["sample-cat.svg", "sample-leaf.png"]
+    width = next(p for p in schema["parameters"] if p["name"] == "width")
+    assert width["samples"] == []
+
+
+def test_a_sample_added_later_is_listed_without_a_source_change(
+    client: TestClient, samples: Path
+) -> None:
+    client.get(f"/api/v1/models/{MODEL_SLUG}/schema")  # warms the schema cache
+    (samples / "sample-rings.svg").write_bytes(HEART_SVG)
+    schema = client.get(f"/api/v1/models/{MODEL_SLUG}/schema").json()
+    label = next(p for p in schema["parameters"] if p["name"] == "label")
+    assert "sample-rings.svg" in label["samples"]
+
+
+def test_a_sample_is_served_as_an_inert_image(client: TestClient, samples: Path) -> None:
+    svg = client.get(f"/api/v1/models/{MODEL_SLUG}/samples/sample-cat.svg")
+    assert svg.status_code == 200
+    assert svg.headers["content-type"] == "image/svg+xml"
+    assert "sandbox" in svg.headers["content-security-policy"]
+    assert svg.headers["x-content-type-options"] == "nosniff"
+    assert svg.headers["cache-control"] == "no-cache"
+    assert svg.content == HEART_SVG
+
+    png = client.get(f"/api/v1/models/{MODEL_SLUG}/samples/sample-leaf.png")
+    assert png.status_code == 200
+    assert png.headers["content-type"] == "image/png"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "model.scad",
+        "model.json",
+        "thumbnail.png",
+        ".secret.svg",
+        "notes.txt",
+        "gone.svg",
+        "..%2Fsecret.svg",
+        "%2E%2E%2F%2E%2E%2Fetc%2Fpasswd",
+    ],
+)
+def test_nothing_but_a_listed_sample_is_served(
+    client: TestClient, samples: Path, name: str
+) -> None:
+    response = client.get(f"/api/v1/models/{MODEL_SLUG}/samples/{name}")
+    assert response.status_code in (404, 422), response.text
+
+
+def test_a_symlinked_sample_is_not_served(
+    client: TestClient, samples: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "outside.svg"
+    outside.write_bytes(HEART_SVG)
+    (samples / "linked.svg").symlink_to(outside)
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/samples/linked.svg").status_code == 404
+    schema = client.get(f"/api/v1/models/{MODEL_SLUG}/schema").json()
+    label = next(p for p in schema["parameters"] if p["name"] == "label")
+    assert "linked.svg" not in label["samples"]
+
+
+def test_a_sample_of_an_unknown_model_or_revision_is_a_404(
+    client: TestClient, samples: Path
+) -> None:
+    assert client.get("/api/v1/models/nope/samples/sample-cat.svg").status_code == 404
+    response = client.get(
+        f"/api/v1/models/{MODEL_SLUG}/samples/sample-cat.svg", params={"version": "0" * 40}
+    )
+    assert response.status_code in (404, 503)
+
+
+def test_a_render_takes_a_sample_by_its_bare_name(client: TestClient, samples: Path) -> None:
+    accepted = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/render", json={"params": {"label": "sample-cat.svg"}}
+    )
+    assert accepted.status_code == 202, accepted.text
+    job = wait_for_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done"
+    assert job["params"] == {"label": "sample-cat.svg"}
+
+
+@pytest.mark.parametrize(
+    "value", ["thumbnail.png", ".secret.svg", "notes.txt", "model.scad", "sample-gone.svg"]
+)
+def test_a_render_refuses_a_file_that_is_not_a_listed_sample(
+    client: TestClient, samples: Path, value: str
+) -> None:
+    response = client.post(f"/api/v1/models/{MODEL_SLUG}/render", json={"params": {"label": value}})
+    assert response.status_code == 422, response.text
+    assert "label" in response.json()["detail"]

@@ -39,7 +39,7 @@ QUEUE_PATH = "/queue"
 #: Normalised across both routes. ``unknown`` is a real state: Bambuddy's status
 #: vocabularies differ per object and a new value must render as "still going" rather
 #: than silently as "done", which would stop the polling on a print that is still live.
-Stage = Literal["pending", "running", "queued", "done", "failed", "cancelled", "unknown"]
+Stage = Literal["running", "queued", "done", "failed", "cancelled", "unknown"]
 
 #: Bambuddy's own words for a finished state, per object. Anything outside these is
 #: treated as still in flight.
@@ -281,7 +281,7 @@ async def _queued_progress(
 
 
 #: How far along an unsettled plate is; a slicing plate already reads as ``running``.
-_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "pending": 1, "queued": 2, "running": 3}
+_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "queued": 1, "running": 2}
 
 
 def from_plates(

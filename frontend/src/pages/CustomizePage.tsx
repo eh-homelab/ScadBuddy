@@ -118,6 +118,7 @@ export function CustomizePage() {
     job,
     rendering,
     error: renderError,
+    busy: renderBusy,
   } = useRenderJob(slug, settled ? debounced : undefined, version)
 
   // A parameter change invalidates the saved output — Generate has to run again.
@@ -321,6 +322,7 @@ export function CustomizePage() {
           <ParameterPanel
             schema={schema}
             slug={slug}
+            version={version}
             values={values}
             fonts={fontsState.data ?? []}
             onChange={onChange}
@@ -360,6 +362,15 @@ export function CustomizePage() {
               className="border-t border-warn/40 bg-warn/8 px-3 py-2 text-[12px] text-warn"
             >
               Does not fit: {misfit.join('; ')}.
+            </p>
+          )}
+          {renderBusy !== undefined && (
+            <p
+              role="status"
+              data-testid="render-busy"
+              className="border-t border-line px-3 py-2 text-[12px] text-muted"
+            >
+              The render queue is full; this preview will be retried in {renderBusy} s.
             </p>
           )}
           {renderError && (

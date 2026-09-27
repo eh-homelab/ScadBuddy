@@ -18,6 +18,7 @@ from scadbuddy.core.events import (
     VersionCommitted,
     emit,
 )
+from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue
@@ -28,7 +29,9 @@ from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
+from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
+from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -55,10 +58,11 @@ class AppState:
     libraries: LibraryStore
     queue: RenderQueue
     #: Where every state change is published (spec §7). In-process today; the
-    #: Postgres ``pg_notify`` backend (#241) replaces it behind the same protocol.
+    #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
+    metrics: Metrics
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -111,6 +115,14 @@ def build_state(settings: Settings) -> AppState:
     paths = DataPaths(root=settings.data_dir)
     events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    metrics = Metrics()
+    metrics.build_info.labels(settings.version, settings.revision).set(1)
+    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
+    store: JobBackend = (
+        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
+        if settings.database_url
+        else JobStore(paths)
+    )
     outputs = OutputStore(paths)
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(paths, history, outputs)
@@ -130,7 +142,10 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        queue=RenderQueue(config, paths, history=history, events=events),
+        queue=RenderQueue(
+            config, paths, store=store, history=history, metrics=metrics, events=events
+        ),
+        metrics=metrics,
         events=events,
         print_progress=ProgressObserver(events),
         checks=asyncio.Semaphore(config.check_concurrency),

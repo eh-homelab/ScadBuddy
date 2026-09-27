@@ -360,6 +360,26 @@ export interface paths {
         patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a preset
+         * @description Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).
+         */
+        post: operations["duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/readme": {
         parameters: {
             query?: never;
@@ -396,6 +416,26 @@ export interface paths {
         put?: never;
         /** Queue a render */
         post: operations["render_model_api_v1_models__slug__render_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/samples/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A sample file the template ships
+         * @description Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.
+         */
+        get: operations["get_sample_content_api_v1_models__slug__samples__name__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1479,7 +1519,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
             /** Waiting Reason */
             waiting_reason?: string | null;
         };
@@ -2128,6 +2168,14 @@ export interface components {
             };
         };
         /**
+         * ParamPresetDuplicate
+         * @description The copy's name; its values are the original's.
+         */
+        ParamPresetDuplicate: {
+            /** Name */
+            name: string;
+        };
+        /**
          * ParamPresetUpdate
          * @description A rename, a new set of values, or both. ``params`` replaces the old ones whole.
          */
@@ -2162,6 +2210,8 @@ export interface components {
             name: string;
             /** Options */
             options?: components["schemas"]["Option"][];
+            /** Samples */
+            samples?: string[];
             /** Step */
             step?: number | null;
             /**
@@ -2731,7 +2781,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
@@ -2965,6 +3015,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -4097,6 +4149,42 @@ export interface operations {
             };
         };
     };
+    duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetDuplicate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_readme_api_v1_models__slug__readme_get: {
         parameters: {
             query?: never;
@@ -4216,6 +4304,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderAccepted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_sample_content_api_v1_models__slug__samples__name__get: {
+        parameters: {
+            query?: {
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                slug: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                    "image/svg+xml": unknown;
                 };
             };
             /** @description Validation Error */
