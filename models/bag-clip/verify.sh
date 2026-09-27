@@ -45,6 +45,7 @@ CASES=(
 status=0
 for c in "${CASES[@]}"; do
     IFS='|' read -r name defs expect <<<"$c"
+    read -ra expect_args <<<"$expect"
     args=()
     IFS=';' read -ra kv <<<"$defs"
     for d in "${kv[@]}"; do [ -n "$d" ] && args+=(-D "$d"); done
@@ -61,7 +62,7 @@ for c in "${CASES[@]}"; do
         echo "  FAIL  OpenSCAD warnings (see $OUT/$name.log)"; status=1
     fi
     echo "    rendered in $(( ($(date +%s%N) - start) / 1000000 )) ms"
-    python3 - "$OUT/$name.3mf" $expect "$tol" <<'PY' || status=1
+    python3 - "$OUT/$name.3mf" "${expect_args[@]}" "$tol" <<'PY' || status=1
 import sys, math, zipfile, xml.etree.ElementTree as ET
 from collections import Counter, defaultdict
 

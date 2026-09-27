@@ -9,6 +9,7 @@ import {
   readMetaName,
   metaProblem,
   readmeProblem,
+  sourceProblem,
   thumbnailProblem,
   uploadFilename,
   type ModelFiles,
@@ -53,6 +54,15 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
           ? 'That is not a .scad file. ScadBuddy renders OpenSCAD source.'
           : 'There is no .scad file among those. ScadBuddy renders OpenSCAD source.',
       )
+      setFiles(null)
+      setIgnored([])
+      setMetaName(undefined)
+      return
+    }
+    // The source is the upload itself, so one over the server's cap refuses it whole.
+    const sourceTooLong = await sourceProblem(picked.scad)
+    if (sourceTooLong) {
+      setError(`${sourceTooLong} ${picked.scad.name} cannot be uploaded.`)
       setFiles(null)
       setIgnored([])
       setMetaName(undefined)

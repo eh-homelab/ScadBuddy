@@ -143,6 +143,14 @@ export const gridfinitySchema: CustomizerSchema = {
     param('Features', { name: 'magnets', type: 'boolean', initial: false, caption: 'Magnet holes' }),
     param('Features', { name: 'label_tab', type: 'boolean', initial: true, caption: 'Label tab' }),
     param('Features', { name: 'bin_color', type: 'color', initial: '#2E7D5B', caption: 'Bin' }),
+    // #204 — `label_art = ""; // file:svg,png`
+    param('Features', {
+      name: 'label_art',
+      type: 'file',
+      initial: '',
+      caption: 'Label artwork',
+      accept: ['svg', 'png'],
+    }),
   ],
 }
 

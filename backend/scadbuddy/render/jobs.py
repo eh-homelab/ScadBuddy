@@ -4,13 +4,14 @@ import asyncio
 import logging
 import math
 import os
+import secrets
 import shutil
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from contextlib import AbstractContextManager, nullcontext, suppress
+from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from scadbuddy.core.paths import (
     DataPaths,
     model_path,
 )
+from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import model_search_path, revision_search_path
 from scadbuddy.render.bambu3mf import write_bambu_3mf
@@ -41,7 +43,7 @@ from scadbuddy.render.job_store import QueueFullError as QueueFullError
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.render.solids import render_solids
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids
 from scadbuddy.render.split import ColourPart, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
@@ -59,6 +61,7 @@ UNCOLOURED_MATERIAL_INDEX = 0
 UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
+MISSING_FILE_WARNING = "OpenSCAD could not open {name}; the model rendered without it"
 
 
 def unreadable_colour_warnings(
@@ -195,6 +198,37 @@ async def plate_thumbnails(
         )
         return None, [THUMBNAIL_FAILED_WARNING]
     return rendered, []
+
+
+@contextmanager
+def staged_assets(
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    model_dir: Path,
+    store: AssetStore,
+) -> Iterator[dict[str, ParamValue]]:
+    """``params`` with each uploaded file copied beside the model (#204).
+
+    OpenSCAD resolves `import()` and `surface()` relative to the file that calls
+    them, so the copy goes into the model's own directory -- where every wrapper
+    render of §6.3 runs too, which is what keeps the closed parts from silently
+    losing the picture. The name is generated and bare, so a template that guards
+    its file parameter against paths still takes it. Each render gets its own
+    copies: two renders of one model overlap routinely, and a shared name would be
+    deleted from under the one still running.
+    """
+    staged = dict(params)
+    created: list[Path] = []
+    try:
+        for name, meta in file_assets(schema, params, store).items():
+            target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
+            shutil.copyfile(store.blob_path(meta), target)
+            created.append(target)
+            staged[name] = target.name
+        yield staged
+    finally:
+        for path in created:
+            path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -370,21 +404,28 @@ async def render_job(
     work = attempt_work_dir(paths, job)
     work.mkdir(parents=True, exist_ok=True)
 
-    with stage("render"):
-        output = await render_3mf(scad, schema, job.params, work / RAW_RENDER_NAME, config=config)
-    with stage("split"):
-        preview_parts = extruder_order(
-            split_by_material(work / RAW_RENDER_NAME), schema, job.params
-        )
-        if not preview_parts:
-            raise OpenSCADError("the render produced no geometry", output.log_tail)
-        preview_path = work / PREVIEW_NAME
-        box = write_glb(preview_parts, preview_path)
+    with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
+        with stage("render"):
+            output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
+        with stage("split"):
+            preview_parts = extruder_order(
+                split_by_material(work / RAW_RENDER_NAME), schema, params
+            )
+            if not preview_parts:
+                raise OpenSCADError("the render produced no geometry", output.log_tail)
+            preview_path = work / PREVIEW_NAME
+            box = write_glb(preview_parts, preview_path)
 
-    with stage("solids"):
-        parts, warnings = await solid_parts(
-            scad, schema, job.params, preview_parts, work, config=config
-        )
+        with stage("solids"):
+            parts, warnings = await solid_parts(
+                scad, schema, params, preview_parts, work, config=config
+            )
+    # Exit 0 with the picture missing is otherwise invisible: the preview simply
+    # has no overlay, and nothing says why.
+    warnings = [
+        *(MISSING_FILE_WARNING.format(name=name) for name in output.missing_files),
+        *warnings,
+    ]
     with stage("thumbnail"):
         thumbnails, thumbnail_warnings = await plate_thumbnails(
             parts, config=config, executor=thumbnail_executor

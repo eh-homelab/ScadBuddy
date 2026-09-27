@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from scadbuddy import __version__
 from scadbuddy.api import (
+    assets,
     fonts,
     health,
     jobs,
@@ -50,6 +51,7 @@ def _api_router() -> APIRouter:
     router.include_router(versions.router)
     router.include_router(presets.router)
     router.include_router(jobs.router)
+    router.include_router(assets.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
     router.include_router(settings.router)

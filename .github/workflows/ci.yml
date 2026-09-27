@@ -49,9 +49,22 @@ on:
   pull_request:
   push:
     branches: [main]
+  # Weekly, and on demand, so every template's verify.sh runs against the image
+  # even in a week when nothing merged (#229). The template checks are the
+  # reason; the rest of CI rides along because it is cheap and it is the same
+  # tree. Nothing about the other jobs changes: `freshness` and
+  # `dispatch-review` are PR-only already, and `CI Summary` requires
+  # `freshness` only on a pull_request.
+  schedule:
+    - cron: "23 7 * * 1"
+  workflow_dispatch:
 
 # One run per ref. A newer push supersedes an older one, so cancelling costs
 # nothing but the wasted minutes.
+#
+# `event_name` is in the key so a scheduled or dispatched run on main never
+# cancels a push run on main (or the other way round): they share the ref, and
+# a cancelled push run is a merge whose CI never reported.
 #
 # `freshness` below is an auto-fixer and pushes to the PR branch, which cancels
 # the very run that pushed. That is harmless and deliberate: the push has
@@ -59,7 +72,7 @@ on:
 # finds no diff, and reports green. What it must never do is `[skip ci]` the
 # commit — see that job for why.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -204,8 +217,15 @@ jobs:
       # shell linting and its own tests. They are pure functions over a comments
       # payload — no network, no `gh` — so they run here in a couple of seconds
       # rather than needing a live PR to exercise.
-      - name: shellcheck the CI scripts
-        run: shellcheck .github/scripts/*.sh
+      #
+      # The templates' verify.sh scripts too (#229): they are what the `models`
+      # job runs, and a word-splitting bug in one is a check that silently
+      # asserts something other than what it says.
+      - name: shellcheck the CI scripts and the template verify scripts
+        run: shellcheck .github/scripts/*.sh models/*/verify.sh
+
+      - name: Test the template selector
+        run: .github/scripts/select-models.test.sh
 
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
@@ -531,6 +551,146 @@ jobs:
         if: always()
         run: docker rm -f scadbuddy-ci || true
 
+  # ── Each template's verify.sh (#229) ────────────────────────────────────────
+  #
+  # Every bundled template ships a `models/<slug>/verify.sh` that renders it
+  # across its parameter edge cases and checks the geometry: bounding boxes,
+  # one closed part per colour, text on its plate, print-in-place clearances.
+  # Before this job nothing ran them, so a README's figures and a PR's
+  # "N cases, all PASS" were attested only by whoever ran them locally.
+  #
+  # WHICH templates: on a pull_request, the ones whose directory the PR
+  # changed, plus all of them when the tooling changed (the Dockerfile, this
+  # file, the selector, the runner) — see .github/scripts/select-models.sh.
+  # On push to main, on the weekly schedule and on a manual dispatch: all of
+  # them. The gate fails OPEN, to "all": if the PR's diff cannot be computed,
+  # every template runs. It can never make this job skip — the job always
+  # runs when models/ exists and `CI Summary` asserts its result — so the only
+  # thing the selection can do is make it shorter.
+  #
+  # WHICH image: the Dockerfile's `base` stage — `openscad/openscad:dev` plus
+  # the exact font packages the shipped image carries — rebuilt here from the
+  # `type=gha` cache the `image` job writes, and then checked against the
+  # Dockerfile's pinned OPENSCAD_VERSION. Not the full `test` image: the
+  # scripts need openscad and fonts and nothing else, and `base` has no
+  # frontend or Python dependency layers to rebuild on a PR that changes them.
+  # Its own job rather than steps in `image`, so it runs beside that job's ~7
+  # minutes instead of after them.
+  #
+  # Timing, measured rather than assumed: on ubuntu-latest (4 vCPU, four
+  # templates at a time) the 24 templates then on main took 3.5 min for the
+  # whole job, slowest chunky-name-sign at 158 s (#283's own run). flexi-fabric
+  # (159 s locally, against chunky-name-sign's 84 s there) and dollhouse-kit
+  # landed after, so budget roughly double that on hosted. `timeout-minutes: 30`
+  # is headroom for the wall time, and it stays above the runner's 20-minute
+  # per-template guard, so a single hung template reds as a named timeout in
+  # the summary table rather than as the whole job being killed. Raise both
+  # together if the set outgrows it.
+  #
+  # It runs as root (as `openscad/openscad:dev` does), which is what the
+  # scripts assume: they bind-mount the checkout and write their renders into
+  # it. The `test` and `runtime` stages run as uid 10001 and could not.
+  models:
+    name: Template verify scripts
+    needs: layout
+    if: ${{ needs.layout.outputs.models == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      # Depth 2: on a pull_request the checkout is GitHub's merge commit, and
+      # its first parent is the base branch tip, so `HEAD^1..HEAD` is exactly
+      # what this PR changes against the base it would merge into.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Select the templates to verify
+        id: select
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          list="$RUNNER_TEMP/models.txt"
+          # The `rev-parse HEAD^2` guard: without a merge commit there is no
+          # base parent to diff against, and diffing HEAD^1 of a non-merge
+          # would silently compare against the wrong commit. Fail open.
+          if [ "$EVENT_NAME" = "pull_request" ] \
+            && git rev-parse -q --verify 'HEAD^2' >/dev/null \
+            && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
+            .github/scripts/select-models.sh changed <"$RUNNER_TEMP/changed.txt" >"$list"
+          else
+            if [ "$EVENT_NAME" = "pull_request" ]; then
+              echo "::warning::Could not compute this PR's changed files; verifying every template."
+            fi
+            .github/scripts/select-models.sh all >"$list"
+          fi
+          count="$(grep -c . "$list" || true)"
+          echo "Selected ${count} template(s):"
+          cat "$list"
+          echo "count=${count}" >>"$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4
+        if: ${{ steps.select.outputs.count != '0' }}
+
+      # Read-only cache. The entries it hits were written by an EARLIER run's
+      # `image` job (mode=max exports every `base` layer): this job does not
+      # wait for this run's `image` job, and both start as soon as `layout` is
+      # done. So on a commit that changes the `base` stage itself (an
+      # OPENSCAD_VERSION bump, a font package), there is nothing to hit yet.
+      # Both jobs cold-build `base` independently, each on its own hosted VM,
+      # and this job does it while selecting every template, because the
+      # Dockerfile is tooling. That is accepted rather than serialized behind
+      # `image`: a cold `base` is a pull of `openscad/openscad:dev` (~620 MB)
+      # plus one apt layer. The apt layer and the build took 19 s locally
+      # (`--no-cache`, base image already present), so the cost is that plus
+      # one pull. Waiting for `image` would cost its full ~7 minutes on every
+      # run. Not exporting
+      # from here keeps one writer per scope.
+      - name: Build the verify image (Dockerfile `base` stage)
+        if: ${{ steps.select.outputs.count != '0' }}
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: base
+          load: true
+          tags: scadbuddy-verify:ci
+          cache-from: type=gha
+
+      # `base` sits BELOW the Dockerfile's OPENSCAD_VERSION assertion (that is
+      # in the `app` stage), so assert it here too: a template check against an
+      # OpenSCAD the rest of the repo has not been verified on proves nothing.
+      # `--version` writes to stderr, hence the redirect.
+      - name: Assert the pinned OpenSCAD version
+        if: ${{ steps.select.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          want="$(sed -n 's/^ARG OPENSCAD_VERSION=//p' Dockerfile)"
+          got="$(docker run --rm scadbuddy-verify:ci openscad --version 2>&1 | sed -n 's/^OpenSCAD version //p')"
+          echo "Dockerfile pins ${want}; image carries ${got}"
+          if [ -z "$want" ] || [ "$want" != "$got" ]; then
+            echo "::error::verify image carries OpenSCAD '${got}', the Dockerfile pins '${want}'."
+            exit 1
+          fi
+
+      # wifi-qr-plaque's verify.sh checks its QR matrices against python-qrcode
+      # and OpenCV through `uv run --with`; everything else needs only the host
+      # python3 the runner already has.
+      - name: Set up uv
+        if: ${{ steps.select.outputs.count != '0' }}
+        uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Run the selected verify.sh scripts
+        if: ${{ steps.select.outputs.count != '0' }}
+        env:
+          SCADBUDDY_OPENSCAD_IMAGE: scadbuddy-verify:ci
+          SCADBUDDY_FONTS_IMAGE: scadbuddy-verify:ci
+        run: .github/scripts/verify-models.sh <"$RUNNER_TEMP/models.txt"
+
+      - name: Nothing to verify
+        if: ${{ steps.select.outputs.count == '0' }}
+        run: |
+          echo "This change touches no template and no verify tooling; no verify.sh ran." | tee -a "$GITHUB_STEP_SUMMARY"
+
   # ── Committed generated files must match their generator ────────────────────
   #
   # Ported from WonderForgeLabs/forge's `freshness` job. Three files in this
@@ -823,7 +983,7 @@ jobs:
     # THIS display name is the required status-check context. Renaming it
     # silently unsatisfiable-ifies branch protection.
     name: CI Summary
-    needs: [layout, lint, frontend, image, freshness]
+    needs: [layout, lint, frontend, image, models, freshness]
     # `!cancelled()`, not a bare `needs:`. A bare `needs:` SKIPS this job when
     # an upstream job fails, and GitHub counts a SKIPPED REQUIRED CHECK AS
     # SATISFIED — a failing build would report green on the one check that
@@ -850,6 +1010,7 @@ jobs:
           LINT_RESULT: ${{ needs.lint.result }}
           FRONTEND_RESULT: ${{ needs.frontend.result }}
           IMAGE_RESULT: ${{ needs.image.result }}
+          MODELS_RESULT: ${{ needs.models.result }}
           FRESHNESS_RESULT: ${{ needs.freshness.result }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
@@ -899,6 +1060,7 @@ jobs:
           assert "Workflow and Dockerfile lint"           "$LINT_RESULT"     true
           assert "Frontend lint, typecheck, test, build"  "$FRONTEND_RESULT" "$has_frontend"
           assert "Image build, backend checks, container smoke, real-backend e2e" "$IMAGE_RESULT" "$has_image"
+          assert "Template verify scripts"                "$MODELS_RESULT"   "$has_models"
 
           # `freshness` is PR-only — it auto-commits regenerated files back to
           # the PR branch, and a push to main has no branch to push to. It is
@@ -930,7 +1092,7 @@ jobs:
   # deadlock, and even on hosted runners it is just a job that does nothing.
   dispatch-review:
     name: Dispatch Claude Code Review
-    needs: [lint, frontend, image, summary]
+    needs: [lint, frontend, image, models, summary]
     if: ${{ !cancelled() && github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10

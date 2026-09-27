@@ -43,6 +43,33 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('bbox-readout')).toContainText('81.4', { timeout: 10_000 })
   })
 
+  test('attaches an SVG to a file parameter and renders with it (#204)', async ({ page }) => {
+    await page.goto('/m/gridfinity-bin')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await page.getByRole('tab', { name: 'Features' }).click()
+
+    const rendered = page.waitForRequest(
+      (request) =>
+        request.method() === 'POST' &&
+        request.url().endsWith('/render') &&
+        /^[0-9a-f]{64}$/.test(String(request.postDataJSON()?.params?.label_art ?? '')),
+    )
+    await page.getByLabel('Label artwork').setInputFiles({
+      name: 'heart.svg',
+      mimeType: 'image/svg+xml',
+      buffer: Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><path d="M0 0H4V4Z"/></svg>',
+      ),
+    })
+
+    await expect(page.getByText('heart.svg')).toBeVisible()
+    await expect(page.getByRole('img', { name: 'Preview of heart.svg' })).toBeVisible()
+    await rendered
+
+    await page.getByRole('button', { name: 'Clear Label artwork' }).click()
+    await expect(page.getByText('Drop a file here')).toBeVisible()
+  })
+
   test('shows the OpenSCAD log when a render fails', async ({ page }) => {
     await page.goto('/m/name-keychain')
     await expect(page.getByTestId('bbox-readout')).toBeVisible()

@@ -19,6 +19,9 @@ export type ParamType = Param['type']
 export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
 
+/** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
+export type Asset = Schemas['AssetMeta']
+
 export type ModelSummary = Schemas['ModelRecord']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']

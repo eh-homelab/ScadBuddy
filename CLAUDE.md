@@ -50,7 +50,19 @@ cd frontend && pnpm exec msw init public --save                         # public
 (without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh`, and the `.github/scripts/*.test.sh` suites.
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, and the `.github/scripts/*.test.sh`
+suites.
+
+Template checks (the `models` job): each `models/<slug>/verify.sh` the PR touches, or all
+of them when the Dockerfile, `ci.yml` or the selector/runner scripts change, and always on
+push to main and the weekly schedule. Run the same locally, in the Dockerfile's `base`
+stage (OpenSCAD plus the image's fonts):
+
+```bash
+docker build --target base -t scadbuddy-verify:ci .
+SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
+```
 
 ## Layout
 

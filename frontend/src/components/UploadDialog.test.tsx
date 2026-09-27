@@ -143,14 +143,14 @@ describe('UploadDialog', () => {
     )
   })
 
-  it('refuses a thumbnail over 2 MiB, attached or in a folder', async () => {
+  it('refuses a thumbnail over 10 MiB, attached or in a folder', async () => {
     const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
     const { dialog, user } = render()
-    const big = () => new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'thumbnail.png')
+    const big = () => new File([new Uint8Array(10 * 1024 * 1024 + 1)], 'thumbnail.png')
 
     await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), file('widget.scad'))
     await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), big())
-    expect(within(dialog).getByRole('alert')).toHaveTextContent('2 MiB or smaller')
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('10 MiB or smaller')
     expect(within(dialog).getByTestId('upload-thumbnail')).toHaveTextContent('None')
 
     await user.upload(within(dialog).getByLabelText('Model folder'), [
@@ -158,7 +158,7 @@ describe('UploadDialog', () => {
       Object.defineProperty(big(), 'webkitRelativePath', { value: 'widget/thumbnail.png' }),
     ])
     expect(await within(dialog).findByRole('alert')).toHaveTextContent(
-      'The thumbnail must be 2 MiB or smaller. thumbnail.png was left out.',
+      'The thumbnail must be 10 MiB or smaller. thumbnail.png was left out.',
     )
     expect(within(dialog).getByTestId('upload-thumbnail')).toHaveTextContent('None')
 
@@ -213,6 +213,22 @@ describe('UploadDialog', () => {
 
     expect(await within(dialog).findByTestId('upload-meta')).toHaveTextContent('At The Cap')
     expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('refuses a .scad over the server limit before anything is sent', async () => {
+    const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
+    const { dialog, user } = render()
+
+    await user.upload(
+      within(dialog).getByLabelText('OpenSCAD source file'),
+      file('widget.scad', 'x'.repeat(1_000_001)),
+    )
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The source must be at most 1,000,000 characters. widget.scad cannot be uploaded.',
+    )
+    expect(within(dialog).getByRole('button', { name: 'Add model' })).toBeDisabled()
+    expect(upload).not.toHaveBeenCalled()
   })
 
   it('refuses a README over the server limit, attached or in a folder', async () => {
