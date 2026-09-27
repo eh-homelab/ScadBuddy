@@ -199,6 +199,11 @@ updates:
       types:
         patterns:
           - "@types/node"
+    ignore:
+      # @types/node tracks the runtime's major (Node 24, the Dockerfile's agent
+      # stages); a newer major would type APIs the service cannot call.
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]
 
   # Docker: the Dockerfile's FROM lines. Three of the four are bumpable
   # (node, ghcr.io/astral-sh/uv, hadolint's own image is not here); the fourth,

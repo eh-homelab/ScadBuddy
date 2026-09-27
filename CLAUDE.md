@@ -104,6 +104,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `openapi-fetch` client over the generated `src/api/schema.d.ts`. The design is
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
+  The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
+  line 185) describes the backend container; the
+  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
