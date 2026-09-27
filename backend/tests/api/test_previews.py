@@ -472,3 +472,29 @@ def test_previews_can_be_turned_off(settings: Settings, paths: DataPaths) -> Non
         _create(client)
         assert _model(client)["thumbnail_source"] is None
     assert stub.calls == []
+
+
+def test_turning_previews_off_hides_the_ones_already_rendered(
+    settings: Settings, paths: DataPaths
+) -> None:
+    """Off means no preview is served, not merely that none is made: one rendered
+    while previews were on stays on disk, but the catalogue no longer reads it."""
+    stub = StubRender(paths)
+    app, booted = _boot(settings, stub)
+    with TestClient(app) as client:
+        _create(client)
+        settle(client, booted)
+        assert _model(client)["thumbnail_source"] == "preview"
+    assert paths.model_preview(SLUG).is_file()
+
+    app, _ = _boot(settings.model_copy(update={"preview_renders": False}), stub)
+    with TestClient(app) as client:
+        model = _model(client)
+        listed = client.get("/api/v1/models").json()
+        served = client.get(f"/api/v1/models/{SLUG}/thumbnail")
+
+    assert (model["has_thumbnail"], model["thumbnail_source"]) == (False, None)
+    assert model["thumbnail_preview_id"] is None
+    assert [entry["thumbnail_source"] for entry in listed if entry["slug"] == SLUG] == [None]
+    assert served.status_code == 404
+    assert len(stub.calls) == 1

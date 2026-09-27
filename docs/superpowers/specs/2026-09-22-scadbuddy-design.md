@@ -648,7 +648,7 @@ source declares them -- is rendered in the background, and that render's
   the scheduler once. A preview already current is left alone, so only the first
   boot after an upgrade renders anything, and it renders one model at a time
   behind requested renders, with a pause (1 s) after each.
-- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off.
+- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay on disk until their model goes, and the orphan sweep removes them by path either way.
 - **Frontend.** Only the new `preview` value (the Edit details dialog says a render
   of the default settings stands in) and `thumbnail_preview_id` in the image's
   cache key. There is no "rendering…" placeholder: the card shows no image until

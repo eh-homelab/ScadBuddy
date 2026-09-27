@@ -80,7 +80,11 @@ def build_state(settings: Settings) -> AppState:
     # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
     # stand in behind them.
     preview_store = PreviewStore(paths)
-    catalogue = Catalogue(paths, history, outputs, preview_store)
+    # Off, the catalogue serves no preview at all -- including ones rendered while it
+    # was on, which stay on disk until their model goes (the sweeps work by path).
+    catalogue = Catalogue(
+        paths, history, outputs, preview_store if settings.preview_renders else None
+    )
     queue = RenderQueue(config, paths, history=history)
     previews = PreviewScheduler(
         catalogue,

@@ -541,15 +541,16 @@ BACKGROUND_PRIORITY = 1
 
 
 @dataclass(order=True)
-class _Queued:
-    """One entry on the workers' queue: a job's id, or a piece of background work."""
+class _Queued[T]:
+    """One entry on the workers' queue: a job's id, or a piece of background work
+    and the future its caller awaits for what the work returns."""
 
     priority: int
     #: Submission order within a priority, so the queue stays first in, first out.
     sequence: int
     job_id: str | None = field(default=None, compare=False)
-    work: Callable[[], Awaitable[Any]] | None = field(default=None, compare=False)
-    done: asyncio.Future[Any] | None = field(default=None, compare=False)
+    work: Callable[[], Awaitable[T]] | None = field(default=None, compare=False)
+    done: asyncio.Future[T] | None = field(default=None, compare=False)
 
 
 class RenderQueue:
@@ -581,7 +582,8 @@ class RenderQueue:
         )
         # Priority-ordered, so background work never starts ahead of a render
         # someone is waiting for.
-        self._queue: asyncio.PriorityQueue[_Queued] = asyncio.PriorityQueue()
+        # Each entry's work returns its own type; only its caller's future carries it.
+        self._queue: asyncio.PriorityQueue[_Queued[Any]] = asyncio.PriorityQueue()
         self._sequence = itertools.count()
         self._workers: list[asyncio.Task[None]] = []
 
@@ -622,10 +624,10 @@ class RenderQueue:
             created_at=_now(),
         )
         self.store.write(job)
-        await self._queue.put(_Queued(USER_PRIORITY, next(self._sequence), job_id=job.id))
+        await self._queue.put(_Queued[None](USER_PRIORITY, next(self._sequence), job_id=job.id))
         return job
 
-    async def run_background(self, work: Callable[[], Awaitable[Any]]) -> Any:
+    async def run_background[T](self, work: Callable[[], Awaitable[T]]) -> T:
         """Run ``work`` on one of the render workers, behind every render queued.
 
         For work that shares the renderers' budget but that nobody is waiting on --
@@ -636,9 +638,9 @@ class RenderQueue:
         these in flight, which leaves every other worker to the renders people
         ask for. Returns what ``work`` returns, or raises what it raised.
         """
-        done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        done: asyncio.Future[T] = asyncio.get_running_loop().create_future()
         await self._queue.put(
-            _Queued(BACKGROUND_PRIORITY, next(self._sequence), work=work, done=done)
+            _Queued[T](BACKGROUND_PRIORITY, next(self._sequence), work=work, done=done)
         )
         return await done
 
@@ -656,7 +658,7 @@ class RenderQueue:
             finally:
                 self._queue.task_done()
 
-    async def _run_background(self, queued: _Queued) -> None:
+    async def _run_background[T](self, queued: _Queued[T]) -> None:
         assert queued.work is not None and queued.done is not None
         if queued.done.done():  # its caller gave up waiting
             return
