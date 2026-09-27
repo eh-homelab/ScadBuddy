@@ -67,6 +67,14 @@ router = APIRouter(tags=["models"])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
+#: The largest thumbnail a model takes (#179): every set is a commit in the models
+#: repository, which keeps each one forever, so the multipart cap (32 MiB) is far
+#: too loose a bound. 2 MiB is still generous: the bundled thumbnails are 30 KB at
+#: most, and a plate image this server renders is 512x512 -- at most 1 MiB even as
+#: raw RGBA, which PNG never is -- so this leaves room for a larger image of the
+#: user's own without letting one set grow the history by megabytes.
+MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+
 #: What the multipart branch will read a body from. `text/*` at large is NOT accepted:
 #: the route documents `text/plain`, and silently treating `text/html` as OpenSCAD
 #: source is a wider contract than anything here promises.
@@ -280,7 +288,7 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
-    thumbnail: Annotated[UploadFile | None, File(description="Optional PNG")] = None,
+    thumbnail: Annotated[UploadFile | None, File(description="Optional PNG, at most 2 MiB")] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
     meta: Annotated[
         UploadFile | None,
@@ -446,8 +454,17 @@ def _declared_path(paths: DataPaths, libraries: list[str]) -> tuple[Path, ...]:
 
 
 def _require_png(payload: bytes) -> bytes:
+    """A model thumbnail, on create and on PUT alike: a PNG, and no larger than
+    `MAX_THUMBNAIL_BYTES`. Checked before anything is written."""
     if not payload.startswith(PNG_MAGIC):
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
+    if len(payload) > MAX_THUMBNAIL_BYTES:
+        # A 422 with the limit, as the source and README caps answer.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the thumbnail is too large: {len(payload)} bytes, "
+            f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes (2 MiB)",
+        )
     return payload
 
 
@@ -859,7 +876,7 @@ def get_thumbnail(
 async def put_thumbnail(
     slug: SlugPath,
     catalogue: CatalogueDep,
-    file: Annotated[UploadFile, File(description="The thumbnail, a PNG")],
+    file: Annotated[UploadFile, File(description="The thumbnail, a PNG of at most 2 MiB")],
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)

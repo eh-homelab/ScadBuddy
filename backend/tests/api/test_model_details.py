@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.models import MAX_SOURCE_CHARS
+from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
@@ -233,6 +233,57 @@ def test_the_etag_follows_every_change_of_image(client: TestClient, paths: DataP
     # A copy validated against an older tag is sent the new image, not a 304.
     stale = client.get(f"/api/v1/models/{SLUG}/thumbnail", headers={"If-None-Match": seen[0]})
     assert (stale.status_code, stale.content) == (200, COVER_TWO)
+
+
+# ── the thumbnail size cap ────────────────────────────────────────────────────
+
+
+def _png_of(size: int) -> bytes:
+    return PNG_BYTES + b"\x00" * (size - len(PNG_BYTES))
+
+
+@pytest.mark.requires_git
+def test_a_thumbnail_one_byte_over_the_cap_is_refused_and_nothing_is_committed(
+    client: TestClient, paths: DataPaths
+) -> None:
+    before = _create(client)
+    history = client.get(f"/api/v1/models/{SLUG}/versions").json()
+
+    response = _put_thumbnail(client, _png_of(MAX_THUMBNAIL_BYTES + 1))
+
+    assert response.status_code == 422
+    assert response.headers["content-type"] == "application/problem+json"
+    assert str(MAX_THUMBNAIL_BYTES) in response.json()["detail"]
+    assert not (paths.model_dir(SLUG) / "thumbnail.png").exists()
+    assert client.get(f"/api/v1/models/{SLUG}/versions").json() == history
+    assert client.get(f"/api/v1/models/{SLUG}").json()["version"] == before["version"]
+
+
+def test_a_thumbnail_one_byte_over_the_cap_is_refused_on_create(client: TestClient) -> None:
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "thumbnail": ("t.png", _png_of(MAX_THUMBNAIL_BYTES + 1), "image/png"),
+        },
+    )
+    assert response.status_code == 422
+    assert str(MAX_THUMBNAIL_BYTES) in response.json()["detail"]
+    assert client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_thumbnail_at_the_cap_is_accepted(client: TestClient) -> None:
+    at_cap = _png_of(MAX_THUMBNAIL_BYTES)
+    created = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "thumbnail": ("t.png", at_cap, "image/png"),
+        },
+    )
+    assert created.status_code == 201, created.text
+    assert _put_thumbnail(client, at_cap).status_code == 200
+    assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == at_cap
 
 
 # ── the plate-image fallback ──────────────────────────────────────────────────

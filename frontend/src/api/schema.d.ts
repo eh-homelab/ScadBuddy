@@ -1123,7 +1123,7 @@ export interface components {
             tags?: string | null;
             /**
              * Thumbnail
-             * @description Optional PNG
+             * @description Optional PNG, at most 2 MiB
              */
             thumbnail?: string | null;
         };
@@ -1139,7 +1139,7 @@ export interface components {
         Body_put_thumbnail_api_v1_models__slug__thumbnail_put: {
             /**
              * File
-             * @description The thumbnail, a PNG
+             * @description The thumbnail, a PNG of at most 2 MiB
              */
             file: string;
         };

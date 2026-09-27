@@ -6,8 +6,8 @@ import {
   droppedFiles,
   folderOf,
   isMarkdown,
-  isPng,
   readMetaName,
+  thumbnailProblem,
   uploadFilename,
   type ModelFiles,
   type Skipped,
@@ -56,16 +56,20 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
       setMetaName(undefined)
       return
     }
-    setError(null)
-    setFiles(picked)
+    // A folder's own thumbnail.png is held to the same limit as one attached by hand;
+    // the rest of the folder still goes up without it.
+    const tooLarge = picked.thumbnail ? thumbnailProblem(picked.thumbnail) : null
+    setError(tooLarge ? `${tooLarge} ${picked.thumbnail?.name} was left out.` : null)
+    setFiles(tooLarge ? { ...picked, thumbnail: undefined } : picked)
     setIgnored(unused)
     setMetaName(await readMetaName(picked.meta))
   }
 
   function attach(kind: 'thumbnail' | 'readme', file: File | undefined) {
     if (!file || !files) return
-    if (kind === 'thumbnail' && !isPng(file)) {
-      setError('The thumbnail must be a PNG.')
+    const problem = kind === 'thumbnail' ? thumbnailProblem(file) : null
+    if (problem) {
+      setError(problem)
       return
     }
     if (kind === 'readme' && !isMarkdown(file)) {

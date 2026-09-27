@@ -35,6 +35,16 @@ export const isScad = (file: File) => lower(file).endsWith('.scad')
 export const isPng = (file: File) => lower(file).endsWith('.png') || file.type === 'image/png'
 export const isMarkdown = (file: File) => /\.(md|markdown)$/.test(lower(file))
 
+/** The server's `MAX_THUMBNAIL_BYTES`: each thumbnail set is kept in the history. */
+export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+
+/** Why a file cannot be a model's thumbnail, or null when it can. */
+export function thumbnailProblem(file: File): string | null {
+  if (!isPng(file)) return 'The thumbnail must be a PNG.'
+  if (file.size > MAX_THUMBNAIL_BYTES) return 'The thumbnail must be 2 MiB or smaller.'
+  return null
+}
+
 /** Code-unit order: the same on every browser, OS and locale, unlike `localeCompare`. */
 function byName(a: File, b: File): number {
   const [x, y] = [a.name, b.name]

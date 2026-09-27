@@ -241,6 +241,19 @@ describe('EditDetailsButton', () => {
     expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
   })
 
+  it('refuses a thumbnail over 2 MiB before anything is sent', async () => {
+    const setThumbnail = vi.spyOn(api, 'setThumbnail')
+    const { dialog, user } = await open()
+    expect(within(dialog).getByText('PNG, up to 2 MiB')).toBeInTheDocument()
+
+    const big = new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'huge.png', { type: 'image/png' })
+    await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), big)
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('2 MiB or smaller')
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
+    expect(setThumbnail).not.toHaveBeenCalled()
+  })
+
   it('removes the thumbnail set on the model', async () => {
     const sent = recordWrites()
     const { dialog, user, onSaved } = await open()

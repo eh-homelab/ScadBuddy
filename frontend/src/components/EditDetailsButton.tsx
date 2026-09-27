@@ -1,7 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary } from '../api/types'
-import { isMarkdown, isPng } from '../lib/modelFolder'
+import { isMarkdown, thumbnailProblem } from '../lib/modelFolder'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -94,8 +94,9 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
 
   function chooseThumbnail(file: File | undefined) {
     if (!file) return
-    if (!isPng(file)) {
-      setError('The thumbnail must be a PNG.')
+    const problem = thumbnailProblem(file)
+    if (problem) {
+      setError(problem)
       return
     }
     setError(null)
@@ -282,6 +283,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                     {thumbnail ? 'Keep current' : 'Remove thumbnail'}
                   </Button>
                 )}
+                <span className="text-[12px] text-faint">PNG, up to 2 MiB</span>
               </div>
             </fieldset>
 

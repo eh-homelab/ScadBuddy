@@ -143,6 +143,30 @@ describe('UploadDialog', () => {
     )
   })
 
+  it('refuses a thumbnail over 2 MiB, attached or in a folder', async () => {
+    const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
+    const { dialog, user } = render()
+    const big = () => new File([new Uint8Array(2 * 1024 * 1024 + 1)], 'thumbnail.png')
+
+    await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), file('widget.scad'))
+    await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), big())
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('2 MiB or smaller')
+    expect(within(dialog).getByTestId('upload-thumbnail')).toHaveTextContent('None')
+
+    await user.upload(within(dialog).getByLabelText('Model folder'), [
+      inFolder('widget', 'model.scad'),
+      Object.defineProperty(big(), 'webkitRelativePath', { value: 'widget/thumbnail.png' }),
+    ])
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The thumbnail must be 2 MiB or smaller. thumbnail.png was left out.',
+    )
+    expect(within(dialog).getByTestId('upload-thumbnail')).toHaveTextContent('None')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce())
+    expect(upload.mock.calls[0]?.[1]?.thumbnail).toBeUndefined()
+  })
+
   it('says so when a folder holds no source', async () => {
     const { dialog, user } = render()
 
