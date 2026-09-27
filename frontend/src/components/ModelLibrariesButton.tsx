@@ -37,13 +37,17 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   // under the user between two pins.
   const dirty = useRef(false)
   const openRef = useRef(false)
+  // Bumped by every pin/unpin. A read started before one must not land after it and
+  // put back the pins it replaced.
+  const generation = useRef(0)
 
   useEffect(() => {
     let live = true
+    const started = generation.current
     api
       .getModel(slug)
       .then((model) => {
-        if (live) setPins(model.libraries ?? [])
+        if (live && generation.current === started) setPins(model.libraries ?? [])
       })
       .catch(() => {})
     return () => {
@@ -57,9 +61,10 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     dirty.current = false
     setCatalogue(null)
     setError(null)
+    const started = generation.current
     try {
       const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
-      setPins(model.libraries ?? [])
+      if (generation.current === started) setPins(model.libraries ?? [])
       setCatalogue(libraries)
     } catch (caught) {
       setError(message(caught))
@@ -81,6 +86,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
     setRunning((n) => n + 1)
     try {
       const model = await action()
+      generation.current += 1
       setPins(model.libraries ?? [])
       if (openRef.current) dirty.current = true
       else onSaved?.()

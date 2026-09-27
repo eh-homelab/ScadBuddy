@@ -2,7 +2,7 @@ import { screen, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { MISSING_REF } from '../mocks/fixtures'
+import { MISSING_REF, models } from '../mocks/fixtures'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { ModelLibrariesButton } from './ModelLibrariesButton'
@@ -211,5 +211,34 @@ describe('ModelLibrariesButton', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent('git timed out')
     expect(screen.queryByRole('button', { name: 'Add' })).not.toBeInTheDocument()
+  })
+
+  it('keeps a new pin when the first read of the model lands after it', async () => {
+    let release = () => {}
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const stale = models.find((model) => model.slug === 'name-keychain')
+    server.use(
+      http.get(
+        '/api/v1/models/:slug',
+        async () => {
+          await held
+          return HttpResponse.json({ ...stale, libraries: [] })
+        },
+        { once: true },
+      ),
+    )
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user)
+    await within(dialog).findByRole('list', { name: 'Catalogue' })
+    await user.click(within(row('BOSL2')).getByRole('button', { name: 'Add' }))
+    await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }))
+
+    release()
+
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent('Libraries1')
   })
 })
