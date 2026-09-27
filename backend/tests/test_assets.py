@@ -31,14 +31,24 @@ HEART_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
 """
 
 
-def png_bytes(width: int, height: int, *, mode: str = "RGBA", text: str | None = None) -> bytes:
+def png_bytes(
+    width: int,
+    height: int,
+    *,
+    mode: str = "RGBA",
+    text: str | None = None,
+    icc: bytes | None = None,
+) -> bytes:
     image = Image.new(mode, (width, height))
     info = None
     if text is not None:
         info = PngImagePlugin.PngInfo()
         info.add_text("Comment", text)
     out = io.BytesIO()
-    image.save(out, format="PNG", pnginfo=info)
+    if icc is None:
+        image.save(out, format="PNG", pnginfo=info)
+    else:
+        image.save(out, format="PNG", pnginfo=info, icc_profile=icc)
     return out.getvalue()
 
 
@@ -161,6 +171,18 @@ def test_a_small_png_keeps_its_size_and_loses_its_metadata(store: AssetStore) ->
 
     assert (meta.width, meta.height) == (96, 96)
     assert b"secret camera serial" not in store.blob_path(meta).read_bytes()
+
+
+def test_a_png_loses_its_icc_profile(store: AssetStore) -> None:
+    upload = png_bytes(16, 16, icc=b"not really a profile but opaque bytes")
+    assert b"iCCP" in upload
+
+    meta = store.put(upload, "profiled.png")
+
+    kept = store.blob_path(meta).read_bytes()
+    assert b"iCCP" not in kept
+    with Image.open(io.BytesIO(kept)) as image:
+        assert "icc_profile" not in image.info
 
 
 def test_a_palette_png_is_re_encoded_in_a_mode_surface_reads(store: AssetStore) -> None:
