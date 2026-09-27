@@ -8,6 +8,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
+  LibraryEntry,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
@@ -48,7 +49,10 @@ const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
-  sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
+  sources: {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -66,6 +70,7 @@ const state = {
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
+  libraries: structuredClone(fixtures.libraries) as LibraryEntry[],
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -76,7 +81,10 @@ export function resetMockState(): void {
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
-  state.sources = { 'name-keychain': fixtures.keychainSource }
+  state.sources = {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -89,6 +97,7 @@ export function resetMockState(): void {
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
+  state.libraries = structuredClone(fixtures.libraries)
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -191,6 +200,16 @@ function problem(status: number, title: string, detail?: string, extensions: obj
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
+}
+
+/**
+ * `require_mine` in `api/models.py`: a built-in is refused before the model is even
+ * looked up, with the backend's problem (403 is not in its title table, so "Error").
+ */
+function refuseBuiltin(slug: string) {
+  return slug.startsWith('builtin:')
+    ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
+    : undefined
 }
 
 function slugify(value: string): string {
@@ -353,6 +372,24 @@ export const handlers = [
     return HttpResponse.json(imported, { status: 201 })
   }),
 
+  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    const patch = (await request.json()) as Partial<ModelSummary>
+    const missing = (patch.libraries ?? []).filter(
+      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
+    )
+    if (missing.length > 0) {
+      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
+    }
+    const updated = { ...model, ...patch }
+    state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
+    return HttpResponse.json(updated)
+  }),
+
   http.post(`${base}/models/check`, async ({ request }) => {
     const body = (await request.json()) as { source: string; slug?: string | null }
     await delay(80)
@@ -368,6 +405,8 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Model not found')
     const body = (await request.json()) as {
@@ -394,6 +433,8 @@ export const handlers = [
   }),
 
   http.delete(`${base}/models/:slug`, ({ params }) => {
+    const refused = refuseBuiltin(String(params['slug']))
+    if (refused) return refused
     if (!state.models.some((m) => m.slug === params['slug'])) {
       return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
     }
@@ -434,6 +475,8 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/versions/:commit/restore`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const commit = String(params['commit'])
     const entries = state.versions[slug] ?? []
     const target = entries.find((v) => v.commit === commit)
@@ -1070,6 +1113,31 @@ export const handlers = [
       { family: row.family, styles },
     ]
     return HttpResponse.json({ family: row.family, styles, files: [], licence: 'OFL.txt' })
+  }),
+
+  http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
+
+  http.post(`${base}/libraries`, async ({ request }) => {
+    const body = (await request.json()) as { name: string; url?: string | null; ref?: string | null }
+    const known = state.libraries.find((entry) => entry.name === body.name)
+    if (!known && !body.url) {
+      return problem(404, 'Not Found', `'${body.name}' is not in the catalogue; give a url to add it`)
+    }
+    const url = body.url ?? known?.url ?? ''
+    const ref = body.ref ?? known?.ref ?? ''
+    if (ref === fixtures.MISSING_REF) {
+      return problem(502, 'Bad Gateway', `git clone failed: Remote branch ${ref} not found`)
+    }
+    await delay(100)
+    state.seq += 1
+    const pin = { url, ref, commit: state.seq.toString(16).padStart(40, 'c') }
+    const entry: LibraryEntry = known
+      ? { ...known, pin }
+      : { name: body.name, url, ref, curated: false, pin }
+    state.libraries = known
+      ? state.libraries.map((row) => (row.name === body.name ? entry : row))
+      : [...state.libraries, entry]
+    return HttpResponse.json(entry)
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),

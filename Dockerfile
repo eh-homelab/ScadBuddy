@@ -190,11 +190,14 @@ ENV OPENSCAD_VERSION=${OPENSCAD_VERSION}
 #                                    config this module refuses to read)
 #   2.35.2  safe.directory as PROTECTED command-line scope — the one that makes
 #           a PVC whose ownership does not match uid 10001 usable at all
+#   2.37    http.curloptResolve     (libraries.py holds a library clone to the
+#                                    addresses it vetted; older git ignores the
+#                                    key and would resolve the host again)
 #
 # No pipes, for the same reason the OpenSCAD check above uses a temp file: every
 # pipe in a RUN trips hadolint's DL4006, and `SHELL -o pipefail` for one command
 # is the worse trade. `sort -V` reads and writes files here instead.
-ARG MIN_GIT_VERSION=2.35.2
+ARG MIN_GIT_VERSION=2.37
 RUN git --version > /tmp/git-version \
     && actual="$(sed -n 's/^git version //p' /tmp/git-version)" \
     && actual="${actual%% *}" \
@@ -203,8 +206,8 @@ RUN git --version > /tmp/git-version \
     && lowest="$(sed -n 1p /tmp/git-sorted)" \
     && rm -f /tmp/git-version /tmp/git-versions /tmp/git-sorted \
     && if [ "$lowest" != "$MIN_GIT_VERSION" ]; then \
-         echo "ERROR: base image carries git '${actual}'; history.py needs >= ${MIN_GIT_VERSION}." >&2; \
-         echo "       safe.directory as command-line (protected) config lands in 2.35.2." >&2; \
+         echo "ERROR: base image carries git '${actual}'; history.py and libraries.py need >= ${MIN_GIT_VERSION}." >&2; \
+         echo "       See the version floors listed above this check." >&2; \
          exit 1; \
        fi
 

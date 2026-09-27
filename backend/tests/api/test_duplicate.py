@@ -24,14 +24,18 @@ THUMBNAIL = PNG_BYTES + b"\x00"
 
 
 @pytest.fixture
-def bundled(seed_dir: Path) -> Path:
+def bundled_meta() -> dict[str, Any]:
+    # No library declared: one without a pin refuses the source writes and schema
+    # reads these tests make (#93). The test that needs one parametrizes this.
+    return {"name": "Name keychain", "tags": ["keychain"]}
+
+
+@pytest.fixture
+def bundled(seed_dir: Path, bundled_meta: dict[str, Any]) -> Path:
     directory = seed_dir / "name-keychain"
     directory.mkdir()
     (directory / "model.scad").write_text(SOURCE, encoding="utf-8")
-    (directory / "model.json").write_text(
-        json.dumps({"name": "Name keychain", "tags": ["keychain"], "libraries": ["BOSL2"]}),
-        encoding="utf-8",
-    )
+    (directory / "model.json").write_text(json.dumps(bundled_meta), encoding="utf-8")
     (directory / "thumbnail.png").write_bytes(THUMBNAIL)
     return directory
 
@@ -101,6 +105,9 @@ def test_a_duplicate_of_a_duplicate_tracks_its_immediate_parent(client: TestClie
     assert client.get("/api/v1/models/another-keychain/source").text == "cube(1);\n"
 
 
+@pytest.mark.parametrize(
+    "bundled_meta", [{"name": "Name keychain", "tags": ["keychain"], "libraries": ["BOSL2"]}]
+)
 def test_a_duplicate_keeps_the_rest_of_model_json(client: TestClient, paths: DataPaths) -> None:
     """A library declaration (#93), or anything else the metadata carries, travels along."""
     _duplicate(client, BUILTIN, "My keychain")

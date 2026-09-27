@@ -134,7 +134,11 @@ async def resolve_host(host: str, port: int) -> list[str]:
     return await asyncio.get_running_loop().run_in_executor(_RESOLVER, _getaddrinfo, host, port)
 
 
-async def _public_addresses(host: str, port: int) -> list[str]:
+async def public_addresses(host: str, port: int) -> list[str]:
+    """Every address ``host`` resolves to, or :func:`unreachable` unless all are public.
+
+    Shared with the library clones (#93), which vet a user-added git URL the same way.
+    """
     try:
         addresses = await asyncio.wait_for(resolve_host(host, port), RESOLVE_TIMEOUT)
     except (OSError, TimeoutError):
@@ -158,7 +162,7 @@ class PublicOnlyBackend(httpcore.AsyncNetworkBackend):
         local_address: str | None = None,
         socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
-        addresses = await _public_addresses(host, port)
+        addresses = await public_addresses(host, port)
         return await self._inner.connect_tcp(
             addresses[0],
             port,
@@ -263,7 +267,7 @@ async def _vet_hop(request: httpx.Request) -> None:
     # A request hook runs for every hop, so this is also what stops a redirect
     # leaving https or turning back into the cluster.
     _require_https(request.url)
-    await _public_addresses(request.url.host, request.url.port or 443)
+    await public_addresses(request.url.host, request.url.port or 443)
 
 
 async def _fetch(url: httpx.URL, client: httpx.AsyncClient, *, limit: int) -> bytes:
