@@ -1,7 +1,8 @@
 import Editor from '@monaco-editor/react'
 import type * as Monaco from 'monaco-editor/editor/editor.api'
-import { useCallback, useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { Diagnostic } from '../api/types'
+import { connectLanguageServer } from '../lib/languageClient'
 import { MARKER_OWNER, toMarkers } from '../lib/markers'
 import { OPENSCAD_LANGUAGE_ID, monaco, setupMonaco } from '../lib/monaco'
 import { SCADBUDDY_DARK, SCADBUDDY_LIGHT } from '../lib/openscadLanguage'
@@ -18,6 +19,8 @@ interface Props {
    * rather than an anonymous buffer so a language server (#95) has something to name.
    */
   uri: string
+  /** The openscad-lsp WebSocket path; without one the editor has no completion or hover. */
+  languageServer?: string
   label: string
 }
 
@@ -39,8 +42,9 @@ const OPTIONS: Monaco.editor.IStandaloneEditorConstructionOptions = {
  * `errors`, so swapping the implementation — or bolting a language client onto it —
  * touches nothing else.
  */
-export function SourceEditor({ value, onChange, errors = [], uri, label }: Props) {
+export function SourceEditor({ value, onChange, errors = [], uri, languageServer, label }: Props) {
   const editor = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null)
+  const [textModel, setTextModel] = useState<Monaco.editor.ITextModel | null>(null)
 
   const applyMarkers = useCallback(() => {
     const model = editor.current?.getModel()
@@ -60,6 +64,14 @@ export function SourceEditor({ value, onChange, errors = [], uri, label }: Props
     [uri],
   )
 
+  // One server session per open model: a new URI is a new document, and the old
+  // session goes with the model it was about.
+  useEffect(() => {
+    if (!textModel || !languageServer) return
+    const client = connectLanguageServer(textModel, languageServer)
+    return () => client.dispose()
+  }, [textModel, languageServer])
+
   const dark =
     typeof window.matchMedia === 'function'
       ? window.matchMedia('(prefers-color-scheme: dark)').matches
@@ -76,6 +88,8 @@ export function SourceEditor({ value, onChange, errors = [], uri, label }: Props
         editor.current = instance
         instance.updateOptions({ ariaLabel: label })
         applyMarkers()
+        setTextModel(instance.getModel())
+        instance.onDidChangeModel(() => setTextModel(instance.getModel()))
       }}
       options={OPTIONS}
       loading={<span className="text-[13px] text-muted">Loading the editor</span>}

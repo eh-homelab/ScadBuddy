@@ -1,4 +1,5 @@
 import { render } from '@testing-library/react'
+import { useEffect } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const dispose = vi.fn()
@@ -13,8 +14,29 @@ vi.mock('../lib/monaco', () => ({
   monaco: { editor: { getModel, setModelMarkers }, Uri: { parse: (value: string) => value } },
 }))
 
+const disconnect = vi.fn()
+const connectLanguageServer = vi.fn(() => ({ dispose: disconnect }))
+vi.mock('../lib/languageClient', () => ({ connectLanguageServer }))
+
+// Mounts the way the real one does: once, handing over an editor holding the path's model.
 vi.mock('@monaco-editor/react', () => ({
-  default: ({ path }: { path: string }) => <div data-testid="monaco" data-path={path} />,
+  default: function Editor({
+    path,
+    onMount,
+  }: {
+    path: string
+    onMount: (instance: object) => void
+  }) {
+    useEffect(() => {
+      onMount({
+        getModel: () => ({ uri: path, getValue: () => 'cube(1);' }),
+        updateOptions: () => {},
+        onDidChangeModel: () => ({ dispose: () => {} }),
+      })
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [])
+    return <div data-testid="monaco" data-path={path} />
+  },
 }))
 
 const { SourceEditor } = await import('./SourceEditor')
@@ -25,6 +47,8 @@ describe('SourceEditor', () => {
   beforeEach(() => {
     dispose.mockClear()
     getModel.mockClear()
+    connectLanguageServer.mockClear()
+    disconnect.mockClear()
   })
 
   it('disposes the text model it opened when it unmounts', () => {
@@ -42,5 +66,23 @@ describe('SourceEditor', () => {
 
     expect(getModel).toHaveBeenCalledWith('file:///models/a/model.scad')
     expect(dispose).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs a language server session for the model while it is open', () => {
+    const { unmount } = render(
+      <SourceEditor {...props} uri="file:///models/a/model.scad" languageServer="/api/v1/models/a/lsp" />,
+    )
+    expect(connectLanguageServer).toHaveBeenCalledWith(
+      expect.objectContaining({ uri: 'file:///models/a/model.scad' }),
+      '/api/v1/models/a/lsp',
+    )
+
+    unmount()
+    expect(disconnect).toHaveBeenCalledTimes(1)
+  })
+
+  it('runs none without a server to talk to', () => {
+    render(<SourceEditor {...props} uri="file:///models/a/model.scad" />)
+    expect(connectLanguageServer).not.toHaveBeenCalled()
   })
 })

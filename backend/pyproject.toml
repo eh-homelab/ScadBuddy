@@ -52,4 +52,5 @@ asyncio_mode = "auto"
 markers = [
     "requires_openscad: needs a real openscad binary on PATH",
     "requires_git: needs a real git binary on PATH",
+    "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
 ]

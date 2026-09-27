@@ -136,6 +136,7 @@ export function SourceWorkbench({
           onChange={onSourceChange}
           errors={check?.diagnostics ?? []}
           uri={uri}
+          languageServer={api.languageServerPath(slug)}
           label="OpenSCAD source"
         />
       </div>
