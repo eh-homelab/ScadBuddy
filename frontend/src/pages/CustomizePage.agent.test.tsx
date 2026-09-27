@@ -91,6 +91,31 @@ describe('customizer tools', () => {
     expect(bbox.size[0]).toBeCloseTo(46.7, 1)
   })
 
+  it('render waits for the values on screen when a newer change supersedes a render', async () => {
+    const bodies: { params: Record<string, unknown>; supersedes?: string }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && new URL(request.url).pathname.endsWith('/render')) {
+        bodies.push((await request.clone().json()) as { params: Record<string, unknown>; supersedes?: string })
+      }
+    })
+    await open()
+    await waitFor(() => expect(bodies).toHaveLength(1))
+
+    // One change is submitted, then another lands straight after it: the second submit
+    // names the first as the job it supersedes (#241).
+    await call('set_param', { name: 'name', value: 'Workshop' })
+    await waitFor(() => expect(bodies).toHaveLength(2))
+    await call('set_param', { name: 'name', value: 'Nova' })
+    await waitFor(() => expect(bodies).toHaveLength(3))
+    expect(bodies[2]).toMatchObject({ params: { name: 'Nova' }, supersedes: expect.any(String) })
+
+    // The answer is Nova's render, never the superseded Workshop one (81.4 mm wide).
+    const rendered = await call('render', { timeout_ms: 5000 })
+    expect(rendered).toMatchObject({ ok: true, result: { status: 'done' } })
+    const bbox = (rendered as { result: { bbox_mm: { size: number[] } } }).result.bbox_mm
+    expect(bbox.size[0]).toBeCloseTo(46.7, 1)
+  })
+
   it('checks a value against the parameter before anything changes', async () => {
     await open()
     const field = screen.getByRole('textbox', { name: 'Name on the tag' })

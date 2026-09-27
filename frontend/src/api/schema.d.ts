@@ -3015,6 +3015,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -4312,6 +4314,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };

@@ -329,6 +329,22 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    # For the `requires_postgres` tests: the render queue's Postgres store. The
+    # test container reaches it on the runner's loopback (`--network host`), and
+    # each test works in a schema of its own.
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
         with:
@@ -380,8 +396,12 @@ jobs:
 
       # No `-m` filter: inside the image `requires_openscad` tests are supposed
       # to run, and the point of building the image at all is that they can.
+      # `requires_postgres` ones run against the service container above.
       - name: pytest
-        run: docker run --rm -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
+        run: >-
+          docker run --rm --network host
+          -e SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
+          -w /app/backend scadbuddy:ci-test uv run --frozen --no-sync pytest
 
       - name: Build the runtime image
         uses: docker/build-push-action@v7
