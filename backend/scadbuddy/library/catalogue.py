@@ -31,6 +31,7 @@ logger = logging.getLogger(__name__)
 THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
+LINK_MESSAGE = "Link seeded templates to their built-ins"
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -556,6 +557,57 @@ class Catalogue:
             logger.info(
                 "synced built-in templates", extra={"changed": changed, "from": str(bundled)}
             )
+        return commit
+
+    def link_seeded(self) -> str | None:
+        """Make every seeded template of mine a duplicate of its built-in, as one commit.
+
+        A model the pre-#155 seed copied in has the slug of a built-in and no
+        ``upstream``. It gets ``upstream = builtin:<slug>`` with ``base`` = its own
+        seed commit and ``path`` = ``<slug>``, where the source lived at that
+        commit: the seeded source is the true merge base, so an unedited one
+        merges cleanly to the current built-in and an edited one keeps its edits.
+        Nothing is renamed, so outputs, ``model_version`` stamps and deep links
+        still point where they did.
+
+        Runs at boot, after :meth:`sync_builtins`. Idempotent: a linked model has
+        an ``upstream``, so a second boot finds nothing to do and commits nothing.
+        Best effort like the sync: a model that cannot be linked is logged and
+        left as it is, and the rest are still linked.
+        """
+        if self.history is None or not self.history.available:
+            return None
+        try:
+            builtins = set(_templates_in(self.paths.builtins))
+            candidates = [slug for slug in _templates_in(self.paths.models) if slug in builtins]
+        except OSError:
+            logger.exception("could not link seeded templates to their built-ins")
+            return None
+        linked: list[str] = []
+        for slug in candidates:
+            try:
+                raw = self.read_raw_meta(slug)
+                if raw.get("upstream") is not None:
+                    continue
+                base = self.history.seed_commit(slug)
+                if base is None:
+                    logger.info(
+                        "not linking a template to its built-in: it was not seeded",
+                        extra={"slug": slug},
+                    )
+                    continue
+                raw["upstream"] = Upstream(
+                    id=f"{BUILTIN_PREFIX}{slug}", path=slug, base=base
+                ).model_dump()
+                self.write_raw_meta(slug, raw)
+            except (GitError, OSError, ValueError, ModelNotFoundError):
+                logger.exception("could not link a seeded template", extra={"slug": slug})
+                continue
+            linked.append(slug)
+        if not linked:
+            return None
+        commit = self._commit(LINK_MESSAGE, *linked)
+        logger.info("linked seeded templates to their built-ins", extra={"slugs": linked})
         return commit
 
     def _replace_builtin(self, source: Path, target: Path) -> None:

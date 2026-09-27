@@ -251,6 +251,19 @@ on the volume sees the same thing.
   the same slug as a built-in is left alone. `GET /models` lists both, each with
   `origin: "builtin" | "mine"`. This replaces the old copy-if-absent seed, which
   turned a bundled model into an ordinary one the first time it was copied.
+- **Seeded templates are linked to their built-ins (#158).** Right after the sync,
+  every template of mine with a built-in's slug and no `upstream` whose own
+  history reaches a `Seed … from the image` commit (the old seed's subject)
+  becomes a duplicate of it: `upstream = {id: builtin:<slug>, path: <slug>, base:
+  <that seed commit>}`, where `path` is where the source lived at `base`. The
+  seeded source is the true merge base, so an unedited copy merges cleanly to the
+  current built-in and an edited one keeps its edits. All of them land as one
+  `Link seeded templates to their built-ins` commit. It is idempotent (a linked
+  template has an `upstream`) and renames nothing, so outputs, `model_version`
+  stamps and deep links are untouched. A template whose newest origin is not a
+  seed (uploaded under that slug, or re-created after a delete) is logged and left
+  alone; one that fails to link is logged and the rest still link, so the boot
+  never fails on it.
 
 - **Shelling out to `git`, not dulwich/pygit2.** The product surface here *is*
   git porcelain, so a library would mean reimplementing log/diff/restore — a
