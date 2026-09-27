@@ -700,6 +700,9 @@ class RenderQueue:
                 self.metrics.store_errors.labels("heartbeat").inc()
 
     async def _run(self, job: Job) -> None:
+        # From the SUBMIT: `created_at` is never reset, so a retry after a lost
+        # worker counts the first attempt's wait and run too, and is expired once
+        # the client has waited past the deadline in total.
         waited = max(0.0, ((job.started_at or _now()) - job.created_at).total_seconds())
         self.metrics.queue_wait.observe(waited)
         deadline = self.config.render_queue_timeout

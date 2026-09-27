@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from scadbuddy.core.config import load_config
+from scadbuddy.core.settings import Settings
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
@@ -22,3 +23,12 @@ def test_a_negative_lsp_sessions_is_refused_by_name() -> None:
 
 def test_zero_lsp_sessions_loads() -> None:
     assert load_config({"SCADBUDDY_LSP_SESSIONS": "0"}).lsp_sessions == 0
+
+
+@pytest.mark.parametrize("value", ["0", "-1"])
+def test_a_database_pool_size_below_one_is_refused_by_name(
+    value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_DATABASE_POOL_SIZE", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_DATABASE_POOL_SIZE must be at least 1"):
+        Settings()

@@ -505,6 +505,51 @@ def test_a_lost_worker_s_job_is_requeued_then_failed(pg_conninfo: str, paths: Da
 
 
 @pytest.mark.requires_postgres
+def test_a_requeued_job_keeps_every_claim_on_it(pg_conninfo: str, paths: DataPaths) -> None:
+    """Two tabs share one job; it loses its worker and is requeued. One tab moving
+    on (a supersede naming it) must release only its own claim, not drop the
+    render the other tab is still waiting on."""
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        shared = _job(n=1)
+        key = render_key("demo", shared.params, None)
+        store.submit(shared, key)
+        assert store.submit(_job(n=1), key).coalesced  # the second tab
+        assert store.claim() is not None  # ...and its worker dies
+        assert [j.id for j in store.reap(lease=0.0001, max_attempts=2).requeued] == [shared.id]
+
+        newer = _job(n=2)
+        answer = store.submit(newer, render_key("demo", newer.params, None), supersedes=shared.id)
+
+        assert answer.superseded is None
+        assert store.read(shared.id).state == "pending"
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
+def test_a_retry_s_wait_counts_from_the_submit(pg_conninfo: str, paths: DataPaths) -> None:
+    """What the queue deadline measures (`started_at - created_at`): on a retry it
+    still starts at the original submit, so the first attempt's time counts."""
+    store = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    store.open()
+    try:
+        job = _job(n=1)
+        store.submit(job, render_key("demo", job.params, None))
+        first = store.claim()
+        assert first is not None and first.started_at is not None
+        store.reap(lease=0.0001, max_attempts=2)
+        retry = store.claim()
+        assert retry is not None and retry.started_at is not None
+
+        assert retry.created_at == first.created_at
+        assert retry.started_at - retry.created_at >= first.started_at - first.created_at
+    finally:
+        store.close()
+
+
+@pytest.mark.requires_postgres
 def test_a_twin_in_the_queue_fails_one_row_not_the_whole_reap(
     pg_conninfo: str, paths: DataPaths
 ) -> None:

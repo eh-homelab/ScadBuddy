@@ -487,7 +487,8 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
     has already read its source, and an edit since would be served stale.
   - **Deadline** (optional). A job that waited longer than
     `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (default 0 = never) for a worker is failed
-    unrendered.
+    unrendered. Measured from the submit, so a retry after a lost worker counts
+    the first attempt's time too.
 - **Job store.** With `SCADBUDDY_DATABASE_URL` the queue is a Postgres table
   (`render/pg_store.py`): workers claim with `FOR UPDATE SKIP LOCKED`; a partial
   unique index on the render key over pending rows makes coalescing atomic

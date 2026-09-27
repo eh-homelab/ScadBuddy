@@ -178,11 +178,14 @@ class PostgresJobStore:
                     # pending-key unique index, and a SELECT beforehand would only
                     # narrow that race, not close it. The savepoint confines the
                     # violation to this row instead of rolling back the whole pass.
+                    # `claims` is left as it is: every submitter coalesced onto the
+                    # job is still waiting on it, and a supersede from one of them
+                    # must release only that one's claim.
                     try:
                         with conn.transaction():
                             back = conn.execute(
                                 "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                                " heartbeat_at = NULL, claims = 1 WHERE id = %s RETURNING *",
+                                " heartbeat_at = NULL WHERE id = %s RETURNING *",
                                 (row["id"],),
                             ).fetchone()
                     except UniqueViolation:

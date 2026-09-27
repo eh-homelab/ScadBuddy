@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # Server-side only, like the Bambuddy key.
     database_url: str | None = None
     database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE
+
+    @field_validator("database_pool_size")
+    @classmethod
+    def _pool_size_at_least_one(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
+        return value
 
     log_level: str = Field(default="INFO")
 
