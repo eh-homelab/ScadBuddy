@@ -416,7 +416,8 @@ class ProgressObserver:
     def __init__(self, events: EventBus | None, *, capacity: int = OBSERVED_OUTPUTS) -> None:
         self.events = events
         self.capacity = capacity
-        self._seen: OrderedDict[str, str] = OrderedDict()
+        #: Per output: the last progress seen, as JSON, and whether it was settled.
+        self._seen: OrderedDict[str, tuple[str, bool]] = OrderedDict()
         self._lock = threading.Lock()
 
     def started(self, meta: OutputMeta) -> None:
@@ -429,14 +430,19 @@ class ProgressObserver:
         if progress is None:
             return
         fingerprint = progress.model_dump_json()
+        # Compare, decide and record under one hold of the lock, so two reads of the
+        # same output racing each other (two tabs polling) cannot both decide they are
+        # the first to see it settled. Only the publishing happens outside it.
+        kinds: list[Literal["print.progress", "print.settled"]] = []
         with self._lock:
             previous = self._seen.pop(meta.id, None)
-            self._seen[meta.id] = fingerprint
+            self._seen[meta.id] = (fingerprint, progress.settled)
             while len(self._seen) > self.capacity:
                 self._seen.popitem(last=False)
-        if fingerprint == previous:
-            return
-        emit(self.events, PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug))
-        was_settled = previous is not None and PrintProgress.model_validate_json(previous).settled
-        if progress.settled and not was_settled:
-            emit(self.events, PrintEvent(kind="print.settled", output_id=meta.id, slug=meta.slug))
+            if previous is None or previous[0] != fingerprint:
+                kinds.append("print.progress")
+                was_settled = previous is not None and previous[1]
+                if progress.settled and not was_settled:
+                    kinds.append("print.settled")
+        for kind in kinds:
+            emit(self.events, PrintEvent(kind=kind, output_id=meta.id, slug=meta.slug))

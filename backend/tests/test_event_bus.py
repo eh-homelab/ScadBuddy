@@ -320,6 +320,39 @@ def test_starting_a_print_is_progress_and_forgets_what_was_seen() -> None:
     assert [e.kind for e in seen] == ["print.progress", "print.progress", "print.settled"]
 
 
+@pytest.mark.parametrize("distinct", [False, True], ids=["same-read", "different-reads"])
+def test_concurrent_reads_publish_settled_exactly_once(distinct: bool) -> None:
+    """Several pollers of one output finding it settled at the same moment: whichever
+    order they land in, one of them is first and only that one publishes it."""
+    bus = InProcessEventBus()
+    seen = _record(bus)
+    observer = ProgressObserver(bus)
+    meta = _meta()
+    observer.observe(meta, _progress("running"))
+    seen.clear()
+    readers = 16
+    barrier = threading.Barrier(readers)
+
+    def read(index: int) -> None:
+        progress = _progress("done", settled=True)
+        if distinct:
+            # Settled, but not byte-identical: each read differs in a detail.
+            progress = progress.model_copy(update={"copies_completed": index})
+        barrier.wait()
+        for _ in range(50):
+            observer.observe(meta, progress)
+
+    threads = [threading.Thread(target=read, args=(index,)) for index in range(readers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert [e.kind for e in seen].count("print.settled") == 1
+    if not distinct:
+        assert [e.kind for e in seen] == ["print.progress", "print.settled"]
+
+
 def test_the_observer_remembers_a_bounded_number_of_outputs() -> None:
     observer = ProgressObserver(None, capacity=2)
     for index in range(5):
