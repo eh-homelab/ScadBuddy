@@ -33,7 +33,10 @@ mkdir -p "$OUT"
 UPLOADS=(_scadbuddy_solid_asset_0123456789abcdef.svg _scadbuddy_solid_asset_fedcba9876543210.png)
 cp sample-lattice.svg "${UPLOADS[0]}"
 cp sample-leaf.png "${UPLOADS[1]}"
-trap 'rm -f "${UPLOADS[@]}"' EXIT
+# ".." inside a bare name cannot traverse, so it must be read like any other.
+DOTDOT=cat..v2.svg
+cp sample-cat.svg "$DOTDOT"
+trap 'rm -f "${UPLOADS[@]}" "$DOTDOT"' EXIT
 
 # The text needs the fonts image; build it from ScadBuddy's backend
 # Dockerfile when it is missing (as the name-keychain script does).
@@ -77,6 +80,7 @@ CASES=(
     "missing-outline|base_color,border_color|shape=\"custom_mask\";mask_file=\"no-such-file.svg\";label=\"\";overlay_file=\"\""
     "missing-overlay|base_color,border_color,text_color,bead_color,bead_color_2|overlay_file=\"no-such-file.png\";overlay_type=\"image_threshold\""
     "refused-parent|base_color,border_color,text_color,bead_color,bead_color_2|mask_file=\"../model.scad\";overlay_file=\"/etc/hostname\""
+    "dotdot-name-read|base_color,border_color|shape=\"custom_mask\";mask_file=\"cat..v2.svg\";label=\"\";overlay_file=\"\""
     "refused-subdir|base_color,border_color|shape=\"custom_mask\";mask_file=\"sub/x.svg\";overlay_file=\".hidden.svg\";label=\"\""
     "upload-names|base_color,border_color,overlay_color|shape=\"classic\";mask_file=\"_scadbuddy_solid_asset_0123456789abcdef.svg\";overlay_file=\"_scadbuddy_solid_asset_fedcba9876543210.png\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
     "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"image_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
@@ -384,6 +388,10 @@ for line in open(os.path.join(OUT, "cases.txt")):
         for key in ("mask_file", "overlay_file"):
             if p[key]:
                 check(name, ('NOTE: %s "%s" ignored' % (key, p[key])) in log, "%s %r is refused with a NOTE" % (key, p[key]))
+
+    if name == "dotdot-name-read":
+        check(name, ('NOTE: mask_file "%s" ignored' % p["mask_file"]) not in log and "Can't open" not in log,
+              "a bare name containing '..' (%r) is accepted and read" % p["mask_file"])
 
     if name == "upload-names":
         opened = "Can't open" in log or "couldn't be opened" in log

@@ -202,9 +202,10 @@ so on the command line, in the OpenSCAD GUI or on MakerWorld, put the file
 next to `model.scad` and type its **bare name** (as `verify.sh` does with the
 samples).
 
-**Only bare names are read.** A value containing `/` or `\`, starting with `.`,
-or containing `..` (e.g. `../model.scad`, `/etc/hostname`, `sub/x.svg`) is
-refused: the model logs `NOTE: mask_file "..." ignored ...` and never calls
+**Only bare names are read.** A value containing `/` or `\`, or starting with
+`.` (e.g. `../model.scad`, `/etc/hostname`, `sub/x.svg`, `.hidden.svg`) is
+refused. A `..` elsewhere in a bare name (`cat..v2.svg`) has no directory to
+climb out of and is read normally. For a refused name the model logs `NOTE: mask_file "..." ignored ...` and never calls
 `import()` / `surface()` on it, so a parameter cannot read files outside the
 model directory.
 
@@ -267,7 +268,7 @@ tie bars; ScadBuddy renders once more per colour for the closed parts.
 ## Verifying
 
 ```bash
-./verify.sh                      # 30 cases, about 80 s
+./verify.sh                      # 31 cases, about 80 s
 ONLY='corner|missing' ./verify.sh    # a subset by name regex
 ```
 
@@ -298,7 +299,7 @@ files, refused names (`../model.scad`, `/etc/hostname`, `sub/x.svg`,
   the classic `width` x `length`); refused names are never opened and are
   logged with a NOTE.
 
-Last run: `OK: all cases passed` (30 cases, 352 checks).
+Last run: `OK: all cases passed` (31 cases, 363 checks).
 
 ## Upload widget (#204)
 
