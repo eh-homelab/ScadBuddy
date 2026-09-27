@@ -17,6 +17,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from pydantic import BaseModel, ValidationError
@@ -67,6 +69,12 @@ class PreviewStore:
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
+        #: Serialises every write and drop, store-wide. A render finishing and a
+        #: thumbnail being set are separate threads; without this, a drop landing
+        #: between a render's "still wanted?" check and its write -- or between its
+        #: image and its record -- leaves a record with no image. Writes are rare
+        #: and small, so one lock costs nothing and keeps no key per model.
+        self._lock = threading.Lock()
 
     def record(self, slug: str) -> PreviewRecord | None:
         path = self.paths.model_preview_record(slug)
@@ -97,25 +105,54 @@ class PreviewStore:
             return None
         return record.key[:PREVIEW_ID_LENGTH]
 
-    def write(self, slug: str, key: str, png: bytes) -> None:
-        """Keep ``png`` as the preview rendered from ``key``. The image goes first, so
-        a record never names a render whose image is not there yet."""
-        self.paths.previews.mkdir(parents=True, exist_ok=True)
-        _write_atomic(self.paths.model_preview(slug), png)
-        self._write_record(slug, PreviewRecord(key=key, ok=True, rendered_at=_now()))
+    def write(
+        self, slug: str, key: str, png: bytes, *, wanted: Callable[[], bool] | None = None
+    ) -> bool:
+        """Keep ``png`` as the preview rendered from ``key``, if ``wanted()`` still
+        says so -- asked under the lock, so no drop can land between the answer and
+        the write. The image goes first, so a record never names an image that is
+        not there yet. False when nothing was written."""
+        with self._lock:
+            if wanted is not None and not wanted():
+                return False
+            self.paths.previews.mkdir(parents=True, exist_ok=True)
+            _write_atomic(self.paths.model_preview(slug), png)
+            self._write_record(slug, PreviewRecord(key=key, ok=True, rendered_at=_now()))
+            return True
 
-    def record_failure(self, slug: str, key: str, error: str) -> None:
-        """No preview for ``key``, and why -- so the same source is not tried again."""
-        self.paths.previews.mkdir(parents=True, exist_ok=True)
-        self.paths.model_preview(slug).unlink(missing_ok=True)
-        self._write_record(slug, PreviewRecord(key=key, ok=False, error=error, rendered_at=_now()))
+    def record_failure(
+        self, slug: str, key: str, error: str, *, wanted: Callable[[], bool] | None = None
+    ) -> bool:
+        """No preview for ``key``, and why -- so the same source is not tried again.
+        ``wanted`` as for :meth:`write`."""
+        with self._lock:
+            if wanted is not None and not wanted():
+                return False
+            self.paths.previews.mkdir(parents=True, exist_ok=True)
+            self.paths.model_preview(slug).unlink(missing_ok=True)
+            record = PreviewRecord(key=key, ok=False, error=error, rendered_at=_now())
+            self._write_record(slug, record)
+            return True
 
     def drop(self, slug: str) -> None:
-        for path in (self.paths.model_preview(slug), self.paths.model_preview_record(slug)):
-            try:
-                path.unlink(missing_ok=True)
-            except OSError:
-                logger.exception("could not remove a preview", extra={"path": str(path)})
+        with self._lock:
+            for path in (self.paths.model_preview(slug), self.paths.model_preview_record(slug)):
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("could not remove a preview", extra={"path": str(path)})
+
+    def current(self, slug: str, key: str) -> bool:
+        """Whether the preview on record was made -- or failed -- from ``key``.
+
+        A record that says it rendered but whose image is gone is not current: it
+        would otherwise be trusted for as long as the source stays the same, and the
+        model would never get its preview back.
+        """
+        record = self.record(slug)
+        if record is None or record.key != key:
+            return False
+        return not record.ok or self.paths.model_preview(slug).is_file()
 
     def _write_record(self, slug: str, record: PreviewRecord) -> None:
         payload = json.dumps(record.model_dump(mode="json"), indent=2) + "\n"

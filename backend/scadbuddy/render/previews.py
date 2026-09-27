@@ -212,11 +212,17 @@ class PreviewScheduler:
             )
             # Recorded against this source, so it is not tried again until the
             # source changes: a model that cannot render must not loop.
-            if await asyncio.to_thread(self._still_wanted, slug, key):
-                await asyncio.to_thread(self.store.record_failure, slug, key, reason)
+            await asyncio.to_thread(
+                lambda: self.store.record_failure(
+                    slug, key, reason, wanted=lambda: self._still_wanted(slug, key)
+                )
+            )
             return True
-        if await asyncio.to_thread(self._still_wanted, slug, key):
-            await asyncio.to_thread(self.store.write, slug, key, png)
+        # Re-checked under the store's lock, so a thumbnail set or a delete landing
+        # while this finishes cannot leave a record behind without its image.
+        await asyncio.to_thread(
+            lambda: self.store.write(slug, key, png, wanted=lambda: self._still_wanted(slug, key))
+        )
         return True
 
     def _plan(self, slug: str) -> str | None:
@@ -234,10 +240,7 @@ class PreviewScheduler:
             self.store.drop(slug)
             return None
         key = source_key(self.store.paths, slug)
-        if key is None:
-            return None
-        record = self.store.record(slug)
-        if record is not None and record.key == key:
+        if key is None or self.store.current(slug, key):
             return None
         return key
 

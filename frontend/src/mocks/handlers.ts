@@ -672,10 +672,12 @@ export const handlers = [
       origin: 'mine',
       origin_url: null,
       // #179: the copy is the upstream's directory, so its thumbnail.png and
-      // README.md come too; its outputs, and so any plate fallback, do not.
+      // README.md come too; its outputs, and so any plate fallback, do not -- nor
+      // its default-render preview, a derived file the copy gets rendered afresh.
       has_thumbnail: upstream.thumbnail_source === 'model',
       thumbnail_source: upstream.thumbnail_source === 'model' ? 'model' : null,
       thumbnail_output_id: null,
+      thumbnail_preview_id: null,
       updated_at: version.date,
       version: version.commit,
       upstream: {
@@ -878,7 +880,13 @@ export const handlers = [
       slug,
       `Set ${slug} thumbnail`,
       [{ status: had ? 'M' : 'A', path: 'thumbnail.png' }],
-      { has_thumbnail: true, thumbnail_source: 'model', thumbnail_output_id: null },
+      // As `write_thumbnail`: an image of its own drops any default-render preview.
+      {
+        has_thumbnail: true,
+        thumbnail_source: 'model',
+        thumbnail_output_id: null,
+        thumbnail_preview_id: null,
+      },
     )
     return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
   }),

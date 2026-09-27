@@ -224,6 +224,23 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
     assert _model(client)["thumbnail_source"] == "preview"
 
 
+def test_a_record_left_without_its_image_is_rendered_again(
+    client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
+) -> None:
+    """The torn state a drop racing a write could once leave: an ok record for the
+    current source with no image. It must not be trusted as current forever."""
+    _create(client)
+    settle(client, state)
+    paths.model_preview(SLUG).unlink()
+    assert _model(client)["thumbnail_source"] is None
+
+    state.previews.request(SLUG)
+    settle(client, state)
+
+    assert len(stub.calls) == 2
+    assert _model(client)["thumbnail_source"] == "preview"
+
+
 def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
 ) -> None:

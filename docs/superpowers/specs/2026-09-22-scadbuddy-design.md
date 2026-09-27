@@ -588,7 +588,7 @@ source declares them -- is rendered in the background, and that render's
   metadata edit re-renders nothing. A model is rendered only when its key differs
   from the recorded one. Requests are debounced (2 s) and coalesced per model, so
   a burst of changes is one render. A render whose model changed, was deleted, or
-  gained a thumbnail or an output while it ran is discarded.
+  gained a thumbnail or an output while it ran is discarded. That check and the write run under one store-wide lock that a drop also takes, so a thumbnail set mid-write never leaves a record without its image; and a record whose image is missing anyway counts as no record, so it is rendered again.
 - **Failure.** A render that fails or times out leaves no image and is logged. Its
   key is recorded as failed, so the same source is never retried, at boot
   included. The next source edit tries again.

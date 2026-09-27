@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from pathlib import Path
 
 import pytest
@@ -96,4 +97,55 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(paths: DataPaths) ->
     catalogue.write_thumbnail(SLUG, b"own")
     assert catalogue.thumbnail_source(SLUG).source == "model"
     assert catalogue.thumbnail(SLUG) == b"own"
+    assert store.image(SLUG) is None
+
+
+def test_a_write_no_longer_wanted_writes_nothing(paths: DataPaths) -> None:
+    store = PreviewStore(paths)
+
+    assert store.write(SLUG, "a" * 64, b"png", wanted=lambda: False) is False
+    assert store.record_failure(SLUG, "a" * 64, "boom", wanted=lambda: False) is False
+    assert store.record(SLUG) is None
+    assert store.image(SLUG) is None
+
+
+def test_a_record_whose_image_is_gone_is_not_current(paths: DataPaths) -> None:
+    store = PreviewStore(paths)
+    store.write(SLUG, "a" * 64, b"png")
+    assert store.current(SLUG, "a" * 64)
+
+    paths.model_preview(SLUG).unlink()
+
+    assert not store.current(SLUG, "a" * 64)
+    # A failure never had an image; it stays current, so it is not retried.
+    store.record_failure(SLUG, "b" * 64, "boom")
+    assert store.current(SLUG, "b" * 64)
+    assert not store.current(SLUG, "c" * 64)
+
+
+def test_a_drop_cannot_land_between_the_check_and_the_write(paths: DataPaths) -> None:
+    """The render's liveness check and its write are one step against a drop: a drop
+    that arrives mid-write waits, then removes both files -- never just the image."""
+    store = PreviewStore(paths)
+    checking = threading.Event()
+    release = threading.Event()
+
+    def wanted() -> bool:
+        checking.set()
+        release.wait(5)
+        return True
+
+    writer = threading.Thread(target=lambda: store.write(SLUG, "a" * 64, b"png", wanted=wanted))
+    writer.start()
+    assert checking.wait(5)
+    dropper = threading.Thread(target=lambda: store.drop(SLUG))
+    dropper.start()
+    dropper.join(0.1)
+    assert dropper.is_alive()  # held behind the write in progress
+
+    release.set()
+    writer.join(5)
+    dropper.join(5)
+
+    assert store.record(SLUG) is None
     assert store.image(SLUG) is None

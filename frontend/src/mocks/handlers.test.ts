@@ -2,7 +2,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
-import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
+import { BUILTIN_PREVIEW_ID, BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -280,7 +280,11 @@ describe('mock PUT /models/:slug/thumbnail, as _require_png holds it', () => {
   it('sets a PNG within the limit', async () => {
     const { status, body } = await put(png())
     expect(status).toBe(200)
-    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+    expect(body).toMatchObject({
+      has_thumbnail: true,
+      thumbnail_source: 'model',
+      thumbnail_preview_id: null,
+    })
   })
 
   it.each([
@@ -339,6 +343,26 @@ describe('mock API: a built-in template (#192)', () => {
     })
     expect(response.status).toBe(403)
     expect(await response.json()).toMatchObject({ status: 403, detail: refusal })
+  })
+
+  it('lists its default-render preview, having no thumbnail of its own', async () => {
+    const builtin = await api.getModel(BUILTIN_SLUG)
+    expect(builtin).toMatchObject({
+      has_thumbnail: true,
+      thumbnail_source: 'preview',
+      thumbnail_output_id: null,
+      thumbnail_preview_id: BUILTIN_PREVIEW_ID,
+    })
+    expect(api.modelThumbnailUrl(builtin)).toContain(BUILTIN_PREVIEW_ID)
+  })
+
+  it('does not hand its preview to a duplicate, which is rendered afresh', async () => {
+    const copy = await api.duplicateModel(BUILTIN_SLUG, 'My Keychain')
+    expect(copy).toMatchObject({
+      has_thumbnail: false,
+      thumbnail_source: null,
+      thumbnail_preview_id: null,
+    })
   })
 
   it('still serves every read', async () => {
