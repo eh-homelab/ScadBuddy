@@ -467,3 +467,27 @@ async def test_an_earlier_plate_failing_is_the_prints_failure(bambuddy: Bambuddy
         (1, 51, "failed"),
         (2, 52, "done"),
     ]
+
+
+@respx.mock
+async def test_a_failed_plate_beside_an_unsettled_one_keeps_polling(
+    bambuddy: BambuddyClient,
+) -> None:
+    """The failure is reported at once, but the print is not settled while a sibling
+    plate is still printing: that plate can still finish (#260)."""
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(
+            200, json={"id": 51, "status": "failed", "error_message": "AMS slot empty"}
+        )
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "printing"})
+    )
+    progress = await progress_for(bambuddy, plates_meta())
+    assert progress is not None
+    assert progress.stage == "failed"
+    assert progress.settled is False
+    assert progress.error_message == "AMS slot empty"
+    assert progress.copies_failed == 1
+    assert progress.copies_in_progress == 1

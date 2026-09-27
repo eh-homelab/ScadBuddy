@@ -1499,7 +1499,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
             /** Waiting Reason */
             waiting_reason?: string | null;
         };
@@ -2753,7 +2753,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
