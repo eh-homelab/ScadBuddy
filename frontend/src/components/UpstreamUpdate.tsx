@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router'
 import { ApiError, api } from '../api/client'
-import type { MergePreview, UpstreamState, UpstreamStatus } from '../api/types'
+import type { MergePreview, UpstreamState } from '../api/types'
 import { countConflicts, resolvePath } from '../lib/upstream'
 import { useAsync } from '../lib/useAsync'
 import { UnifiedDiff } from './UnifiedDiff'
@@ -162,7 +162,7 @@ function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
       {status.data && !preview && (
         <p className="text-[13px] text-muted">There is no update to take any more.</p>
       )}
-      {status.data && preview && <UpdatePreview status={status.data} preview={preview} />}
+      {status.data && preview && <UpdatePreview preview={preview} />}
       {error && (
         <p role="alert" className="mt-3 text-[13px] text-warn">
           {error}
@@ -172,13 +172,7 @@ function UpdateDialog({ slug, onClose, onDone }: DialogProps) {
   )
 }
 
-function UpdatePreview({ status, preview }: { status: UpstreamStatus; preview: MergePreview }) {
-  const { upstream, revision } = status
-  const diff = useAsync(
-    // The upstream's own history: what changed there between `base` and now.
-    () => api.getVersionDiff(upstream.id, revision ?? '', upstream.base ?? undefined),
-    [upstream.id, revision, upstream.base],
-  )
+function UpdatePreview({ preview }: { preview: MergePreview }) {
   const conflicts = countConflicts(preview.merged)
 
   return (
@@ -186,17 +180,8 @@ function UpdatePreview({ status, preview }: { status: UpstreamStatus; preview: M
       <section>
         <h3 className="mb-1.5 text-[13px] font-medium">Upstream changes</h3>
         <div className="max-h-56 overflow-y-auto rounded-[6px] border border-line bg-surface-2">
-          {diff.loading && (
-            <p className="flex items-center gap-2 p-3 text-[12px] text-muted">
-              <Spinner /> Loading the diff
-            </p>
-          )}
-          {diff.error && (
-            <p role="alert" className="p-3 text-[12px] text-warn">
-              Could not load the diff: {diff.error.message}
-            </p>
-          )}
-          {diff.data && <UnifiedDiff patch={diff.data.patch} />}
+          {/* From the upstream at `base`, where it lived then, to now (#236). */}
+          <UnifiedDiff patch={preview.patch} />
         </div>
       </section>
 

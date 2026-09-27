@@ -566,6 +566,35 @@ class ModelHistory:
             args += ["--", slug]
         return self._out(*args)
 
+    def diff_dirs(
+        self,
+        base: str | None,
+        base_path: str,
+        head: str,
+        head_path: str,
+        *,
+        label: str,
+        exclude: tuple[str, ...] = (),
+    ) -> str:
+        """A unified patch from ``base_path`` at ``base`` to ``head_path`` at ``head``.
+
+        The two directories are compared as trees, so a directory that moved between
+        the revisions diffs file by file rather than as one removed and one added.
+        Headers name ``<label>/...``; a side that does not exist is the empty tree.
+        """
+        args = ["diff", "--no-color", f"--src-prefix=a/{label}/", f"--dst-prefix=b/{label}/"]
+        args += [self._tree(base, base_path), self._tree(head, head_path)]
+        if exclude:
+            args += ["--", ".", *(f":(exclude){name}" for name in exclude)]
+        return self._out(*args)
+
+    def _tree(self, commit: str | None, path: str) -> str:
+        if commit is None:
+            return EMPTY_TREE
+        completed = self._run("rev-parse", "--verify", "--quiet", f"{commit}:{path}", check=False)
+        assert isinstance(completed.stdout, str)
+        return completed.stdout.strip() if completed.returncode == 0 else EMPTY_TREE
+
     def diff_files(self, revisions: RevisionRange, slug: str | None = None) -> list[FileChange]:
         """The ``--name-status`` summary for the same pair :meth:`diff` patches."""
         args = ["diff", "--name-status", "--no-renames", revisions.base, revisions.head]

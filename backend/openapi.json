@@ -1569,6 +1569,11 @@
             "title": "Ours",
             "type": "string"
           },
+          "patch": {
+            "description": "The upstream's own changes since `base`: a unified patch from its directory at `base` (at `upstream.path`) to its current one, `model.json` aside",
+            "title": "Patch",
+            "type": "string"
+          },
           "taken": {
             "description": "Other files that follow the upstream: unchanged here since `base`",
             "items": {
@@ -1587,6 +1592,7 @@
           "ours",
           "base",
           "theirs",
+          "patch",
           "merged",
           "clean"
         ],

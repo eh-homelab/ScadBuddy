@@ -1757,6 +1757,11 @@ export interface components {
              */
             ours: string;
             /**
+             * Patch
+             * @description The upstream's own changes since `base`: a unified patch from its directory at `base` (at `upstream.path`) to its current one, `model.json` aside
+             */
+            patch: string;
+            /**
              * Taken
              * @description Other files that follow the upstream: unchanged here since `base`
              */
