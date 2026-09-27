@@ -75,6 +75,7 @@ CASES = [
     ("round-1.3-noloop-name", dict(style="round_chamber", size=1.3, loop=False,
                                    name="Maximilian12")),
     ("name", dict(name="MAYA")),
+    ("mini-long-name", dict(style="keychain_mini", name="Maximilian12")),
 ]
 
 
@@ -252,6 +253,16 @@ for name, ov in CASES:
         check(near(tlo[2], g["Wz"] - INLAY) and near(thi[2], g["Wz"]),
               "name is inlaid flush, z %.3f .. %.3f (expected %.3f .. %.3f)"
               % (tlo[2], thi[2], g["Wz"] - INLAY, g["Wz"]))
+        # Over the chamber, 1.5 mm in from its edge; a long name uses the
+        # whole chord (it used to stop at 1.7 x Rc, leaving it tiny).
+        rmax = max(math.hypot(v[0], v[1]) for t in txt for v in t)
+        room = g["Rc"] + g["t"] - 1.5
+        check(rmax <= room + 0.1, "name within %.2f mm of the chamber centre (reaches %.2f)" % (room, rmax))
+        if len(p["name"]) >= 10:
+            half = (g["Rc"] / 2) / 2
+            chord = 2 * math.sqrt(room ** 2 - half ** 2)
+            check(thi[0] - tlo[0] >= chord - 0.1,
+                  "long name fills the %.2f mm chord (%.2f wide)" % (chord, thi[0] - tlo[0]))
 
     ws, wi, hw, y_f, y_e = g["ws"], g["wi"], g["hw"], g["y_f"], g["y_e"]
     zm = ws + wi / 2

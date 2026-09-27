@@ -39,7 +39,10 @@ CASES=(
     "magnets|magnet_holes=true;screw_holes=true"
     "ultralight|floor_style=\"ultralight\";magnet_holes=true;screw_holes=true"
     "no-lip|units_x=1;units_y=1;height_units=2;stacking_lip=false"
-    "max|units_x=8;units_y=8;height_units=12;divisions_x=8;divisions_y=8;floor_style=\"ultralight\";magnet_holes=true;label_text=\"BIG\""
+    "max|units_x=7;units_y=7;height_units=12;divisions_x=8;divisions_y=8;floor_style=\"ultralight\";magnet_holes=true;label_text=\"BIG\""
+    # 24 wide letters on a 1-unit left tab: shrunk to fit, not clipped.
+    "long-label|units_x=1;label_tab=\"left\";label_text=\"WWWWWWWWWWWWWWWWWWWWWWWW\""
+    "long-label-divided|units_x=3;divisions_x=3;wall=2.4;label_text=\"Resistors 10k 1/4W\""
 )
 
 : > "$OUT/cases.txt"
@@ -51,6 +54,9 @@ for c in "${CASES[@]}"; do
     start=$(date +%s.%N)
     scad "${defs[@]}" -o "$OUT/$name.3mf" model.scad >"$OUT/$name.log" 2>&1 \
         || { cat "$OUT/$name.log"; echo "FAIL: $name did not render"; exit 1; }
+    if grep -qE '^(WARNING|ERROR)' "$OUT/$name.log"; then
+        grep -E '^(WARNING|ERROR)' "$OUT/$name.log"; echo "FAIL: $name rendered with warnings"; exit 1
+    fi
     secs=$(echo "$(date +%s.%N) - $start" | bc)
     printf '%s %s %s\n' "$name" "$secs" "${c#*|}" >> "$OUT/cases.txt"
     printf '==> %-10s %5.1fs\n' "$name" "$secs"
@@ -145,6 +151,7 @@ for name, (secs, p) in cases.items():
     check(abs(max(zs) - min(zs) - wz) <= TOL,
           "Z = %d x 7%s = %.3f" % (hu, " + 3.551 lip" if lip else "", wz))
     check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.4f)" % min(zs))
+    check(wx <= 300 and wy <= 320, "fits the H2C bed, 300 x 320 with both nozzles (%.1f x %.1f)" % (wx, wy))
 
     # Foot bottoms: the z=0 footprint is (n-1) pitches plus one 35.6 mm foot.
     z0 = [v for v in verts if abs(v[2]) <= TOL]
@@ -159,6 +166,36 @@ for name, (secs, p) in cases.items():
         lz = {round(verts[v][2], 3) for t in tris if t[3] == li for v in t[:3]}
         check(lz == {round(top_z, 3)},
               "label's exposed face is the tab top at z=%.2f (got %s)" % (top_z, sorted(lz)))
+        # The label stays on the back-left tab's flat top.
+        wall = float(p.get("wall", 1.2))
+        nx, ny = int(p.get("divisions_x", 1)), int(p.get("divisions_y", 1))
+        ix, iy = wx - 2 * wall, wy - 2 * wall
+        cw, cd = (ix - (nx - 1) * 1.2) / nx, (iy - (ny - 1) * 1.2) / ny
+        tab_w = min(42, cw) if tab == "left" else cw
+        tx0, tx1 = -ix / 2 + 1, -ix / 2 + tab_w - 1
+        ty0 = iy / 2 - min(15.85, cd / 2) + 1
+        ty1 = iy / 2 - ((2.6 - wall + 0.5) if lip else 1)
+        lv = [verts[v] for t in tris if t[3] == li for v in t[:3]]
+        lx0, lx1 = min(v[0] for v in lv), max(v[0] for v in lv)
+        ly0, ly1 = min(v[1] for v in lv), max(v[1] for v in lv)
+        check(lx0 >= tx0 - TOL and lx1 <= tx1 + TOL and ly0 >= ty0 - TOL and ly1 <= ty1 + TOL,
+              "label x %.2f..%.2f y %.2f..%.2f within the tab x %.2f..%.2f y %.2f..%.2f"
+              % (lx0, lx1, ly0, ly1, tx0, tx1, ty0, ty1))
+        # Every letter is there: a clipped label loses its outer letters.
+        text = p["label_text"]
+        if len(set(text)) == 1 and text[0] in "WMVX":
+            parent = {}
+            def find(a):
+                while parent.setdefault(a, a) != a:
+                    parent[a] = parent[parent[a]]
+                    a = parent[a]
+                return a
+            for t in tris:
+                if t[3] == li:
+                    for v in t[1:3]:
+                        parent[find(t[0])] = find(v)
+            n = len({find(v) for t in tris if t[3] == li for v in t[:3]})
+            check(n == len(text), "all %d letters present, none clipped (got %d)" % (len(text), n))
 
     # Holes: a ring of vertices at the hole depth, centred +/-13 mm from a cell centre.
     cx, cy = -(ux - 1) / 2 * PITCH + 13, -(uy - 1) / 2 * PITCH + 13
@@ -170,7 +207,7 @@ for name, (secs, p) in cases.items():
     if p.get("screw_holes") == "true":
         check(len(ring(6.0, 1.5)) >= 8, "3 mm screw hole 6 deep at (+13, +13) from the cell centre")
     if name == "max":
-        check(secs < 60, "8x8x12 renders in under 60 s (%.1fs)" % secs)
+        check(secs < 60, "7x7x12 renders in under 60 s (%.1fs)" % secs)
 
 print("\nstacking (second default bin on top):")
 check(stack.get("20.67") == "empty", "0.02 mm above the seat (z=20.67) the bins do not intersect")

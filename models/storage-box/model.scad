@@ -23,19 +23,19 @@ inner_l = 80; // [20:5:250]
 // Inside width (Y), wall to wall, in mm
 inner_w = 60; // [20:5:250]
 
-// Inside height, floor to rim (sliding lid: floor to the underside of the lid)
+// Inside height in mm, floor to rim (sliding lid: floor to the underside of the lid)
 inner_h = 40; // [10:5:200]
 
-// Wall thickness
+// Wall thickness in mm (dividers too)
 wall = 2; // [1.2:0.2:4]
 
-// Floor thickness (also the thickness of the lid top)
+// Floor thickness in mm (also the thickness of a friction or snap lid's top)
 floor = 1.6; // [1:0.2:4]
 
 // Footprint shape
 shape = "rounded"; // [rectangle, rounded, hexagon, round]
 
-// Inside corner radius (rounded shape only)
+// Inside corner radius in mm (rounded shape only)
 corner_r = 6; // [0:1:30]
 
 // Dividers across the length (walls parallel to Y)
@@ -49,19 +49,19 @@ dividers_y = 0; // [0:1:6]
 // Lid type (sliding needs rectangle or rounded; other shapes get a friction lid)
 lid_type = "friction"; // [none, friction, sliding, snap]
 
-// Lid height, top to the rim it sits on (friction and snap lids)
+// Lid height in mm, top to the rim it sits on (friction and snap lids)
 lid_h = 10; // [4:1:40]
 
-// Clearance between lid and box
+// Clearance in mm per side between lid and box (and the knob peg)
 tolerance = 0.25; // [0.1:0.05:0.6]
 
-// Handle on the lid
+// Handle on the lid (knob: a separate press-in knob on a friction or snap lid)
 handle = "none"; // [none, knob, finger_notch]
 
-// Text inlaid in the lid top (leave empty for none)
+// Text inlaid in the lid top (leave empty for none; long text shrinks to fit the lid)
 lid_text = ""; // 24
 
-// Lid text height in mm
+// Lid text height in mm (the most it will be; long text shrinks)
 lid_text_size = 12; // [5:1:40]
 
 // Lid text typeface
@@ -208,10 +208,26 @@ module slide_plate_local() {
 
 slide_knob_x = s_x0 + 9;
 
+// Shrink-only fit to width w, as in models/name-sign: resize() the text with
+// a hair-thin bar exactly w long, so shorter text is left alone and longer
+// text is scaled down (both axes) to w.
+module fit_x(w) {
+    projection(cut = true) translate([0, 0, -0.5])
+        resize([w, 0, 0], auto = [false, true, false])
+            union() {
+                linear_extrude(1) children();
+                translate([-w / 2, 0, 10]) cube([w, 0.01, 0.01]);
+            }
+}
+
+// Room for sliding-lid text, centred on the plate: clear of the knob or
+// thumb dimple at the open end, 1.5 mm from the edges.
+slide_text_w = 2 * min(s_al + wall - (knob ? 16 : notch ? 17.5 : 1.5), s_x1 - 1.5);
+
 module slide_text_2d() {
     difference() {
         intersection() {
-            text(lid_text, size = lid_text_size, font = font,
+            fit_x(slide_text_w) text(lid_text, size = lid_text_size, font = font,
                  halign = "center", valign = "center");
             offset(delta = -1.5) projection() slide_plate_local();
         }
@@ -233,7 +249,9 @@ module slide_lid_local() {
 
 // ---- box ------------------------------------------------------------------
 
-divider_top = box_h - (plug_lid ? lip_d + 0.5 : 0) - (lid == "sliding" ? slide_t : 0);
+// Dividers stop 0.5 mm short of the lid's lip or the sliding plate, so the
+// lid never rubs on them.
+divider_top = box_h - (plug_lid ? lip_d + 0.5 : 0) - (lid == "sliding" ? slide_t + 0.5 : 0);
 
 module dividers_2d() {
     intersection() {
@@ -277,10 +295,14 @@ module box() {
 lid_top = box_h + lid_h;
 text_y = knob ? -(knob_d / 2 + 2 + lid_text_size / 2) : 0;
 
+// Room for friction/snap lid text: the lid top 1.5 mm in from its edge; a
+// hexagon or oval narrows away from its centre line, so it gets 70 %.
+plug_text_w = (shape == "hexagon" || shape == "round" ? 0.7 : 1) * box_x - 3;
+
 module plug_text_2d() {
     difference() {
         intersection() {
-            translate([0, text_y]) text(lid_text, size = lid_text_size, font = font,
+            translate([0, text_y]) fit_x(plug_text_w) text(lid_text, size = lid_text_size, font = font,
                                         halign = "center", valign = "center");
             shape_off(wall - 1.5);
         }
@@ -332,23 +354,40 @@ module knob_part() {
 
 // ---- plate ------------------------------------------------------------------
 
-plug_x = box_x + gap;
-knob_x = plug_x + box_x / 2 + gap + knob_d / 2;
-slide_dx = box_x / 2 + gap + (slide_rot == 0 ? -s_x0 : s_half);
+// The H2C's bed with both nozzles usable. The lid goes beside the box (+X)
+// when that fits, else behind it (+Y), else beside it with a NOTE: at that
+// size print the box and the lid on separate plates.
+bed = [300, 320];
+slide_right = slide_rot == 0 ? s_x1 - s_x0 : 2 * s_half;   // sliding lid's X extent
+row_w = lid == "none" ? box_x
+      : plug_lid ? 2 * box_x + gap + (knob ? gap + knob_d : 0)
+      : box_x + gap + slide_right;
+col_w = box_x + (knob && plug_lid ? gap + knob_d : 0);
+col_d = 2 * box_y + gap;
+behind = lid != "none" && row_w > bed[0] && col_w <= bed[0] && col_d <= bed[1];
+if (lid != "none" && row_w > bed[0] && !behind)
+    echo(str("NOTE: box and lid are ", round(row_w), " x ", round(box_y),
+             " mm side by side, more than the ", bed[0], " x ", bed[1], " mm bed; print them on separate plates"));
+
+// Lid centre, relative to the box centre.
+lid_off = behind ? [0, box_y + gap] : [box_x + gap, 0];
+knob_off = behind ? [box_x / 2 + gap + knob_d / 2, box_y + gap]
+                  : [2 * box_x + 2 * gap + knob_d / 2 - box_x / 2, 0];
+slide_off = behind ? [0, box_y + gap] : [box_x / 2 + gap + (slide_rot == 0 ? -s_x0 : s_half), 0];
 
 color(box_color) box();
 
 if (plug_lid) {
     color(lid_color) {
-        flip_plug(plug_x) plug_lid_body();
-        if (knob) translate([knob_x, 0, 0]) knob_part();
+        translate(lid_off) flip_plug(0) plug_lid_body();
+        if (knob) translate(knob_off) knob_part();
     }
-    if (has_text) color(lid_text_color) flip_plug(plug_x) plug_lid_text();
+    if (has_text) color(lid_text_color) translate(lid_off) flip_plug(0) plug_lid_text();
 }
 
 if (lid == "sliding") {
-    color(lid_color) translate([slide_dx, 0, 0]) rotate(slide_rot) slide_lid_local();
+    color(lid_color) translate(slide_off) rotate(slide_rot) slide_lid_local();
     if (has_text) color(lid_text_color)
-        translate([slide_dx, 0, slide_t - text_depth]) rotate(slide_rot)
+        translate([slide_off[0], slide_off[1], slide_t - text_depth]) rotate(slide_rot)
             linear_extrude(text_depth) slide_text_2d();
 }

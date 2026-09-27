@@ -48,6 +48,7 @@ D = dict(size=100, thickness=5, style="flat_board", piece_style="classic_xo",
 BOARD, GRID, XC, OC = "#4FC3F7", "#FFFFFF", "#E53935", "#FDD835"
 INLAY, WELL_GAP, WALL, FLOOR, FLANGE, LAND = 1, 2, 4, 2, 1.5, 0.6
 PIECE_GAP, PART_GAP, FN = 4, 8, 64
+BED_W = 300   # H2C with both nozzles
 
 CASES = [
     ("defaults", {}),
@@ -59,6 +60,8 @@ CASES = [
     ("big-loose", dict(size=150, thickness=8, piece_thickness=8, clearance=0.8,
                        style="box_with_storage")),
     ("big-flat", dict(size=150, thickness=8, piece_thickness=8, clearance=0.8)),
+    # 150 mm box and lid used to be 302 mm wide side by side.
+    ("big-box-tight", dict(size=150, clearance=0.2, style="box_with_storage")),
 ]
 
 
@@ -143,7 +146,7 @@ def geo(ov):
     return dict(p=p, S=S, T=T, cl=cl, box=box, lid_w=lid_w, lid_l=lid_l, cell=cell,
                 line_w=line_w, well_d=well_d, piece_d=piece_d, inner_h=inner_h,
                 lid_z=lid_z, box_h=lid_z + T, well_depth=min(2, T - 1.2),
-                lid_x=S / 2 + PART_GAP + lid_w / 2 + FLANGE)
+                lid_x=S / 2 + max(3, min(PART_GAP, BED_W - (S + lid_w + 2 * FLANGE))) + lid_w / 2 + FLANGE)
 
 
 # ---- renders
@@ -209,6 +212,8 @@ for name, ov in CASES:
     top = max(g["box_h"] if g["box"] else T, p["piece_thickness"])
     ex_lo = (-S / 2, -S / 2 - PART_GAP - pd - pitch, 0)
     ex_hi = (right, S / 2, top)
+    check(hi[0] - lo[0] <= BED_W + 0.01,
+          "plate %.1f mm wide fits the %d mm bed" % (hi[0] - lo[0], BED_W))
     if p["piece_style"] == "classic_xo":
         check(all(near(a, b, 0.02) for a, b in zip(lo + hi, ex_lo + ex_hi)),
               "plate bbox %s .. %s == %s .. %s" % (r2(lo), r2(hi), r2(ex_lo), r2(ex_hi)))

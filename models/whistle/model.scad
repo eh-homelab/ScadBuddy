@@ -26,7 +26,7 @@
 // Body shape
 style = "classic_referee"; // [classic_referee:Classic referee, round_chamber:Round pebble, keychain_mini:Keychain mini]
 
-// Scale factor; the windway never goes below 1 mm high
+// Scale factor (1 = a 43 mm long classic whistle); the windway never goes below 1 mm high
 size = 1; // [0.8:0.1:1.5]
 
 // Lanyard loop at the back of the chamber
@@ -34,7 +34,7 @@ loop = true;
 
 /* [Decor] */
 
-// Name inlaid in the upper side, over the chamber (leave empty for none)
+// Name inlaid in the upper side, over the chamber (leave empty for none; it shrinks to fit, so about 6 letters stay legible, fewer on the mini)
 name = ""; // 12
 
 // Typeface (the app fills this dropdown from the fonts installed in the image)
@@ -148,11 +148,14 @@ module fit_x(w) {
             }
 }
 
+// The name shrinks to the chord of the chamber's flat side (1.5 mm in from
+// its edge) across the letters' height.
 name_size = 0.5 * Rc;
+name_w = 2 * sqrt(pow(Rc + t - 1.5, 2) - pow(name_size / 2, 2));
 module name_2d() {
     if (len(name) > 0)
         intersection() {
-            fit_x(1.7 * Rc)
+            fit_x(name_w)
                 text(name, size = name_size, font = font, halign = "center", valign = "center");
             offset(delta = -1.5) difference() { body_2d(); window_2d(); }
         }

@@ -19,7 +19,9 @@ mkdir -p "$OUT"
 # image installs. If the family is missing, derive a throwaway image that has
 # it -- otherwise OpenSCAD silently falls back and text widths change.
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if docker image inspect "$FONTS_IMAGE" >/dev/null 2>&1; then
+    IMAGE="$FONTS_IMAGE"
+elif ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE
@@ -49,6 +51,8 @@ CASES=(
     'cr2032-too-low-for-label|cell="CR2032";stackable=false;height_pct=30'
     'one-cell|cols=1;rows=1;cell="AAA";clearance=1.5'
     'max|cell="D";cols=12;rows=8;height_pct=100;style="solid_block"'
+    'd-crate-overflow|cell="D";cols=12;rows=8'
+    'aa-12x8|cols=12;rows=8'
 )
 
 status=0
@@ -63,6 +67,9 @@ for c in "${CASES[@]}"; do
     docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
         openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad \
         >"$OUT/$name.log" 2>&1 || { echo "  FAIL  openscad exited non-zero (see $OUT/$name.log)"; status=1; continue; }
+    if grep -E 'WARNING|ERROR' "$OUT/$name.log"; then
+        echo "  FAIL  OpenSCAD warnings (see $OUT/$name.log)"; status=1
+    fi
     ms=$(( ($(date +%s%N) - start) / 1000000 ))
     printf '    render %d.%03ds\n' $((ms / 1000)) $((ms % 1000))
     python3 - "$OUT/$name.3mf" "$defs" <<'PY' || status=1
@@ -88,7 +95,10 @@ stack = p["stackable"] == "true"
 t = 1.2 if crate else 1.6
 ow = 3.2 if stack else 2.4
 end_t = ow + 5 if (p["handle_cutouts"] == "true" and not crate) else ow
-cols, rows = int(p["cols"]), int(p["rows"])
+# The model caps the grid to the most cells that fit the 300 x 320 mm plate.
+BED_X, BED_Y = 300, 320
+cols = max(1, min(int(p["cols"]), int((BED_X - 2 * end_t + t) // (cx + t))))
+rows = max(1, min(int(p["rows"]), int((BED_Y - 2 * ow + t) // (cy + t))))
 ex = cols * cx + (cols - 1) * t + 2 * end_t
 ey = rows * cy + (rows - 1) * t + 2 * ow
 grid_top = 1.6 + length * p["height_pct"] / 100
@@ -126,6 +136,7 @@ check(abs(dx - ex) <= TOL, "X %.3f == %.3f" % (dx, ex))
 check(abs(dy - ey) <= TOL, "Y %.3f == %.3f" % (dy, ey))
 check(abs(dz - ez) <= TOL, "Z %.3f == %.3f" % (dz, ez))
 check(abs(min(zs)) <= 1e-3, "sits on z=0 (min z %.4f)" % min(zs))
+check(dx <= BED_X and dy <= BED_Y, "fits the %d x %d mm plate (%.1f x %.1f)" % (BED_X, BED_Y, dx, dy))
 
 # Label: flush in the front (-Y) face, clear of the foot chamfer and the rim.
 if has_label:

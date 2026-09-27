@@ -46,6 +46,12 @@ CASES=(
     'portrait-hexagon-notch|shape="hexagon";inner_l=40;inner_w=120;handle="finger_notch"'
     'max-size|inner_l=250;inner_w=250;inner_h=200;wall=4;floor=4;lid_h=40;corner_r=30;dividers_x=6;dividers_y=6;handle="knob";lid_text="BIG"'
     'min-size|inner_l=20;inner_w=20;inner_h=10;wall=1.2;floor=1;lid_h=4;tolerance=0.6;lid_type="snap"'
+    # Long lid text used to be clipped mid-letter at the lid edge.
+    'long-text-sliding|lid_type="sliding";lid_text="SCREWS AND BOLTS";lid_color="#E0A030"'
+    'long-text-knob|handle="knob";lid_text="SCREWS AND BOLTS";lid_color="#E0A030"'
+    # 150 x 100 friction box + lid used to be 318 mm wide: now the lid goes behind.
+    'wide-lid-behind|inner_l=150;inner_w=100;handle="knob";dividers_x=2'
+    'wide-sliding-behind|inner_l=200;inner_w=120;lid_type="sliding";dividers_x=3;handle="knob";lid_text="LONG LABEL TEXT HERE"'
 )
 
 status=0
@@ -89,6 +95,10 @@ box_h = fl + H + (2 if lid == "sliding" else 0)
 lip_d = min(6, H / 2)
 gap, knob_d, knob_h, slide_t = 10, 18, 8, 2
 
+g = min(max(wall / 2, p["tolerance"] + 0.4), wall - 0.4)
+sl, sw = max(L, W), min(L, W)
+s_x0 = -(sl / 2 + wall)
+s_x1 = sl / 2 + g - p["tolerance"]
 if lid == "none":
     ex = box_x
     ez = box_h
@@ -96,15 +106,26 @@ elif plug:
     ex = 2 * box_x + gap + (gap + knob_d if knob else 0)
     ez = max(box_h, p["lid_h"] + lip_d, knob_h + fl if knob else 0)
 else:
-    g = min(max(wall / 2, p["tolerance"] + 0.4), wall - 0.4)
-    sl, sw = max(L, W), min(L, W)
     if L >= W:
-        lid_x = (sl / 2 + wall) + (sl / 2 + g - p["tolerance"])
+        lid_x = s_x1 - s_x0
     else:
         lid_x = 2 * (sw / 2 + g - p["tolerance"])
     ex = box_x + gap + lid_x
     ez = max(box_h, slide_t + (5 if knob else 0))
 ey = box_y
+# The lid goes behind the box (+Y) when beside it would overflow the 300 mm
+# width of the H2C bed and behind fits 300 x 320.
+BED_X, BED_Y = 300, 320
+col_w = box_x + (gap + knob_d if knob and plug else 0)
+behind = lid != "none" and ex > BED_X and col_w <= BED_X and 2 * box_y + gap <= BED_Y
+if behind:
+    ex = col_w
+    if plug:
+        ey = 2 * box_y + gap
+    else:
+        # A sliding lid's far edge: its half-width (slides along X) or its
+        # closed end (slides along Y), from the lid's centre.
+        ey = box_y / 2 + box_y + gap + (sw / 2 + g - p["tolerance"] if L >= W else s_x1)
 
 colours = [p["box_color"]]
 if lid != "none":
@@ -140,6 +161,33 @@ check(abs(dx - ex) <= TOL, "X %.3f == %.3f" % (dx, ex))
 check(abs(dy - ey) <= TOL, "Y %.3f == %.3f" % (dy, ey))
 check(abs(dz - ez) <= TOL, "Z %.3f == %.3f" % (dz, ez))
 check(abs(min(zs)) <= 1e-3, "sits on z=0 (min z %.4f)" % min(zs))
+if ex <= BED_X and ey <= BED_Y:
+    check(True, "plate %.0f x %.0f fits the %d x %d bed%s"
+          % (ex, ey, BED_X, BED_Y, " (lid behind the box)" if behind else ""))
+elif not behind:
+    print("  note  plate %.0f x %.0f is larger than the bed at any layout (the model echoes a NOTE)" % (ex, ey))
+
+# Dividers stop 0.5 mm below the lid's lip or sliding plate.
+if (p.get("dividers_x", 0) or p.get("dividers_y", 0)) and lid != "none":
+    top = box_h - (lip_d + 0.5 if plug else slide_t + 0.5)
+    bi = [i for i in named if mats[i][1] == p["box_color"].upper()][0]
+    # Horizontal faces of the box part over the first divider, inside the
+    # cavity and below the rim: the divider's top.
+    nx, ny = int(p.get("dividers_x", 0)), int(p.get("dividers_y", 0))
+    if nx:
+        on = lambda x, y: abs(x - (-L / 2 + L / (nx + 1))) <= wall / 2 + 0.01 and abs(y) < W / 2 - 0.02
+    else:
+        on = lambda x, y: abs(y - (-W / 2 + W / (ny + 1))) <= wall / 2 + 0.01 and abs(x) < L / 2 - 0.02
+    dz = []
+    for t in tris:
+        if t[3] != bi:
+            continue
+        a, b, c = (verts[v] for v in t[:3])
+        if abs(a[2] - b[2]) < 1e-4 and abs(a[2] - c[2]) < 1e-4 and fl + 0.1 < a[2] < box_h - 0.01 \
+                and on((a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3):
+            dz.append(a[2])
+    check(dz and abs(max(dz) - top) <= 1e-3,
+          "dividers stop at z=%.2f, 0.5 mm under the lid (got %.3f)" % (top, max(dz) if dz else -1))
 
 # Lid text: on the bed face of a flipped plug lid, on the top face of a
 # sliding lid -- visible from above once the lid is on the box either way.
@@ -147,6 +195,16 @@ if lid != "none" and p["lid_text"]:
     ti = [i for i in named if mats[i][1] == p["lid_text_color"].upper()]
     if ti:
         tz = [verts[v][2] for t in tris if t[3] == ti[0] for v in t[:3]]
+        tx = [verts[v][0] for t in tris if t[3] == ti[0] for v in t[:3]]
+        if plug:
+            room = (0.7 if p["shape"] in ("hexagon", "round") else 1) * box_x - 3
+        else:
+            reserve = 16 if knob else 17.5 if p["handle"] == "finger_notch" else 1.5
+            room = 2 * min(sl / 2 + wall - reserve, s_x1 - 1.5)
+        if L >= W or plug:
+            # Along X; 0.1 mm slack because halign=center centres the advance, not the ink.
+            check(max(tx) - min(tx) <= room + 0.1,
+                  "lid text %.2f mm wide fits its %.2f mm room" % (max(tx) - min(tx), room))
         if plug:
             check(abs(min(tz)) <= 1e-3, "lid text reaches the bed face (min z %.3f)" % min(tz))
         else:
