@@ -48,7 +48,19 @@ cd frontend && pnpm exec msw init public --save                         # public
 (without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh`, and the `.github/scripts/*.test.sh` suites.
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, and the `.github/scripts/*.test.sh`
+suites.
+
+Template checks (the `models` job): each `models/<slug>/verify.sh` the PR touches, or all
+of them when the Dockerfile, `ci.yml` or the selector/runner scripts change, and always on
+push to main and the weekly schedule. Run the same locally, in the Dockerfile's `base`
+stage (OpenSCAD plus the image's fonts):
+
+```bash
+docker build --target base -t scadbuddy-verify:ci .
+SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-verify:ci \
+  bash -c '.github/scripts/select-models.sh all | .github/scripts/verify-models.sh'
+```
 
 ## Layout
 
@@ -62,7 +74,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
-  (`history.py`), fonts (`fonts.py`, `googlefonts.py`).
+  (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
+  (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
+  template's revision; shipped read-only ones in a template's `presets.json`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and

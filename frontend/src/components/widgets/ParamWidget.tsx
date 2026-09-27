@@ -1,6 +1,7 @@
 import type { FontFamily, Param, ParamValue } from '../../api/types'
 import { BooleanWidget } from './BooleanWidget'
 import { ColorWidget } from './ColorWidget'
+import { FileWidget } from './FileWidget'
 import { FontWidget } from './FontWidget'
 import { NumberWidget } from './NumberWidget'
 import { SelectWidget } from './SelectWidget'
@@ -10,6 +11,8 @@ import { TextWidget } from './TextWidget'
 export interface ParamWidgetProps {
   param: Param
   value: ParamValue
+  /** The model the parameter belongs to: a `file` parameter uploads against it. */
+  slug: string
   fonts: FontFamily[]
   /** Seeds the font picker's preview: the text this model will actually set. */
   sampleText?: string
@@ -21,6 +24,7 @@ export interface ParamWidgetProps {
 export function ParamWidget({
   param,
   value,
+  slug,
   fonts,
   sampleText,
   extruder,
@@ -55,6 +59,8 @@ export function ParamWidget({
           onChange={onChange}
         />
       )
+    case 'file':
+      return <FileWidget param={param} value={String(value)} slug={slug} onChange={onChange} />
     case 'string':
       return <TextWidget param={param} value={String(value)} onChange={onChange} />
   }

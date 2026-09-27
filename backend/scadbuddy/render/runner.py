@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 from collections import deque
@@ -27,6 +28,18 @@ LOG_TAIL_LINES = 50
 
 _ESCAPES = {"\\": "\\\\", '"': '\\"', "\n": "\\n", "\r": "\\r", "\t": "\\t"}
 
+#: What a `file` parameter may hand OpenSCAD: a bare name in the model's directory,
+#: never a path. The render stages uploads under names that match (#204).
+_BARE_FILENAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}")
+
+#: OpenSCAD reports a file it could not read and carries on: `import()` logs an
+#: ERROR, `surface()` a WARNING, and the run still exits 0 whenever anything else
+#: rendered. Measured on 2026.09.23.
+_MISSING_FILE = re.compile(
+    r"^(?:ERROR: Can't open file '(?P<imported>[^']*)'"
+    r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
+)
+
 
 class OpenSCADError(RuntimeError):
     def __init__(self, message: str, log_tail: Sequence[str], returncode: int | None = None):
@@ -48,6 +61,17 @@ class ProcessOutput:
     returncode: int
     log_tail: list[str]
     duration_s: float
+    #: Base names of the files the run could not open, in first-seen order. Read off
+    #: the whole log, not the tail: the message comes early and a long log drops it.
+    missing_files: tuple[str, ...] = ()
+
+
+def missing_file(line: str) -> str | None:
+    """The base name of the file ``line`` says OpenSCAD could not open, if any."""
+    match = _MISSING_FILE.match(line)
+    if match is None:
+        return None
+    return Path(match["imported"] or match["surface"] or "").name
 
 
 def quote_string(value: str) -> str:
@@ -65,6 +89,17 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
         return "true" if value else "false"
+    if parameter.type == "file":
+        # The model's own default is its business; anything else must be a bare
+        # name, so no value -- whatever the route checked -- reaches import() as a path.
+        if not isinstance(value, str) or (
+            value not in ("", parameter.initial)
+            and (not _BARE_FILENAME.fullmatch(value) or ".." in value)
+        ):
+            raise ValueError(
+                f"parameter {parameter.name!r} expects an uploaded file, got {value!r}"
+            )
+        return quote_string(value)
     if parameter.type in ("string", "color", "font"):
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
@@ -96,9 +131,13 @@ def build_defines(schema: CustomizerSchema, params: Mapping[str, ParamValue]) ->
     return defines
 
 
-async def _drain(stream: asyncio.StreamReader, tail: deque[str]) -> None:
-    async for line in stream:
-        tail.append(line.decode("utf-8", "replace").rstrip("\n"))
+async def _drain(stream: asyncio.StreamReader, tail: deque[str], missing: list[str]) -> None:
+    async for raw in stream:
+        line = raw.decode("utf-8", "replace").rstrip("\n")
+        tail.append(line)
+        name = missing_file(line)
+        if name is not None and name not in missing:
+            missing.append(name)
 
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
@@ -121,8 +160,9 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         env=env,
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
+    missing: list[str] = []
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -143,7 +183,12 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     duration = time.monotonic() - started
     if returncode != 0:
         raise OpenSCADError(f"openscad exited with {returncode}", tail, returncode)
-    return ProcessOutput(returncode=returncode, log_tail=list(tail), duration_s=duration)
+    return ProcessOutput(
+        returncode=returncode,
+        log_tail=list(tail),
+        duration_s=duration,
+        missing_files=tuple(missing),
+    )
 
 
 async def export_param_json(scad_path: Path, *, config: Config) -> dict[str, Any]:

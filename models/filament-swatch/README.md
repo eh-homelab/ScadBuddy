@@ -21,7 +21,7 @@ unchanged on MakerWorld and in ScadBuddy.
 |---|---|---|
 | `brand` | `Bambu` | Up to 16 characters. |
 | `material` | `PLA Basic` | Up to 16 characters. In landscape it shares a line with the brand. |
-| `color_name` | `Jade White` | Up to 20 characters. The top line, and the largest. |
+| `color_name` | `Cyan` | Up to 20 characters. The top line, and the largest. |
 | `temp` | `220°C` | Up to 10 characters. DejaVu has the degree sign; with a face that lacks it, write `220C`. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for all lettering. ScadBuddy fills this dropdown from the fonts installed in the container (`// font`). |
 
@@ -47,8 +47,8 @@ The window band is 34 % of the card height in landscape; the cards keep a
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `swatch_color` | `#FFFFFF` | The card. Set it to the filament being catalogued. |
-| `text_color` | `#000000` | Lettering, inlay mode only. |
+| `swatch_color` | `#0086D6` (Bambu PLA Basic Cyan) | The card. Set it to the filament being catalogued. |
+| `text_color` | `#FFFFFF` | Lettering, inlay mode only. |
 
 ## Colours and extruders
 

@@ -1,4 +1,5 @@
 import type {
+  Asset,
   AttachResult,
   BambuddyTargets,
   ConnectionTest,
@@ -11,14 +12,17 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
-  LibraryAdd,
-  LibraryEntry,
+  CatalogueLibrary,
+  LibraryPinRequest,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
   ModelVersion,
   Output,
   OutputPlate,
+  ParamPreset,
+  ParamPresetCreate,
+  ParamPresetUpdate,
   PastedSource,
   ParamValue,
   PipelineChoices,
@@ -192,6 +196,24 @@ export const api = {
   removeReadme: (slug: string) =>
     request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
+  /** The template's shipped presets, then the ones saved on it. */
+  listPresets: (slug: string) => request<ParamPreset[]>(`/models/${seg(slug)}/presets`),
+
+  createPreset: (slug: string, body: ParamPresetCreate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  deletePreset: (slug: string, id: string) =>
+    request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, { method: 'DELETE' }),
+
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
     request<ModelSummary>('/models', { method: 'POST', body: JSON.stringify(body) }),
@@ -229,7 +251,7 @@ export const api = {
       signal,
     }),
 
-  /** Metadata, and since #93 the libraries the model renders with. */
+  /** Metadata: name, description, tags. Libraries have their own routes below. */
   updateModel: (slug: string, patch: ModelPatch) =>
     request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
@@ -281,6 +303,22 @@ export const api = {
       .join('.')
     return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '..' ? '' : `?v=${seg(key)}`}`
   },
+
+  /**
+   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * SHA-256 of what the server kept) is the value the render takes.
+   */
+  uploadAsset: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+  },
+
+  getAsset: (slug: string, id: string) =>
+    request<Asset>(`/models/${seg(slug)}/assets/${seg(id)}`),
+
+  assetContentUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>
@@ -506,12 +544,21 @@ export const api = {
 
   listPlates: () => request<PlateCatalogue>('/plates'),
 
-  /** #93 — the curated catalogue plus anything added by URL, each with its pin. */
-  listLibraries: () => request<LibraryEntry[]>('/libraries'),
+  /** #93 — the curated catalogue: libraries the server knows, each with a suggested ref. */
+  listLibraries: () => request<CatalogueLibrary[]>('/libraries'),
 
-  /** Clones the library at `ref` server-side and pins it in `libraries.lock`. */
-  addLibrary: (body: LibraryAdd) =>
-    request<LibraryEntry>('/libraries', { method: 'POST', body: JSON.stringify(body) }),
+  /**
+   * Clones the library at `ref` server-side and pins the resolved commit into this
+   * model only. `url`/`ref` default to the catalogue's; re-pinning is the same call.
+   */
+  pinModelLibrary: (slug: string, name: string, body: LibraryPinRequest) =>
+    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+
+  unpinModelLibrary: (slug: string, name: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
 
   getSettings: () => request<Settings>('/settings'),
 

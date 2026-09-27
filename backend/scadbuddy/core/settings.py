@@ -10,6 +10,7 @@ from scadbuddy.core.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
+    DEFAULT_LIBRARY_MAX_BYTES,
     DEFAULT_LSP_SESSIONS,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
@@ -38,6 +39,7 @@ class Settings(BaseSettings):
     job_ttl: float = DEFAULT_JOB_TTL
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
+    library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -79,6 +81,7 @@ class Settings(BaseSettings):
             fonts_catalogue_ttl=self.fonts_catalogue_ttl,
             openscad_lsp=self.openscad_lsp,
             lsp_sessions=self.lsp_sessions,
+            library_max_bytes=self.library_max_bytes,
         )
 
     def resolve_seed_models_dir(self) -> Path | None:

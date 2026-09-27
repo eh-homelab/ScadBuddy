@@ -19,6 +19,9 @@ export type ParamType = Param['type']
 export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
 
+/** #204 — an SVG or PNG uploaded for a `// file` parameter; its `id` is the value. */
+export type Asset = Schemas['AssetMeta']
+
 export type ModelSummary = Schemas['ModelRecord']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
@@ -52,16 +55,21 @@ export type RenderAccepted = Schemas['RenderAccepted']
 export type Output = Schemas['OutputDetail']
 export type EditTarget = Schemas['EditTarget']
 
+/** Named parameter sets per template: shipped with it (`template`) or saved (`mine`). */
+export type ParamPreset = Schemas['ParamPreset']
+export type ParamPresetCreate = Schemas['ParamPresetCreate']
+export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
+
 export type FontFamily = Schemas['FontFamily']
 export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
 export type InstalledFamily = Schemas['InstalledFamily']
 
-/** #93 — third-party OpenSCAD libraries, pinned in the models repository's lockfile. */
-export type LibraryEntry = Schemas['LibraryEntry']
-export type LibraryPin = Schemas['LibraryPin']
-export type LibraryAdd = Schemas['LibraryAdd']
+/** #93 — third-party OpenSCAD libraries: the curated catalogue, and each model's own pins. */
+export type CatalogueLibrary = Schemas['CatalogueLibrary']
+export type ModelLibrary = Schemas['ModelLibrary']
+export type LibraryPinRequest = Schemas['LibraryPinRequest']
 export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']

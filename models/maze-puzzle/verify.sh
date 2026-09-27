@@ -52,7 +52,7 @@ TOL = 0.01
 # Defaults and hidden constants, mirrored from model.scad.
 D = dict(cells_x=8, cells_y=8, seed=42, cell_size=10, shape="square",
          wall_height=6, wall_thickness=1.6, mode="open_tray", ball_d=6,
-         markers=True)
+         markers=True, parts="both")
 FLOOR_T, BORDER_EXTRA, BALL_CLEAR, LID_HEAD, INLAY = 2, 1.2, 1.0, 0.5, 0.6
 LID_T, SKIRT_T, LID_FIT, PART_GAP = 1.6, 1.6, 0.25, 8
 FLOOR, WALL, MARKER, LID = "#80DEEA", "#006064", "#FFCA28", "#FFFFFF"
@@ -72,7 +72,15 @@ CASES = [
     ("wide-12x5", dict(cells_x=12, cells_y=5, wall_height=12, seed=5)),
     ("big-ball-widen", dict(ball_d=12, cell_size=6, mode="ball_lid", wall_height=3)),
     ("thick-walls-no-markers", dict(wall_thickness=3, cell_size=16, markers=False)),
+    # Tray + lid side by side would pass the 300 mm width: the lid goes behind.
+    ("lid-behind-15x6", dict(mode="ball_lid", cells_x=15, cells_y=6)),
+    ("round-lid", dict(shape="round", mode="ball_lid", seed=11)),
+    # Neither way fits: the lid is left off with a note; print it on its own.
+    ("lid-too-big-15x15", dict(mode="ball_lid", cells_x=15, cells_y=15, cell_size=16)),
+    ("lid-only-15x15", dict(mode="ball_lid", cells_x=15, cells_y=15, cell_size=16, parts="lid")),
+    ("tray-only", dict(mode="ball_lid", parts="tray")),
 ]
+BED = (300, 320)
 
 
 def scad(v):
@@ -186,7 +194,7 @@ def dims(ov):
     R_out = min(W, H) * p / 2 + p / 4 + B
     return dict(W=W, H=H, t=t, p=p, c=p - t, wh=wh, B=B, rc=B + t / 2, R_out=R_out,
                 skirt_h=min(4, wh - 0.4), round=q("shape") == "round",
-                lid=q("mode") == "ball_lid", markers=q("markers"))
+                lid=q("mode") == "ball_lid", markers=q("markers"), parts=q("parts"))
 
 
 def outline_area(d, grow=0):
@@ -259,24 +267,43 @@ for name, ov in CASES:
     mats, verts, tris = combined[name]
     used = Counter(t[3] for t in tris)
     named = {col for i, (n, col) in enumerate(mats) if n != "Default" and used.get(i)}
-    want = {FLOOR, WALL} | ({MARKER} if d["markers"] else set()) | ({LID} if d["lid"] else set())
+    # Lid placement, as in model.scad: right of the tray, else behind it,
+    # else not on this plate.
+    (ox0, oy0), (ox1, oy1) = outline_box(d)
+    g = LID_FIT + SKIRT_T
+    span = (ox1 - ox0, oy1 - oy0)
+    pair = [2 * span[i] + PART_GAP + 2 * g for i in (0, 1)]
+    lid_at = ((span[0] + g + PART_GAP, 0) if pair[0] <= BED[0] and span[1] + 2 * g <= BED[1]
+              else (0, span[1] + g + PART_GAP) if pair[1] <= BED[1] and span[0] + 2 * g <= BED[0]
+              else None)
+    show_tray = not d["lid"] or d["parts"] != "lid"
+    show_lid = d["lid"] and (d["parts"] == "lid" or (d["parts"] == "both" and lid_at is not None))
+    if d["lid"] and d["parts"] == "both" and lid_at is None:
+        check("the lid is left off" in logs[name], "tray and lid do not fit together: lid left off, with a note")
+    want = (({FLOOR, WALL} | ({MARKER} if d["markers"] else set())) if show_tray else set()) \
+        | ({LID} if show_lid else set())
     check(named == want, "parts are %s (got %s)" % (sorted(want), sorted(named)))
     check(used.get(0, 0) == 0, "Default material has no triangles (got %d)" % used.get(0, 0))
 
-    (ox0, oy0), (ox1, oy1) = outline_box(d)
     z_top = FLOOR_T + d["wh"]
-    elo, ehi = [ox0, oy0, 0.0], [ox1, oy1, z_top]
-    if d["lid"]:
-        g = LID_FIT + SKIRT_T
-        dx = ox1 - ox0 + g + PART_GAP
-        elo[1], ehi[1] = oy0 - g, oy1 + g
-        ehi[0] = ox1 + dx + g
+    lid_h = LID_T + d["skirt_h"]
+    boxes = []
+    if show_tray:
+        boxes.append(((ox0, oy0, 0.0), (ox1, oy1, z_top)))
+    if show_lid:
+        lx, ly = lid_at if show_tray else (0, 0)
+        boxes.append(((ox0 - g + lx, oy0 - g + ly, 0.0), (ox1 + g + lx, oy1 + g + ly, lid_h)))
+    elo = [min(b[0][i] for b in boxes) for i in range(3)]
+    ehi = [max(b[1][i] for b in boxes) for i in range(3)]
     lo, hi = bbox(verts)
     check(all(near(a, b) for a, b in zip(lo + hi, tuple(elo) + tuple(ehi))),
           "bbox %s .. %s == %s .. %s"
           % (tuple(round(x, 2) for x in lo), tuple(round(x, 2) for x in hi),
              tuple(round(x, 2) for x in elo), tuple(round(x, 2) for x in ehi)))
     check(near(lo[2], 0), "sits on z=0 (min z %.3f)" % lo[2])
+    check(hi[0] - lo[0] <= BED[0] and hi[1] - lo[1] <= BED[1],
+          "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
+          % (BED[0], BED[1], hi[0] - lo[0], hi[1] - lo[1]))
 
     # -- closed parts
     parts = {col: read_stl("%s/%s_%s.stl" % (OUT, name, col[1:])) for col in named}
@@ -289,33 +316,34 @@ for name, ov in CASES:
 
     zr = {col: (bbox([v for t in s for v in t])[0][2], bbox([v for t in s for v in t])[1][2])
           for col, s in parts.items()}
-    check(near(zr[FLOOR][0], 0) and near(zr[FLOOR][1], FLOOR_T),
-          "floor z 0 .. %.1f (got %.3f .. %.3f)" % (FLOOR_T, *zr[FLOOR]))
-    check(near(zr[WALL][0], FLOOR_T) and near(zr[WALL][1], z_top),
-          "walls z %.1f .. %.2f (got %.3f .. %.3f)" % (FLOOR_T, z_top, *zr[WALL]))
-    if d["markers"]:
-        check(near(zr[MARKER][0], FLOOR_T - INLAY) and near(zr[MARKER][1], FLOOR_T),
-              "markers inlaid z %.1f .. %.1f (got %.3f .. %.3f)"
-              % (FLOOR_T - INLAY, FLOOR_T, *zr[MARKER]))
-    if d["lid"]:
+    if show_lid:
         check(near(zr[LID][0], 0) and near(zr[LID][1], LID_T + d["skirt_h"]),
               "lid prints upside down, z 0 .. %.2f (got %.3f .. %.3f)"
               % (LID_T + d["skirt_h"], *zr[LID]))
+    if show_tray:
+        check(near(zr[FLOOR][0], 0) and near(zr[FLOOR][1], FLOOR_T),
+              "floor z 0 .. %.1f (got %.3f .. %.3f)" % (FLOOR_T, *zr[FLOOR]))
+        check(near(zr[WALL][0], FLOOR_T) and near(zr[WALL][1], z_top),
+              "walls z %.1f .. %.2f (got %.3f .. %.3f)" % (FLOOR_T, z_top, *zr[WALL]))
+        if d["markers"]:
+            check(near(zr[MARKER][0], FLOOR_T - INLAY) and near(zr[MARKER][1], FLOOR_T),
+                  "markers inlaid z %.1f .. %.1f (got %.3f .. %.3f)"
+                  % (FLOOR_T - INLAY, FLOOR_T, *zr[MARKER]))
 
-    # Wall volume from the echoed maze: outline minus cells minus openings.
-    corridors = len(cells) * d["c"] ** 2 + len(edges) * d["c"] * d["t"]
-    exp_wall = (outline_area(d) - corridors) * d["wh"]
-    if d["lid"]:
-        check(vols[WALL] < exp_wall and exp_wall - vols[WALL] < 0.02 * exp_wall,
-              "walls %.1f mm^3 = maze walls %.1f less the snap groove" % (vols[WALL], exp_wall))
-    else:
-        check(abs(vols[WALL] - exp_wall) <= 0.001 * exp_wall,
-              "walls %.1f mm^3 == outline - corridors of the echoed maze %.1f"
-              % (vols[WALL], exp_wall))
-    exp_floor = outline_area(d) * FLOOR_T - vols.get(MARKER, 0)
-    check(abs(vols[FLOOR] - exp_floor) <= 0.001 * exp_floor,
-          "floor %.1f mm^3 == outline x %.0f mm less the marker inlays (%.1f)"
-          % (vols[FLOOR], FLOOR_T, exp_floor))
+        # Wall volume from the echoed maze: outline minus cells minus openings.
+        corridors = len(cells) * d["c"] ** 2 + len(edges) * d["c"] * d["t"]
+        exp_wall = (outline_area(d) - corridors) * d["wh"]
+        if d["lid"]:
+            check(vols[WALL] < exp_wall and exp_wall - vols[WALL] < 0.02 * exp_wall,
+                  "walls %.1f mm^3 = maze walls %.1f less the snap groove" % (vols[WALL], exp_wall))
+        else:
+            check(abs(vols[WALL] - exp_wall) <= 0.001 * exp_wall,
+                  "walls %.1f mm^3 == outline - corridors of the echoed maze %.1f"
+                  % (vols[WALL], exp_wall))
+        exp_floor = outline_area(d) * FLOOR_T - vols.get(MARKER, 0)
+        check(abs(vols[FLOOR] - exp_floor) <= 0.001 * exp_floor,
+              "floor %.1f mm^3 == outline x %.0f mm less the marker inlays (%.1f)"
+              % (vols[FLOOR], FLOOR_T, exp_floor))
 
     if name == "big-ball-widen":
         check(near(d["p"], 12 + BALL_CLEAR + d["t"]) and "cell_size widened" in logs[name]

@@ -30,10 +30,10 @@ line2 = ""; // 30
 font = "DejaVu Sans:style=Bold"; // font
 
 // Letter height of the first line in mm; auto-fit only ever shrinks it
-text_size = 18; // [6:1:40]
+text_size = 18; // [6:1:100]
 
-// Letter height of the second line in mm
-line2_size = 10; // [4:1:30]
+// Letter height of the second line in mm; auto-fit only ever shrinks it
+line2_size = 10; // [4:1:60]
 
 // Shrink the text so it always fits inside the plate (never enlarges it)
 auto_fit = true;
@@ -55,13 +55,13 @@ thickness = 4; // [2:0.5:10]
 // Corner shape
 corner = "rounded"; // [square:Square, rounded:Rounded, chamfered:Chamfered]
 
-// Corner radius or chamfer size in mm
+// Corner radius or chamfer size in mm (not used with square corners)
 corner_r = 5; // [0:1:20]
 
 // Add a border line around the plate
 border = true;
 
-// Border line width in mm
+// Border line width in mm (only with a border)
 border_w = 2; // [1:0.5:6]
 
 /* [Mounting] */
@@ -69,10 +69,10 @@ border_w = 2; // [1:0.5:6]
 // How the sign is mounted
 mount = "desk_stand"; // [none:None, screw_holes:Screw holes, magnet_pockets:Magnet pockets, hanging_loop:Hanging loop, desk_stand:Desk stand]
 
-// Magnet diameter in mm (the pocket adds clearance)
+// Magnet diameter in mm, for magnet pockets only (the pocket adds 0.2 mm clearance)
 magnet_d = 8; // [5:0.5:15]
 
-// Desk stand lean, degrees from horizontal (90 would be upright)
+// Desk stand lean in degrees from horizontal, for the desk stand only (90 would be upright)
 stand_angle = 70; // [45:5:85]
 
 /* [Colors] */

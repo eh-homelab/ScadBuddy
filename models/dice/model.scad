@@ -19,13 +19,21 @@
 // Edge length of the die in mm
 size = 20; // [12:1:40]
 
-// Radius of the rounded edges (capped at a fifth of the size)
+// Radius of the rounded edges in mm (capped at a fifth of the size); the face artwork shrinks to stay on the flat
 rounding = 2; // [0:0.5:5]
 
 // What goes on the faces
 faces = "pips"; // [pips:Pips, numbers:Numbers, custom_text:Custom words, emoji_shapes:Picture shapes]
 
-// Face 1 word (top), custom words only
+// Typeface for numbers and words
+font = "DejaVu Sans:style=Bold"; // font
+
+// Depth of the face inlays in mm
+inlay_depth = 0.8; // [0.4:0.2:2]
+
+/* [Custom words] */
+
+// Face 1 word (top). Used only when faces is Custom words; empty leaves the face blank
 face_1 = "HOP"; // 8
 
 // Face 2 word (front)
@@ -42,12 +50,6 @@ face_5 = "SING"; // 8
 
 // Face 6 word (bottom)
 face_6 = "DANCE"; // 8
-
-// Typeface for numbers and words
-font = "DejaVu Sans:style=Bold"; // font
-
-// Depth of the face inlays
-inlay_depth = 0.8; // [0.4:0.2:2]
 
 /* [Batch] */
 
@@ -68,9 +70,12 @@ $fn = 48;
 
 part_gap = 6;                       // gap between dice on the plate
 r = min(rounding, size / 5);        // effective edge radius
-content = size * 0.72;              // face artwork box
-pip_step = size * 0.25;             // pip grid spacing
-pip_d = size * 0.17;                // pip diameter
+// Artwork is drawn for a 0.72 x size box and shrunk, when the rounding eats
+// into the flat of the face, so it never wraps over a rounded edge.
+art_fit = min(1, 0.92 * (size - 2 * r) / (0.72 * size));
+content = size * 0.72 * art_fit;    // face artwork box
+pip_step = size * 0.25 * art_fit;   // pip grid spacing
+pip_d = size * 0.17 * art_fit;      // pip diameter
 words = [face_1, face_2, face_3, face_4, face_5, face_6];
 shapes = ["heart", "star", "moon", "sun", "cloud", "lightning"];
 
@@ -109,10 +114,10 @@ module fit_x(w) {
 module word_2d(s) {
     if (len(s) > 0)
         fit_x(content)
-            text(s, size = size * 0.26, font = font, halign = "center", valign = "center");
+            text(s, size = size * 0.26 * art_fit, font = font, halign = "center", valign = "center");
 }
 
-module number_2d(k) {
+module number_2d(k) scale(art_fit) {
     text(str(k), size = size * 0.5, font = font, halign = "center", valign = "center");
     // Underline the 6 so it cannot be read as a 9.
     if (k == 6) translate([0, -size * 0.34]) offset(r = size * 0.02)

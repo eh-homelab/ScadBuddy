@@ -21,16 +21,16 @@
 
 /* [Leaf] */
 
-// Width of each leaf, from the pin axis to its outer edge
+// Width of each leaf in mm, from the pin axis to its outer edge
 leaf_w = 30; // [15:1:80]
 
-// Length of the hinge along the pin axis
+// Length of the hinge along the pin axis in mm
 leaf_l = 40; // [20:5:150]
 
-// Leaf thickness
+// Leaf thickness in mm
 thickness = 3; // [2:0.5:6]
 
-// Screw holes per leaf
+// Screw holes per leaf, for #6 / M3.5 wood screws (dropped when they do not fit)
 screw_holes = 2; // [0:1:4]
 
 // Countersink the screw holes (on the upward face as printed)
@@ -44,10 +44,10 @@ leaf_shape = "rect"; // [rect:Rectangle, rounded:Rounded corners, tapered:Tapere
 // Number of knuckles, alternating between the leaves (odd)
 knuckles = 5; // [3:2:11]
 
-// Pin diameter (cone base diameter for print-in-place)
+// Pin diameter in mm (cone base diameter for print-in-place; ignored for a filament pin)
 pin_d = 3; // [2:0.5:6]
 
-// Gap between parts that move against each other
+// Gap between parts that move against each other, in mm
 clearance = 0.35; // [0.2:0.05:0.6]
 
 // How the leaves are pinned together

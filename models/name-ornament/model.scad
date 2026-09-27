@@ -126,6 +126,9 @@ heart_cusp = sqrt(2) * heart_a;
 flake_r = 0.055 * S;
 flake_rc = S / 2 - bw - 1.2 - flake_r;
 disc_inner = flake_rc - flake_r - 1;
+// With a loop the ring is offset 15 degrees so no flake sits under the loop;
+// with a hole the hole takes the place of the top flake in the ring.
+flake_phase = hanger == "hole" ? 0 : 15;
 
 // Tree tiers: [bottom y, top y, bottom width, top width] as fractions of S.
 tree_rc = 0.025 * S;
@@ -161,7 +164,7 @@ hole_y =
     shape == "star"   ? star_c + 0.6 * star_rc :
     shape == "tree"   ? 0.62 * S :
     shape == "heart"  ? heart_cusp - ring_ro :
-                        S - ring_ro;
+                        S / 2 + flake_rc;
 hanger_y = hanger == "loop" ? loop_y : hole_y;
 
 // ---------------------------------------------------------------------------
@@ -274,8 +277,8 @@ module inner_2d() {
 
 module flakes_2d() {
     if (shape == "snowflake_disc") intersection() {
-        for (k = [0:11]) translate([0, S / 2]) rotate(15 + 30 * k) translate([flake_rc, 0])
-            rotate(-15 - 30 * k) snowflake(flake_r);
+        for (k = [0:11]) let(a = flake_phase + 30 * k) if (hanger != "hole" || a != 90)
+            translate([0, S / 2]) rotate(a) translate([flake_rc, 0]) rotate(-a) snowflake(flake_r);
         offset(r = -(bw + 0.6)) base_region_2d();
     }
 }

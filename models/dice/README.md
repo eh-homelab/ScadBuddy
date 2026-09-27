@@ -27,11 +27,18 @@ ScadBuddy.
 | Parameter | Default | What it does |
 |---|---|---|
 | `size` | `20` | Edge length in mm, 12–40. |
-| `rounding` | `2` | Radius of the rounded edges, capped at a fifth of `size`. `0` gives sharp edges. |
+| `rounding` | `2` | Radius of the rounded edges, capped at a fifth of `size`. `0` gives sharp edges. When the rounding eats into the flat of a face, the artwork shrinks so it never wraps over an edge. |
 | `faces` | `pips` | `pips`, `numbers` (the 6 is underlined so it cannot be read as a 9), `custom_text`, or `emoji_shapes`: heart, star, moon, sun, cloud, lightning on faces 1–6. |
-| `face_1` … `face_6` | `HOP`, `JUMP`, `SPIN`, `CLAP`, `SING`, `DANCE` | Words for `custom_text`, up to 8 characters each. Long words shrink to fit the face; short ones are left alone. An empty word leaves that face blank. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for numbers and words (`// font`). |
 | `inlay_depth` | `0.8` | Depth of the face inlays, 0.4–2 mm. |
+
+### Custom words
+
+Used only when `faces` is `custom_text`.
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `face_1` … `face_6` | `HOP`, `JUMP`, `SPIN`, `CLAP`, `SING`, `DANCE` | Words for `custom_text`, up to 8 characters each. Long words shrink to fit the face; short ones are left alone. An empty word leaves that face blank. |
 
 ### Batch
 
@@ -70,8 +77,9 @@ prints in one colour.
 ./verify.sh
 ```
 
-Renders the defaults and 8 variations (every face style, 12 to 40 mm, sharp
-and fully rounded, a blank face, a long word, deeper inlays, all faces blank,
+Renders the defaults and 11 variations (every face style, 12 to 40 mm, sharp
+and fully rounded (every face style on a fully rounded 12 mm die), a blank face,
+a long word, deeper inlays, all faces blank,
 batches of 2–6) and checks for each:
 
 - the expected colour parts, nothing in `Default`, the exact bounding box the
@@ -79,7 +87,8 @@ batches of 2–6) and checks for each:
 - from one closed render per colour: the parts do not overlap, the die plus
   its inlays has exactly the volume of a plain die (the inlays are flush —
   nothing proud, no gaps), every inlay vertex is within `inlay_depth` of the
-  surface, each face with artwork has it on every die and a blank face has
+  surface and within the flat of its face (clear of the rounded edges), each
+  face with artwork has it on every die and a blank face has
   none, one die body per die;
 - pips: face *k* carries *k* pips on every die, opposite faces add up to 7,
   and the pip volume is exactly 21 pip-sized discs `inlay_depth` deep.

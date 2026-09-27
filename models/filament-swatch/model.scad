@@ -20,7 +20,7 @@ brand = "Bambu"; // 16
 material = "PLA Basic"; // 16
 
 // Colour name
-color_name = "Jade White"; // 20
+color_name = "Cyan"; // 20
 
 // Print temperature
 temp = "220°C"; // 10
@@ -54,10 +54,10 @@ orientation = "landscape"; // [landscape:Landscape, portrait:Portrait]
 /* [Colors] */
 
 // Card (extruder 1)
-swatch_color = "#FFFFFF"; // color
+swatch_color = "#0086D6"; // color
 
 // Lettering, inlay mode only (extruder 2)
-text_color = "#000000"; // color
+text_color = "#FFFFFF"; // color
 
 /* [Hidden] */
 

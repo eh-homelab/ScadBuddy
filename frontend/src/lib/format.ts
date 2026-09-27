@@ -1,12 +1,9 @@
 import type { BoundingBox, ParamValue } from '../api/types'
+import { length, type DisplayUnit } from './units'
 
-export function mm(value: number): string {
-  return value.toFixed(1)
-}
-
-export function formatBbox(bbox: BoundingBox): string {
+export function formatBbox(bbox: BoundingBox, unit: DisplayUnit = 'mm'): string {
   const [x, y, z] = bbox.size
-  return `${mm(x)} × ${mm(y)} × ${mm(z)} mm`
+  return `${length(x, unit)} × ${length(y, unit)} × ${length(z, unit)} ${unit}`
 }
 
 export function formatValue(value: ParamValue): string {

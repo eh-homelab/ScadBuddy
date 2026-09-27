@@ -3,6 +3,7 @@ import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
+import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -81,7 +82,7 @@ function png(size = 16): Uint8Array {
 }
 
 const TOO_LARGE =
-  'the thumbnail is too large: 2097153 bytes, and a thumbnail is at most 2097152 bytes (2 MiB)'
+  'the thumbnail is too large: 10485761 bytes, and a thumbnail is at most 10485760 bytes (10 MiB)'
 
 async function upload(
   fields: Record<string, string> = {},
@@ -203,6 +204,29 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
     expect(body.detail).toBe('tags is not valid JSON')
   })
 
+  async function uploadSource(source: string) {
+    const response = await fetch('/api/v1/models', {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart([{ name: 'file', value: source, filename: 'widget.scad' }]),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('takes an uploaded source of exactly MAX_SOURCE_CHARS characters', async () => {
+    const { status } = await uploadSource('\u{1F600}'.repeat(1_000_000))
+    expect(status).toBe(201)
+  })
+
+  it('refuses an uploaded source one character over the cap, and creates nothing', async () => {
+    const { status, body } = await uploadSource('x'.repeat(1_000_001))
+    expect(status).toBe(422)
+    expect(body.detail).toBe(
+      'the source is too large: 1000001 characters, and this route reads at most 1000000',
+    )
+    expect((await api.listModels()).some((model) => model.slug === 'widget')).toBe(false)
+  })
+
   /** A readable model.json of exactly `size` bytes; JSON allows trailing spaces. */
   function metaOf(size: number): string {
     const body = JSON.stringify({ name: 'Widget' })
@@ -256,7 +280,7 @@ describe('mock POST /models (multipart), as the backend resolves details', () =>
 
   it.each([
     ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
-    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+    ['is over the limit', png(10 * 1024 * 1024 + 1), TOO_LARGE],
   ])('refuses a thumbnail that %s, as _require_png does, and creates nothing', async (_, bytes, detail) => {
     const { status, body } = await uploadThumbnail(bytes)
     expect(status).toBe(422)
@@ -285,7 +309,7 @@ describe('mock PUT /models/:slug/thumbnail, as _require_png holds it', () => {
 
   it.each([
     ['is not a PNG by its bytes', new TextEncoder().encode('GIF89a'), 'the thumbnail is not a PNG'],
-    ['is over the limit', png(2 * 1024 * 1024 + 1), TOO_LARGE],
+    ['is over the limit', png(10 * 1024 * 1024 + 1), TOO_LARGE],
   ])('refuses one that %s with the backend\'s 422, and changes nothing', async (_, bytes, detail) => {
     const before = await api.getModel('name-keychain')
     const { status, body } = await put(bytes)
@@ -521,5 +545,67 @@ describe('mock API: delete a template duplicates track (#223)', () => {
     await api.deleteModel('name-keychain', true)
     const gone: unknown = await api.getModel('name-keychain').catch((caught: unknown) => caught)
     expect(gone).toMatchObject({ status: 404 })
+  })
+})
+
+describe('mock API: presets keep the server limits', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses a name longer than the server takes', async () => {
+    const long = 'x'.repeat(MAX_PRESET_NAME + 1)
+    await expect(api.createPreset('name-keychain', { name: long, params: {} })).rejects.toMatchObject(
+      { status: 422 },
+    )
+    const saved = await api.createPreset('name-keychain', {
+      name: 'x'.repeat(MAX_PRESET_NAME),
+      params: {},
+    })
+    await expect(
+      api.updatePreset('name-keychain', saved.id, { name: long }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses a new preset once a template keeps as many as the server allows', async () => {
+    const existing = Array.from({ length: MAX_PRESETS }, (_, index) => ({
+      id: `${index}`.padStart(32, '0'),
+      name: `Preset ${index}`,
+      origin: 'mine' as const,
+      params: {},
+    }))
+    setMockPresets('name-keychain', existing)
+    const refused = api.createPreset('name-keychain', { name: 'One too many', params: {} })
+    await expect(refused).rejects.toBeInstanceOf(ApiError)
+    await expect(refused).rejects.toMatchObject({ status: 409 })
+    // A bad value is refused first, as the server validates it before counting.
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { nope: 1 } }),
+    ).rejects.toMatchObject({ status: 422 })
+    // Editing one that is already there is still fine.
+    const first = existing[0]!
+    await expect(
+      api.updatePreset('name-keychain', first.id, { name: 'Renamed' }),
+    ).resolves.toMatchObject({ name: 'Renamed' })
+  })
+})
+
+describe('mock API: preset values are checked as the server checks them', () => {
+  beforeEach(() => resetMockState())
+
+  it('refuses a value of the wrong type for a known parameter', async () => {
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { text_size: 'big' } }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { keyring_hole: 'yes' } }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses a dropdown value that is not one of its options', async () => {
+    await expect(
+      api.createPreset('name-keychain', { name: 'Bad', params: { hole_side: 'bottom' } }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.createPreset('name-keychain', { name: 'Good', params: { hole_side: 'top' } }),
+    ).resolves.toMatchObject({ params: { hole_side: 'top' } })
   })
 })

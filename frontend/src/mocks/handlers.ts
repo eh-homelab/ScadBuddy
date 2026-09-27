@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  Asset,
   AttachResult,
   BoundingBox,
   CatalogueFont,
@@ -8,7 +9,7 @@ import type {
   FilamentOptions,
   FontFamily,
   Job,
-  LibraryEntry,
+  CatalogueLibrary,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -16,6 +17,9 @@ import type {
   ModelVersion,
   Output,
   OutputPlate,
+  ParamPreset,
+  ParamPresetCreate,
+  ParamPresetUpdate,
   ParamValue,
   PipelineChoices,
   PipelineCreate,
@@ -43,6 +47,7 @@ import { editPath } from '../lib/deeplink'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
+  MAX_SOURCE_CHARS,
   MAX_THUMBNAIL_BYTES,
   MAX_THUMBNAIL_SIZE,
 } from '../lib/modelFolder'
@@ -66,6 +71,8 @@ const state = {
   } as Record<string, string>,
   /** #179 — README text per model; a model's `has_readme` follows it. */
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
+  /** Per-template presets, shipped (`template-*`) and saved. */
+  presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -85,7 +92,9 @@ const state = {
   /** #157 — each revision's `model.scad`, so a merge can read its `base`. */
   sourceAt: initialSourceAt(),
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
-  libraries: structuredClone(fixtures.libraries) as LibraryEntry[],
+  libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
+  /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
+  assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -101,6 +110,7 @@ export function resetMockState(): void {
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
+  state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -115,9 +125,15 @@ export function resetMockState(): void {
   state.sourceAt = initialSourceAt()
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
+  state.assets.clear()
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
+}
+
+/** Replaces a template's presets, so a test can start at a state that is slow to build. */
+export function setMockPresets(slug: string, presets: ParamPreset[]): void {
+  state.presets[slug] = presets
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -358,6 +374,42 @@ function jobView(job: MockJob): Job {
   return rest
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/** `library/assets.py`'s `sniff`: the kind comes from the bytes, never the name. */
+function sniffAsset(bytes: ArrayBuffer): Asset['kind'] | undefined {
+  const head = new Uint8Array(bytes.slice(0, 4096))
+  if (PNG_MAGIC.every((byte, index) => head[index] === byte)) return 'png'
+  return new TextDecoder().decode(head).includes('<svg') ? 'svg' : undefined
+}
+
+export const ASSET_REFUSAL = 'only SVG and PNG files can be attached'
+
+/**
+ * What `POST /models/{slug}/assets` does with a file, exported so a jsdom test can
+ * reach it: jsdom's `File` cannot cross into Node's `fetch` as a multipart body.
+ */
+export async function storeAsset(file: Blob & { name?: string }): Promise<Asset | undefined> {
+  const bytes = await file.arrayBuffer()
+  const kind = sniffAsset(bytes)
+  if (!kind) return undefined
+  const meta: Asset = {
+    id: await sha256Hex(bytes),
+    name: file.name || `upload.${kind}`,
+    kind,
+    size: bytes.byteLength,
+    width: kind === 'png' ? 96 : null,
+    height: kind === 'png' ? 96 : null,
+  }
+  state.assets.set(meta.id, { meta, bytes })
+  return meta
+}
+
+async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', bytes)
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
 function problem(status: number, title: string, detail?: string, extensions: object = {}) {
   return HttpResponse.json(
     { type: 'about:blank', title, status, detail, ...extensions },
@@ -365,7 +417,6 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
-const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
 
 /**
  * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
@@ -442,6 +493,75 @@ function refuseBuiltin(slug: string) {
   return slug.startsWith('builtin:')
     ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
     : undefined
+}
+
+/** `library/presets.py`'s limits: the longest name, and the most presets a template keeps. */
+export const MAX_PRESET_NAME = 80
+export const MAX_PRESETS = 200
+
+/** Why a preset save is refused, as the server words it, or undefined. */
+function presetRefusal(
+  slug: string,
+  name: string,
+  params: Record<string, ParamValue>,
+  own: string | null,
+) {
+  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  if (name.length > MAX_PRESET_NAME) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `a preset name is at most ${MAX_PRESET_NAME} characters`,
+    )
+  }
+  const byName = new Map((state.schemas[slug]?.parameters ?? []).map((p) => [p.name, p]))
+  const unknown = Object.keys(params).filter((key) => !byName.has(key))
+  if (unknown.length > 0) {
+    return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
+      parameters: unknown,
+    })
+  }
+  // Then each value's type, as `build_defines` checks it, and a dropdown's options, as
+  // the preset routes check them.
+  for (const [key, value] of Object.entries(params)) {
+    const param = byName.get(key)!
+    const options = (param.options ?? []).map((option) => option.value)
+    const expected =
+      param.type === 'boolean'
+        ? 'boolean'
+        : ['string', 'color', 'font'].includes(param.type) ||
+            (param.type === 'select' && options.some((option) => typeof option === 'string'))
+          ? 'string'
+          : 'number'
+    if (typeof value !== expected) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `parameter '${key}' expects a ${expected}, got ${JSON.stringify(value)}`,
+      )
+    }
+    if (options.length > 0 && !options.includes(value)) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `${JSON.stringify(value)} is not one of the options of '${key}'`,
+        { parameters: [key] },
+      )
+    }
+  }
+  // After the values, as the server checks them: they are validated in the route,
+  // and only then does the store count the presets and compare the names.
+  const saved = (state.presets[slug] ?? []).filter((p) => p.origin === 'mine')
+  if (own === null && saved.length >= MAX_PRESETS) {
+    return problem(409, 'Conflict', `a template keeps at most ${MAX_PRESETS} presets`)
+  }
+  const clash = (state.presets[slug] ?? []).some(
+    (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
+  )
+  if (clash) {
+    return problem(409, 'Conflict', `'${slug}' already has a preset named '${name}'`, { name })
+  }
+  return undefined
 }
 
 function slugify(value: string): string {
@@ -568,6 +688,16 @@ export const handlers = [
     if (!filename.endsWith('.scad')) {
       return problem(415, 'Unsupported file type', 'ScadBuddy accepts .scad source files.')
     }
+    // As `create_model`: the uploaded source is held to MAX_SOURCE_CHARS, in code points.
+    const characters = [...(await (file as File).text())].length
+    if (characters > MAX_SOURCE_CHARS) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        `the source is too large: ${characters} characters, ` +
+          `and this route reads at most ${MAX_SOURCE_CHARS}`,
+      )
+    }
     const slug = filename
       .replace(/\.scad$/, '')
       .toLowerCase()
@@ -690,6 +820,13 @@ export const handlers = [
     // #179: the copy is the upstream's directory, so its README comes too.
     const readme = state.readmes[id]
     if (readme !== undefined) state.readmes[slug] = readme
+    // Its shipped presets are in the copied directory; the saved ones are copied.
+    const copied = state.presets[id]
+    if (copied) {
+      state.presets[slug] = copied.map((preset) =>
+        preset.origin === 'mine' ? { ...preset, id: nextHexId() } : { ...preset },
+      )
+    }
     await delay(120)
     return HttpResponse.json(view(copy), { status: 201 })
   }),
@@ -845,13 +982,6 @@ export const handlers = [
     const refused = refuseBuiltin(slug)
     if (refused) return refused
     const patch = (await request.json()) as ModelPatch
-    // #93: only libraries that have been added (and so are pinned) can be declared.
-    const missing = (patch.libraries ?? []).filter(
-      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
-    )
-    if (missing.length > 0) {
-      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
-    }
     const change = Object.fromEntries(
       Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
     ) as Partial<ModelSummary>
@@ -1046,6 +1176,63 @@ export const handlers = [
       : problem(404, 'Model not found')
   }),
 
+  // Per-template presets. Values are checked against the schema as a render is.
+  http.get(`${base}/models/:slug/presets`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    return HttpResponse.json(state.presets[slug] ?? [])
+  }),
+
+  http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const body = (await request.json()) as ParamPresetCreate
+    const name = body.name.trim().replace(/\s+/g, ' ')
+    const refused = presetRefusal(slug, name, body.params ?? {}, null)
+    if (refused) return refused
+    const created: ParamPreset = {
+      id: nextHexId(),
+      name,
+      origin: 'mine',
+      params: body.params ?? {},
+      updated_at: new Date().toISOString(),
+    }
+    state.presets[slug] = [...(state.presets[slug] ?? []), created]
+    await delay(60)
+    return HttpResponse.json(created, { status: 201 })
+  }),
+
+  http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
+    if (!existing) return problem(404, 'Preset not found')
+    const body = (await request.json()) as ParamPresetUpdate
+    const name = body.name?.trim().replace(/\s+/g, ' ')
+    const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
+    if (refused) return refused
+    const updated: ParamPreset = {
+      ...existing,
+      name: name ?? existing.name,
+      params: body.params ?? existing.params,
+      updated_at: new Date().toISOString(),
+    }
+    state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
+    await delay(60)
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    const presets = state.presets[slug] ?? []
+    if (!presets.some((p) => p.id === id)) return problem(404, 'Preset not found')
+    state.presets[slug] = presets.filter((p) => p.id !== id)
+    return new HttpResponse(null, { status: 204 })
+  }),
+
   http.post(`${base}/models/:slug/render`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const body = (await request.json()) as { params: Record<string, ParamValue> }
@@ -1056,6 +1243,20 @@ export const handlers = [
     const unknown = Object.keys(body.params).filter((key) => !known.has(key))
     if (unknown.length > 0) {
       return problem(422, 'Unknown parameter', `Not in the model schema: ${unknown.join(', ')}`)
+    }
+    // #204 — `file_assets`: empty, the model's default, or an uploaded id; never a path.
+    for (const param of schema.parameters ?? []) {
+      const value = body.params[param.name]
+      if (param.type !== 'file' || value === undefined || value === '' || value === param.initial) {
+        continue
+      }
+      if (typeof value !== 'string' || !state.assets.has(value)) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `parameter '${param.name}' is not an uploaded file: '${String(value)}'`,
+        )
+      }
     }
 
     const jobId = nextHexId()
@@ -1072,6 +1273,35 @@ export const handlers = [
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
     )
+  }),
+
+  http.post(`${base}/models/:slug/assets`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((model) => model.slug === slug)) {
+      return problem(404, 'Not Found', `no model named '${slug}'`)
+    }
+    // Duck-typed, as on `POST /models`: the entry's class differs between the
+    // browser worker and the Node interceptor.
+    const file = (await request.formData()).get('file')
+    if (file === null || typeof file === 'string') {
+      return problem(422, 'Unprocessable Content', 'no file part')
+    }
+    const stored = await storeAsset(file)
+    return stored
+      ? HttpResponse.json(stored, { status: 201 })
+      : problem(422, 'Unprocessable Content', ASSET_REFUSAL)
+  }),
+
+  http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
+    const asset = state.assets.get(String(params['id']))
+    return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
+  }),
+
+  http.get(`${base}/models/:slug/assets/:id/content`, ({ params }) => {
+    const asset = state.assets.get(String(params['id']))
+    if (!asset) return problem(404, 'Not Found', 'no uploaded file')
+    const type = asset.meta.kind === 'svg' ? 'image/svg+xml' : 'image/png'
+    return HttpResponse.arrayBuffer(asset.bytes, { headers: { 'Content-Type': type } })
   }),
 
   http.get(`${base}/jobs/:id`, ({ params }) => {
@@ -1652,27 +1882,55 @@ export const handlers = [
 
   http.get(`${base}/libraries`, () => HttpResponse.json(state.libraries)),
 
-  http.post(`${base}/libraries`, async ({ request }) => {
-    const body = (await request.json()) as { name: string; url?: string | null; ref?: string | null }
-    const known = state.libraries.find((entry) => entry.name === body.name)
+  // #93 — pins are per model: PUT clones at `ref` and pins it into this model alone.
+  http.put(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const name = String(params['name'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(name)) {
+      return problem(422, 'Unprocessable Content', `'${name}' is not a library directory name`)
+    }
+    const body = (await request.json()) as { url?: string | null; ref?: string | null }
+    const known = state.libraries.find((entry) => entry.name === name)
     if (!known && !body.url) {
-      return problem(404, 'Not Found', `'${body.name}' is not in the catalogue; give a url to add it`)
+      return problem(404, 'Not Found', `'${name}' is not in the catalogue; give a url to add it`)
     }
     const url = body.url ?? known?.url ?? ''
     const ref = body.ref ?? known?.ref ?? ''
+    if (!ref) return problem(422, 'Unprocessable Content', `give a ref to pin '${name}' at`)
     if (ref === fixtures.MISSING_REF) {
       return problem(502, 'Bad Gateway', `git clone failed: Remote branch ${ref} not found`)
     }
     await delay(100)
     state.seq += 1
-    const pin = { url, ref, commit: state.seq.toString(16).padStart(40, 'c') }
-    const entry: LibraryEntry = known
-      ? { ...known, pin }
-      : { name: body.name, url, ref, curated: false, pin }
-    state.libraries = known
-      ? state.libraries.map((row) => (row.name === body.name ? entry : row))
-      : [...state.libraries, entry]
-    return HttpResponse.json(entry)
+    const pin = { name, url, ref, commit: state.seq.toString(16).padStart(40, 'c') }
+    const current = model.libraries ?? []
+    const libraries = current.some((row) => row.name === name)
+      ? current.map((row) => (row.name === name ? pin : row))
+      : [...current, pin]
+    const updated = { ...model, libraries }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    return HttpResponse.json(view(updated))
+  }),
+
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+    const slug = String(params['slug'])
+    const name = String(params['name'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    const current = model.libraries ?? []
+    if (!current.some((row) => row.name === name)) {
+      return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
+    }
+    await delay(50)
+    const updated = { ...model, libraries: current.filter((row) => row.name !== name) }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    return HttpResponse.json(view(updated))
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
@@ -1685,10 +1943,12 @@ export const handlers = [
       library_folder_id?: number | null
       pipeline_id?: number | null
       printer_id?: number | null
+      display_unit?: Settings['display_unit'] | null
     }
     state.settings = {
       ...state.settings,
       ...body,
+      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
       has_api_key:
         body.bambuddy_api_key === undefined
           ? state.settings.has_api_key

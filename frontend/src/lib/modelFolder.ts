@@ -36,7 +36,7 @@ export const isPng = (file: File) => lower(file).endsWith('.png') || file.type =
 export const isMarkdown = (file: File) => /\.(md|markdown)$/.test(lower(file))
 
 /** The server's `MAX_THUMBNAIL_BYTES`: each thumbnail set is kept in the history. */
-export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+export const MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
 /** The limit as people read it, derived so the message cannot drift from it. */
 export const MAX_THUMBNAIL_SIZE = `${MAX_THUMBNAIL_BYTES / (1024 * 1024)} MiB`
 
@@ -72,6 +72,21 @@ export const MAX_README_CHARS = 1_000_000
 export function readmeProblem(text: string): string | null {
   if (text.length <= MAX_README_CHARS || [...text].length <= MAX_README_CHARS) return null
   return `The README must be at most ${MAX_README_CHARS.toLocaleString('en')} characters.`
+}
+
+/** The server's `MAX_SOURCE_CHARS` itself: an uploaded .scad is held to it as a paste is. */
+export const MAX_SOURCE_CHARS = MAX_README_CHARS
+
+/**
+ * Why a .scad cannot be uploaded, or null when it can. Counted in code points, as
+ * `readmeProblem` counts; a file of at most that many bytes cannot hold more
+ * characters, so only a larger one is read.
+ */
+export async function sourceProblem(file: File): Promise<string | null> {
+  if (file.size <= MAX_SOURCE_CHARS) return null
+  const text = await file.text()
+  if (text.length <= MAX_SOURCE_CHARS || [...text].length <= MAX_SOURCE_CHARS) return null
+  return `The source must be at most ${MAX_SOURCE_CHARS.toLocaleString('en')} characters.`
 }
 
 /** Code-unit order: the same on every browser, OS and locale, unlike `localeCompare`. */

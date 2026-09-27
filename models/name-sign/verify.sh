@@ -75,6 +75,8 @@ CASES = [
     ("nofit-long", dict(line1=LONG, border=False, mount="none", auto_fit=False)),
     ("big-45deg", dict(width=300, height=150, stand_angle=45,
                        line2="Second line")),
+    ("big-text", dict(width=300, height=150, text_size=100, line2_size=40,
+                      line2="Engineering", mount="none", border_color=RED)),
     ("empty-text", dict(line1="", border=False, mount="none")),
     ("thin-inlay-magnets", dict(thickness=2, text_style="inlay",
                                 mount="magnet_pockets")),
@@ -273,6 +275,17 @@ for name, ov in CASES:
             target = W - 2 * (INSET + TEXT_PAD / 2)
             check(near(w, target, 0.05),
                   "without auto-fit the long line is clipped to the plate: width %.2f == %.2f" % (w, target))
+
+
+    if name == "big-text":
+        # Big signs take big letters: the block fills the text box's height.
+        stl = parts[colours["text"]]
+        blo, bhi = bbox([v for t in stl for v in t])
+        box_w = W - 2 * (INSET + p(ov, "border_w") + TEXT_PAD)
+        box_h = p(ov, "height") - 2 * (INSET + p(ov, "border_w") + TEXT_PAD)
+        check(box_h - 1.5 <= bhi[1] - blo[1] <= box_h + 0.05 and bhi[0] - blo[0] <= box_w + 0.05,
+              "large text fills the text box: %.1f x %.1f in %.1f x %.1f"
+              % (bhi[0] - blo[0], bhi[1] - blo[1], box_w, box_h))
 
 
 def pocket_volume(ov, depth):

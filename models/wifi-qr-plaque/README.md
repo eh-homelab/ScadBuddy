@@ -116,10 +116,12 @@ corners sit 1 mm inside the rim.
 - **Module size.** Echoed on every render (`QRINFO`). Below about 0.8 mm a
   0.4 mm nozzle cannot print modules cleanly and a warning is echoed; raise
   `size`, drop the credentials or lower `error_correction`.
-- **Text size.** OpenSCAD cannot measure text, so long lines shrink from the
-  nominal size (7.5 % of `size` for the caption, 5 % for credentials) based on
-  an average character width. Very wide capitals (`WWWW…`) can still run close
-  to the edge.
+- **Text size.** The caption is 7.5 % of `size` tall and the credentials 5 %.
+  A line wider than the text band (90 % of `size` on a square plaque, 80 % on
+  a rounded one, the code block's width on a round one) is scaled down to fit
+  it exactly; shorter lines are never enlarged. A 63-character password on a
+  small plaque therefore comes out very small: keep credentials for plaques of
+  80 mm and up.
 - **Stand.** The stand's slot is 6 mm deep and leans back 15°. With the stand
   on, 7.5 mm is kept clear at the bottom of the plaque so the slot never
   covers text or the quiet zone. The slot runs the stand's full length.
@@ -147,12 +149,14 @@ magnets, and the stand's slot at `stand_clearance = 0.4`.
 Needs Docker and [uv](https://docs.astral.sh/uv/) (`~/.local/bin/uv` is
 found). Three stages:
 
-1. **Renders and geometry** (host `python3`, standard library only). Seven
+1. **Renders and geometry** (host `python3`, standard library only). Nine
    variations — defaults; URL + rounded + inlay + H + magnets + a third
    colour; long text + round + stand; WiFi with escaped characters + WEP +
    hidden + credentials + Q + round; open network + stand + magnets + inlay;
    a version-10 code on a 50 mm plaque (2-module quiet zone); a 250-byte text
-   at H that must fall back to L. For each: the parts and colours, `Default`
+   at H that must fall back to L; a 30-character caption of `W`s and a round
+   50 mm plaque with 32- and 63-character credentials, whose text must stay
+   inside the text band. For each: the parts and colours, `Default`
    empty, bounding box exactly as the parameters imply, on z=0, the code's
    heights, magnet pockets, the quiet zone inside the outline and clear of
    the text. Each colour is also rendered on its own the way ScadBuddy renders

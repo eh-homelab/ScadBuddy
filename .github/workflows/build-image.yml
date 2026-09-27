@@ -96,7 +96,7 @@ jobs:
           labels: |
             org.opencontainers.image.title=ScadBuddy
             org.opencontainers.image.description=Self-hosted OpenSCAD customizer for Bambuddy
-            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.licenses=Apache-2.0
 
       # The label the deploy pipeline pins, and what /healthz reports as
       # `version`: `X.Y.Z` for a `vX.Y.Z` tag, `sha-<short>` for anything

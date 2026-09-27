@@ -12,6 +12,7 @@ function Harness({ schema = keychainSchema }: { schema?: CustomizerSchema }) {
   return (
     <ParameterPanel
       schema={schema}
+      slug="name-keychain"
       values={values}
       fonts={fonts}
       onChange={(name: string, value: ParamValue) =>
