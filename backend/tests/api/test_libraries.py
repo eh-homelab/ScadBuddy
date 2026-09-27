@@ -7,7 +7,10 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -131,6 +134,39 @@ def test_a_user_added_library_is_listed_after_the_catalogue(
         ("BOSL2", True),
         ("mylib", False),
     ]
+
+
+def test_installs_run_one_at_a_time(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Each clone holds a worker thread for up to the git timeout; a burst of them
+    must not take the executor every other route shares."""
+    store = libraries_app.dependency_overrides[get_libraries]()
+    lock = threading.Lock()
+    running, most = 0, 0
+    real_install = store.install
+
+    def install(name: str, **kwargs: Any) -> Any:
+        nonlocal running, most
+        with lock:
+            running += 1
+            most = max(most, running)
+        time.sleep(0.2)
+        with lock:
+            running -= 1
+        return real_install(name, **kwargs)
+
+    monkeypatch.setattr(store, "install", install)
+    with ThreadPoolExecutor(3) as pool:
+        codes = list(
+            pool.map(
+                lambda _: lib_client.post("/api/v1/libraries", json={"name": "BOSL2"}).status_code,
+                range(3),
+            )
+        )
+
+    assert codes == [200, 200, 200]
+    assert most == 1
 
 
 def test_an_unknown_library_without_a_url_is_a_404(lib_client: TestClient) -> None:

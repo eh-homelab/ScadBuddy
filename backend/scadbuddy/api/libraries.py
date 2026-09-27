@@ -12,7 +12,7 @@ from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import LibrariesDep
+from scadbuddy.api.deps import InstallsDep, LibrariesDep
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import (
@@ -57,10 +57,13 @@ def list_libraries(libraries: LibrariesDep) -> list[LibraryEntry]:
         "Models that declare it render against the new pin from then on."
     ),
 )
-async def add_library(body: LibraryAdd, libraries: LibrariesDep) -> LibraryEntry:
+async def add_library(
+    body: LibraryAdd, libraries: LibrariesDep, installs: InstallsDep
+) -> LibraryEntry:
     try:
-        # A clone is a network fetch; off the loop.
-        await asyncio.to_thread(libraries.install, body.name, url=body.url, ref=body.ref)
+        # A clone is a network fetch; off the loop, and one at a time.
+        async with installs:
+            await asyncio.to_thread(libraries.install, body.name, url=body.url, ref=body.ref)
     except LibraryNotFoundError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND,

@@ -45,6 +45,10 @@ class AppState:
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
     #: the pod's worst case is render_concurrency + check_concurrency.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One library clone at a time. Each runs in a worker thread for up to the git
+    #: timeout; uncapped, a burst of installs would hold the default executor that
+    #: every other `to_thread` route shares. A queued install waits on the loop.
+    installs: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -140,6 +144,10 @@ def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
 
+def get_installs(state: StateDep) -> asyncio.Semaphore:
+    return state.installs
+
+
 ConfigDep = Annotated[Config, Depends(get_config)]
 PathsDep = Annotated[DataPaths, Depends(get_paths)]
 CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
@@ -150,6 +158,7 @@ FontsDep = Annotated[FontService, Depends(get_fonts)]
 LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
+InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 
 SlugPath = Annotated[str, Path(pattern=SLUG_PATTERN, max_length=100)]
 JobIdPath = Annotated[str, Path(pattern=JOB_ID_PATTERN)]
