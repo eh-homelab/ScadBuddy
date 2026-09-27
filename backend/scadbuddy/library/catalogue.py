@@ -92,12 +92,16 @@ class ModelMeta(BaseModel):
     #: Where the model was imported from (#153), for the link back; None for anything
     #: uploaded, pasted or built in. Not in `ModelPatch`: it records a fact, not a choice.
     origin_url: str | None = None
+    # The third-party libraries (#93) this model renders with: the only ones on
+    # its OPENSCADPATH, each at the commit `libraries.lock` pins.
+    libraries: list[str] = Field(default_factory=list)
 
 
 class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    libraries: list[str] | None = None
 
     @field_validator("name")
     @classmethod

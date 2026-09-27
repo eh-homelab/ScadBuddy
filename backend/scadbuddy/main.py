@@ -14,6 +14,7 @@ from scadbuddy.api import (
     fonts,
     health,
     jobs,
+    libraries,
     lsp,
     models,
     outputs,
@@ -46,6 +47,7 @@ def _api_router() -> APIRouter:
     router.include_router(settings.router)
     router.include_router(fonts.router)
     router.include_router(plates.router)
+    router.include_router(libraries.router)
     router.include_router(lsp.router)
     return router
 
@@ -130,6 +132,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     )
     setattr(app.state, STATE_ATTR, build_state(app_settings))
     install_problem_handlers(app)
+    libraries.install_library_handlers(app)
     # Outermost, so an oversized body is refused on its headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 

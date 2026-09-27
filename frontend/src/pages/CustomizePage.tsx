@@ -5,6 +5,7 @@ import type { Output, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
@@ -246,9 +247,20 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
-          {/* #184: only a template of mine is writable, so its details are too. */}
-          {origin === 'mine' && <EditDetailsButton slug={slug} />}
-          {origin === 'mine' && <DeleteModelButton slug={slug} name={schema.title ?? slug} />}
+          {origin === 'mine' && (
+            <>
+              <ModelLibrariesButton
+                slug={slug}
+                name={schema.title ?? slug}
+                // The library path changes what the source resolves to: re-read the
+                // schema, which re-seeds the values and so re-renders the preview.
+                onSaved={schemaState.reload}
+              />
+              {/* #179: only a template of mine is writable, so its details are too. */}
+              <EditDetailsButton slug={slug} />
+              <DeleteModelButton slug={slug} name={schema.title ?? slug} />
+            </>
+          )}
         </div>
       </div>
 

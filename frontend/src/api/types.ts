@@ -20,7 +20,6 @@ export type ParamOption = Schemas['Option']
 export type CustomizerSchema = Schemas['CustomizerSchema']
 
 export type ModelSummary = Schemas['ModelRecord']
-export type ModelPatch = Schemas['ModelPatch']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
 
@@ -48,6 +47,12 @@ export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']
 export type FontVariant = Schemas['FontVariant']
 export type InstalledFamily = Schemas['InstalledFamily']
+
+/** #93 — third-party OpenSCAD libraries, pinned in the models repository's lockfile. */
+export type LibraryEntry = Schemas['LibraryEntry']
+export type LibraryPin = Schemas['LibraryPin']
+export type LibraryAdd = Schemas['LibraryAdd']
+export type ModelPatch = Schemas['ModelPatch']
 
 export type Settings = Schemas['SettingsView']
 export type SettingsUpdate = Schemas['SettingsPatch']

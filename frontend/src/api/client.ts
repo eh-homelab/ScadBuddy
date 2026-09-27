@@ -10,6 +10,8 @@ import type {
   FontFamily,
   InstalledFamily,
   Job,
+  LibraryAdd,
+  LibraryEntry,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -154,13 +156,6 @@ export const api = {
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
 
-  /** Name, description and tags; each change is one revision in the model's history. */
-  updateModel: (slug: string, patch: ModelPatch) =>
-    request<ModelSummary>(`/models/${seg(slug)}`, {
-      method: 'PATCH',
-      body: JSON.stringify(patch),
-    }),
-
   /** Multipart with a `file` part, like the output thumbnail PUT. */
   setThumbnail: (slug: string, png: Blob) => {
     const body = new FormData()
@@ -230,6 +225,10 @@ export const api = {
       body: JSON.stringify({ source, slug: slug ?? null }),
       signal,
     }),
+
+  /** Metadata, and since #93 the libraries the model renders with. */
+  updateModel: (slug: string, patch: ModelPatch) =>
+    request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
@@ -470,6 +469,13 @@ export const api = {
   },
 
   listPlates: () => request<PlateCatalogue>('/plates'),
+
+  /** #93 — the curated catalogue plus anything added by URL, each with its pin. */
+  listLibraries: () => request<LibraryEntry[]>('/libraries'),
+
+  /** Clones the library at `ref` server-side and pins it in `libraries.lock`. */
+  addLibrary: (body: LibraryAdd) =>
+    request<LibraryEntry>('/libraries', { method: 'POST', body: JSON.stringify(body) }),
 
   getSettings: () => request<Settings>('/settings'),
 
