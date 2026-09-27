@@ -171,8 +171,9 @@ stored on ScadBuddy's server and is never sent to the browser.
 
 2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
    **Test connection**.
-3. Under **Where files go**, choose the library folder, the fallback slicer pipeline
-   and the printer.
+3. Under **Where files go**, choose the library folder, the slicer pipeline the send
+   bar runs and the printer. That one pipeline is used for every model; a per-model
+   pipeline saved by an older ScadBuddy is no longer used.
 4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
    should link to; ScadBuddy can't work it out from behind a proxy). Then press
    **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
@@ -235,7 +236,9 @@ Top to bottom, the dialog is:
   so nothing chosen in Advanced is sent unseen.
 - **Printer** — shown only when more than one printer is active (today there is one).
   Otherwise ScadBuddy has already picked one: this model's remembered printer, else the
-  printer set in Settings, else the first active printer.
+  printer set in Settings, else the first active printer — skipping a remembered or
+  Settings printer that is no longer active. Presets are only resolved for the H2C, so
+  printing on any other model is refused before anything is sliced.
 - **Filament** — the same spool-inventory picker the send bar uses. Loaded spools are
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
@@ -246,8 +249,7 @@ Top to bottom, the dialog is:
   "(installed)"; picking one that isn't warns you to install it first. Advanced adds
   Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
   choice slices as Standard and the dialog says so: "Bambuddy slices this as Standard
-  flow; High Flow presets aren't supported by Bambuddy yet." That note stays visible in
-  Simple mode too, if a High Flow choice carries over from an earlier Advanced visit.
+  flow; High Flow presets aren't supported by Bambuddy yet."
 - **Quality** — Fine / Standard / Draft in Simple mode. Advanced replaces that with the
   full list of Bambu processes for the chosen nozzle size.
 - **Plate** — every plate type the H2C supports, preselected from the printer's last
@@ -255,7 +257,8 @@ Top to bottom, the dialog is:
   Choosing anything other than the last print's plate shows a reminder: "The
   *printer*'s last print used *plate*. Swap to *plate* before this starts." For an
   output with more than one plate, a separate choice of which plate (or all of them)
-  to print also appears here.
+  to print also appears here. Choosing all plates lists every plate's colors under
+  Filament, so a color only a later plate uses gets a spool too.
 - **Print options** — Bambuddy's own queue-item options (manual start, waiting for
   filament, and the rest), remembered per print, per printer or per model as before.
 - **Project** — file the print under a Bambuddy project.

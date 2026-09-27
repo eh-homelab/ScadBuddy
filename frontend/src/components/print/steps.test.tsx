@@ -108,6 +108,26 @@ describe('QualityStep', () => {
       tier: null, processName: '0.10mm Standard @BBL H2C 0.2 nozzle',
     })
   })
+
+  it('clears a process this size does not offer, falling back to the tier', () => {
+    // Final review 6: a remembered process from another size, or one Bambuddy no
+    // longer lists, must not be sent unseen.
+    const onChange = vi.fn()
+    render(<QualityStep size="0.2" tiers={tiers} advanced tier={null}
+      processName="0.20mm Standard @BBL H2C" processes={tiers.map((t) => t.process_name)}
+      onChange={onChange} />)
+    expect(onChange).toHaveBeenCalledWith({ tier: 'standard', processName: null })
+  })
+
+  it('leaves a listed process alone, and waits for the list before judging', () => {
+    const onChange = vi.fn()
+    const { rerender } = render(<QualityStep size="0.2" tiers={tiers} advanced tier={null}
+      processName="0.08mm High Quality @BBL H2C 0.2 nozzle" processes={[]} onChange={onChange} />)
+    rerender(<QualityStep size="0.2" tiers={tiers} advanced tier={null}
+      processName="0.08mm High Quality @BBL H2C 0.2 nozzle"
+      processes={tiers.map((t) => t.process_name)} onChange={onChange} />)
+    expect(onChange).not.toHaveBeenCalled()
+  })
 })
 
 describe('PlateStep', () => {

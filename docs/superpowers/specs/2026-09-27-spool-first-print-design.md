@@ -28,7 +28,10 @@ Bambuddy untouched; ScadBuddy neither deletes nor edits them.
 **The one-click send bar and Settings' default pipeline are out of scope and stay
 pipeline-based (amendment 2, confirmed with the user before Task 3).** `SendDialog`
 (`POST /outputs/{id}/send`) and the per-model/global default pipeline in Settings are
-untouched by this project — this spec's scope is the print picker dialog only.
+untouched by this project — this spec's scope is the print picker dialog only. One
+exception from the final review: the send bar now runs the global pipeline only. A
+stored per-model pipeline is kept but no longer read, because the routes that showed
+and changed it went with the picker.
 Converting the send bar to spool-first is tracked as its own follow-up,
 eh-homelab/ScadBuddy#312.
 
@@ -56,9 +59,9 @@ let Advanced override.**
 
 | Step | Simple mode | Advanced mode adds |
 |---|---|---|
-| 1. Plate slots | One row per color in the model, each pre-matched to the nearest spool (the existing `suggest`). | — |
+| 1. Plate slots | One row per color in the model — for "All plates", every color any plate uses — each pre-matched to the nearest spool (the existing `suggest`). | — |
 | 2. Spools | Any active spool from inventory. Loaded spools are marked with printer + AMS slot and listed first. An unloaded spool is allowed and warned: "Jade White PLA isn't loaded — load it before this prints." | Override the filament preset per slot, from the presets compatible with the chosen nozzle size. |
-| 3. Nozzles | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." | Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). The note shows in Simple mode too, if a High Flow choice carries over from an earlier Advanced visit. |
+| 3. Nozzles | One nozzle size for the job, both sides — a single radio group, not a per-side choice (§5 test 3 withdrew the per-side size). All four sizes (0.2 / 0.4 / 0.6 / 0.8) are offered; the ones installed in the rack are marked; picking one that isn't installed warns "No 0.6 mm nozzle is installed. Install one before this prints." | Standard or High Flow per side. Bambuddy has no High Flow presets (§5 test 1), so choosing High Flow slices as Standard and the step says so: "Bambuddy slices this as Standard flow; High Flow presets aren't supported by Bambuddy yet." (bambuddy#3176). |
 | 4. Quality | Fine / Standard / Draft (§4.2). | Bambu's full H2C process list for the chosen size. |
 | 5. Plate | Every H2C plate type; preselected from the printer's last print (§4.4). | — |
 | 6. Print options | Bambuddy's queue-item options with Bambuddy's defaults, exactly as `PrintOptionsDisclosure` shows them today (#88). Queue behavior — manual start, waiting for filament — is Bambuddy's. | — |

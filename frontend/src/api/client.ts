@@ -415,17 +415,19 @@ export const api = {
    * the chosen slot can reach it.
    *
    * `plateId` is what the print dialog reads another plate of a multi-plate 3MF by;
-   * plate 1 already arrives inside `getChoices`.
+   * plate 1 already arrives inside `getChoices`. `allPlates` reads every plate at once —
+   * one row per slot any plate uses — for an all-plates print.
    */
   getFilaments: (
     outputId: string,
-    query: { printerId?: number | null; plateId?: number } = {},
+    query: { printerId?: number | null; plateId?: number; allPlates?: boolean } = {},
   ) => {
     const search = new URLSearchParams()
     if (query.printerId !== null && query.printerId !== undefined) {
       search.set('printer_id', String(query.printerId))
     }
     if (query.plateId !== undefined) search.set('plate_id', String(query.plateId))
+    if (query.allPlates) search.set('all_plates', 'true')
     const suffix = search.size > 0 ? `?${search}` : ''
     return request<FilamentOptions>(`/print/outputs/${seg(outputId)}/filaments${suffix}`)
   },

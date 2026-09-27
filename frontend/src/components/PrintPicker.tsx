@@ -216,14 +216,16 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const printers = choices?.printers ?? []
   const printer = printers.find((entry) => entry.id === printerId)
   const size = nozzles[0]?.size ?? '0.4'
-  // "All plates" picks its spools against plate 1; the server applies that plan to
-  // every plate, a slot being the same colour-numbered project filament on each (#180).
+  // One plan applies to every plate, a slot being the same color-numbered project
+  // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
+  // later plate uses still gets a row (spec §2 step 1).
   const chosenPlate = plate === 'all' ? 1 : plate
+  const allPlates = plate === 'all'
   const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
 
   /**
    * The filament step: plate 1 is in the choices read already; another plate's slots
-   * are that plate's own, so they are read for it.
+   * are that plate's own, and all plates' are their union, so those are read for it.
    */
   const filamentAttempt = useRef(0)
   useEffect(() => {
@@ -240,12 +242,17 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       // auto-match (#78); every slot stays editable.
       setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
     }
-    if (chosenPlate === 1) {
+    if (chosenPlate === 1 && !allPlates) {
       seed(choices.filaments)
       return
     }
     api
-      .getFilaments(outputId, { printerId: choices.printer_id ?? null, plateId: chosenPlate })
+      .getFilaments(
+        outputId,
+        allPlates
+          ? { printerId: choices.printer_id ?? null, allPlates: true }
+          : { printerId: choices.printer_id ?? null, plateId: chosenPlate },
+      )
       .then((next) => token === filamentAttempt.current && seed(next))
       .catch((cause: unknown) => {
         if (token !== filamentAttempt.current) return
@@ -255,7 +262,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
       })
-  }, [choices, outputId, chosenPlate, rememberedPlan])
+  }, [choices, outputId, chosenPlate, allPlates, rememberedPlan])
 
   /** #81 — the chosen printer's model, reported once the choices have landed. */
   const printerModel = choices ? (printer?.model ?? null) : undefined

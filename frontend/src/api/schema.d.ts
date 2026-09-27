@@ -896,6 +896,9 @@ export interface paths {
          *     this printer": without one the spools are still listed, with their last known
          *     assignment, but the reconciled remaining weights are not. It is also what reads the
          *     mounted nozzles (#78).
+         *
+         *     ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
+         *     place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -4826,6 +4829,7 @@ export interface operations {
             query?: {
                 printer_id?: number | null;
                 plate_id?: number;
+                all_plates?: boolean;
             };
             header?: never;
             path: {
@@ -5100,7 +5104,7 @@ export interface operations {
     get_print_options_api_v1_settings_print_options_get: {
         parameters: {
             query?: {
-                /** @description The model about to be printed, whose own pipeline may differ */
+                /** @description The model about to be printed */
                 slug?: string | null;
                 /** @description The pipeline about to run, when the caller has already chosen one */
                 pipeline_id?: number | null;

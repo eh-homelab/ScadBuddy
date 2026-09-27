@@ -650,6 +650,50 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
   })
 
+  it('offers a row for a slot only a later plate uses when printing all plates', async () => {
+    // Final review 1 / spec §2 step 1: plate 1 uses only slot 1, so the choices read
+    // carries one row; "All plates" reads every plate's slots and slot 2 gets a spool.
+    const plateOne = {
+      ...choicesView.filaments,
+      slots: (choicesView.filaments.slots ?? []).filter((slot) => slot.slot_id === 1),
+      suggested: (choicesView.filaments.suggested ?? []).filter((c) => c.slot_id === 1),
+    }
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+      http.get('/api/v1/print/outputs/:id/choices', () =>
+        HttpResponse.json({ ...choicesView, filaments: plateOne }),
+      ),
+      http.get('/api/v1/print/outputs/:id/filaments', ({ request }) =>
+        HttpResponse.json(
+          new URL(request.url).searchParams.get('all_plates') === 'true'
+            ? choicesView.filaments
+            : plateOne,
+        ),
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { bodies } = watch('POST', '/run')
+    const { user } = renderPicker()
+    await loaded()
+    expect(screen.queryByTestId('filament-slot-2')).not.toBeInTheDocument()
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+
+    expect(await screen.findByTestId('filament-slot-2')).toBeInTheDocument()
+    expect(reads.urls.at(-1)).toContain('all_plates=true')
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    const slots = (bodies[0]?.filament_plan as { slots: { slot_id: number }[] }).slots
+    expect(slots.map((slot) => slot.slot_id).sort()).toEqual([1, 2])
+  })
+
   it("drops the previous output's plates while the next output's load", async () => {
     const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
     const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }

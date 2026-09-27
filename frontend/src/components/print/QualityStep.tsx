@@ -1,3 +1,4 @@
+import { useEffect } from 'react'
 import type { TierOption } from '../../api/types'
 
 type Tier = 'fine' | 'standard' | 'draft'
@@ -26,6 +27,13 @@ function layerHeight(processName: string): string {
 
 export function QualityStep({ size, tiers, processes, advanced, tier, processName, onChange }: Props) {
   const selectedProcess = processName ?? tiers.find((t) => t.tier === tier)?.process_name ?? ''
+  // A process this size does not offer (remembered from another size, or gone from
+  // Bambuddy) would be sent unseen; fall back to the tier. An empty list is "not read
+  // yet", not "nothing offered".
+  const stale = processName !== null && processes.length > 0 && !processes.includes(processName)
+  useEffect(() => {
+    if (stale) onChange({ tier: tier ?? 'standard', processName: null })
+  }, [stale, tier, onChange])
 
   return (
     <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
