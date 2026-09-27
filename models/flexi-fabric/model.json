@@ -1,0 +1,6 @@
+{
+  "name": "Flexi Fabric",
+  "description": "A print-in-place sheet of interlocking links that drapes, folds and squishes like fabric, printed flat with no supports. Five link patterns (square links, chainmail rings, diamonds, hex scales, TriFlex-style triangles), five sheet outlines, eight colour modes over an eight-colour palette, optional two-tone links, and an SVG or PNG picture laid across the sheet either as link-sized pixels or as an exact inlay in the top layers.",
+  "tags": ["fidget", "fabric", "chainmail", "print-in-place", "multi-colour", "kids"],
+  "source": "inspired by MakerWorld \"Flexi Fabric Fidget\" (models/2550125) and \"TriFlex - Super Flexible Fabric\" by Rossero (MakerWorld 1958162; Printables 1460006, 7,908 downloads), with the mechanism studied from Printables \"Fabric/Chainmail Fidget\" by Molodos (1538278, 9,743 downloads) and Flowalistik's \"Chainmail 2.0\" (288, 3,622 downloads)"
+}
