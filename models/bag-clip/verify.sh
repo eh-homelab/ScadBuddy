@@ -55,7 +55,11 @@ for c in "${CASES[@]}"; do
     echo "==> $name ${args[*]:-}"
     start=$(date +%s%N)
     docker run --rm -v "$PWD":/w -w /w "$IMAGE" \
-        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad >/dev/null 2>&1
+        openscad --backend=Manifold "${args[@]}" -o "$OUT/$name.3mf" model.scad >"$OUT/$name.log" 2>&1 \
+        || { echo "  FAIL  openscad exited non-zero (see $OUT/$name.log)"; status=1; continue; }
+    if grep -E 'WARNING|ERROR' "$OUT/$name.log"; then
+        echo "  FAIL  OpenSCAD warnings (see $OUT/$name.log)"; status=1
+    fi
     echo "    rendered in $(( ($(date +%s%N) - start) / 1000000 )) ms"
     python3 - "$OUT/$name.3mf" $expect "$tol" <<'PY' || status=1
 import sys, math, zipfile, xml.etree.ElementTree as ET
