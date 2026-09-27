@@ -1,9 +1,11 @@
 # AI integration: harness, tools, sessions, auth
 
 Design for epic #249 (spec issue #250). Written 2026-09-27. It settles what the
-implementation stories (#251–#300) build on: the harness, how tools are defined once
-and served twice, where state lives, how MCP clients authenticate, and what a human
-must approve.
+epic's implementation stories build on: the harness, how tools are defined once and
+served twice, where state lives, how MCP clients authenticate, and what a human must
+approve. Those stories are the epic's sub-issues: #251–#259, #261, #262, #264, #265
+(the realtime story, with its children #266–#270), #284, #297, #299 and #300. Numbers
+between them that aren't listed belong to unrelated work.
 
 **Citation rule** (epic principle): every external claim below links its source, and
 every fact about this repository names the file it was read from. §3 separates facts
