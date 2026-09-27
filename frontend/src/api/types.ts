@@ -59,6 +59,7 @@ export type EditTarget = Schemas['EditTarget']
 export type ParamPreset = Schemas['ParamPreset']
 export type ParamPresetCreate = Schemas['ParamPresetCreate']
 export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
+export type ParamPresetDuplicate = Schemas['ParamPresetDuplicate']
 
 export type FontFamily = Schemas['FontFamily']
 export type FontCatalogue = Schemas['FontCatalogueView']
