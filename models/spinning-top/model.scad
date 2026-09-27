@@ -174,10 +174,14 @@ decor_r0 = r_h + 2;
 
 has_name = len(name) > 0;
 name_r = face_r - name_size / 2;                 // centre line of the letters
-// Letters are spaced by a nominal advance; shrink them so each copy of the
-// name fits in 80 % of half the circumference.
-name_pitch = 0.78;
-name_s = has_name ? min(name_size, PI * name_r * 0.8 / (len(name) * name_pitch)) : 0;
+// Letters are spaced by their DejaVu Sans Bold advance widths (measured at
+// size 10 with textmetrics(), ASCII 32..126; anything else counts as 'N'),
+// and shrunk so each copy of the name fits in 80 % of half the circumference.
+ADV10 = [4.84, 6.33, 7.24, 11.64, 9.66, 13.92, 12.11, 4.25, 6.35, 6.35, 7.26, 11.64, 5.28, 5.76, 5.28, 5.07, 9.66, 9.66, 9.66, 9.66, 9.66, 9.66, 9.66, 9.66, 9.66, 9.66, 5.55, 5.55, 11.64, 11.64, 11.64, 8.06, 13.89, 10.75, 10.59, 10.19, 11.53, 9.49, 9.49, 11.4, 11.62, 5.17, 5.17, 10.76, 8.85, 13.82, 11.62, 11.81, 10.18, 11.81, 10.69, 10, 9.47, 11.28, 10.75, 15.32, 10.71, 10.06, 10.07, 6.35, 5.07, 6.35, 11.64, 6.94, 6.94, 9.37, 9.94, 8.23, 9.94, 9.42, 6.04, 9.94, 9.89, 4.76, 4.76, 9.24, 4.76, 14.47, 9.89, 9.54, 9.94, 9.94, 6.85, 8.27, 6.64, 9.89, 9.05, 12.83, 8.96, 9.05, 8.08, 9.89, 5.07, 9.89, 11.64];
+function adv10(c) = let(o = ord(c)) (o >= 32 && o <= 126) ? ADV10[o - 32] : ADV10[78 - 32];
+function sum_adv(i) = i <= 0 ? 0 : sum_adv(i - 1) + adv10(name[i - 1]);
+name_adv10 = sum_adv(len(name));
+name_s = has_name ? min(name_size, PI * name_r * 0.8 * 10 / name_adv10) : 0;
 name_ok = has_name && name_s >= 1.5 && name_r - name_s > decor_r0 + 1;
 decor_r1 = name_ok ? name_r - name_s / 2 - 1.5 : face_r;
 pattern_ok = pattern != "none" && decor_r1 - decor_r0 >= 3;
@@ -222,10 +226,12 @@ module pattern_2d() {
 // One copy of the name, centred at the top (90 degrees), reading clockwise
 // with the letters' tops pointing outwards.
 module name_copy_2d() {
-    step = name_s * name_pitch / name_r * 180 / PI;
-    n = len(name);
-    for (i = [0:n - 1]) {
-        a = 90 + ((n - 1) / 2 - i) * step;
+    k = name_s / 10;                              // advance scale
+    total = k * name_adv10;
+    for (i = [0:len(name) - 1]) {
+        // Arc length from the start of the name to the middle of letter i.
+        x = k * (sum_adv(i) + adv10(name[i]) / 2) - total / 2;
+        a = 90 - x / name_r * 180 / PI;
         translate(polar(name_r, a)) rotate(a - 90)
             text(name[i], size = name_s, font = font, halign = "center", valign = "center");
     }

@@ -27,7 +27,7 @@ name = "MIA"; // 10
 // Typeface: DejaVu Sans Bold or Lobster Two Bold are measured for tight pockets; any other face is shrunk into generic cells
 font = "DejaVu Sans:style=Bold"; // font
 
-// Height of a capital letter in mm
+// Height of a capital letter in mm; shrinks automatically when the puzzle would be wider than the 300 mm plate
 letter_size = 40; // [25:5:70]
 
 /* [Puzzle] */
@@ -225,11 +225,11 @@ LOB_T = [
     ["c", -0.233, 0.238, -0.355, 0.355, -0.133, -0.040, 0.098]
 ];
 
-s = letter_size;
 cl = clearance;
 m = tray_margin;
 pd = min(pocket_depth, letter_thickness - 1);
 tray_h = tray_thickness + pd;
+is_train = tray_shape == "train";
 known_font = font == DEJAVU || font == LOBSTER;
 TBL = font == LOBSTER ? LOB_T : DEJ_T;
 
@@ -246,6 +246,26 @@ GENERIC = ["?", -0.45, 0.45, -0.55, 0.55, 0, 0, 0.1];
 function met(c) = let(i = search(c, TBL))
     len(i) > 0 ? TBL[i[0]] : GENERIC;
 function in_tbl(c) = known_font && len(search(c, TBL)) > 0;
+// Letter size: the requested one, or smaller when the plate would be wider
+// than the H2C's 300 mm two-nozzle print width. Everything along x is
+// linear in the size (the locomotive's length has a 30 mm floor), so a
+// bisection on the plate length finds the largest size that fits.
+BED_X = 300;
+function w1(c) = let(t = met(c)) t[2] - t[1];
+function h1(c) = let(t = met(c)) t[4] - t[3];
+W1 = n == 0 ? 0 : sum([for (k = [0:n - 1]) w1(L[k][0])], n);
+HMAX1 = n == 0 ? 1 : max([for (k = [0:n - 1]) h1(L[k][0])]);
+N_GAPS = len([for (k = [1:1:n - 1]) if (L[k][1]) 1]);
+function span_at(sz) = n == 0 ? sz * 0.6
+    : W1 * sz + 2 * cl * n + (n - 1) * (is_train ? 2 * m + coupler : wall)
+      + (is_train ? 0 : N_GAPS * space_gap_k * sz);
+function plate_len(sz) = let(lr = span_at(sz) + 2 * m, h = HMAX1 * sz + 2 * cl + 2 * m)
+    tray_shape == "cloud" ? lr + 0.34 * h
+    : is_train ? lr + coupler + 1.02 * max(0.9 * h, 30) : lr;
+function fit_s(lo, hi, i) = i == 0 ? lo : let(mid = (lo + hi) / 2)
+    plate_len(mid) <= BED_X ? fit_s(mid, hi, i - 1) : fit_s(lo, mid, i - 1);
+s = plate_len(letter_size) <= BED_X ? letter_size : fit_s(0, letter_size, 30);
+
 function gw(k) = let(t = met(L[k][0])) (t[2] - t[1]) * s;     // glyph width
 function gh(k) = let(t = met(L[k][0])) (t[4] - t[3]) * s;     // glyph height
 function pw(k) = gw(k) + 2 * cl;                             // pocket width
@@ -257,7 +277,6 @@ function sum(v, i) = i <= 0 ? 0 : sum(v, i - 1) + v[i - 1];
 // Pocket centres along x, and the tray's inner span.
 space_gap = space_gap_k * s;
 PW = [for (k = [0:1:n - 1]) pw(k)];
-is_train = tray_shape == "train";
 STEP = [for (k = [0:1:n - 1])
     PW[k] + (is_train ? 2 * m + coupler : wall)
     + (!is_train && k + 1 < n && L[k + 1][1] ? space_gap : 0)];
@@ -409,6 +428,7 @@ for (k = [0:1:n - 1])
         translate(assembled ? [cx(k), 0, tray_thickness] : [cx(k), letters_y, 0])
             letter_3d(k);
 
-if (span + 2 * m + (is_train ? Le : 0) > 250)
-    echo(str("NOTE: the puzzle is ", round(span + 2 * m + (is_train ? Le : 0)),
-             " mm long; shorten the name or reduce letter_size to fit a 256 mm bed"));
+if (s < letter_size)
+    echo(str("NOTE: letter_size reduced from ", letter_size, " to ", round(s * 10) / 10,
+             " mm so the ", round(plate_len(s)), " mm puzzle fits the 300 mm plate",
+             s < 20 ? "; pieces this small are fiddly for small hands, so try a shorter name or the rounded rectangle tray" : ""));

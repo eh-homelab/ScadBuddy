@@ -1,4 +1,4 @@
-"""Third-party OpenSCAD libraries: pinned git checkouts, a lockfile, per-model declaration.
+"""Third-party OpenSCAD libraries: pinned git checkouts, pinned per model.
 
 OpenSCAD has no package manager, but it has ``OPENSCADPATH``, and every widely
 used library is a git repository with tags. So a library here is exactly the
@@ -8,12 +8,22 @@ upstream repository at a commit (#93) -- no package format, no registry:
   of the last ``<name>`` is what goes on ``OPENSCADPATH``, so ``use
   <BOSL2/std.scad>`` resolves exactly as it does on a desktop install. Keyed by
   commit, so a new pin never disturbs a render reading the old one, and an old
-  model revision can still be rendered against the pin it was written with.
-- **The lockfile** is ``libraries.lock`` at the root of the models repository
-  (#90): name -> url, ref, commit. It is versioned with the models, so a model
-  revision and the pins it rendered with are one history.
-- **The declaration** is ``libraries`` in a model's ``model.json``. A render puts
-  only those on ``OPENSCADPATH``, never every library ever installed.
+  model revision can still be rendered against the pin it was written with. A
+  checkout is a cache shared by every model pinned to that commit; nothing about
+  it is a setting.
+- **The pins** are ``libraries`` in each model's ``model.json``: name -> url, ref,
+  commit, for that model alone. A render puts only those on ``OPENSCADPATH``.
+  Two models can pin the same library at different refs, or at different
+  upstreams (a fork under the same ``use <NAME/...>``), and moving one never
+  moves the other. Being in ``model.json``, the pins are versioned with the
+  model: a revision, a restore, a duplicate all carry the pins that go with it.
+
+Before per-model pins, ``libraries`` was a list of names and the pins lived in one
+shared ``libraries.lock`` at the root of the models repository.
+:func:`migrate_lockfile` moves the live pins into each model once, at boot; an
+old revision that still declares by name renders against the lockfile as it was
+at that revision (:func:`revision_search_path`), and restoring one writes those
+pins into the model (:func:`pin_restored_declaration`).
 
 Clones use the same hermetic git as the history (:func:`git_env`), with
 ``GIT_ALLOW_PROTOCOL`` narrowing the transports to the ones this store was built
@@ -40,11 +50,9 @@ import re
 import shutil
 import signal
 import subprocess
-import tempfile
-import threading
 import time
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -53,7 +61,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.core.config import DEFAULT_LIBRARY_MAX_BYTES
-from scadbuddy.core.paths import MODEL_META_NAME, DataPaths
+from scadbuddy.core.paths import MODEL_META_NAME, DataPaths, is_builtin, model_path
 from scadbuddy.library.history import (
     GIT,
     GitError,
@@ -65,6 +73,8 @@ from scadbuddy.library.url_import import ImportRefusedError, public_addresses
 
 logger = logging.getLogger(__name__)
 
+#: The shared lockfile pins lived in before they moved into each model. Only read:
+#: once at boot to migrate it, and at old revisions that still declare by name.
 LOCKFILE_NAME = "libraries.lock"
 #: A directory name OpenSCAD can `use <NAME/...>`: no separators, no dot-files.
 NAME_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
@@ -82,7 +92,7 @@ DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
 class CatalogueLibrary(BaseModel):
-    """One library ScadBuddy knows how to fetch."""
+    """One library ScadBuddy knows how to fetch, and the ref it suggests."""
 
     name: str
     url: str
@@ -92,8 +102,7 @@ class CatalogueLibrary(BaseModel):
 
 
 class LibraryPin(BaseModel):
-    """One entry of ``libraries.lock``: where it came from, what was asked for, what
-    that resolved to."""
+    """Where a library came from, what was asked for, what that resolved to."""
 
     # REF_PATTERN refuses `..` with a look-ahead, which pydantic's default engine lacks.
     model_config = ConfigDict(regex_engine="python-re")
@@ -103,25 +112,14 @@ class LibraryPin(BaseModel):
     commit: str = Field(pattern=COMMIT_PATTERN)
 
 
-class LibraryEntry(BaseModel):
-    """The catalogue and the lockfile, joined: what can be added, and what is."""
+class ModelLibrary(LibraryPin):
+    """One entry of a model's ``libraries``: a library pinned for that model."""
 
-    name: str
-    url: str
-    ref: str
-    licence: str | None = None
-    homepage: str | None = None
-    curated: bool
-    pin: LibraryPin | None = None
-    error: str | None = Field(
-        default=None,
-        description="Why its `libraries.lock` entry is unusable (a hand edit); models "
-        "declaring it cannot render until it is added again",
-    )
+    name: str = Field(pattern=NAME_PATTERN, description="The directory `use <NAME/...>` names")
 
 
 #: The curated catalogue. Refs are the latest release tag when this was written
-#: (MCAD has none since 2019, so it follows its branch); a user can pin any other.
+#: (MCAD has none since 2019, so it follows its branch); a model can pin any other.
 CURATED: tuple[CatalogueLibrary, ...] = (
     CatalogueLibrary(
         name="BOSL2",
@@ -162,7 +160,7 @@ CURATED: tuple[CatalogueLibrary, ...] = (
 
 
 class LibraryError(RuntimeError):
-    """A library could not be added: a bad name, ref or URL, or the clone failed."""
+    """A library could not be pinned: a bad name, ref or URL, or the clone failed."""
 
 
 class LibraryFetchError(LibraryError):
@@ -174,18 +172,19 @@ class LibraryTooLargeError(LibraryError):
 
 
 class LibraryNotFoundError(KeyError):
-    """Not in the catalogue, and no URL was given to add it by."""
+    """Not in the catalogue, and no URL was given to pin it from."""
 
 
 class LibraryNotInstalledError(LookupError):
     """A model declares a library that has no pin, or whose checkout is gone."""
 
 
-class LockfileError(RuntimeError):
-    """``libraries.lock`` is not what ScadBuddy writes: a hand edit, most likely."""
+class LibraryDeclarationError(RuntimeError):
+    """A model's ``libraries`` is not what ScadBuddy writes -- a hand edit, most
+    likely -- or names a pin in a legacy ``libraries.lock`` that cannot be read."""
 
 
-# ── the lockfile ──────────────────────────────────────────────────────────────
+# ── the legacy lockfile ───────────────────────────────────────────────────────
 
 
 @dataclass(frozen=True)
@@ -193,25 +192,32 @@ class Lock:
     """``libraries.lock``, parsed entry by entry.
 
     A hand-edited entry that is not a valid pin is kept out of ``pins`` and held
-    in ``broken`` by name, so it fails only the models that declare it; every
-    other pin still renders. A file that is not a JSON object at all has no names
-    to hold apart: ``unreadable`` says why, and it fails every model declaring
-    any library.
+    in ``broken`` by name, so it fails only the models that declare it. A file
+    that is not a JSON object at all has no names to hold apart: ``unreadable``
+    says why, and it fails every name looked up in it.
     """
 
     pins: dict[str, LibraryPin] = field(default_factory=dict)
-    #: name -> (why it is not valid, the entry as written).
-    broken: dict[str, tuple[str, Any]] = field(default_factory=dict)
+    #: name -> why it is not valid.
+    broken: dict[str, str] = field(default_factory=dict)
     unreadable: str | None = None
 
     def pin(self, name: str) -> LibraryPin | None:
-        """``name``'s pin, ``None`` when it has none, or :class:`LockfileError`
-        when its entry -- or the whole file -- cannot be read."""
+        """``name``'s pin, ``None`` when it has none, or
+        :class:`LibraryDeclarationError` when its entry -- or the whole file --
+        cannot be read."""
         if self.unreadable is not None:
-            raise LockfileError(self.unreadable)
+            raise LibraryDeclarationError(self.unreadable)
         if name in self.broken:
-            raise LockfileError(self.broken[name][0])
+            raise LibraryDeclarationError(self.broken[name])
         return self.pins.get(name)
+
+
+def _problems(error: ValidationError) -> str:
+    return "; ".join(
+        f"{'.'.join(str(part) for part in detail['loc']) or 'entry'}: {detail['msg']}"
+        for detail in error.errors()
+    )
 
 
 def _parse_lock(raw: str) -> Lock:
@@ -222,141 +228,245 @@ def _parse_lock(raw: str) -> Lock:
     if not isinstance(loaded, dict):
         return Lock(unreadable=f"{LOCKFILE_NAME} is not a JSON object")
     pins: dict[str, LibraryPin] = {}
-    broken: dict[str, tuple[str, Any]] = {}
+    broken: dict[str, str] = {}
     for name, pin in loaded.items():
         try:
             pins[name] = LibraryPin.model_validate(pin)
         except ValidationError as error:
-            # Named, so whoever edited the file by hand can find the entry.
-            problems = "; ".join(
-                f"{'.'.join(str(part) for part in detail['loc']) or 'entry'}: {detail['msg']}"
-                for detail in error.errors()
-            )
-            broken[name] = (f"{LOCKFILE_NAME} entry {name!r} is not valid: {problems}", pin)
+            broken[name] = f"{LOCKFILE_NAME} entry {name!r} is not valid: {_problems(error)}"
     return Lock(pins=pins, broken=broken)
 
 
-def read_lock(paths: DataPaths) -> Lock:
-    """The lockfile as it is now: what a render of a live model uses."""
+def read_lock(paths: DataPaths) -> Lock | None:
+    """The legacy lockfile as it is on the volume, or ``None`` once migrated."""
     lock = paths.models / LOCKFILE_NAME
     if not lock.is_file():
-        return Lock()
+        return None
     return _parse_lock(lock.read_text(encoding="utf-8"))
 
 
-def read_pins(paths: DataPaths) -> dict[str, LibraryPin]:
-    """The valid pins of the lockfile as it is now."""
-    return read_lock(paths).pins
-
-
 def lock_at(history: ModelHistory, commit: str) -> Lock:
-    """The lockfile as it was at ``commit``: what that revision rendered with."""
+    """The legacy lockfile as it was at ``commit``: what that revision rendered with."""
     try:
         raw = history.show(commit, LOCKFILE_NAME)
     except RevisionNotFoundError:
-        # Older than the first pin.
+        # Older than the first pin, or newer than the migration.
         return Lock()
     return _parse_lock(raw.decode("utf-8"))
 
 
-def _update_pins(paths: DataPaths, changes: Mapping[str, LibraryPin]) -> None:
-    """Write ``changes`` over the lock as it is now. A broken entry that is not
-    among them is written back as it was: fixing it is its editor's call, not a
-    side effect of adding something else. A lock that is not JSON at all is
-    refused rather than overwritten."""
-    lock = read_lock(paths)
-    if lock.unreadable is not None:
-        raise LockfileError(lock.unreadable)
-    kept = {name: raw for name, (_, raw) in lock.broken.items() if name not in changes}
-    _write_pins(paths, {**lock.pins, **changes}, kept)
-
-
-def _lock_body(pins: Mapping[str, LibraryPin], kept: Mapping[str, Any]) -> str:
-    entries: dict[str, Any] = {**kept, **{name: pin.model_dump() for name, pin in pins.items()}}
-    # Sorted, so a pin change is a one-entry diff in the history.
-    return json.dumps({name: entries[name] for name in sorted(entries)}, indent=2) + "\n"
-
-
-def _write_pins(
-    paths: DataPaths, pins: Mapping[str, LibraryPin], kept: Mapping[str, Any] | None = None
-) -> None:
-    """Swap the lock in whole. Renders, checks and edits read it without the
-    install lock; `write_text` truncates first, and a reader in that window would
-    fail on a torn file. A temp file beside it keeps `os.replace` atomic."""
-    handle, staged = tempfile.mkstemp(dir=paths.models, prefix=".libraries-", suffix=".lock")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as writer:
-            writer.write(_lock_body(pins, kept or {}))
-        os.replace(staged, paths.models / LOCKFILE_NAME)
-    except BaseException:
-        Path(staged).unlink(missing_ok=True)
-        raise
-
-
 # ── a model's declaration ─────────────────────────────────────────────────────
 
+#: One entry of ``libraries``: a pin, or -- written before pins moved into the
+#: model -- a bare name that the legacy lockfile pins.
+Declared = ModelLibrary | str
 
-def _libraries_of(meta: Any) -> list[str]:
-    libraries = meta.get("libraries") if isinstance(meta, dict) else None
-    return [str(name) for name in libraries] if isinstance(libraries, list) else []
+
+def entry_name(entry: Any) -> str | None:
+    """The library an entry of ``libraries`` names, however it is written."""
+    if isinstance(entry, str):
+        return entry
+    if isinstance(entry, dict) and isinstance(entry.get("name"), str):
+        return str(entry["name"])
+    return None
 
 
-def declared_libraries(model_dir: Path) -> list[str]:
+def parse_declaration(meta: Any) -> list[Declared]:
+    """``libraries`` from a parsed ``model.json``.
+
+    Strict, unlike the rest of the metadata: an entry that cannot be read is an
+    error rather than left out, because OpenSCAD only WARNs on a missing ``use``
+    and a render without it would come out with half its geometry missing.
+    """
+    raw = meta.get("libraries") if isinstance(meta, dict) else None
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise LibraryDeclarationError(f"`libraries` in {MODEL_META_NAME} is not a list")
+    declared: list[Declared] = []
+    for entry in raw:
+        if isinstance(entry, str):
+            declared.append(entry)
+            continue
+        try:
+            declared.append(ModelLibrary.model_validate(entry))
+        except ValidationError as error:
+            name = entry_name(entry)
+            label = repr(name) if name is not None else "an entry"
+            raise LibraryDeclarationError(
+                f"{MODEL_META_NAME} library {label} is not valid: {_problems(error)}; pin it again"
+            ) from None
+    return declared
+
+
+def declared_libraries(model_dir: Path) -> list[Declared]:
     """``libraries`` from a model directory's ``model.json`` -- the live one or an
     exported revision, which is an ordinary model directory too."""
     meta = model_dir / MODEL_META_NAME
     if not meta.is_file():
         return []
-    return _libraries_of(json.loads(meta.read_text(encoding="utf-8")))
+    return parse_declaration(json.loads(meta.read_text(encoding="utf-8")))
 
 
-def search_path(paths: DataPaths, declared: Sequence[str], lock: Lock) -> tuple[Path, ...]:
+def _by_name(declared: Iterable[Declared]) -> bool:
+    return any(isinstance(entry, str) for entry in declared)
+
+
+def search_path(
+    paths: DataPaths, declared: Sequence[Declared], legacy: Lock | None = None
+) -> tuple[Path, ...]:
     """The ``OPENSCADPATH`` for a model: one checkout per library it declares.
 
     A declared library with no pin, or whose checkout is not on the volume, is an
     error rather than a silent omission: OpenSCAD only WARNs on a missing ``use``,
-    so leaving it off would render a model with half its geometry missing. So is
-    one whose lock entry is not valid (:class:`LockfileError`); an entry the model
-    does not declare is never looked at.
+    so leaving it off would render a model with half its geometry missing. A bare
+    name is looked up in ``legacy``, the lockfile of its time.
     """
     directories: list[Path] = []
-    for name in declared:
-        pin = lock.pin(name)
-        if pin is None:
-            raise LibraryNotInstalledError(f"{name!r} is declared but has no pin; add it first")
+    for entry in declared:
+        if isinstance(entry, str):
+            name = entry
+            pin = legacy.pin(name) if legacy is not None else None
+            if pin is None:
+                raise LibraryNotInstalledError(
+                    f"{name!r} is declared but has no pin; pin it to this model again"
+                )
+        else:
+            name, pin = entry.name, entry
         directory = paths.libraries / name / pin.commit
         if not (directory / name).is_dir():
             raise LibraryNotInstalledError(
                 f"{name!r} is pinned to {pin.commit[:7]}, which is not on this volume; "
-                f"add it again at {pin.ref!r}"
+                f"pin it to this model again at {pin.ref!r}"
             )
         directories.append(directory)
     return tuple(directories)
 
 
 def model_search_path(paths: DataPaths, slug: str) -> tuple[Path, ...]:
-    """:func:`search_path` for a live model: its declaration, the lockfile as it is."""
-    return search_path(paths, declared_libraries(paths.model_dir(slug)), read_lock(paths))
+    """:func:`search_path` for a live model: its own pins."""
+    declared = declared_libraries(paths.model_dir(slug))
+    # Only a model the migration could not pin still declares by name, and the
+    # lockfile is gone by then; read it anyway in case the migration never ran.
+    return search_path(paths, declared, read_lock(paths) if _by_name(declared) else None)
 
 
-def restore_pins(history: ModelHistory, paths: DataPaths, slug: str, commit: str) -> list[str]:
-    """Put back the pins ``slug`` rendered with at ``commit``, for the libraries it
-    declared then. Every other pin stays where it is.
+def revision_search_path(
+    history: ModelHistory, paths: DataPaths, directory: Path, commit: str
+) -> tuple[Path, ...]:
+    """:func:`search_path` for an exported revision: its own pins, or -- written
+    before pins moved into the model -- the lockfile as it was at ``commit``."""
+    declared = declared_libraries(directory)
+    return search_path(paths, declared, lock_at(history, commit) if _by_name(declared) else None)
 
-    The ``also`` hook of :meth:`ModelHistory.restore`: it runs under the history's
-    write lock, and what it returns is staged into the restore's own commit, so the
-    model and its pins come back as one revision.
-    """
+
+def _pin_names(meta: dict[str, Any], lock: Lock) -> bool:
+    """Replace every bare name in ``meta``'s ``libraries`` that ``lock`` pins with
+    that pin. One it does not pin stays a name, and a render of it says so."""
+    libraries = meta.get("libraries")
+    if not isinstance(libraries, list) or not any(isinstance(e, str) for e in libraries):
+        return False
+    rewritten: list[Any] = []
+    for entry in libraries:
+        pin = lock.pins.get(entry) if isinstance(entry, str) else None
+        rewritten.append(
+            ModelLibrary(name=entry, **pin.model_dump()).model_dump()
+            if isinstance(entry, str) and pin is not None
+            else entry
+        )
+    if rewritten == libraries:
+        return False
+    meta["libraries"] = rewritten
+    return True
+
+
+def _rewrite_meta(meta_path: Path, lock: Lock) -> bool:
     try:
-        meta = json.loads(history.show(commit, f"{slug}/{MODEL_META_NAME}"))
-    except RevisionNotFoundError:
+        meta: Any = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(meta, dict) or not _pin_names(meta, lock):
+        return False
+    meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
+def pin_restored_declaration(
+    history: ModelHistory, paths: DataPaths, slug: str, commit: str
+) -> list[str]:
+    """The ``also`` hook of :meth:`ModelHistory.restore`: a revision that declares
+    by name comes back with the pins the lockfile gave it at ``commit`` written
+    into its ``model.json``. Nothing outside the model moves.
+
+    A revision written with per-model pins already carries them; it is left as
+    checked out.
+    """
+    _rewrite_meta(paths.model_meta(slug), lock_at(history, commit))
+    # `model.json` is under the slug, which the restore commits anyway.
+    return []
+
+
+def _needs_lock(paths: DataPaths, slug: str, lock: Lock) -> bool:
+    """Does ``slug`` declare by name a library ``lock`` pins?"""
+    try:
+        meta: Any = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    libraries = meta.get("libraries") if isinstance(meta, dict) else None
+    return isinstance(libraries, list) and any(
+        isinstance(entry, str) and entry in lock.pins for entry in libraries
+    )
+
+
+def migrate_lockfile(
+    paths: DataPaths, history: ModelHistory | None, slugs: Sequence[str]
+) -> list[str]:
+    """Move the pins of a legacy ``libraries.lock`` into the models that declare
+    them, and remove it, as one revision. Returns the slugs rewritten.
+
+    Only a user's own models: a built-in's ``model.json`` is the image's, mirrored
+    by the boot sync and written by nothing else, which would put a rewrite back on
+    the next boot. A built-in still declaring by name reads the lockfile at render
+    time instead (:func:`model_search_path`), so the lockfile stays while one needs
+    it; it goes once the image pins its own libraries.
+
+    A lockfile that cannot be read at all is left where it is, so nothing is lost;
+    each model still declaring by name reads it until someone pins its libraries
+    again. A single broken entry leaves that name unpinned in the models that use
+    it, which then say so on their next render.
+    """
+    lock = read_lock(paths)
+    if lock is None:
         return []
-    old = lock_at(history, commit).pins
-    wanted = {name: old[name] for name in _libraries_of(meta) if name in old}
-    if not wanted:
+    if lock.unreadable is not None:
+        logger.warning("legacy library lockfile not migrated", extra={"reason": lock.unreadable})
         return []
-    _update_pins(paths, wanted)
-    return [LOCKFILE_NAME]
+    mine = [slug for slug in slugs if not is_builtin(slug)]
+    kept_for = [slug for slug in slugs if is_builtin(slug) and _needs_lock(paths, slug, lock)]
+    changed: list[str] = []
+
+    def migrate() -> None:
+        for slug in mine:
+            if _rewrite_meta(paths.model_meta(slug), lock):
+                changed.append(slug)
+        if kept_for:
+            logger.info("legacy library lockfile kept for built-ins", extra={"slugs": kept_for})
+        else:
+            (paths.models / LOCKFILE_NAME).unlink(missing_ok=True)
+
+    message = "Move library pins from libraries.lock into each model"
+    if history is None or not history.available:
+        migrate()
+        return changed
+    try:
+        history.commit(
+            message, LOCKFILE_NAME, *(model_path(slug) for slug in mine), prepare=migrate
+        )
+    except (GitError, OSError):
+        # As `Catalogue._commit`: the files are what renders read; a lost revision
+        # is the smaller harm.
+        logger.exception("could not record a revision", extra={"revision_message": message})
+    return changed
 
 
 # ── installing ────────────────────────────────────────────────────────────────
@@ -400,16 +510,11 @@ def _same_repository(first: str, second: str) -> bool:
     return bare(first) == bare(second)
 
 
-@dataclass
-class _NameLock:
-    """One library name's install lock, and how many adds hold or wait for it."""
-
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    users: int = 0
-
-
 class LibraryStore:
-    """``<data>/libraries/`` and the lockfile that pins them.
+    """``<data>/libraries/``: the checkouts every model's pins point into.
+
+    It records nothing: :meth:`resolve` fetches and returns a pin, and the model
+    it is for stores it (:meth:`~scadbuddy.library.catalogue.Catalogue.pin_library`).
 
     Sync on purpose, like :class:`ModelHistory`: a clone is a subprocess, so an
     ``async`` caller hands it to :func:`asyncio.to_thread`.
@@ -418,7 +523,6 @@ class LibraryStore:
     def __init__(
         self,
         paths: DataPaths,
-        history: ModelHistory,
         *,
         catalogue: Sequence[CatalogueLibrary] = CURATED,
         protocols: Sequence[str] = ("https",),
@@ -427,24 +531,11 @@ class LibraryStore:
         max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES,
     ) -> None:
         self.paths = paths
-        self.history = history
         self.catalogue = {entry.name: entry for entry in catalogue}
         self.protocols = tuple(protocols)
         self.git = git
         self.timeout = timeout
         self.max_bytes = max_bytes
-        # Serialises the lockfile's read-modify-write when there is no history
-        # to do it under; with one, its own write lock does.
-        self._lock = threading.Lock()
-        # One lock per library name, held from reading the URL the name is bound
-        # to until its pin is recorded: two adds of the same new name must not
-        # both find it unbound. Per name rather than one lock for every add,
-        # because a clone can take minutes (NopSCADlib) and adding BOSL2 should
-        # not queue behind it (the API caps clones in flight separately, see
-        # AppState.installs). Counted, so an entry goes once nobody holds or
-        # waits for it and the table never outgrows the adds in flight.
-        self._names: dict[str, _NameLock] = {}
-        self._names_guard = threading.Lock()
 
     def sweep_staging(self) -> list[str]:
         """Remove the staging clones an install killed mid-clone left behind.
@@ -469,48 +560,15 @@ class LibraryStore:
             removed.append(entry.name)
         return removed
 
-    def entries(self) -> list[LibraryEntry]:
-        lock = read_lock(self.paths)
-        if lock.unreadable is not None:
-            # No entry can be told apart from another; the catalogue still lists,
-            # and adding to it says why it cannot.
-            logger.warning("unreadable lockfile", extra={"reason": lock.unreadable})
-        errors = {name: reason for name, (reason, _) in lock.broken.items()}
-        listed = [
-            LibraryEntry(
-                **entry.model_dump(),
-                curated=True,
-                pin=lock.pins.get(entry.name),
-                error=errors.get(entry.name),
-            )
-            for entry in self.catalogue.values()
-        ]
-        added = [
-            LibraryEntry(name=name, url=pin.url, ref=pin.ref, curated=False, pin=pin)
-            for name, pin in lock.pins.items()
-            if name not in self.catalogue
-        ]
-        for name, (reason, raw) in lock.broken.items():
-            if name in self.catalogue:
-                continue
-            # Listed as broken rather than dropped, so it can be seen and re-added.
-            written = raw if isinstance(raw, dict) else {}
-            added.append(
-                LibraryEntry(
-                    name=name,
-                    url=str(written.get("url", "")),
-                    ref=str(written.get("ref", "")),
-                    curated=False,
-                    error=reason,
-                )
-            )
-        return listed + sorted(added, key=lambda entry: entry.name)
+    def entries(self) -> list[CatalogueLibrary]:
+        return list(self.catalogue.values())
 
-    def install(self, name: str, *, url: str | None = None, ref: str | None = None) -> LibraryPin:
-        """Clone ``name`` at ``ref`` and pin it to the commit that resolved to.
+    def resolve(self, name: str, *, url: str | None = None, ref: str | None = None) -> ModelLibrary:
+        """Clone ``name`` at ``ref`` and return the pin: the commit that resolved to.
 
-        ``url`` and ``ref`` default to the catalogue's. The pin is one revision of
-        the models repository; re-pinning the commit already pinned is none.
+        ``url`` and ``ref`` default to the catalogue's. A curated name may be pinned
+        from another repository -- a fork is still ``use <BOSL2/...>`` -- but only
+        the catalogue's own URL skips the vetting, and another one needs a ``ref``.
         """
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
@@ -518,48 +576,19 @@ class LibraryStore:
         # carries credentials is refused before any of that -- without quoting it.
         if url is not None and "@" in urlsplit(url).netloc:
             raise LibraryError("a library URL must not carry a user name or password")
-        with self._names_guard:
-            entry = self._names.setdefault(name, _NameLock())
-            entry.users += 1
-        try:
-            with entry.lock:
-                return self._install_locked(name, url, ref)
-        finally:
-            with self._names_guard:
-                entry.users -= 1
-                if entry.users == 0:
-                    del self._names[name]
-
-    def _install_locked(self, name: str, url: str | None, ref: str | None) -> LibraryPin:
         known = self.catalogue.get(name)
-        # A name is bound to one upstream: the catalogue's for a curated library,
-        # the one it was first added from otherwise. Every model declaring it
-        # trusts that upstream, so a different URL under the same name would
-        # silently swap the code they render with.
-        lock = read_lock(self.paths)
-        if lock.unreadable is not None:
-            # Refused before the clone: the pin could not be written anyway.
-            raise LockfileError(lock.unreadable)
-        recorded = lock.pins.get(name)
-        bound = known.url if known is not None else recorded.url if recorded else None
-        if bound is None and name in lock.broken:
-            # Re-adding is how a broken entry is fixed, but it stays bound to the
-            # upstream it names, if it still names one.
-            written = lock.broken[name][1]
-            if isinstance(written, dict) and isinstance(written.get("url"), str):
-                bound = written["url"]
         if url is None:
-            if bound is None:
-                raise LibraryNotFoundError(name)
-            url = bound
-        elif bound is not None:
-            if _same_repository(url, bound):
-                url = bound
-            else:
-                raise LibraryError(f"{name!r} comes from {bound}; add {url} under another name")
-        if ref is None:
             if known is None:
+                raise LibraryNotFoundError(name)
+            url = known.url
+        trusted = known is not None and _same_repository(url, known.url)
+        if trusted:
+            assert known is not None
+            url = known.url
+        if ref is None:
+            if not trusted:
                 raise LibraryError(f"a library from {url} needs a ref to pin")
+            assert known is not None
             ref = known.ref
         if not re.fullmatch(REF_PATTERN, ref) or ".." in ref:
             raise LibraryError(f"{ref!r} is not a usable branch or tag name")
@@ -567,13 +596,10 @@ class LibraryStore:
         if scheme not in self.protocols:
             raise LibraryError(f"{url!r} is not a {' or '.join(self.protocols)} URL")
         # The catalogue's own URLs are trusted as they are; anything a client named
-        # -- now or when it first bound the name -- is vetted on every clone.
-        pinned = self._vet(url) if known is None else ()
-
+        # is vetted on every clone.
+        pinned = () if trusted else self._vet(url)
         commit = self._clone(name, url, ref, pinned)
-        pin = LibraryPin(url=url, ref=ref, commit=commit)
-        self._record(name, pin)
-        return pin
+        return ModelLibrary(name=name, url=url, ref=ref, commit=commit)
 
     def _vet(self, url: str) -> tuple[str, ...]:
         """Refuse ``url`` unless its host resolves only to public addresses, and
@@ -727,25 +753,3 @@ class LibraryStore:
             os.killpg(process.pid, signal.SIGKILL)
         with contextlib.suppress(subprocess.TimeoutExpired):
             process.communicate(timeout=KILL_WAIT)
-
-    def _record(self, name: str, pin: LibraryPin) -> None:
-        def write() -> None:
-            _update_pins(self.paths, {name: pin})
-
-        if not self.history.available:
-            with self._lock:
-                write()
-            return
-        message = f"Pin {name} to {pin.ref} ({pin.commit[:7]})"
-        try:
-            # The read-modify-write runs under the history's write lock, so a restore
-            # putting an old pin back cannot interleave with it and lose one of the two.
-            self.history.commit(message, LOCKFILE_NAME, prepare=write)
-        except (GitError, OSError):
-            # As `Catalogue._commit`: once `write` has run the pin is live, since
-            # renders read the lockfile, not HEAD, and a lost revision is the smaller
-            # harm than telling the client an add failed that did not. A failure
-            # before `write` (the lock wait) left the old pin, and that one raises.
-            if read_lock(self.paths).pins.get(name) != pin:
-                raise
-            logger.exception("could not record a revision", extra={"revision_message": message})

@@ -37,7 +37,7 @@ under 3. Supervise play; prefer capitals for young children.
 |---|---|---|
 | `name` | `MIA` | Up to 10 characters. Spaces are skipped (no piece, no pocket); on the rectangle and cloud trays they add a gap of 0.35 × `letter_size` between words. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface (`// font`). `DejaVu Sans:style=Bold` and `Lobster Two:style=Bold` are measured (see below). Any other face works, but each letter is shrunk into a generic cell. |
-| `letter_size` | `40` | Height of a capital letter in mm (25–70). |
+| `letter_size` | `40` | Height of a capital letter in mm (25–70). Shrinks automatically when the plate would be wider than 300 mm (see below). |
 
 ### Puzzle
 
@@ -91,9 +91,13 @@ other faces are shrunk (never enlarged) into a generic 0.9 × 1.1
 `letter_size` cell; their knob may be missing if the cell centre falls in a
 counter.
 
-The puzzle grows with the name: ten 25 mm letters on the train are 432 mm
-long. When the tray is longer than 250 mm, the render echoes a `NOTE:` saying
-so; shorten the name or the letter size to fit a 256 mm bed.
+The puzzle grows with the name. When the plate would be wider than 300 mm
+(the H2C's print width with both nozzles), the letter size is reduced until it
+fits and the render echoes a `NOTE:` with the size used: `ALEXANDRA` at 30 mm
+becomes 29.1 mm, and a ten-letter train at 25 mm becomes 10.9 mm, because each
+wagon adds its own margin and coupling. Below 20 mm the note suggests a shorter
+name or the rounded rectangle tray; pieces that small are fiddly for small
+hands.
 
 ## Variations
 
@@ -117,16 +121,17 @@ so; shorten the name or the letter size to fit a 256 mm bed.
 ./verify.sh
 ```
 
-Renders ten cases in `scadbuddy-verify:local` (building it from
+Renders twelve cases in `scadbuddy-verify:local` (building it from
 `openscad/openscad:dev` with the font packages when it is missing): the
 defaults, a Lobster Two cloud, a train with knobs, a two-word name, the
 largest letter with the pocket-depth cap, the smallest size with an accented
-character and 0.2 mm clearance, an unmeasured face, a ten-letter train, an
-empty name and an all-space name. For each it checks the colour parts, that
-`Default` has no triangles, the tray outline against the dimensions the glyph
-table implies, the z range of every closed per-colour part (rendered the way
-ScadBuddy builds its parts), that the letter row lies clear in front of the
-tray, and two volume facts: the plate's union equals the sum of the parts (no
-two pieces overlap), and with the hidden `assembled = true` — letters placed
-in their pockets — it still does (every letter fits its pocket without
-touching the tray). Output lands in `.verify/`.
+character and 0.2 mm clearance, an unmeasured face, a ten-letter train, a
+nine-letter rectangle and a ten-letter cloud that are shrunk to fit, an empty
+name and an all-space name. For each it checks the colour parts, that
+`Default` has no triangles, that the plate fits 300 × 320 mm, the tray outline
+against the dimensions the glyph table implies, the z range of every closed
+per-colour part (rendered the way ScadBuddy builds its parts), that the letter
+row lies clear in front of the tray, and two volume facts: the plate's union
+equals the sum of the parts (no two pieces overlap), and with the hidden
+`assembled = true` — letters placed in their pockets — it still does (every
+letter fits its pocket without touching the tray). Output lands in `.verify/`.

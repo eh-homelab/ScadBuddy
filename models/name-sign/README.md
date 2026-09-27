@@ -21,8 +21,8 @@ ScadBuddy.
 | `line1` | `Elan` | First line, up to 30 characters. |
 | `line2` | *(empty)* | Second, smaller line under the first. Empty means a single line. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface (`// font`). |
-| `text_size` | `18` | Letter height of the first line in mm. With `auto_fit` this is the largest it will be. |
-| `line2_size` | `10` | Letter height of the second line in mm. |
+| `text_size` | `18` | Letter height of the first line in mm (6–100). With `auto_fit` this is the largest it will be, so a large value fills the plate. |
+| `line2_size` | `10` | Letter height of the second line in mm (4–60); auto-fit shrinks it like the first line. |
 | `auto_fit` | `true` | Shrinks each line to the width of the text box, then the whole block to its height. Never enlarges. |
 | `text_style` | `raised` | `raised`: letters and border stand 1.2 mm proud. `inlay`: letters and border are pockets filled flush with the face. `cutout`: the face layer has the letters cut through it, showing a backing layer in the text colour. |
 
@@ -105,7 +105,7 @@ the text colour, then the face on top of it in the plate colour.
 ./verify.sh
 ```
 
-Renders the defaults and eleven variations in `scadbuddy-verify:local`
+Renders the defaults and twelve variations in `scadbuddy-verify:local`
 (building it from `openscad/openscad:dev` plus ScadBuddy's font packages when
 it is missing), then checks each one:
 
@@ -118,6 +118,7 @@ it is missing), then checks each one:
   cutout backing at 0–2.8 mm);
 - auto-fit shrinks an over-long line to exactly the text box width, and with
   auto-fit off it is clipped to the plate;
+- on a 300 × 150 mm plate, 100 mm text fills the text box's height;
 - the four magnet pockets remove the volume of four 8.2 × 2.2 mm pockets, in
   both raised and cutout styles.
 

@@ -28,8 +28,9 @@ THUMBNAIL = PNG_BYTES + b"\x00"
 
 @pytest.fixture
 def bundled_meta() -> dict[str, Any]:
-    # No library declared: one without a pin refuses the source writes and schema
-    # reads these tests make (#93). The test that needs one parametrizes this.
+    # No library pinned: one whose checkout is not on the volume refuses the source
+    # writes and schema reads these tests make (#93). The test that needs one
+    # parametrizes this.
     return {"name": "Name keychain", "tags": ["keychain"]}
 
 
@@ -108,16 +109,20 @@ def test_a_duplicate_of_a_duplicate_tracks_its_immediate_parent(client: TestClie
     assert client.get("/api/v1/models/another-keychain/source").text == "cube(1);\n"
 
 
+PIN = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
+
+
 @pytest.mark.parametrize(
-    "bundled_meta", [{"name": "Name keychain", "tags": ["keychain"], "libraries": ["BOSL2"]}]
+    "bundled_meta", [{"name": "Name keychain", "tags": ["keychain"], "libraries": [PIN]}]
 )
 def test_a_duplicate_keeps_the_rest_of_model_json(client: TestClient, paths: DataPaths) -> None:
-    """A library declaration (#93), or anything else the metadata carries, travels along."""
+    """The library pins (#93), or anything else the metadata carries, travel along:
+    the duplicate renders against the same library versions until it re-pins."""
     _duplicate(client, BUILTIN, "My keychain")
 
     stored = json.loads(paths.model_meta("my-keychain").read_text(encoding="utf-8"))
 
-    assert stored["libraries"] == ["BOSL2"]
+    assert stored["libraries"] == [PIN]
     assert stored["upstream"]["id"] == BUILTIN
 
 
