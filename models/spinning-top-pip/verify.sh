@@ -85,6 +85,10 @@ CASES = [
     ("launcher-flower-small-loose", dict(variant="with_launcher", style="flower", diameter=35,
                                          gear_module=1.25, pull_length=160, clearance=0.6,
                                          pattern="dots", name="LEO", stem_length=20)),
+    # Tightest launcher fit: the smallest top on the coarsest gear, where the dome
+    # narrows closest to the gear root.
+    ("launcher-smallest-coarsest", dict(variant="with_launcher", diameter=30, gear_module=2,
+                                        clearance=0.2, pattern="spiral")),
     ("launcher-big-rings-name", dict(variant="with_launcher", diameter=80, pattern="rings",
                                      name="SAMANTHA", stem_color="#FFEB3B")),
     ("gyro", dict(variant="gyro_ring")),
