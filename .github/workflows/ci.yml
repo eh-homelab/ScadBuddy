@@ -612,8 +612,18 @@ jobs:
       - uses: docker/setup-buildx-action@v4
         if: ${{ steps.select.outputs.count != '0' }}
 
-      # Read-only cache: the `image` job writes every `base` layer (mode=max),
-      # and two jobs exporting the same scope at once gains nothing.
+      # Read-only cache. The entries it hits were written by an EARLIER run's
+      # `image` job (mode=max exports every `base` layer): this job does not
+      # wait for this run's `image` job, and both start as soon as `layout` is
+      # done. So on a commit that changes the `base` stage itself (an
+      # OPENSCAD_VERSION bump, a font package), there is nothing to hit yet.
+      # Both jobs cold-build `base` independently, each on its own hosted VM,
+      # and this job does it while selecting every template, because the
+      # Dockerfile is tooling. That is accepted rather than serialized behind
+      # `image`: a cold `base` is a pull of `openscad/openscad:dev` plus one
+      # apt layer, measured at 19 s with `--no-cache --pull`. Waiting for
+      # `image` would cost its full ~7 minutes on every run. Not exporting
+      # from here keeps one writer per scope.
       - name: Build the verify image (Dockerfile `base` stage)
         if: ${{ steps.select.outputs.count != '0' }}
         uses: docker/build-push-action@v7
