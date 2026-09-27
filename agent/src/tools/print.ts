@@ -245,9 +245,10 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'print_output',
     description:
-      'Print an output: checks eligibility, then runs the pipeline (or slices and queues when a filament ' +
-      'plan, plate or remembered option needs it), behind one approval. Refuses on a blocking eligibility ' +
-      'issue unless `force` is true. Follow it with get_print_progress.',
+      "Print an output: resolves the pipeline (the given one, else the model's, else the global default), " +
+      'checks its eligibility, then runs it (or slices and queues when a filament plan, plate or remembered ' +
+      'option needs it), behind one approval. Refuses on a blocking eligibility issue unless `force` is ' +
+      'true, and when no pipeline resolves. Follow it with get_print_progress.',
     input: z.object({
       output_id: outputId,
       pipeline_id: z.number().int().optional().describe("Defaults to the model's pipeline, then the global one"),
@@ -274,18 +275,45 @@ export const printTools: Tool[] = [
       `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}`,
     handler: async (args, { backend }) => {
       const path = { output_id: args.output_id }
-      if (args.pipeline_id !== undefined && !args.force) {
+      // Resolve the pipeline the way /run would, so the one checked is the one
+      // run. backend/scadbuddy/bambuddy/pipelines.py `run_for_output`:
+      // `request.pipeline_id or settings.pipeline_for(meta.slug)` (the model's
+      // pipeline, then the global one; library/settings_store.py), refusing
+      // when neither is set. The eligibility route does NOT do this: with no
+      // `pipeline_ids` it checks every pipeline (`check_pipelines`). So the
+      // default is read from GET /print/models/{slug}/pipelines, whose
+      // `default_pipeline_id` is that same `settings.pipeline_for(slug)`
+      // (`describe_pipelines`), and passed to /run explicitly.
+      let pipelineId = args.pipeline_id
+      if (pipelineId === undefined) {
+        const output = await ok(
+          backend.GET('/api/v1/outputs/{output_id}', { params: { path } }),
+          `get output ${args.output_id}`,
+        )
+        const choices = await ok(
+          backend.GET('/api/v1/print/models/{slug}/pipelines', { params: { path: { slug: output.slug } } }),
+          `resolve the default pipeline of ${output.slug}`,
+        )
+        if (choices.default_pipeline_id === null || choices.default_pipeline_id === undefined) {
+          throw new ToolError(
+            `no slicer pipeline is set for model ${output.slug} and there is no global default: pass ` +
+              'pipeline_id (see list_pipelines) or remember one with remember_model_print_choices',
+          )
+        }
+        pipelineId = choices.default_pipeline_id
+      }
+      if (!args.force) {
         const overview = await ok(
           backend.POST('/api/v1/print/outputs/{output_id}/eligibility', {
             params: { path },
-            body: { pipeline_ids: [args.pipeline_id] },
+            body: { pipeline_ids: [pipelineId] },
           }),
           `check eligibility of ${args.output_id}`,
         )
         // A report with `error` could not be judged; the run decides then (Bambuddy's 409).
         const blocked = (overview.reports ?? []).filter((r) => r.report?.ok === false)
         if (blocked.length > 0) {
-          return { ...json({ status: 'ineligible', reports: blocked }), isError: true }
+          return { ...json({ status: 'ineligible', pipeline_id: pipelineId, reports: blocked }), isError: true }
         }
       }
       return json(
@@ -293,7 +321,7 @@ export const printTools: Tool[] = [
           backend.POST('/api/v1/print/outputs/{output_id}/run', {
             params: { path },
             body: {
-              pipeline_id: args.pipeline_id ?? null,
+              pipeline_id: pipelineId,
               printer_id: args.printer_id ?? null,
               copies: args.copies ?? null,
               plate_id: args.plate_id,

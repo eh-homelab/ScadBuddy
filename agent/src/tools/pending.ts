@@ -20,22 +20,43 @@ export type PendingAction = {
   readonly expiresAt: Date
 }
 
+/**
+ * Bounds, so no caller can crowd out another's approvals:
+ *
+ * - `perPrincipal`: a caller's own queue. When it is full, THAT caller's
+ *   oldest pending action is evicted; nobody else's ever is.
+ * - `total`: a process-wide backstop against many principals at once (every
+ *   anonymous session is its own principal in `disabled` mode). When it is
+ *   reached, new prepares are REFUSED rather than evicting anyone's action.
+ */
+export type PendingLimits = { ttlMs?: number; perPrincipal?: number; total?: number }
+
+export class PendingStoreFullError extends Error {
+  override name = 'PendingStoreFullError'
+}
+
 export class PendingActionStore {
   readonly #actions = new Map<string, PendingAction>()
   readonly #ttlMs: number
-  readonly #max: number
+  readonly #perPrincipal: number
+  readonly #total: number
 
-  constructor(options: { ttlMs?: number; max?: number } = {}) {
+  constructor(options: PendingLimits = {}) {
     this.#ttlMs = options.ttlMs ?? 15 * 60_000
-    this.#max = options.max ?? 1000
+    this.#perPrincipal = options.perPrincipal ?? 50
+    this.#total = options.total ?? 10_000
   }
 
   prepare(input: { tool: string; args: unknown; summary: string; principalId: string }): PendingAction {
     this.#sweep()
-    if (this.#actions.size >= this.#max) {
-      // Oldest first: Map iteration order is insertion order.
-      const oldest = this.#actions.keys().next().value
-      if (oldest !== undefined) this.#actions.delete(oldest)
+    // Map iteration order is insertion order, so this list is oldest first.
+    const own = [...this.#actions.values()].filter((a) => a.principalId === input.principalId)
+    if (own.length >= this.#perPrincipal) {
+      for (const stale of own.slice(0, own.length - this.#perPrincipal + 1)) this.#actions.delete(stale.id)
+    } else if (this.#actions.size >= this.#total) {
+      throw new PendingStoreFullError(
+        'too many actions are waiting for approval right now; try again once some are approved or expire',
+      )
     }
     const now = new Date()
     const action: PendingAction = {

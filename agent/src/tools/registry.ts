@@ -3,7 +3,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
-import type { PendingActionStore } from './pending.js'
+import { type PendingActionStore, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -150,7 +150,7 @@ export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Prom
     return await tool.execute(args, ctx)
   } catch (err) {
     if (err instanceof z.ZodError) return errorResult(`invalid arguments: ${z.prettifyError(err)}`)
-    if (err instanceof ToolError) return errorResult(err.message)
+    if (err instanceof ToolError || err instanceof PendingStoreFullError) return errorResult(err.message)
     if (err instanceof Error && err.name === 'AbortError') return errorResult('the call was cancelled')
     return errorResult(`${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`)
   }

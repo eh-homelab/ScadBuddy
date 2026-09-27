@@ -177,6 +177,58 @@ describe('print_output (as it will run once approved, #258)', () => {
     expect(firstText(result)).toMatchObject({ status: 'ineligible' })
   })
 
+  function defaultPipeline(id: number | null) {
+    return [
+      http.get(`${BACKEND}/api/v1/outputs/out-1`, () => HttpResponse.json({ id: 'out-1', slug: 'box' })),
+      http.get(`${BACKEND}/api/v1/print/models/box/pipelines`, () =>
+        HttpResponse.json({ pipelines: [], printers: [], default_pipeline_id: id, model_choices: {}, printer_bed_types: {} }),
+      ),
+    ]
+  }
+
+  it('checks the DEFAULT pipeline too, and never runs when it is blocked', async () => {
+    let checked: unknown
+    let ran = false
+    server.use(
+      ...defaultPipeline(7),
+      http.post(`${BACKEND}/api/v1/print/outputs/out-1/eligibility`, async ({ request }) => {
+        checked = await request.json()
+        return HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 7, report: { ok: false, issues: [{ kind: 'printer_offline' }] } }] })
+      }),
+      http.post(`${BACKEND}/api/v1/print/outputs/out-1/run`, () => {
+        ran = true
+        return HttpResponse.json({})
+      }),
+    )
+    const result = await tool('print_output').execute({ output_id: 'out-1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatchObject({ status: 'ineligible', pipeline_id: 7 })
+    expect(checked).toEqual({ pipeline_ids: [7] })
+    expect(ran).toBe(false)
+  })
+
+  it('with force, skips the check and runs the resolved default pipeline', async () => {
+    let run: unknown
+    server.use(
+      ...defaultPipeline(7),
+      // No eligibility handler: calling it would be an unhandled request.
+      http.post(`${BACKEND}/api/v1/print/outputs/out-1/run`, async ({ request }) => {
+        run = await request.json()
+        return HttpResponse.json({ route: 'pipeline' })
+      }),
+    )
+    const result = await tool('print_output').execute({ output_id: 'out-1', force: true }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(run).toMatchObject({ pipeline_id: 7, force: true })
+  })
+
+  it('refuses clearly when no pipeline resolves', async () => {
+    server.use(...defaultPipeline(null))
+    const result = await runTool({ ...tool('print_output'), gated: false }, { output_id: 'out-1' }, ctx())
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('no slicer pipeline is set for model box')
+  })
+
   it('passes a Bambuddy scope error through with its detail', async () => {
     server.use(
       http.post(`${BACKEND}/api/v1/outputs/out-1/send`, () =>

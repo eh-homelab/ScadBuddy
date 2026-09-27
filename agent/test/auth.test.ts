@@ -3,6 +3,7 @@ import { checkTransport, isLoopback } from '../src/auth/authenticate.js'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { FailClosedTokenStore, hashToken, InMemoryTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { BoundedEventStore } from '../src/mcp/eventStore.js'
+import { PendingActionStore, PendingStoreFullError } from '../src/tools/pending.js'
 
 describe('tiers', () => {
   it('include every lower tier', () => {
@@ -88,5 +89,28 @@ describe('BoundedEventStore (Last-Event-ID replay, in memory)', () => {
     await store.storeEvent('a', msg(2))
     await store.storeEvent('a', msg(3))
     expect(await store.replayEventsAfter(first, { send: async () => {} })).toBe('')
+  })
+})
+
+describe('PendingActionStore bounds', () => {
+  const prep = (store: PendingActionStore, principalId: string, n = 1) =>
+    Array.from({ length: n }, (_, i) =>
+      store.prepare({ tool: 't', args: {}, summary: `${principalId} ${i}`, principalId }),
+    )
+
+  it("a principal filling its quota evicts only its own oldest, never another's", () => {
+    const store = new PendingActionStore({ perPrincipal: 3, total: 100 })
+    const [b] = prep(store, 'B')
+    const a = prep(store, 'A', 10)
+    expect(store.get(b!.id, 'B')).toBeDefined()
+    expect(store.list('A').map((x) => x.id)).toEqual(a.slice(-3).map((x) => x.id))
+    expect(store.list('B')).toHaveLength(1)
+  })
+
+  it('refuses new prepares at the global bound instead of evicting anyone', () => {
+    const store = new PendingActionStore({ perPrincipal: 5, total: 4 })
+    const kept = [...prep(store, 'A', 2), ...prep(store, 'B', 2)]
+    expect(() => prep(store, 'C')).toThrow(PendingStoreFullError)
+    for (const action of kept) expect(store.get(action.id, action.principalId)).toBeDefined()
   })
 })
