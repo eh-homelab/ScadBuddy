@@ -633,3 +633,22 @@ describe('mock API: preset values are checked as the server checks them', () => 
     ).resolves.toMatchObject({ params: { hole_side: 'top' } })
   })
 })
+
+describe('mock API: duplicating a preset', () => {
+  beforeEach(() => resetMockState())
+
+  it('copies a shipped preset to a saved one with its values', async () => {
+    const copy = await api.duplicatePreset('name-keychain', 'template-0', { name: 'Tiny copy' })
+    expect(copy).toMatchObject({ origin: 'mine', params: { text_size: 10, keyring_hole: false } })
+  })
+
+  it('refuses a taken name, and a preset whose values the template no longer takes', async () => {
+    await expect(
+      api.duplicatePreset('name-keychain', 'template-0', { name: 'mum' }),
+    ).rejects.toMatchObject({ status: 409 })
+    // "Old engraving" names engrave_depth, which the schema has dropped.
+    await expect(
+      api.duplicatePreset('name-keychain', 'b1b2c3d4e5f60718293a4b5c6d7e8f90', { name: 'Copy' }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+})

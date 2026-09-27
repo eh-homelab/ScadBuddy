@@ -12,7 +12,7 @@ import trimesh
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.deps import get_queue
+from scadbuddy.api.deps import STATE_ATTR, get_queue
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -187,7 +187,16 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
     async def queue_override() -> RenderQueue:
         # Built on first use so its workers live on the app's own event loop.
         if "queue" not in queues:
-            queue = RenderQueue(settings.to_config(), paths, render=fake_render)
+            # On the app's own registry and bus, as `build_state` wires them, so
+            # /metrics reports this queue's jobs and its states are published.
+            state = getattr(application.state, STATE_ATTR)
+            queue = RenderQueue(
+                settings.to_config(),
+                paths,
+                render=fake_render,
+                metrics=state.metrics,
+                events=state.events,
+            )
             await queue.start()
             queues["queue"] = queue
         return queues["queue"]

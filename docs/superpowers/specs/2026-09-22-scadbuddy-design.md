@@ -551,8 +551,62 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 ### 6.1 Runner
 
-- One job at a time per worker; a small in-process queue (asyncio) with
-  `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
+- One job at a time per worker; `SCADBUDDY_RENDER_CONCURRENCY` (default 2) workers
+  per process, as asyncio tasks, over the job store below.
+- **Every render request is accepted by default.** `RenderQueue` runs
+  `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest job
+  first, and keeps latency down without refusing anything:
+  - **Supersede.** A render request may name the job it replaces
+    (`supersedes`); the preview's debounce sends its previous unsettled job, which
+    is dropped unrendered if no worker has taken it (failed as superseded).
+  - **Coalesce.** A request identical to a job still *waiting* (same model,
+    revision and parameters) is answered with that job. Never a running one: it
+    has already read its source, and an edit since would be served stale.
+  - **Deadline** (optional). A job that waited longer than
+    `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (default 0 = never) for a worker is failed
+    unrendered. Measured from the submit, so a retry after a lost worker counts
+    the first attempt's time too.
+- **Job store.** With `SCADBUDDY_DATABASE_URL` the queue is a Postgres table
+  (`render/pg_store.py`): workers claim with `FOR UPDATE SKIP LOCKED`; a partial
+  unique index on the render key over pending rows makes coalescing atomic
+  (`INSERT … ON CONFLICT DO UPDATE SET claims = claims + 1`); a running job's worker
+  heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
+  heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
+  jobs survive a restart. Migrations are append-only and applied at startup under
+  an advisory lock. Without a database URL the store is JSON files under `jobs/`
+  with the wait list in the process, and a restart fails unfinished jobs.
+  A retry renders into its own `attempt-N/` under the job's work directory, since a
+  lapsed lease does not prove the first worker died; only the attempt that still
+  holds the job can `finish` it, so the recorded result always names that
+  attempt's files. Multiple replicas on one queue additionally need a shared
+  (ReadWriteMany) data directory; the deployment in §9 is one replica on RWO.
+- **Admission (opt-in).** `SCADBUDDY_RENDER_QUEUE_MAX` (default 0 = no limit): set,
+  a request that would be a new job while that many already wait is refused with
+  503 and `Retry-After` (about one mean render). The check comes after a supersede
+  frees its place, a request that coalesces is never refused, and a refusal changes
+  nothing (the Postgres store rolls its transaction back). A soft limit across
+  replicas. The preview treats such a 503 as a wait, not a failure: it shows
+  "the render queue is full" and resubmits after `retry_after`, unless a newer
+  render supersedes it first.
+- SLO targets `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and
+  `SCADBUDDY_RENDER_LATENCY_SLO` (60 s) are exported as gauges for alerts to
+  compare against; they limit nothing.
+- `GET /metrics` (Prometheus text) reports queue depth, oldest wait and running jobs
+  (read from the store per scrape), submissions/coalesced/rejected/retried, jobs finished by
+  outcome
+  (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
+  submit-to-settled latency and per-stage time (`source`, `render`, `split`,
+  `solids`, `thumbnail`, `write`), and HTTP requests by route template.
+- Store health, for alerts: `scadbuddy_render_store_info{backend}` (`postgres` or
+  `files`) says where the queue is, and `scadbuddy_render_store_up` whether the last
+  scrape could read it. When a read fails, `store_up` goes to 0 and the queue
+  gauges keep their last good values rather than going absent, so an outage is
+  seen by `store_up`, not by the depth or stall rules.
+  `scadbuddy_render_store_errors_total{operation}` counts failed calls: `read`
+  (the scrape), `work` (claiming), `reap`, `heartbeat`. The app never falls back to
+  files on a database error: an unreachable database at startup fails the start.
+  The file store's read is in-process with no I/O, so without a database URL
+  `store_up` is always 1.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:
@@ -640,14 +694,18 @@ source declares them -- is rendered in the background, and that render's
   included) calls the scheduler, as do a saved or deleted output and a restored
   revision. The call only records the model's id and returns, so no request waits
   on it. The scheduler's one worker then decides whether a render is needed at all.
-- **Priority.** A preview runs on a render worker through
-  `RenderQueue.run_background`, behind every render someone has asked for,
-  including ones submitted after it was queued. So the pod never runs more openscad
-  than `SCADBUDDY_RENDER_CONCURRENCY` allows. At most one preview is in flight, so
-  every other worker stays free for requested renders. A preview that has started
-  is not preempted, and it is bounded by three render timeouts (schema, render,
-  cover). It is not a job: it is never persisted, never listed, and never makes a
-  model's delete wait.
+- **Priority.** `RenderQueue.run_background` holds a preview in the process, and
+  one of that process's render workers runs it only when claiming from the job
+  store finds nothing: no render waiting, and with Postgres none waiting on any
+  replica. So a preview never starts ahead of a render someone has asked for,
+  including ones submitted after it was queued. It runs on a worker slot, so the
+  process never runs more openscad than `SCADBUDDY_RENDER_CONCURRENCY` allows. At
+  most one preview is in flight, so every other worker stays free for requested
+  renders. A preview that has started is not preempted, and it is bounded by three
+  render timeouts (schema, render, cover). It never touches the job store, so it is
+  not a job: never a `render_jobs` row or job file, never listed, never counted by
+  admission (`SCADBUDDY_RENDER_QUEUE_MAX`) or the queue metrics, never a `job.*`
+  event, and never makes a model's delete wait.
 - **Storage.** `cache/previews/<id>.png`, beside a `<id>.json` recording the source
   key it was rendered from. It is never in the model's directory, so never
   committed, and never among the outputs, so never in a print flow. The orphan
@@ -801,6 +859,7 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 

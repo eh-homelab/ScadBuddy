@@ -25,7 +25,8 @@ multi-colour rules, connecting Bambuddy and each feature.
   from one, changing only what differs this time (a name, a colour, a size). A
   preset keeps only the values that differ from the defaults. A template can ship
   its own read-only presets in a `presets.json` beside `model.scad`
-  (`{"presets": [{"name": "…", "params": {…}}]}`).
+  (`{"presets": [{"name": "…", "params": {…}}]}`); **Duplicate** copies one of
+  those, or any saved preset, to an editable preset of your own.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -89,8 +90,38 @@ for the project picker).
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
   editor still works, without completion and hover.
+- **Render queue.** By default every render request is accepted;
+  `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
+  first. A preview replaced before it started is dropped, and identical waiting
+  requests share one job.
+  - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
+    job while that many already wait gets 503 with `Retry-After`. A request that
+    supersedes a waiting preview, or matches one, is never refused.
+  - `SCADBUDDY_DATABASE_URL` (libpq URL): keep the queue in Postgres. Accepted
+    renders then survive a restart. Unset, it lives in `/data/jobs` and this
+    process, and a restart fails what was unfinished. Several replicas can share
+    one queue only if they also share `/data` (a ReadWriteMany volume): a job's
+    files are written there by whichever replica renders it. On a ReadWriteOnce
+    PVC run one replica, as the design does.
+    `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
+    startup.
+  - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
+    than this for a worker, unrendered.
+  - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
+    jobs it was not woken for (another replica's).
+  - `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s) and `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2),
+    Postgres only: a running job whose worker stops heartbeating for a lease is
+    requeued, and failed after its last attempt.
+  - `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and `SCADBUDDY_RENDER_LATENCY_SLO`
+    (60 s): targets, not limits. They are exported with the metrics for alerts.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is
   writable, and the build revision.
+- `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
+  (read from the store, so across replicas with Postgres), wait time and latency
+  (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
+  the queue's store can be read (`scadbuddy_render_store_up`), the
+  SLO targets, and HTTP requests by route. It is unauthenticated, like the rest of
+  the app.
 
 ## Deploying
 
@@ -148,6 +179,35 @@ the pinned `revision` — the commit stamped into the image at build time by
 That is a stronger proof than "the image field changed": the ReplicaSet rolled
 and the new pod is serving that exact build.
 
+### The agent sidecar (AI, #261)
+
+The AI agent service in `agent/` ships as a **separate image**,
+`ghcr.io/eh-homelab/scadbuddy-agent` (the Dockerfile's `--target agent`,
+published by the `agent` job in `build-image.yml` with the same tags as the
+backend image). It is meant to run as a **second container in the ScadBuddy
+pod**, not inside the backend image: the sidecar layout chosen in §4.1 of the
+AI design spec (`docs/superpowers/specs/2026-09-27-ai-integration-design.md`,
+issue #250; on branch `claude/scad-buddy-ai-integration-pfn00c` until it
+merges). The two containers share the pod network, so the agent reaches
+the backend on `http://127.0.0.1:8080` (§4.3).
+
+- It listens on port `8081` and answers `GET /healthz` (`agent/src/app.ts`).
+- It reads only `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
+  `http://127.0.0.1:8080`) and `SCADBUDDY_SECRET_KEY_FILE`
+  (`agent/src/config.ts`; spec §9). With no database URL it still runs and
+  `/healthz` reports `"ai": "disabled (no database)"`.
+- It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
+  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
+  recreates `claude/` and `work/` in that volume, and it exits 1 with a
+  message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
+- Nothing deploys it yet. The clusters manifest, and the ingress routes for
+  `/mcp`, `/api/v1/ai/*` and `/api/v1/ws` (spec §4.2), come with the stories
+  that give it routes. Until then the image's publish job is
+  `continue-on-error`, so it cannot hold back a backend deploy, and the new
+  GHCR package needs the same one-time **public** visibility step as
+  `scadbuddy` (see the header of `build-image.yml`).
+
 ### Switching continuous deploy off
 
 Disable the one workflow; nothing else changes:
@@ -196,6 +256,8 @@ what makes the running image knowable.
   `requires_openscad` need a real `openscad`; the Dockerfile's `test` target
   is where they run in CI).
 - `frontend/` — Vite + React, `pnpm test`, `pnpm build`.
+- `agent/` — the AI agent service (Node 24, Hono, Claude Agent SDK),
+  `pnpm test`, `pnpm build`; see "The agent sidecar" above.
 - `models/` — bundled example models; `models/<name>/verify.sh` renders one
   against `openscad/openscad:dev` and checks the result.
 - `backend/openapi.json` and `frontend/public/mockServiceWorker.js` are

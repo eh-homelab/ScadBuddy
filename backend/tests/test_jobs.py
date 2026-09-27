@@ -165,8 +165,9 @@ async def test_concurrency_is_capped_by_the_config(paths: DataPaths) -> None:
     queue = RenderQueue(replace(CONFIG, render_concurrency=2), paths, render=slow)
     await queue.start()
     try:
-        for _ in range(4):
-            await queue.submit("demo", {})
+        # Distinct parameters: identical waiting renders would coalesce into one job.
+        for n in range(4):
+            await queue.submit("demo", {"n": n})
         await asyncio.sleep(0.05)
         assert peak == 2
         release.set()
@@ -485,60 +486,6 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
     assert 'name="demo"' in root
     assert '<metadata key="name" value="demo"/>' in settings
     assert "builtin:" not in root and "builtin:" not in settings
-
-
-# ── the background lane (default-render previews) ─────────────────────────────
-
-
-async def test_background_work_waits_behind_every_queued_render(paths: DataPaths) -> None:
-    """A preview never starts ahead of a render someone asked for, even one submitted
-    after it was queued."""
-    ran: list[str] = []
-    release = asyncio.Event()
-
-    async def render(job: Job) -> tuple[JobResult, list[str]]:
-        await release.wait()
-        ran.append(job.slug)
-        return _result(), []
-
-    async def background() -> str:
-        ran.append("preview")
-        return "done"
-
-    queue = RenderQueue(replace(CONFIG, render_concurrency=1), paths, render=render)
-    await queue.start()
-    try:
-        await queue.submit("first", {})  # takes the one worker
-        await asyncio.sleep(0.01)
-        preview = asyncio.create_task(queue.run_background(background))
-        await asyncio.sleep(0.01)
-        await queue.submit("second", {})  # submitted after, run before
-        release.set()
-        assert await preview == "done"
-        await queue.join()
-    finally:
-        await queue.aclose()
-    assert ran == ["first", "second", "preview"]
-
-
-async def test_background_work_raises_to_its_caller_and_the_worker_lives_on(
-    paths: DataPaths,
-) -> None:
-    async def broken() -> None:
-        raise RuntimeError("no geometry")
-
-    queue = RenderQueue(CONFIG, paths, render=_fake_render)
-    await queue.start()
-    try:
-        with pytest.raises(RuntimeError, match="no geometry"):
-            await queue.run_background(broken)
-        job = await queue.submit("demo", {})
-        await queue.join()
-        assert queue.store.read(job.id).state == "done"
-        # Never a job of its own: nothing to list, nothing to block a delete.
-        assert [stored.id for stored in queue.store.list_jobs()] == [job.id]
-    finally:
-        await queue.aclose()
 
 
 # ── #204: uploaded files staged for the render and every wrapper render ───────

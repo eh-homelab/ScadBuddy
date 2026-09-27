@@ -360,6 +360,26 @@ export interface paths {
         patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a preset
+         * @description Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).
+         */
+        post: operations["duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/readme": {
         parameters: {
             query?: never;
@@ -687,6 +707,30 @@ export interface paths {
          *     link keeps working from the file alone.
          */
         get: operations["get_edit_target_api_v1_outputs__output_id__edit_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/outputs/{output_id}/geometry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mesh geometry analysis
+         * @description Printability measurements of the output's closed per-colour solids (#284):
+         *     open and non-manifold edges with their locations, bounding box, bed contact,
+         *     height-to-base ratio, overhang area by angle, and estimates of the thinnest
+         *     wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
+         *     the preview. Computed on first ask and cached beside the output.
+         */
+        get: operations["get_output_geometry_api_v1_outputs__output_id__geometry_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1499,7 +1543,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
             /** Waiting Reason */
             waiting_reason?: string | null;
         };
@@ -1630,6 +1674,18 @@ export interface components {
             target_printer_id?: number | null;
             /** Target Printer Name */
             target_printer_name?: string | null;
+        };
+        /** FeatureEstimate */
+        FeatureEstimate: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Colour */
+            colour: string;
+            /** Islands */
+            islands: number;
+            /** Min Extent Mm */
+            min_extent_mm: number;
+            /** Part */
+            part: number;
         };
         /**
          * FilamentOptions
@@ -1764,6 +1820,40 @@ export interface components {
              * @default 400
              */
             weight: number;
+        };
+        /**
+         * GeometryAnalysis
+         * @description What :func:`analyze_geometry` measured. See the module docstring for methods.
+         */
+        GeometryAnalysis: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Bed Contact Area Mm2 */
+            bed_contact_area_mm2: number;
+            /** Bed Z */
+            bed_z: number;
+            /** Edges */
+            edges?: components["schemas"]["MeshEdge"][];
+            /**
+             * Edges Truncated
+             * @default false
+             */
+            edges_truncated: boolean;
+            footprint?: components["schemas"]["BoundingBox"] | null;
+            /** Height Mm */
+            height_mm: number;
+            /** Height To Base Ratio */
+            height_to_base_ratio?: number | null;
+            /** Overhangs */
+            overhangs: components["schemas"]["OverhangBucket"][];
+            /** Parts */
+            parts: components["schemas"]["PartGeometry"][];
+            smallest_feature?: components["schemas"]["FeatureEstimate"] | null;
+            thinnest_wall?: components["schemas"]["WallEstimate"] | null;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -1918,6 +2008,35 @@ export interface components {
              * @description The upstream's current `model.scad`
              */
             theirs: string;
+        };
+        /**
+         * MeshEdge
+         * @description One defective edge, located so the preview can draw it.
+         */
+        MeshEdge: {
+            /** Colour */
+            colour: string;
+            /** End */
+            end: [
+                number,
+                number,
+                number
+            ];
+            /** Faces */
+            faces: number;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "open" | "non_manifold";
+            /** Part */
+            part: number;
+            /** Start */
+            start: [
+                number,
+                number,
+                number
+            ];
         };
         /**
          * ModelLibrary
@@ -2109,6 +2228,19 @@ export interface components {
             /** Index */
             index: number;
         };
+        /**
+         * OverhangBucket
+         * @description Faces tipped at least ``min_angle_deg`` below horizontal (cumulative).
+         */
+        OverhangBucket: {
+            /** Area Mm2 */
+            area_mm2: number;
+            bbox?: components["schemas"]["BoundingBox"] | null;
+            /** Faces */
+            faces: number;
+            /** Min Angle Deg */
+            min_angle_deg: number;
+        };
         /** Overshoot */
         Overshoot: {
             /**
@@ -2148,6 +2280,14 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+        };
+        /**
+         * ParamPresetDuplicate
+         * @description The copy's name; its values are the original's.
+         */
+        ParamPresetDuplicate: {
+            /** Name */
+            name: string;
         };
         /**
          * ParamPresetUpdate
@@ -2193,6 +2333,31 @@ export interface components {
              * @enum {string}
              */
             type: "number" | "integer" | "string" | "boolean" | "select" | "color" | "font" | "slider" | "file";
+        };
+        /** PartGeometry */
+        PartGeometry: {
+            bbox: components["schemas"]["BoundingBox"] | null;
+            /** Colour */
+            colour: string;
+            /** Edges Checked */
+            edges_checked: boolean;
+            /** Name */
+            name: string;
+            /** Non Manifold Edges */
+            non_manifold_edges?: number | null;
+            /** Open Edges */
+            open_edges?: number | null;
+            /** Part */
+            part: number;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "solid" | "split";
+            /** Triangles */
+            triangles: number;
+            /** Volume Mm3 */
+            volume_mm3?: number | null;
         };
         /** PartInfo */
         PartInfo: {
@@ -2755,7 +2920,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
@@ -2989,6 +3154,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -3315,6 +3482,23 @@ export interface components {
             path: string;
             /** Status */
             status: string;
+        };
+        /** WallEstimate */
+        WallEstimate: {
+            /** At */
+            at: [
+                number,
+                number,
+                number
+            ];
+            /** Colour */
+            colour: string;
+            /** Part */
+            part: number;
+            /** Samples */
+            samples: number;
+            /** Thickness Mm */
+            thickness_mm: number;
         };
     };
     responses: never;
@@ -4121,6 +4305,42 @@ export interface operations {
             };
         };
     };
+    duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetDuplicate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_readme_api_v1_models__slug__readme_get: {
         parameters: {
             query?: never;
@@ -4250,6 +4470,13 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
+            };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -4861,6 +5088,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EditTarget"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_output_geometry_api_v1_outputs__output_id__geometry_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeometryAnalysis"];
                 };
             };
             /** @description Validation Error */
