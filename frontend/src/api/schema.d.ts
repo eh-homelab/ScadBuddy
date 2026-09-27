@@ -360,6 +360,26 @@ export interface paths {
         patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a preset
+         * @description Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).
+         */
+        post: operations["duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/readme": {
         parameters: {
             query?: never;
@@ -2146,6 +2166,14 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+        };
+        /**
+         * ParamPresetDuplicate
+         * @description The copy's name; its values are the original's.
+         */
+        ParamPresetDuplicate: {
+            /** Name */
+            name: string;
         };
         /**
          * ParamPresetUpdate
@@ -4101,6 +4129,42 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetDuplicate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };

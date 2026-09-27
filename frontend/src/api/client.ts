@@ -22,6 +22,7 @@ import type {
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
+  ParamPresetDuplicate,
   ParamPresetUpdate,
   PastedSource,
   ParamValue,
@@ -208,6 +209,13 @@ export const api = {
   updatePreset: (slug: string, id: string, body: ParamPresetUpdate) =>
     request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}`, {
       method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
+  /** Copies any preset, shipped or saved, to a new saved one with the same values. */
+  duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+      method: 'POST',
       body: JSON.stringify(body),
     }),
 

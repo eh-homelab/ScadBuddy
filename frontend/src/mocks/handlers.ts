@@ -19,6 +19,7 @@ import type {
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
+  ParamPresetDuplicate,
   ParamPresetUpdate,
   ParamValue,
   PipelineChoices,
@@ -1200,6 +1201,28 @@ export const handlers = [
     state.presets[slug] = [...(state.presets[slug] ?? []), created]
     await delay(60)
     return HttpResponse.json(created, { status: 201 })
+  }),
+
+  http.post(`${base}/models/:slug/presets/:id/duplicate`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const source = (state.presets[slug] ?? []).find((p) => p.id === id)
+    if (!source) return problem(404, 'Preset not found')
+    const body = (await request.json()) as ParamPresetDuplicate
+    const name = body.name.trim().replace(/\s+/g, ' ')
+    const refused = presetRefusal(slug, name, source.params, null)
+    if (refused) return refused
+    const copy: ParamPreset = {
+      id: nextHexId(),
+      name,
+      origin: 'mine',
+      params: { ...source.params },
+      updated_at: new Date().toISOString(),
+    }
+    state.presets[slug] = [...(state.presets[slug] ?? []), copy]
+    await delay(60)
+    return HttpResponse.json(copy, { status: 201 })
   }),
 
   http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {

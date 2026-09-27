@@ -25,7 +25,8 @@ multi-colour rules, connecting Bambuddy and each feature.
   from one, changing only what differs this time (a name, a colour, a size). A
   preset keeps only the values that differ from the defaults. A template can ship
   its own read-only presets in a `presets.json` beside `model.scad`
-  (`{"presets": [{"name": "…", "params": {…}}]}`).
+  (`{"presets": [{"name": "…", "params": {…}}]}`); **Duplicate** copies one of
+  those, or any saved preset, to an editable preset of your own.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with

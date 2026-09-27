@@ -2278,6 +2278,22 @@
         "title": "ParamPresetCreate",
         "type": "object"
       },
+      "ParamPresetDuplicate": {
+        "description": "The copy's name; its values are the original's.",
+        "properties": {
+          "name": {
+            "maxLength": 80,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "ParamPresetDuplicate",
+        "type": "object"
+      },
       "ParamPresetUpdate": {
         "description": "A rename, a new set of values, or both. ``params`` replaces the old ones whole.",
         "properties": {
@@ -6825,6 +6841,71 @@
           }
         },
         "summary": "Rename a preset or replace its values",
+        "tags": [
+          "presets"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+      "post": {
+        "description": "Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).",
+        "operationId": "duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "preset_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[a-z0-9-]{1,64}$",
+              "title": "Preset Id",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ParamPresetDuplicate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParamPreset"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Duplicate a preset",
         "tags": [
           "presets"
         ]
