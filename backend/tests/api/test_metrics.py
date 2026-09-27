@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 
 from fastapi.testclient import TestClient
 
@@ -27,13 +28,29 @@ def test_counters_alerts_read_with_increase_start_at_zero(client: TestClient) ->
     assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 0.0' in text
 
 
+def _metrics_once(client: TestClient, line: str) -> str:
+    """/metrics as soon as it carries ``line``. A job's final state is written
+    (store.finish, in a worker thread) a moment BEFORE the worker counts it back on
+    the event loop, so a status poll can see the job settled while a scrape taken
+    in that instant does not yet count it. Prometheus scrapes are eventually
+    consistent anyway; the test waits out the gap instead of racing it."""
+    text = ""
+    for _ in range(200):
+        text = str(client.get("/metrics").text)
+        if line in text:
+            return text
+        time.sleep(0.01)
+    return text
+
+
 def test_metrics_count_renders(client: TestClient, model: str) -> None:
     accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
     wait_for_job(client, accepted.json()["job_id"])
 
-    text = client.get("/metrics").text
+    done = 'scadbuddy_render_jobs_finished_total{outcome="done"} 1.0'
+    text = _metrics_once(client, done)
     assert "scadbuddy_render_jobs_submitted_total 1.0" in text
-    assert 'scadbuddy_render_jobs_finished_total{outcome="done"} 1.0' in text
+    assert done in text
 
 
 def test_http_requests_are_labelled_by_route_template(client: TestClient, model: str) -> None:
