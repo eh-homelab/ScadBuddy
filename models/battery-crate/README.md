@@ -45,8 +45,8 @@ for them or accept the crate above sitting on the cells.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `cols` | `4` | Cells along X. |
-| `rows` | `2` | Cells along Y. |
+| `cols` | `4` | Cells along X. Capped to the most that fit a 300 mm wide plate (8 D cells in a crate, 7 in a solid block). |
+| `rows` | `2` | Cells along Y. Capped to the most that fit a 320 mm deep plate. |
 | `height_pct` | `60` | Cell depth as a percentage of the battery's length. Lower leaves more of each battery to grab. |
 | `stackable` | `true` | Raises the walls to 1 mm above the batteries and adds a 4 mm nesting foot and rim (see below). |
 | `handle_cutouts` | `true` | Handle slots in the two end walls (±X). |
@@ -105,10 +105,13 @@ low, non-stackable coin-cell crate), and then the crate prints in one colour.
 ./verify.sh
 ```
 
-Renders the defaults and 13 variations. These cover every cell type, both
+Renders the defaults and 15 variations. These cover every cell type, both
 styles, stackable on and off, handles on and off, a custom label, a crate too
-low for a label, a single cell at maximum clearance, and a 12 × 8 grid of D
-cells. Each 3MF is checked for:
+low for a label, a single cell at maximum clearance, and 12 × 8 grids of D
+and AA cells. Each 3MF is checked for:
+
+- no OpenSCAD warnings
+- the crate fitting the 300 × 320 mm plate (a 12 × 8 D grid is capped)
 
 - the expected number of non-empty materials, with nothing on `Default`
 - a bounding box exactly equal to what the parameters imply (the checker

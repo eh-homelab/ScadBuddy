@@ -20,15 +20,15 @@
 // Battery type the cells are sized for
 cell = "AA"; // [AAA, AA, C, D, 9V, 18650, CR2032]
 
-// Clearance added to the battery's diameter (or each side of a 9V / coin cell)
+// Clearance in mm added to the battery's diameter (or to each dimension of a 9V / coin cell)
 clearance = 0.6; // [0.2:0.1:1.5]
 
 /* [Layout] */
 
-// Cells along X
+// Cells along X (capped so the crate fits a 300 mm wide plate)
 cols = 4; // [1:1:12]
 
-// Cells along Y
+// Cells along Y (capped so the crate fits a 320 mm deep plate)
 rows = 2; // [1:1:8]
 
 // Cell depth as a percentage of the battery's length
@@ -96,8 +96,16 @@ end_t = (handle_cutouts && !crate) ? ow + recess : ow;
 label_depth = 0.8;
 corner = 2;
 
-grid_x = cols * cx + (cols - 1) * t;
-grid_y = rows * cy + (rows - 1) * t;
+// Printable area of the H2C with both nozzles. Big cells overflow it well
+// inside the slider ranges (12 x 8 D cells is 437 x 293 mm), so the grid is
+// capped to the most cells that fit.
+bed_x = 300;
+bed_y = 320;
+ncols = max(1, min(cols, floor((bed_x - 2 * end_t + t) / (cx + t))));
+nrows = max(1, min(rows, floor((bed_y - 2 * ow + t) / (cy + t))));
+
+grid_x = ncols * cx + (ncols - 1) * t;
+grid_y = nrows * cy + (nrows - 1) * t;
 X = grid_x + 2 * end_t;
 Y = grid_y + 2 * ow;
 
@@ -141,7 +149,7 @@ module pocket_2d() {
 hole_d = 0.5 * min(cx, cy);
 
 module cells_cut() {
-    for (i = [0 : cols - 1], j = [0 : rows - 1])
+    for (i = [0 : ncols - 1], j = [0 : nrows - 1])
         translate(cell_centre(i, j)) {
             translate([0, 0, fl]) linear_extrude(H) pocket_2d();
             if (crate && hole_d >= 3)
