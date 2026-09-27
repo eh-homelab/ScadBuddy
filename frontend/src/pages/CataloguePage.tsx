@@ -11,6 +11,7 @@ import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
+import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
 export function CataloguePage() {
@@ -96,11 +97,12 @@ export function CataloguePage() {
 }
 
 function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?: string }) {
+  const origin = safeHttpUrl(model.origin_url)
   return (
     <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
       <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
         <ModelThumbnail
-          src={model.has_thumbnail ? api.modelThumbnailUrl(model.slug) : undefined}
+          src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
           alt={model.name}
         />
 
@@ -136,17 +138,18 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
           Updated {timeAgo(model.updated_at)}
         </p>
       </Link>
-      {/* Outside the card's link: an anchor cannot nest inside another. */}
-      {model.origin_url && (
+      {/* Outside the card's link: an anchor cannot nest inside another. Only an
+          http(s) origin is linked at all; anything else is not shown (#179). */}
+      {origin && (
         <p className="truncate px-3 pb-2.5 text-[12px] text-faint">
           From{' '}
           <a
-            href={model.origin_url}
+            href={origin}
             target="_blank"
             rel="noreferrer"
             className="text-muted underline decoration-line-strong underline-offset-2 hover:text-ink"
           >
-            {hostOf(model.origin_url)}
+            {hostOf(origin)}
           </a>
         </p>
       )}

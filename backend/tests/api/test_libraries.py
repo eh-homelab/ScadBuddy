@@ -548,3 +548,76 @@ def test_a_failed_migration_does_not_stop_the_boot(
     ):
         assert client.get("/healthz").status_code == 200
     assert "could not migrate the library lockfile" in caplog.text
+
+
+# ── a dropped model.json's pins (#179) ────────────────────────────────────────
+
+
+def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
+        },
+    )
+    return response
+
+
+def test_a_dropped_model_json_cannot_name_a_library_without_a_pin(
+    lib_client: TestClient,
+) -> None:
+    """A bare name has no shared lockfile left to resolve it; nothing is created."""
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+
+    assert refused.status_code == 422
+    assert refused.json()["libraries"] == ["BOSL2"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_carries_its_pins_and_is_checked_with_them(
+    lib_client: TestClient,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    url, commits = upstream
+    # Fetched onto this volume by another model's pin.
+    create_model(lib_client, "gadget")
+    pin(lib_client, "BOSL2", "gadget")
+    pinned = {"name": "BOSL2", "url": url, "ref": "v1", "commit": commits["v1"]}
+    log = tmp_path / "openscadpath.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned, pinned]})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["libraries"] == [pinned]
+    # The parse check ran with the pinned checkout, as every render will.
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(paths.libraries / "BOSL2" / commits["v1"])
+    ]
+
+
+def test_a_dropped_model_json_whose_checkout_is_not_here_is_a_409(
+    lib_client: TestClient,
+) -> None:
+    """The 409 every render of it would be, and nothing is created."""
+    pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
+
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned]})
+
+    assert refused.status_code == 409, refused.text
+    assert "not on this volume" in refused.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_with_a_malformed_pin_is_a_422(lib_client: TestClient) -> None:
+    broken = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "HEAD"}
+
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [broken]})
+
+    assert refused.status_code == 422, refused.text
+    assert "'BOSL2' is not valid: commit:" in refused.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404

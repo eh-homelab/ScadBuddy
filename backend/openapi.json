@@ -102,6 +102,19 @@
             "description": "The .scad source",
             "title": "File"
           },
+          "meta": {
+            "anyOf": [
+              {
+                "contentMediaType": "application/octet-stream",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it",
+            "title": "Meta"
+          },
           "name": {
             "anyOf": [
               {
@@ -148,7 +161,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional PNG",
+            "description": "Optional PNG, at most 2 MiB",
             "title": "Thumbnail"
           }
         },
@@ -168,6 +181,21 @@
           "file"
         ],
         "title": "Body_put_output_thumbnail_api_v1_outputs__output_id__thumbnail_put",
+        "type": "object"
+      },
+      "Body_put_thumbnail_api_v1_models__slug__thumbnail_put": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "The thumbnail, a PNG of at most 2 MiB",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_put_thumbnail_api_v1_models__slug__thumbnail_put",
         "type": "object"
       },
       "BoundingBox": {
@@ -1663,6 +1691,32 @@
             },
             "title": "Tags",
             "type": "array"
+          },
+          "thumbnail_output_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Output Id"
+          },
+          "thumbnail_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "model",
+                  "output"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Source"
           },
           "updated_at": {
             "format": "date-time",
@@ -4299,6 +4353,21 @@
         "title": "ProjectView",
         "type": "object"
       },
+      "ReadmeUpdate": {
+        "properties": {
+          "content": {
+            "description": "The README, as Markdown text",
+            "maxLength": 1000000,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ReadmeUpdate",
+        "type": "object"
+      },
       "RenderAccepted": {
         "properties": {
           "job_id": {
@@ -5541,7 +5610,7 @@
         ]
       },
       "post": {
-        "description": "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail and README); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.",
+        "description": "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.",
         "operationId": "create_model_api_v1_models_post",
         "parameters": [
           {
@@ -6128,6 +6197,146 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/readme": {
+      "delete": {
+        "description": "Removes the README, as one revision in the model's history.",
+        "operationId": "delete_readme_api_v1_models__slug__readme_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a model's README",
+        "tags": [
+          "models"
+        ]
+      },
+      "get": {
+        "operationId": "get_readme_api_v1_models__slug__readme_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Model README",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "description": "Sets or replaces the README, as one revision in the model's history.",
+        "operationId": "put_readme_api_v1_models__slug__readme_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadmeUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set a model's README",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/render": {
       "post": {
         "operationId": "render_model_api_v1_models__slug__render_post",
@@ -6351,8 +6560,9 @@
       }
     },
     "/api/v1/models/{slug}/thumbnail": {
-      "get": {
-        "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
+      "delete": {
+        "description": "Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`).",
+        "operationId": "delete_thumbnail_api_v1_models__slug__thumbnail_delete",
         "parameters": [
           {
             "in": "path",
@@ -6369,7 +6579,11 @@
         "responses": {
           "200": {
             "content": {
-              "image/png": {}
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
             },
             "description": "Successful Response"
           },
@@ -6384,7 +6598,118 @@
             "description": "Validation Error"
           }
         },
+        "summary": "Remove a model's thumbnail",
+        "tags": [
+          "models"
+        ]
+      },
+      "get": {
+        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
+        "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "The copy named by `If-None-Match` is still current"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
         "summary": "Model thumbnail",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "description": "Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision in the model's history.",
+        "operationId": "put_thumbnail_api_v1_models__slug__thumbnail_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_put_thumbnail_api_v1_models__slug__thumbnail_put"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set a model's thumbnail",
         "tags": [
           "models"
         ]

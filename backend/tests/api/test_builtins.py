@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from tests.api.conftest import PNG_BYTES, wait_for_job
 
 pytestmark = pytest.mark.requires_git
@@ -142,6 +144,9 @@ def test_a_built_ins_diff_never_names_the_mirror(client: TestClient) -> None:
         ("PATCH", "", {"name": "Mine now"}),
         ("DELETE", "", None),
         ("POST", "/versions/{commit}/restore", None),
+        ("DELETE", "/thumbnail", None),
+        ("PUT", "/readme", {"content": "# Mine now\n"}),
+        ("DELETE", "/readme", None),
     ],
 )
 def test_a_built_in_cannot_be_changed(
@@ -156,6 +161,19 @@ def test_a_built_in_cannot_be_changed(
     assert response.status_code == 403, response.text
     assert "built-in" in response.json()["detail"]
     assert client.get(f"/api/v1/models/{BUILTIN}/source").text == SOURCE
+    assert len(_versions(client, BUILTIN)) == 1
+
+
+def test_a_built_ins_thumbnail_cannot_be_replaced(client: TestClient) -> None:
+    before = client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+
+    response = client.put(
+        f"/api/v1/models/{BUILTIN}/thumbnail", files={"file": ("t.png", png, "image/png")}
+    )
+
+    assert response.status_code == 403, response.text
+    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == before
     assert len(_versions(client, BUILTIN)) == 1
 
 
@@ -218,6 +236,79 @@ def test_the_id_of_a_longest_legal_slug_is_not_refused_for_length(client: TestCl
     assert client.get(f"/api/v1/models/builtin:{slug}x").status_code == 422
 
 
+# ── #179's details against a built-in (its writes are 403, above) ────────────
+
+
+def test_a_built_ins_details_are_readable(client: TestClient, bundled: Path) -> None:
+    record = client.get(f"/api/v1/models/{BUILTIN}").json()
+    assert (record["thumbnail_source"], record["has_readme"]) == ("model", False)
+    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
+    assert client.get(f"/api/v1/models/{BUILTIN}/readme").status_code == 404
+
+
+def test_a_built_ins_readme_is_served(app: FastAPI, bundled: Path) -> None:
+    (bundled / "README.md").write_text("# Keychain\n", encoding="utf-8")
+    with TestClient(app) as client:
+        assert client.get(f"/api/v1/models/{BUILTIN}").json()["has_readme"] is True
+        assert client.get(f"/api/v1/models/{BUILTIN}/readme").text == "# Keychain\n"
+
+
+@pytest.mark.parametrize(
+    "origin_url", ["javascript:alert(document.domain)", "https://example.com/keychain.scad"]
+)
+def test_a_built_ins_model_json_never_sets_origin_url(
+    app: FastAPI, bundled: Path, paths: DataPaths, origin_url: str
+) -> None:
+    """Only `POST /models/import` sets it (#179). The mirror keeps the image's bytes,
+    so the next boot's sync still sees nothing to change."""
+    meta = {"name": "Keychain", "origin_url": origin_url}
+    (bundled / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+    with TestClient(app) as client:
+        assert client.get(f"/api/v1/models/{BUILTIN}").json()["origin_url"] is None
+        listed = {model["slug"]: model for model in client.get("/api/v1/models").json()}
+        assert listed[BUILTIN]["origin_url"] is None
+    assert json.loads(paths.model_meta(BUILTIN).read_text(encoding="utf-8")) == meta
+
+
+def test_a_built_in_without_a_thumbnail_shows_its_first_plate_image(
+    app: FastAPI, bundled: Path, paths: DataPaths
+) -> None:
+    (bundled / "thumbnail.png").unlink()
+    cover = PNG_BYTES + b"plate"
+    with TestClient(app) as client:
+        assert client.get(f"/api/v1/models/{BUILTIN}").json()["has_thumbnail"] is False
+        job_id = _finished_job(client, BUILTIN)
+        with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+            archive.writestr(PLATE_THUMBNAIL, cover)
+        saved = client.post(f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id})
+        assert saved.status_code == 201, saved.text
+
+        record = client.get(f"/api/v1/models/{BUILTIN}").json()
+        assert record["thumbnail_source"] == "output"
+        assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == cover
+
+
+def test_linking_a_seeded_template_drops_an_origin_url_its_image_carried(
+    settings: Settings, bundled: Path, paths: DataPaths
+) -> None:
+    """Linked, a seeded copy is a duplicate of the built-in, and a duplicate never
+    carries a link its image's model.json supplied (#179); the rest of it stays."""
+    meta = {"name": "Keychain", "origin_url": "javascript:alert(document.domain)"}
+    (bundled / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+    history = ModelHistory(paths.models)
+    history.ensure_repo()
+    shutil.copytree(bundled, paths.model_dir("keychain"))
+    history.commit("Seed keychain from the image", "keychain")
+
+    with TestClient(create_app(settings)) as client:
+        model = client.get("/api/v1/models/keychain").json()
+        assert (model["name"], model["origin_url"]) == ("Keychain", None)
+        assert model["upstream"]["id"] == BUILTIN
+        # Its own thumbnail came with the seed, and is still its own.
+        assert model["thumbnail_source"] == "model"
+    assert "origin_url" not in json.loads(paths.model_meta("keychain").read_text("utf-8"))
+
+
 def test_boot_links_a_template_the_old_seed_copied_in(
     settings: Settings, bundled: Path, paths: DataPaths
 ) -> None:
@@ -245,3 +336,17 @@ def test_boot_links_a_template_the_old_seed_copied_in(
     with TestClient(create_app(settings)):
         pass
     assert history.head() == head
+
+
+def test_the_boot_survives_a_built_in_with_an_invalid_model_json(
+    app: FastAPI, bundled: Path
+) -> None:
+    """The sync mirrors it as it is; the listing leaves it out; reading it names why."""
+    (bundled / "model.json").write_text('{"name": "Keychain", "tags": 5}', encoding="utf-8")
+    with TestClient(app) as client:
+        listing = client.get("/api/v1/models")
+        assert listing.status_code == 200
+        assert BUILTIN not in {model["slug"] for model in listing.json()}
+        response = client.get(f"/api/v1/models/{BUILTIN}")
+        assert response.status_code == 409
+        assert "tags" in response.json()["detail"]
