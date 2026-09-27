@@ -11,6 +11,8 @@ goes. Assertions are on the request bodies, because that is all Bambuddy sees.
 from __future__ import annotations
 
 import json
+import re
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -348,6 +350,39 @@ def test_every_plate_of_an_all_plates_print_is_recorded(
         {"plate_id": 2, "queue_item_id": 72, "slice_job_id": 10},
     ]
     assert (meta["queue_item_id"], meta["slice_job_id"]) == (72, 10)
+
+
+@respx.mock
+def test_all_plates_of_a_3mf_that_lists_none_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    pipelines_route()
+    printers_route()
+    output_id = make_output(client, model)
+    upload_route()
+    _drop_plates(_output_3mf(paths, output_id))
+    queue = queue_route()
+
+    answer = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "all_plates": True}
+    )
+
+    assert answer.status_code == 422
+    assert "no plates" in answer.json()["detail"]
+    assert not queue.called
+
+
+def _drop_plates(path: Path) -> None:
+    with zipfile.ZipFile(path) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    config = entries["Metadata/model_settings.config"].decode("utf-8")
+    entries["Metadata/model_settings.config"] = re.sub(
+        r" <plate>.*?</plate>\n", "", config, flags=re.DOTALL
+    ).encode("utf-8")
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, payload in entries.items():
+            archive.writestr(name, payload)
 
 
 def test_a_meta_json_without_plates_still_loads(

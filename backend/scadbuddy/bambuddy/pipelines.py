@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import Literal
 
+from fastapi import status
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.bambuddy.client import BambuddyClient
@@ -664,6 +665,13 @@ async def run_for_output(
         if request.all_plates
         else [request.plate_id]
     )
+    if not plate_ids:
+        # ScadBuddy's writer always lays out one; a 3MF edited to list none has nothing
+        # to queue, and every route below reads the first plate's outcome.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "This output's 3MF lays out no plates, so there is nothing to print.",
+        )
     plate_chosen = request.bed_type is not None or plate_ids != [1]
 
     if request.filament_plan is None and not plate_chosen and not print_options.beyond_pipeline():
