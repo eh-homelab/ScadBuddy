@@ -1,0 +1,6 @@
+{
+  "name": "Train Track",
+  "description": "Wooden-railway track pieces compatible with BRIO, IKEA LILLABO and other 40 mm wooden train track: straights, curves, an ascending ramp, a 90-degree crossing, an end stop with a buffer, and a name tile with a word inlaid between the rails. Standard 40 x 12 mm profile with two 6 x 3 mm grooves, round peg and socket connectors with a clearance slider. Prints flat without supports. The track prints on extruder 1; the word, when there is one, on extruder 2.",
+  "tags": ["kids", "toy", "train", "track", "two-colour"],
+  "source": "inspired by Printables \"Extended Set of Wooden Train Track with 50+ Unique Pieces\" (#117903, 14.8k downloads) and \"Connectors - Brio/IKEA Wooden Train Track\" (#48018, 5.5k downloads); profile from woodenrailway.info's track guide"
+}

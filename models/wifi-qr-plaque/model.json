@@ -1,0 +1,6 @@
+{
+  "name": "WiFi / URL QR Code Plaque",
+  "description": "A flat plaque or fridge magnet with a QR code that joins a WiFi network, opens a web link or shows text, with an optional caption and the network name and password printed underneath. The QR encoder is plain OpenSCAD (byte mode, versions 1-10, error correction L/M/Q/H, all eight masks scored). Square, rounded or round, raised or inlaid code, optional magnet pockets and desk stand. Plate on extruder 1, code on extruder 2, caption on extruder 3 (the same black as the code by default).",
+  "tags": ["qr-code", "wifi", "sign", "fridge-magnet", "multi-colour"],
+  "source": "inspired by Printables \"Easy and Customizable QR Code Plaques/Fridge Magnet for WiFi\""
+}

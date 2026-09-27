@@ -1,0 +1,6 @@
+{
+  "name": "Gridfinity Bin",
+  "description": "A self-contained Gridfinity bin that drops into standard 42 mm baseplates: stacking lip, optional magnet and screw holes, dividers, a label tab with an inlaid label, a finger scoop, and an ultralight hollow-foot floor. The bin prints on extruder 1; the label, when there is one, on extruder 2.",
+  "tags": ["gridfinity", "storage", "bin", "organiser", "two-colour"],
+  "source": "inspired by MakerWorld Parametric Gridfinity Generator and Printables Gridfinity Rebuilt / Ultra Light Bins"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Spinning Top",
+  "description": "A three-piece spinning top: a wide disc with an inlaid spiral, ray or dot pattern that swirls when it spins, an underside cone (or saucer bowl, or flower), and a spindle that is the stem and the tip in one piece. Everything prints without supports. The disc and cone print on extruder 1, the pattern and an optional name on extruder 2, the spindle on extruder 3.",
+  "tags": ["toy", "kids", "spinning-top", "three-colour"],
+  "source": "inspired by Printables \"Twisted Spinning Top - Spins like forever\" (prntmkr, 8,397 downloads) and \"Spinning Top\" (fifindr, 6,387 downloads)"
+}

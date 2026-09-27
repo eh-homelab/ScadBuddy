@@ -1,0 +1,6 @@
+{
+  "name": "Parametric Hinge",
+  "description": "Two-leaf butt hinge with alternating knuckles, printed flat and opened 180 degrees. Print-in-place (45-degree cone pins with a set clearance, no supports), a separate headed pin, or a bore for 1.75 mm filament. Rectangular, rounded or tapered leaves with optional countersunk screw holes. One colour per leaf, equal by default.",
+  "tags": ["hinge", "print-in-place", "hardware", "functional"],
+  "source": "inspired by Printables Parametric hinge"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "Stackable Battery Crate",
+  "description": "A beer-crate style holder for one battery type (AAA, AA, C, D, 9V, 18650 or CR2032): a grid of cells, an interlocking foot so crates stack, handle cut-outs in the ends and the battery name inlaid in the front wall. Two colours: crate on extruder 1, label on extruder 2. Defaults give a 4 x 2 AA crate, 70.4 x 37.8 x 57.1 mm.",
+  "tags": ["battery", "storage", "stackable", "organiser", "two-colour"],
+  "source": "inspired by Printables Customizable & stackable beer crate for all types of batteries"
+}
