@@ -1,0 +1,17 @@
+{
+  "name": "scadbuddy",
+  "description": "ScadBuddy's Claude plugin: OpenSCAD template authoring, the customizer, and printing through Bambuddy.",
+  "owner": {
+    "name": "eh-homelab",
+    "url": "https://github.com/eh-homelab"
+  },
+  "plugins": [
+    {
+      "name": "scadbuddy",
+      "source": "./plugins/scadbuddy",
+      "description": "Skills and subagents for authoring OpenSCAD templates, and for customizing and printing them through a ScadBuddy instance's MCP server.",
+      "category": "3d-printing",
+      "tags": ["openscad", "bambuddy", "mcp"]
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+import { loadChatTransportFactory, type ChatTransportFactory } from '../../agent/chat/transport'
+import { useAsync } from '../../lib/useAsync'
+import { AssistantChat } from './AssistantChat'
+
+interface Props {
+  onClose: () => void
+  focusKey: number
+  /** Tests pass one; the app loads whichever this build has. */
+  factory?: ChatTransportFactory
+}
+
+export function AssistantPanel({ onClose, focusKey, factory }: Props) {
+  const loaded = useAsync(async () => factory ?? (await loadChatTransportFactory()), [factory])
+  if (loaded.loading) {
+    return <p className="p-3 text-[12.5px] text-muted">Connecting to the assistant…</p>
+  }
+  if (!loaded.data) {
+    return (
+      <p role="alert" className="p-3 text-[12.5px] text-warn">
+        The assistant isn&apos;t reachable in this build.
+      </p>
+    )
+  }
+  return <AssistantChat factory={loaded.data} onClose={onClose} focusKey={focusKey} />
+}

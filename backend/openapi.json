@@ -893,6 +893,38 @@
         "title": "EligibilityReport",
         "type": "object"
       },
+      "FeatureEstimate": {
+        "properties": {
+          "bbox": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "islands": {
+            "title": "Islands",
+            "type": "integer"
+          },
+          "min_extent_mm": {
+            "title": "Min Extent Mm",
+            "type": "number"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_extent_mm",
+          "part",
+          "colour",
+          "bbox",
+          "islands"
+        ],
+        "title": "FeatureEstimate",
+        "type": "object"
+      },
       "FilamentOptions": {
         "description": "Everything the filament step of the dialog needs, in one answer.\n\nOne route rather than three, because the join \u2014 inventory against assignments\nagainst the per-slot remaining weights \u2014 is the part that is easy to get wrong, and\ndoing it in the browser would mean shipping every spool's history to do it.",
         "properties": {
@@ -1189,6 +1221,108 @@
           }
         },
         "title": "FontVariant",
+        "type": "object"
+      },
+      "GeometryAnalysis": {
+        "description": "What :func:`analyze_geometry` measured. See the module docstring for methods.",
+        "properties": {
+          "bbox": {
+            "$ref": "#/components/schemas/BoundingBox"
+          },
+          "bed_contact_area_mm2": {
+            "title": "Bed Contact Area Mm2",
+            "type": "number"
+          },
+          "bed_z": {
+            "title": "Bed Z",
+            "type": "number"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MeshEdge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "edges_truncated": {
+            "default": false,
+            "title": "Edges Truncated",
+            "type": "boolean"
+          },
+          "footprint": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "height_mm": {
+            "title": "Height Mm",
+            "type": "number"
+          },
+          "height_to_base_ratio": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Height To Base Ratio"
+          },
+          "overhangs": {
+            "items": {
+              "$ref": "#/components/schemas/OverhangBucket"
+            },
+            "title": "Overhangs",
+            "type": "array"
+          },
+          "parts": {
+            "items": {
+              "$ref": "#/components/schemas/PartGeometry"
+            },
+            "title": "Parts",
+            "type": "array"
+          },
+          "smallest_feature": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FeatureEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "thinnest_wall": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WallEstimate"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "version": {
+            "default": 1,
+            "title": "Version",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "parts",
+          "bbox",
+          "bed_z",
+          "height_mm",
+          "bed_contact_area_mm2",
+          "overhangs"
+        ],
+        "title": "GeometryAnalysis",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1658,6 +1792,75 @@
           "clean"
         ],
         "title": "MergePreview",
+        "type": "object"
+      },
+      "MeshEdge": {
+        "description": "One defective edge, located so the preview can draw it.",
+        "properties": {
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "end": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "End",
+            "type": "array"
+          },
+          "faces": {
+            "title": "Faces",
+            "type": "integer"
+          },
+          "kind": {
+            "enum": [
+              "open",
+              "non_manifold"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "start": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "Start",
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "part",
+          "colour",
+          "start",
+          "end",
+          "faces"
+        ],
+        "title": "MeshEdge",
         "type": "object"
       },
       "ModelDiagnostics": {
@@ -2280,6 +2483,40 @@
         "title": "OutputPlate",
         "type": "object"
       },
+      "OverhangBucket": {
+        "description": "Faces tipped at least ``min_angle_deg`` below horizontal (cumulative).",
+        "properties": {
+          "area_mm2": {
+            "title": "Area Mm2",
+            "type": "number"
+          },
+          "bbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "faces": {
+            "title": "Faces",
+            "type": "integer"
+          },
+          "min_angle_deg": {
+            "title": "Min Angle Deg",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "min_angle_deg",
+          "area_mm2",
+          "faces"
+        ],
+        "title": "OverhangBucket",
+        "type": "object"
+      },
       "Overshoot": {
         "properties": {
           "axis": {
@@ -2595,6 +2832,92 @@
           "type"
         ],
         "title": "Parameter",
+        "type": "object"
+      },
+      "PartGeometry": {
+        "properties": {
+          "bbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "edges_checked": {
+            "title": "Edges Checked",
+            "type": "boolean"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "non_manifold_edges": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Non Manifold Edges"
+          },
+          "open_edges": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Open Edges"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "solid",
+              "split"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "triangles": {
+            "title": "Triangles",
+            "type": "integer"
+          },
+          "volume_mm3": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Volume Mm3"
+          }
+        },
+        "required": [
+          "part",
+          "name",
+          "colour",
+          "source",
+          "triangles",
+          "bbox",
+          "edges_checked"
+        ],
+        "title": "PartGeometry",
         "type": "object"
       },
       "PartInfo": {
@@ -5748,6 +6071,52 @@
         ],
         "title": "VersionFile",
         "type": "object"
+      },
+      "WallEstimate": {
+        "properties": {
+          "at": {
+            "maxItems": 3,
+            "minItems": 3,
+            "prefixItems": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "number"
+              }
+            ],
+            "title": "At",
+            "type": "array"
+          },
+          "colour": {
+            "title": "Colour",
+            "type": "string"
+          },
+          "part": {
+            "title": "Part",
+            "type": "integer"
+          },
+          "samples": {
+            "title": "Samples",
+            "type": "integer"
+          },
+          "thickness_mm": {
+            "title": "Thickness Mm",
+            "type": "number"
+          }
+        },
+        "required": [
+          "thickness_mm",
+          "part",
+          "colour",
+          "at",
+          "samples"
+        ],
+        "title": "WallEstimate",
+        "type": "object"
       }
     }
   },
@@ -8490,6 +8859,50 @@
           }
         },
         "summary": "Resolve an edit deep link",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
+    "/api/v1/outputs/{output_id}/geometry": {
+      "get": {
+        "description": "Printability measurements of the output's closed per-colour solids (#284):\nopen and non-manifold edges with their locations, bounding box, bed contact,\nheight-to-base ratio, overhang area by angle, and estimates of the thinnest\nwall and smallest feature. Coordinates are the model's own (mm, Z up), as in\nthe preview. Computed on first ask and cached beside the output.",
+        "operationId": "get_output_geometry_api_v1_outputs__output_id__geometry_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GeometryAnalysis"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Mesh geometry analysis",
         "tags": [
           "outputs"
         ]

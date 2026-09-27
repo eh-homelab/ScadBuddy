@@ -23,12 +23,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.api.deps import (
     CatalogueDep,
     CheckoutsDep,
+    EventsDep,
     InstallsDep,
     LibrariesDep,
     PathsDep,
     SlugPath,
 )
 from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.core.events import EventBus, LibraryChanged, LibraryRemoved, ModelEvent, emit
 from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
     Catalogue,
@@ -127,6 +129,7 @@ async def pin_library(
     libraries: LibrariesDep,
     installs: InstallsDep,
     checkouts: CheckoutsDep,
+    events: EventsDep,
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
@@ -139,6 +142,7 @@ async def pin_library(
         libraries=libraries,
         installs=installs,
         checkouts=checkouts,
+        events=events,
     )
 
 
@@ -152,6 +156,7 @@ async def _pin(
     libraries: LibraryStore,
     installs: asyncio.Semaphore,
     checkouts: CheckoutGate,
+    events: EventBus,
     replacing: Declared | None = None,
 ) -> ModelRecord:
     """Clone ``name`` and record the pin in ``slug``, with the same checks and status
@@ -163,7 +168,7 @@ async def _pin(
             # A clone is a network fetch; off the loop, and a bounded number at a time.
             async with installs:
                 pin = await asyncio.to_thread(libraries.resolve, name, url=url, ref=ref)
-            return await asyncio.to_thread(
+            record = await asyncio.to_thread(
                 partial(catalogue.pin_library, slug, pin, replacing=replacing)
             )
     except LibraryPinChangedError:
@@ -186,6 +191,8 @@ async def _pin(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    _library_changed(events, slug, name)
+    return record
 
 
 @router.patch(
@@ -210,6 +217,7 @@ async def repin_library(
     installs: InstallsDep,
     checkouts: CheckoutsDep,
     paths: PathsDep,
+    events: EventsDep,
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
@@ -240,6 +248,7 @@ async def repin_library(
         libraries=libraries,
         installs=installs,
         checkouts=checkouts,
+        events=events,
         replacing=current,
     )
 
@@ -250,11 +259,13 @@ async def repin_library(
     summary="Remove a library from a model",
     description="The checkout stays on the volume: an older revision may still pin it.",
 )
-def unpin_library(slug: SlugPath, name: LibraryName, catalogue: CatalogueDep) -> ModelRecord:
+def unpin_library(
+    slug: SlugPath, name: LibraryName, catalogue: CatalogueDep, events: EventsDep
+) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     try:
-        return catalogue.unpin_library(slug, name)
+        record = catalogue.unpin_library(slug, name)
     except LibraryNotDeclaredError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"
@@ -263,6 +274,13 @@ def unpin_library(slug: SlugPath, name: LibraryName, catalogue: CatalogueDep) ->
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    _library_changed(events, slug, name)
+    return record
+
+
+def _library_changed(events: EventBus, slug: str, name: str) -> None:
+    emit(events, LibraryChanged(slug=slug, name=name))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
 
 
 @router.get(
@@ -305,6 +323,7 @@ async def remove_library(
     catalogue: CatalogueDep,
     libraries: LibrariesDep,
     checkouts: CheckoutsDep,
+    events: EventsDep,
     commit: Annotated[
         str | None,
         Query(pattern=COMMIT_PATTERN, description="Only this checkout; every one when omitted"),
@@ -334,13 +353,16 @@ async def remove_library(
                 models=users,
             )
         try:
-            await asyncio.to_thread(libraries.remove, name, commit)
+            removed = await asyncio.to_thread(libraries.remove, name, commit)
         except LibraryCheckoutNotFoundError:
             raise ApiError(
                 status.HTTP_404_NOT_FOUND, f"no checkout of {what} is on this volume"
             ) from None
         except LibraryError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    # No model changes -- a removal is refused while one pins it -- so no
+    # `model.updated`: only the checkouts on the volume moved.
+    emit(events, LibraryRemoved(name=name, commits=removed))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

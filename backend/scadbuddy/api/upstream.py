@@ -8,8 +8,9 @@ from collections.abc import Callable
 from fastapi import APIRouter, status
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, SlugPath
-from scadbuddy.api.models import require_mine
+from scadbuddy.api.deps import CatalogueDep, EventsDep, SlugPath
+from scadbuddy.api.models import announce_source_change, require_mine
+from scadbuddy.core.events import ModelEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import ModelNotFoundError, ModelRecord
 from scadbuddy.library.history import GitError, GitUnavailableError
@@ -99,9 +100,10 @@ def get_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamStatus:
         "there is no update to merge."
     ),
 )
-def merge_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamMerge:
+def merge_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> UpstreamMerge:
     require_mine(slug)
     record, plan = _answer(slug, lambda: catalogue.merge_upstream(slug))
+    announce_source_change(events, slug)
     return UpstreamMerge(model=record, taken=plan.preview.taken, kept=plan.preview.kept)
 
 
@@ -115,9 +117,11 @@ def merge_upstream(slug: SlugPath, catalogue: CatalogueDep) -> UpstreamMerge:
         "`Dismiss <upstream id> update in <slug>`. 409 when there is no update."
     ),
 )
-def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
-    return _answer(slug, lambda: catalogue.dismiss_upstream(slug))
+    record = _answer(slug, lambda: catalogue.dismiss_upstream(slug))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record
 
 
 @router.post(
@@ -130,6 +134,8 @@ def dismiss_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
         "409 while the upstream still exists."
     ),
 )
-def detach_upstream(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+def detach_upstream(slug: SlugPath, catalogue: CatalogueDep, events: EventsDep) -> ModelRecord:
     require_mine(slug)
-    return _answer(slug, lambda: catalogue.detach_upstream(slug))
+    record = _answer(slug, lambda: catalogue.detach_upstream(slug))
+    emit(events, ModelEvent(kind="model.updated", slug=slug))
+    return record

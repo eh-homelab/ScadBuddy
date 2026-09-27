@@ -11,8 +11,10 @@ from pydantic import BaseModel, ConfigDict, Field
 from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
+    EventsDep,
     OutputIdPath,
     OutputsDep,
+    PrintProgressDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
@@ -21,6 +23,7 @@ from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_j
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
+from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
@@ -32,6 +35,7 @@ from scadbuddy.library.outputs import (
     download_filename,
 )
 from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
@@ -103,6 +107,7 @@ def create_output(
     outputs: OutputsDep,
     queue: QueueDep,
     store: SettingsStoreDep,
+    events: EventsDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
     job = require_job(queue, body.job_id)
@@ -114,7 +119,9 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    return _detail(outputs, outputs.create(job, name=body.name, public_url=store.load().public_url))
+    meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
+    emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
+    return _detail(outputs, meta)
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
@@ -181,9 +188,10 @@ def get_edit_target(
 @router.delete(
     "/outputs/{output_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an output"
 )
-def delete_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
-    require_output(outputs, output_id)
+def delete_output(output_id: OutputIdPath, outputs: OutputsDep, events: EventsDep) -> Response:
+    meta = require_output(outputs, output_id)
     outputs.delete(output_id)
+    emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -284,6 +292,29 @@ def get_output_plate_thumbnail(
         return Response(archive.read(cover), media_type="image/png")
 
 
+@router.get(
+    "/outputs/{output_id}/geometry",
+    response_model=GeometryAnalysis,
+    summary="Mesh geometry analysis",
+)
+def get_output_geometry(output_id: OutputIdPath, outputs: OutputsDep) -> GeometryAnalysis:
+    """Printability measurements of the output's closed per-colour solids (#284):
+    open and non-manifold edges with their locations, bounding box, bed contact,
+    height-to-base ratio, overhang area by angle, and estimates of the thinnest
+    wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
+    the preview. Computed on first ask and cached beside the output."""
+    require_output(outputs, output_id)
+    try:
+        return outputs.geometry(output_id)
+    except FileNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no 3MF") from None
+    except (ValueError, zipfile.BadZipFile) as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the 3MF of output {output_id!r} cannot be analysed: {error}",
+        ) from None
+
+
 @router.put(
     "/outputs/{output_id}/thumbnail",
     status_code=status.HTTP_204_NO_CONTENT,
@@ -312,6 +343,7 @@ async def send_output_to_bambuddy(
     body: SendRequest,
     outputs: OutputsDep,
     store: SettingsStoreDep,
+    observer: PrintProgressDep,
 ) -> SendResult:
     """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
     slice and queue it.
@@ -323,4 +355,8 @@ async def send_output_to_bambuddy(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await send_output(client, outputs, meta, settings, body)
+        result = await send_output(client, outputs, meta, settings, body)
+    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
+    if result.pipeline_run_id is not None or result.queue_item_id is not None:
+        observer.started(meta)
+    return result
