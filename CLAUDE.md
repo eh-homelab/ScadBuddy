@@ -82,6 +82,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
+- `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
+  `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
+  the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
+  `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
+  the authoritative manifest check.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 

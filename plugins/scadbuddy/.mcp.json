@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "scadbuddy": {
+      "type": "http",
+      "url": "${user_config.scadbuddy_url}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.scadbuddy_token}"
+      }
+    }
+  }
+}
