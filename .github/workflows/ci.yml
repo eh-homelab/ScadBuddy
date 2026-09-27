@@ -620,9 +620,11 @@ jobs:
       # Both jobs cold-build `base` independently, each on its own hosted VM,
       # and this job does it while selecting every template, because the
       # Dockerfile is tooling. That is accepted rather than serialized behind
-      # `image`: a cold `base` is a pull of `openscad/openscad:dev` plus one
-      # apt layer, measured at 19 s with `--no-cache --pull`. Waiting for
-      # `image` would cost its full ~7 minutes on every run. Not exporting
+      # `image`: a cold `base` is a pull of `openscad/openscad:dev` (~620 MB)
+      # plus one apt layer. The apt layer and the build took 19 s locally
+      # (`--no-cache`, base image already present), so the cost is that plus
+      # one pull. Waiting for `image` would cost its full ~7 minutes on every
+      # run. Not exporting
       # from here keeps one writer per scope.
       - name: Build the verify image (Dockerfile `base` stage)
         if: ${{ steps.select.outputs.count != '0' }}
