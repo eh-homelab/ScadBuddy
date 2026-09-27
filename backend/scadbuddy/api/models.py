@@ -504,6 +504,37 @@ def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> M
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
 
 
+class DuplicateRequest(BaseModel):
+    name: str = Field(description="Display name of the duplicate; its slug is derived from it")
+
+
+@router.post(
+    "/models/{slug}/duplicate",
+    response_model=ModelRecord,
+    status_code=status.HTTP_201_CREATED,
+    summary="Duplicate a template",
+    description=(
+        "Copies any template, built-in or mine, to a new template of mine whose slug is "
+        "derived from `name` as `POST /models` derives it, and records the template it "
+        "came from as `upstream`, with `base` the upstream's current revision. One "
+        "revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, "
+        "outputs) are not copied."
+    ),
+)
+def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    new_slug = _slug_from_name(body.name)
+    try:
+        return catalogue.duplicate(slug, new_slug, body.name)
+    except ModelExistsError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
+        ) from None
+    except ModelNotFoundError:
+        # A concurrent delete of the upstream got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
 def delete_model(slug: SlugPath, catalogue: CatalogueDep, queue: QueueDep) -> Response:
     require_mine(slug)

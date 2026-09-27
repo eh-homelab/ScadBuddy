@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
+    MODEL_META_NAME,
     SOURCE_NAME,
     DataPaths,
     is_builtin,
@@ -73,6 +74,21 @@ class ModelExistsError(ValueError):
     pass
 
 
+class Upstream(BaseModel):
+    """The template a duplicate was copied from, and the revision of it it includes."""
+
+    id: str = Field(description="The upstream template's id: a slug, or `builtin:<slug>`")
+    #: Stored, not derived from `id`: a merge base may name a commit where the
+    #: upstream's source lived somewhere else.
+    path: str = Field(description="The upstream's directory in the models repository")
+    base: str | None = Field(
+        description="The upstream commit this template includes; None without history"
+    )
+    dismissed: str | None = Field(
+        default=None, description="An upstream commit the user chose not to take"
+    )
+
+
 class ModelMeta(BaseModel):
     """``model.json``: the model's metadata, and nothing derived."""
 
@@ -83,6 +99,9 @@ class ModelMeta(BaseModel):
     #: Where the model was imported from (#153), for the link back; None for anything
     #: uploaded, pasted or built in. Not in `ModelPatch`: it records a fact, not a choice.
     origin_url: str | None = None
+    #: Set by a duplicate (#156). Not in `ModelPatch` either, so a metadata edit
+    #: never clobbers it.
+    upstream: Upstream | None = None
 
 
 class ModelPatch(BaseModel):
@@ -240,6 +259,54 @@ class Catalogue:
         if readme is not None:
             self.readme_path(slug).write_text(readme, encoding="utf-8")
         self._commit(f"Add {slug}", slug)
+        return self.record(slug)
+
+    def duplicate(self, upstream_id: str, slug: str, name: str) -> ModelRecord:
+        """Copy a template to a new one of mine at ``slug``, recording its upstream.
+
+        The copy is staged under ``cache/`` (same volume) and renamed into place
+        with its ``model.json`` already written, so the new template appears whole
+        or not at all, and a slug something else claimed meanwhile refuses the
+        rename rather than being copied into. Not under ``cache/tombstones/``: a
+        concurrent delete sweeps that.
+        """
+        self._require(upstream_id)
+        if self.exists(slug):
+            raise ModelExistsError(slug)
+        base = self.version(upstream_id)
+        self.paths.cache.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
+        staged = staging / slug
+        target = self.paths.model_dir(slug)
+        try:
+            try:
+                # Dotfiles are left out: a `.model-*.scad` is a source write in flight.
+                shutil.copytree(
+                    self.paths.model_dir(upstream_id), staged, ignore=shutil.ignore_patterns(".*")
+                )
+            except FileNotFoundError:
+                raise ModelNotFoundError(upstream_id) from None
+            meta_path = staged / MODEL_META_NAME
+            loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
+            meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
+            meta.pop("schema", None)
+            meta["name"] = name
+            meta["upstream"] = Upstream(
+                id=upstream_id, path=model_path(upstream_id), base=base
+            ).model_dump()
+            meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+            try:
+                # Onto an empty directory it succeeds, as `create`'s mkdir would;
+                # onto a populated one it fails.
+                staged.rename(target)
+            except OSError:
+                if target.exists():
+                    raise ModelExistsError(slug) from None
+                raise
+        finally:
+            _remove_tree(staging)
+        self._clear_derived(slug)
+        self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
