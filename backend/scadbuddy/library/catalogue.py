@@ -10,6 +10,7 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -55,6 +56,9 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
+#: How many times a merge is worked out again when the template or its upstream
+#: moves between planning and writing it, before it is refused.
+MERGE_ATTEMPTS = 3
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -105,6 +109,10 @@ def _still_there(path: Path) -> bool:
         return path.exists() or path.is_symlink()
     except OSError:
         return True
+
+
+class _StaleMergeError(Exception):
+    """The template or its upstream moved between planning a merge and writing it."""
 
 
 class ModelNotFoundError(KeyError):
@@ -722,36 +730,58 @@ class Catalogue:
         """Take the upstream's current revision as one commit, or raise
         :class:`MergeConflictError` having written nothing.
 
-        Worked out and written under the history's write lock, so no other
-        catalogue commit lands between reading this template and committing it.
+        Worked out outside the history's write lock -- its git reads would stall
+        every other catalogue write -- and written under it only if neither this
+        template nor its upstream has moved since. If one has, it is worked out
+        again, a bounded number of times, and then refused as a 409.
         """
         history = self._require_history()
         self._require(slug)
         upstream_id = self._upstream(slug).id
-        plans: list[MergePlan] = []
+        directory = self.paths.model_dir(slug)
 
-        def merge() -> None:
-            upstream, revision, state = self._upstream_now(slug)
+        for _ in range(MERGE_ATTEMPTS):
+            planned = (history.last_commit(model_path(slug)), *self._upstream_now(slug))
+            _, upstream, revision, state = planned
             if state not in ("update", "dismissed") or revision is None:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
-            plan = plan_merge(history, slug, self.paths.model_dir(slug), upstream, revision)
+            plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
                 raise MergeConflictError(plan)
-            if plan.preview.merged != plan.preview.ours:
-                self._replace_source(slug, plan.preview.merged)
-            directory = self.paths.model_dir(slug)
-            for name, content in plan.files.items():
-                target = directory / name
-                if content is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    _write_atomic(target, content)
-            self._advance_base(slug, upstream, revision)
-            plans.append(plan)
+            merge = partial(self._write_merge, slug, plan, planned)
+            try:
+                self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
+            except _StaleMergeError:
+                continue
+            return self.record(slug), plan
+        raise UpstreamStateError(
+            f"{slug!r} or its upstream kept changing while the merge was worked out; try again",
+            state,
+        )
 
-        self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
-        return self.record(slug), plans[0]
+    def _write_merge(
+        self,
+        slug: str,
+        plan: MergePlan,
+        planned: tuple[str | None, Upstream, str | None, UpstreamState],
+    ) -> None:
+        """Write ``plan`` -- under the write lock -- unless the template's revision, its
+        upstream or the files the plan read have moved since ``planned`` was read."""
+        history = self._require_history()
+        directory = self.paths.model_dir(slug)
+        now = (history.last_commit(model_path(slug)), *self._upstream_now(slug))
+        if now != planned or not plan.still_applies(directory):
+            raise _StaleMergeError
+        if plan.preview.merged != plan.preview.ours:
+            self._replace_source(slug, plan.preview.merged)
+        for name, content in plan.files.items():
+            target = directory / name
+            if content is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                _write_atomic(target, content)
+        self._advance_base(slug, planned[1], plan.revision)
 
     def dismiss_upstream(self, slug: str) -> ModelRecord:
         """Don't offer the upstream's current revision again; a later one still is."""
