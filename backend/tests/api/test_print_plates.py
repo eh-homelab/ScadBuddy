@@ -426,6 +426,8 @@ def _plan_run(
     paths: DataPaths,
     used: dict[int, set[int]],
     grams: float = 0,
+    *,
+    all_plates: bool = True,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     configure(client)
     pipelines_route()
@@ -443,7 +445,7 @@ def _plan_run(
         json={
             "pipeline_id": 1,
             "printer_id": 1,
-            "all_plates": True,
+            "all_plates": all_plates,
             # Picked against plate 1, as the picker does for "all plates".
             "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
         },
@@ -494,6 +496,19 @@ def test_the_filament_check_sums_what_every_plate_needs(
     body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=600)
 
     assert len(queued) == 2
+    [warning] = [warning for warning in body["warnings"] if warning["kind"] == "low-filament"]
+    assert warning["slot_id"] == 1
+    assert "needs 1200 g" in warning["message"]
+
+
+@respx.mock
+def test_one_plate_short_of_filament_is_still_warned_about(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The summed check (#198) runs for every planned print, so one plate is its own total."""
+    body, queued = _plan_run(client, model, paths, {1: {1}, 2: {1}}, grams=1200, all_plates=False)
+
+    assert len(queued) == 1
     [warning] = [warning for warning in body["warnings"] if warning["kind"] == "low-filament"]
     assert warning["slot_id"] == 1
     assert "needs 1200 g" in warning["message"]

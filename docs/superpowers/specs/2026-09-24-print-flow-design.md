@@ -147,7 +147,10 @@ the data it has already fetched:
    Misty Blue* into the printer", naming its `storage_location` when it has one, or
    naming the other printer when it is loaded in one.
 2. **Not enough filament**: `remaining_g < used_grams × copies`, only when the slice
-   has reported grams. Unknown grams decline to judge rather than guessing.
+   has reported grams. Unknown grams decline to judge rather than guessing. For all
+   plates, each slot's grams are summed across the plates before this check (#198): a
+   plate with unknown grams adds nothing, so the total is unknown only when every
+   plate's is.
 
 Plus "this slot has nothing chosen", which is the one case that really is incomplete.
 All three are advisory and none disables Run.
