@@ -31,6 +31,7 @@ from scadbuddy.render.jobs import (
     extruder_order,
     plate_thumbnails,
     solid_parts,
+    unreadable_colour_warnings,
 )
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
@@ -355,6 +356,24 @@ def test_extruder_order_matches_the_rendered_values() -> None:
         (4, "#0000FF"),
         (2, "#AABBCC"),
         (1, "#FF0000"),
+    ]
+
+
+def test_a_malformed_colour_matches_no_part() -> None:
+    """#187: a 5-digit hex is not truncated or padded into some other colour's match."""
+    schema = _colour_schema(("a", "#FF000"), ("b", "#0047BB"))
+    split = [_part(1, "#FF0000"), _part(2, "#0047BB")]
+
+    assert _order(extruder_order(split, schema, {})) == [(2, "#0047BB"), (1, "#FF0000")]
+
+
+def test_an_unreadable_colour_is_a_job_warning() -> None:
+    """#187: a value no part can match says so instead of silently getting no extruder."""
+    schema = _colour_schema(("a", "#FF000"), ("b", "red"), ("c", "#0047BB"))
+
+    assert unreadable_colour_warnings(schema, {"c": "#GGGGGG"}) == [
+        "colour parameter 'a' is '#FF000', not a colour; it gets no extruder",
+        "colour parameter 'c' is '#GGGGGG', not a colour; it gets no extruder",
     ]
 
 

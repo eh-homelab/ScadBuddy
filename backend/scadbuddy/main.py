@@ -22,6 +22,7 @@ from scadbuddy.api import (
     plates,
     printing,
     settings,
+    upstream,
     versions,
 )
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
@@ -41,6 +42,7 @@ DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 def _api_router() -> APIRouter:
     router = APIRouter(prefix=API_PREFIX)
     router.include_router(models.router)
+    router.include_router(upstream.router)
     router.include_router(versions.router)
     router.include_router(jobs.router)
     router.include_router(assets.router)
@@ -144,6 +146,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     setattr(app.state, STATE_ATTR, build_state(app_settings))
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
+    models.install_model_handlers(app)
     # Outermost, so an oversized body is refused on its headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 

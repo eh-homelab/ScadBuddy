@@ -156,6 +156,19 @@
             "description": "The .scad source",
             "title": "File"
           },
+          "meta": {
+            "anyOf": [
+              {
+                "contentMediaType": "application/octet-stream",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it",
+            "title": "Meta"
+          },
           "name": {
             "anyOf": [
               {
@@ -202,7 +215,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional PNG",
+            "description": "Optional PNG, at most 2 MiB",
             "title": "Thumbnail"
           }
         },
@@ -222,6 +235,21 @@
           "file"
         ],
         "title": "Body_put_output_thumbnail_api_v1_outputs__output_id__thumbnail_put",
+        "type": "object"
+      },
+      "Body_put_thumbnail_api_v1_models__slug__thumbnail_put": {
+        "properties": {
+          "file": {
+            "contentMediaType": "application/octet-stream",
+            "description": "The thumbnail, a PNG of at most 2 MiB",
+            "title": "File",
+            "type": "string"
+          }
+        },
+        "required": [
+          "file"
+        ],
+        "title": "Body_put_thumbnail_api_v1_models__slug__thumbnail_put",
         "type": "object"
       },
       "Body_upload_asset_api_v1_models__slug__assets_post": {
@@ -1581,6 +1609,65 @@
         "title": "LoadedAt",
         "type": "object"
       },
+      "MergePreview": {
+        "properties": {
+          "base": {
+            "description": "The upstream's `model.scad` at `base`",
+            "title": "Base",
+            "type": "string"
+          },
+          "clean": {
+            "title": "Clean",
+            "type": "boolean"
+          },
+          "kept": {
+            "description": "Other files changed both here and upstream since `base`: ours stay",
+            "items": {
+              "type": "string"
+            },
+            "title": "Kept",
+            "type": "array"
+          },
+          "merged": {
+            "description": "`git merge-file -p --diff3 ours base theirs`: conflict markers when not clean",
+            "title": "Merged",
+            "type": "string"
+          },
+          "ours": {
+            "description": "This template's `model.scad`",
+            "title": "Ours",
+            "type": "string"
+          },
+          "patch": {
+            "description": "The upstream's own changes since `base`: a unified patch from its directory at `base` (at `upstream.path`) to its current one, `model.json` aside",
+            "title": "Patch",
+            "type": "string"
+          },
+          "taken": {
+            "description": "Other files that follow the upstream: unchanged here since `base`",
+            "items": {
+              "type": "string"
+            },
+            "title": "Taken",
+            "type": "array"
+          },
+          "theirs": {
+            "description": "The upstream's current `model.scad`",
+            "title": "Theirs",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ours",
+          "base",
+          "theirs",
+          "patch",
+          "merged",
+          "clean"
+        ],
+        "title": "MergePreview",
+        "type": "object"
+      },
       "ModelPatch": {
         "properties": {
           "description": {
@@ -1729,6 +1816,32 @@
             "title": "Tags",
             "type": "array"
           },
+          "thumbnail_output_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Output Id"
+          },
+          "thumbnail_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "model",
+                  "output"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Source"
+          },
           "updated_at": {
             "format": "date-time",
             "title": "Updated At",
@@ -1743,6 +1856,23 @@
                 "type": "null"
               }
             ]
+          },
+          "upstream_state": {
+            "anyOf": [
+              {
+                "enum": [
+                  "current",
+                  "update",
+                  "dismissed",
+                  "gone"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Upstream State"
           },
           "version": {
             "anyOf": [
@@ -4355,6 +4485,21 @@
         "title": "ProjectView",
         "type": "object"
       },
+      "ReadmeUpdate": {
+        "properties": {
+          "content": {
+            "description": "The README, as Markdown text",
+            "maxLength": 1000000,
+            "title": "Content",
+            "type": "string"
+          }
+        },
+        "required": [
+          "content"
+        ],
+        "title": "ReadmeUpdate",
+        "type": "object"
+      },
       "RenderAccepted": {
         "properties": {
           "job_id": {
@@ -5119,6 +5264,82 @@
         "title": "Upstream",
         "type": "object"
       },
+      "UpstreamMerge": {
+        "properties": {
+          "kept": {
+            "description": "Other files changed both here and upstream since `base`: ours were kept",
+            "items": {
+              "type": "string"
+            },
+            "title": "Kept",
+            "type": "array"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelRecord",
+            "description": "The template after the merge"
+          },
+          "taken": {
+            "description": "Other files taken from the upstream",
+            "items": {
+              "type": "string"
+            },
+            "title": "Taken",
+            "type": "array"
+          }
+        },
+        "required": [
+          "model"
+        ],
+        "title": "UpstreamMerge",
+        "type": "object"
+      },
+      "UpstreamStatus": {
+        "properties": {
+          "preview": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MergePreview"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The merge a `POST \u2026/upstream/merge` would make; on update only"
+          },
+          "revision": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The upstream's current revision; None when it is gone",
+            "title": "Revision"
+          },
+          "state": {
+            "enum": [
+              "current",
+              "update",
+              "dismissed",
+              "gone"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "upstream": {
+            "$ref": "#/components/schemas/Upstream"
+          }
+        },
+        "required": [
+          "state",
+          "upstream",
+          "revision"
+        ],
+        "title": "UpstreamStatus",
+        "type": "object"
+      },
       "UrlImport": {
         "properties": {
           "force": {
@@ -5560,7 +5781,7 @@
         ]
       },
       "post": {
-        "description": "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail and README); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.",
+        "description": "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.",
         "operationId": "create_model_api_v1_models_post",
         "parameters": [
           {
@@ -5727,6 +5948,7 @@
     },
     "/api/v1/models/{slug}": {
       "delete": {
+        "description": "409 while templates of mine are duplicates of it, with how many as `duplicates` (and which, as `slugs`); `?force=true` deletes it anyway, and they report their upstream as `gone`.",
         "operationId": "delete_model_api_v1_models__slug__delete",
         "parameters": [
           {
@@ -5738,6 +5960,18 @@
               "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
               "title": "Slug",
               "type": "string"
+            }
+          },
+          {
+            "description": "Delete even when duplicates track this template",
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "default": false,
+              "description": "Delete even when duplicates track this template",
+              "title": "Force",
+              "type": "boolean"
             }
           }
         ],
@@ -6172,6 +6406,146 @@
         ]
       }
     },
+    "/api/v1/models/{slug}/readme": {
+      "delete": {
+        "description": "Removes the README, as one revision in the model's history.",
+        "operationId": "delete_readme_api_v1_models__slug__readme_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a model's README",
+        "tags": [
+          "models"
+        ]
+      },
+      "get": {
+        "operationId": "get_readme_api_v1_models__slug__readme_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "text/markdown": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Model README",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "description": "Sets or replaces the README, as one revision in the model's history.",
+        "operationId": "put_readme_api_v1_models__slug__readme_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadmeUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set a model's README",
+        "tags": [
+          "models"
+        ]
+      }
+    },
     "/api/v1/models/{slug}/render": {
       "post": {
         "operationId": "render_model_api_v1_models__slug__render_post",
@@ -6310,7 +6684,7 @@
         ]
       },
       "put": {
-        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.",
+        "description": "Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it. `merge_base` saves the resolution of a conflicted upstream merge: the source must carry no conflict markers (`force` does not skip that), `merge_base` must be a revision of the upstream (422 otherwise, writing nothing), and the duplicate's `base` becomes it in the same commit, `Merge <upstream id> into <slug>` unless `message` names it.",
         "operationId": "put_source_api_v1_models__slug__source_put",
         "parameters": [
           {
@@ -6334,6 +6708,25 @@
               "description": "Save even when the parse check fails",
               "title": "Force",
               "type": "boolean"
+            }
+          },
+          {
+            "description": "The upstream revision this resolves a merge of: the 409's `merge_base`",
+            "in": "query",
+            "name": "merge_base",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^[0-9a-f]{7,40}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The upstream revision this resolves a merge of: the 409's `merge_base`",
+              "title": "Merge Base"
             }
           }
         ],
@@ -6376,8 +6769,9 @@
       }
     },
     "/api/v1/models/{slug}/thumbnail": {
-      "get": {
-        "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
+      "delete": {
+        "description": "Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`).",
+        "operationId": "delete_thumbnail_api_v1_models__slug__thumbnail_delete",
         "parameters": [
           {
             "in": "path",
@@ -6394,7 +6788,11 @@
         "responses": {
           "200": {
             "content": {
-              "image/png": {}
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
             },
             "description": "Successful Response"
           },
@@ -6409,7 +6807,298 @@
             "description": "Validation Error"
           }
         },
+        "summary": "Remove a model's thumbnail",
+        "tags": [
+          "models"
+        ]
+      },
+      "get": {
+        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
+        "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            },
+            "description": "Successful Response"
+          },
+          "304": {
+            "description": "The copy named by `If-None-Match` is still current"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
         "summary": "Model thumbnail",
+        "tags": [
+          "models"
+        ]
+      },
+      "put": {
+        "description": "Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision in the model's history.",
+        "operationId": "put_thumbnail_api_v1_models__slug__thumbnail_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "$ref": "#/components/schemas/Body_put_thumbnail_api_v1_models__slug__thumbnail_put"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Set a model's thumbnail",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream": {
+      "get": {
+        "description": "`state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.",
+        "operationId": "get_upstream_api_v1_models__slug__upstream_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamStatus"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A duplicate's upstream: state and merge preview",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/detach": {
+      "post": {
+        "description": "Clears `upstream` from a duplicate whose upstream no longer exists, leaving an ordinary template of mine. One commit, `Detach <slug> from <upstream id>`. 409 while the upstream still exists.",
+        "operationId": "detach_upstream_api_v1_models__slug__upstream_detach_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Detach from an upstream that is gone",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/dismiss": {
+      "post": {
+        "description": "Sets `dismissed` to the upstream's current revision, so it is no longer offered; a later upstream revision is. One commit, `Dismiss <upstream id> update in <slug>`. 409 when there is no update.",
+        "operationId": "dismiss_upstream_api_v1_models__slug__upstream_dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRecord"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Dismiss the upstream's current revision",
+        "tags": [
+          "models"
+        ]
+      }
+    },
+    "/api/v1/models/{slug}/upstream/merge": {
+      "post": {
+        "description": "Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.",
+        "operationId": "merge_upstream_api_v1_models__slug__upstream_merge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "slug",
+            "required": true,
+            "schema": {
+              "maxLength": 108,
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "title": "Slug",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamMerge"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Merge the upstream's current revision",
         "tags": [
           "models"
         ]

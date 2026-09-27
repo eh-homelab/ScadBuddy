@@ -32,6 +32,12 @@ export type PastedSource = Schemas['PastedSource']
 export type DuplicateRequest = Schemas['DuplicateRequest']
 export type Upstream = Schemas['Upstream']
 
+/** #157 — where a duplicate stands against its upstream, and the merge it would make. */
+export type UpstreamState = Schemas['UpstreamStatus']['state']
+export type UpstreamStatus = Schemas['UpstreamStatus']
+export type MergePreview = Schemas['MergePreview']
+export type UpstreamMerge = Schemas['UpstreamMerge']
+
 /** #153 — a model fetched from a URL rather than uploaded or pasted. */
 export type UrlImport = Schemas['UrlImport']
 

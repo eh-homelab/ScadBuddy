@@ -23,6 +23,7 @@ from scadbuddy.bambuddy.filaments import (
     FilamentOptions,
     FilamentPlan,
     SlotNeed,
+    across_plates,
     build_options,
     check,
     colour_distance,
@@ -253,6 +254,36 @@ def test_known_grams_are_multiplied_by_the_copies() -> None:
     plan = FilamentPlan(slots=list(built.suggested))
     assert not any(warning.kind == "low-filament" for warning in check(built, plan, copies=1))
     assert any(warning.kind == "low-filament" for warning in check(built, plan, copies=100))
+
+
+def _plate(*slots: SlotNeed) -> FilamentOptions:
+    return FilamentOptions(library_file_id=1, slots=list(slots))
+
+
+def test_a_slot_only_some_plates_use_sums_only_their_grams() -> None:
+    merged = across_plates(
+        [
+            _plate(SlotNeed(slot_id=1, used_grams=10.0), SlotNeed(slot_id=2, used_grams=5.0)),
+            _plate(SlotNeed(slot_id=1, used_grams=20.0)),
+            _plate(SlotNeed(slot_id=2, used_grams=7.0)),
+        ]
+    )
+
+    assert {slot.slot_id: slot.used_grams for slot in merged.slots} == {1: 30.0, 2: 12.0}
+
+
+def test_a_plate_with_unknown_grams_adds_nothing_to_a_known_total() -> None:
+    known_first = across_plates(
+        [_plate(SlotNeed(slot_id=1, used_grams=10.0)), _plate(SlotNeed(slot_id=1))]
+    )
+    unknown_first = across_plates(
+        [_plate(SlotNeed(slot_id=1)), _plate(SlotNeed(slot_id=1, used_grams=10.0))]
+    )
+    all_unknown = across_plates([_plate(SlotNeed(slot_id=1)), _plate(SlotNeed(slot_id=1))])
+
+    assert [slot.used_grams for slot in known_first.slots] == [10.0]
+    assert [slot.used_grams for slot in unknown_first.slots] == [10.0]
+    assert [slot.used_grams for slot in all_unknown.slots] == [None]
 
 
 def test_a_slot_with_nothing_chosen_says_so() -> None:

@@ -68,13 +68,15 @@ def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
+    outputs = OutputStore(paths)
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
         history=history,
-        catalogue=Catalogue(paths, history),
-        outputs=OutputStore(paths),
+        # The outputs feed the catalogue's fallback thumbnail (#179).
+        catalogue=Catalogue(paths, history, outputs),
+        outputs=outputs,
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
         fonts=FontService(
             paths.root,

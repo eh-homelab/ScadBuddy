@@ -122,7 +122,7 @@ export interface paths {
         put?: never;
         /**
          * Add a model
-         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail and README); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
+         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
          */
         post: operations["create_model_api_v1_models_post"];
         delete?: never;
@@ -182,7 +182,10 @@ export interface paths {
         get: operations["get_model_api_v1_models__slug__get"];
         put?: never;
         post?: never;
-        /** Delete a model */
+        /**
+         * Delete a model
+         * @description 409 while templates of mine are duplicates of it, with how many as `duplicates` (and which, as `slugs`); `?force=true` deletes it anyway, and they report their upstream as `gone`.
+         */
         delete: operations["delete_model_api_v1_models__slug__delete"];
         options?: never;
         head?: never;
@@ -286,6 +289,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/{slug}/readme": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Model README */
+        get: operations["get_readme_api_v1_models__slug__readme_get"];
+        /**
+         * Set a model's README
+         * @description Sets or replaces the README, as one revision in the model's history.
+         */
+        put: operations["put_readme_api_v1_models__slug__readme_put"];
+        post?: never;
+        /**
+         * Remove a model's README
+         * @description Removes the README, as one revision in the model's history.
+         */
+        delete: operations["delete_readme_api_v1_models__slug__readme_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/render": {
         parameters: {
             query?: never;
@@ -331,7 +359,7 @@ export interface paths {
         get: operations["get_source_api_v1_models__slug__source_get"];
         /**
          * Replace a model's source as one revision
-         * @description Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it.
+         * @description Parse-checks the replacement against the model's own directory (skipped with `force`), then writes it as one revision in the model's history, named by `message` when given, and re-derives the customizer schema so the next customizer open does not pay for it. `merge_base` saves the resolution of a conflicted upstream merge: the source must carry no conflict markers (`force` does not skip that), `merge_base` must be a revision of the upstream (422 otherwise, writing nothing), and the duplicate's `base` becomes it in the same commit, `Merge <upstream id> into <slug>` unless `message` names it.
          */
         put: operations["put_source_api_v1_models__slug__source_put"];
         post?: never;
@@ -348,10 +376,101 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Model thumbnail */
+        /**
+         * Model thumbnail
+         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
+         */
         get: operations["get_thumbnail_api_v1_models__slug__thumbnail_get"];
+        /**
+         * Set a model's thumbnail
+         * @description Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision in the model's history.
+         */
+        put: operations["put_thumbnail_api_v1_models__slug__thumbnail_put"];
+        post?: never;
+        /**
+         * Remove a model's thumbnail
+         * @description Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`).
+         */
+        delete: operations["delete_thumbnail_api_v1_models__slug__thumbnail_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/upstream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A duplicate's upstream: state and merge preview
+         * @description `state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.
+         */
+        get: operations["get_upstream_api_v1_models__slug__upstream_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/upstream/detach": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Detach from an upstream that is gone
+         * @description Clears `upstream` from a duplicate whose upstream no longer exists, leaving an ordinary template of mine. One commit, `Detach <slug> from <upstream id>`. 409 while the upstream still exists.
+         */
+        post: operations["detach_upstream_api_v1_models__slug__upstream_detach_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/upstream/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss the upstream's current revision
+         * @description Sets `dismissed` to the upstream's current revision, so it is no longer offered; a later upstream revision is. One commit, `Dismiss <upstream id> update in <slug>`. 409 when there is no update.
+         */
+        post: operations["dismiss_upstream_api_v1_models__slug__upstream_dismiss_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/upstream/merge": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge the upstream's current revision
+         * @description Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.
+         */
+        post: operations["merge_upstream_api_v1_models__slug__upstream_merge_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1140,6 +1259,11 @@ export interface components {
              * @description The .scad source
              */
             file?: string | null;
+            /**
+             * Meta
+             * @description Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
+             */
+            meta?: string | null;
             /** Name */
             name?: string | null;
             /**
@@ -1154,7 +1278,7 @@ export interface components {
             tags?: string | null;
             /**
              * Thumbnail
-             * @description Optional PNG
+             * @description Optional PNG, at most 2 MiB
              */
             thumbnail?: string | null;
         };
@@ -1163,6 +1287,14 @@ export interface components {
             /**
              * File
              * @description PNG captured by the viewer
+             */
+            file: string;
+        };
+        /** Body_put_thumbnail_api_v1_models__slug__thumbnail_put */
+        Body_put_thumbnail_api_v1_models__slug__thumbnail_put: {
+            /**
+             * File
+             * @description The thumbnail, a PNG of at most 2 MiB
              */
             file: string;
         };
@@ -1680,6 +1812,46 @@ export interface components {
             /** Tray Id */
             tray_id: number;
         };
+        /** MergePreview */
+        MergePreview: {
+            /**
+             * Base
+             * @description The upstream's `model.scad` at `base`
+             */
+            base: string;
+            /** Clean */
+            clean: boolean;
+            /**
+             * Kept
+             * @description Other files changed both here and upstream since `base`: ours stay
+             */
+            kept?: string[];
+            /**
+             * Merged
+             * @description `git merge-file -p --diff3 ours base theirs`: conflict markers when not clean
+             */
+            merged: string;
+            /**
+             * Ours
+             * @description This template's `model.scad`
+             */
+            ours: string;
+            /**
+             * Patch
+             * @description The upstream's own changes since `base`: a unified patch from its directory at `base` (at `upstream.path`) to its current one, `model.json` aside
+             */
+            patch: string;
+            /**
+             * Taken
+             * @description Other files that follow the upstream: unchanged here since `base`
+             */
+            taken?: string[];
+            /**
+             * Theirs
+             * @description The upstream's current `model.scad`
+             */
+            theirs: string;
+        };
         /** ModelPatch */
         ModelPatch: {
             /** Description */
@@ -1734,12 +1906,18 @@ export interface components {
             source?: string | null;
             /** Tags */
             tags?: string[];
+            /** Thumbnail Output Id */
+            thumbnail_output_id?: string | null;
+            /** Thumbnail Source */
+            thumbnail_source?: ("model" | "output") | null;
             /**
              * Updated At
              * Format: date-time
              */
             updated_at: string;
             upstream?: components["schemas"]["Upstream"] | null;
+            /** Upstream State */
+            upstream_state?: ("current" | "update" | "dismissed" | "gone") | null;
             /** Version */
             version?: string | null;
         };
@@ -2664,6 +2842,14 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** ReadmeUpdate */
+        ReadmeUpdate: {
+            /**
+             * Content
+             * @description The README, as Markdown text
+             */
+            content: string;
+        };
         /** RenderAccepted */
         RenderAccepted: {
             /** Job Id */
@@ -2909,6 +3095,37 @@ export interface components {
              * @description The upstream's directory in the models repository
              */
             path: string;
+        };
+        /** UpstreamMerge */
+        UpstreamMerge: {
+            /**
+             * Kept
+             * @description Other files changed both here and upstream since `base`: ours were kept
+             */
+            kept?: string[];
+            /** @description The template after the merge */
+            model: components["schemas"]["ModelRecord"];
+            /**
+             * Taken
+             * @description Other files taken from the upstream
+             */
+            taken?: string[];
+        };
+        /** UpstreamStatus */
+        UpstreamStatus: {
+            /** @description The merge a `POST …/upstream/merge` would make; on update only */
+            preview?: components["schemas"]["MergePreview"] | null;
+            /**
+             * Revision
+             * @description The upstream's current revision; None when it is gone
+             */
+            revision: string | null;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "current" | "update" | "dismissed" | "gone";
+            upstream: components["schemas"]["Upstream"];
         };
         /** UrlImport */
         UrlImport: {
@@ -3335,7 +3552,10 @@ export interface operations {
     };
     delete_model_api_v1_models__slug__delete: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description Delete even when duplicates track this template */
+                force?: boolean;
+            };
             header?: never;
             path: {
                 slug: string;
@@ -3598,6 +3818,103 @@ export interface operations {
             };
         };
     };
+    get_readme_api_v1_models__slug__readme_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "text/markdown": string;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_readme_api_v1_models__slug__readme_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadmeUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_readme_api_v1_models__slug__readme_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     render_model_api_v1_models__slug__render_post: {
         parameters: {
             query?: never;
@@ -3700,6 +4017,8 @@ export interface operations {
             query?: {
                 /** @description Save even when the parse check fails */
                 force?: boolean;
+                /** @description The upstream revision this resolves a merge of: the 409's `merge_base` */
+                merge_base?: string | null;
             };
             header?: never;
             path: {
@@ -3736,7 +4055,9 @@ export interface operations {
     get_thumbnail_api_v1_models__slug__thumbnail_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "If-None-Match"?: string | null;
+            };
             path: {
                 slug: string;
             };
@@ -3751,6 +4072,203 @@ export interface operations {
                 };
                 content: {
                     "image/png": unknown;
+                };
+            };
+            /** @description The copy named by `If-None-Match` is still current */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_thumbnail_api_v1_models__slug__thumbnail_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "multipart/form-data": components["schemas"]["Body_put_thumbnail_api_v1_models__slug__thumbnail_put"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_thumbnail_api_v1_models__slug__thumbnail_delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_upstream_api_v1_models__slug__upstream_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    detach_upstream_api_v1_models__slug__upstream_detach_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dismiss_upstream_api_v1_models__slug__upstream_dismiss_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    merge_upstream_api_v1_models__slug__upstream_merge_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamMerge"];
                 };
             };
             /** @description Validation Error */

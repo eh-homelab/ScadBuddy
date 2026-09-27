@@ -195,6 +195,15 @@ The **Models** page lists every model. Use **Add model** to upload a `.scad` fil
 or **Paste source** to paste source into an editor. OpenSCAD parse-checks the
 source before it's saved, and errors are marked on their line.
 
+**Add model** also takes an optional PNG thumbnail and a README. Dropping a whole
+model folder (`model.scad`, `model.json`, `thumbnail.png`, `README.md`, the layout
+of `models/<slug>/`) adds it with the same name, metadata, thumbnail and README the
+bundled models get.
+
+On a model's page, **Edit details** changes its name, description, tags, thumbnail
+and README. Each change is a revision in the model's history. A model with no
+thumbnail of its own shows the plate image of its first generated output.
+
 ### Customizing
 
 Changing a parameter starts a real render. The preview *is* the render (debounced),

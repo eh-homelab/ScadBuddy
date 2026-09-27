@@ -50,11 +50,29 @@ import type {
   SettingsUpdate,
   SidebarLink,
   SourceCheck,
+  UpstreamMerge,
+  UpstreamStatus,
   UrlImport,
   VersionDiff,
 } from './types'
 
 export const API_BASE = '/api/v1'
+
+/** What a model thumbnail's URL is keyed on (#179). */
+export type ThumbnailKeyed = Pick<
+  ModelSummary,
+  'slug' | 'version' | 'thumbnail_source' | 'thumbnail_output_id'
+>
+
+/** The optional parts of a model upload besides its source (#179). */
+export interface UploadExtras {
+  /** What the source is called on the wire, which is where the slug comes from. */
+  filename?: string
+  /** A bundled model's `model.json`. */
+  meta?: File
+  thumbnail?: File
+  readme?: File
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -93,7 +111,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-/** `GET /models/{slug}/source` answers text/plain, not JSON. */
+/**
+ * For the routes that answer with a text body rather than JSON: the model's
+ * source (`GET /models/{slug}/source`, text/plain) and its README
+ * (`GET /models/{slug}/readme`, text/markdown).
+ */
 async function requestText(path: string): Promise<string> {
   const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
   if (!response.ok) {
@@ -124,11 +146,52 @@ export const api = {
 
   getModel: (slug: string) => request<ModelSummary>(`/models/${seg(slug)}`),
 
-  uploadModel: (file: File) => {
+  /**
+   * `extras` are the other files of a bundled model's directory (#179). `filename`
+   * renames the source on the wire, because the server takes the slug from it: a
+   * dropped `models/<slug>/` sends `model.scad`, which would otherwise become `model`.
+   */
+  uploadModel: (file: File, extras: UploadExtras = {}) => {
     const body = new FormData()
-    body.append('file', file)
+    body.append('file', file, extras.filename ?? file.name)
+    if (extras.meta) body.append('meta', extras.meta)
+    if (extras.thumbnail) body.append('thumbnail', extras.thumbnail)
+    if (extras.readme) body.append('readme', extras.readme)
     return request<ModelSummary>('/models', { method: 'POST', body })
   },
+
+  /** Multipart with a `file` part, like the output thumbnail PUT. */
+  setThumbnail: (slug: string, png: Blob) => {
+    const body = new FormData()
+    body.append('file', png, 'thumbnail.png')
+    return request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'PUT', body })
+  },
+
+  /**
+   * Removes the model's own thumbnail. The record that comes back may still have one:
+   * a generated model falls back to its first output's plate image.
+   */
+  removeThumbnail: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/thumbnail`, { method: 'DELETE' }),
+
+  /** The README's Markdown, or null when the model has none. */
+  getReadme: async (slug: string): Promise<string | null> => {
+    try {
+      return await requestText(`/models/${seg(slug)}/readme`)
+    } catch (caught) {
+      if (caught instanceof ApiError && caught.status === 404) return null
+      throw caught
+    }
+  },
+
+  setReadme: (slug: string, content: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/readme`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
+
+  removeReadme: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/readme`, { method: 'DELETE' }),
 
   /** The pasted-source twin of `uploadModel`: same route, JSON body, same code path. */
   createModelFromSource: (body: PastedSource) =>
@@ -178,9 +241,47 @@ export const api = {
       body: JSON.stringify({ name } satisfies DuplicateRequest),
     }),
 
-  deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
+  /** 409 while duplicates track it (see `trackingDuplicates`); `force` deletes it anyway. */
+  deleteModel: (slug: string, force = false) =>
+    request<void>(`/models/${seg(slug)}${force ? '?force=true' : ''}`, { method: 'DELETE' }),
 
-  modelThumbnailUrl: (slug: string) => `${API_BASE}/models/${seg(slug)}/thumbnail`,
+  /** #157 — a duplicate's upstream: its state, and on `update` the merge it would make. */
+  getUpstream: (slug: string) => request<UpstreamStatus>(`/models/${seg(slug)}/upstream`),
+
+  /** A conflicted merge answers 409 with `merged` and `merge_base` and writes nothing. */
+  mergeUpstream: (slug: string) =>
+    request<UpstreamMerge>(`/models/${seg(slug)}/upstream/merge`, { method: 'POST' }),
+
+  dismissUpstream: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/upstream/dismiss`, { method: 'POST' }),
+
+  detachUpstream: (slug: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/upstream/detach`, { method: 'POST' }),
+
+  /**
+   * Saves the resolution of a conflicted upstream merge: the same write as
+   * `replaceSource`, which also advances the duplicate's `base` to `mergeBase`.
+   */
+  resolveUpstreamMerge: (slug: string, source: string, mergeBase: string, force = false) =>
+    request<ModelSummary>(`/models/${seg(slug)}/source?merge_base=${seg(mergeBase)}`, {
+      method: 'PUT',
+      body: JSON.stringify({ source, force, message: null }),
+    }),
+
+
+  /**
+   * The `v` param is only there to change the URL when the image does: an `<img>`
+   * already on the page does not refetch the same URL. It joins the model's
+   * revision (a thumbnail set or removed is a commit) with where the image comes
+   * from and, for the output fallback, which output -- that fallback moves with no
+   * commit when the covering output is deleted or another becomes the first (#179).
+   */
+  modelThumbnailUrl: (model: ThumbnailKeyed) => {
+    const key = [model.version, model.thumbnail_source, model.thumbnail_output_id]
+      .map((part) => part ?? '')
+      .join('.')
+    return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '..' ? '' : `?v=${seg(key)}`}`
+  },
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the

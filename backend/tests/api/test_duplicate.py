@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import zipfile
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -14,8 +15,9 @@ from fastapi.testclient import TestClient
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue, ModelMeta
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
+from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.api.conftest import PNG_BYTES
+from tests.api.conftest import PNG_BYTES, wait_for_job
 
 pytestmark = pytest.mark.requires_git
 
@@ -360,3 +362,112 @@ def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -
         "thumbnail.png",
     ]
     assert _no_staging_left(paths)
+
+
+# ── #179's details on a duplicate ─────────────────────────────────────────────
+
+
+def _generate_with_cover(client: TestClient, paths: DataPaths, model_id: str, cover: bytes) -> str:
+    """Render and save an output whose 3MF carries ``cover`` as its plate image."""
+    job_id = client.post(f"/api/v1/models/{model_id}/render", json={"params": {}}).json()["job_id"]
+    assert wait_for_job(client, job_id)["status"] == "done"
+    with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+        archive.writestr(PLATE_THUMBNAIL, cover)
+    saved = client.post(f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id})
+    assert saved.status_code == 201, saved.text
+    output_id: str = saved.json()["id"]
+    return output_id
+
+
+def test_a_duplicate_takes_the_thumbnail_and_readme_as_its_own_and_can_edit_them(
+    client: TestClient, bundled: Path
+) -> None:
+    """The copy is the upstream's directory, sidecars included; on a template of
+    mine they are editable, and editing them leaves the upstream alone."""
+    record = _duplicate(client, BUILTIN, "My keychain")
+    slug = record["slug"]
+    assert (record["origin"], record["thumbnail_source"]) == ("mine", "model")
+    assert client.get(f"/api/v1/models/{slug}/thumbnail").content == THUMBNAIL
+
+    replaced = client.put(
+        f"/api/v1/models/{slug}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
+    )
+    readme = client.put(f"/api/v1/models/{slug}/readme", json={"content": "# Mine\n"})
+    patched = client.patch(f"/api/v1/models/{slug}", json={"name": "Keyring"})
+
+    assert (replaced.status_code, readme.status_code, patched.status_code) == (200, 200, 200)
+    assert client.get(f"/api/v1/models/{slug}/thumbnail").content == PNG_BYTES
+    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
+    assert client.get(f"/api/v1/models/{BUILTIN}/readme").status_code == 404
+    # The details edits never touch what the duplicate records as its upstream.
+    assert patched.json()["upstream"] == record["upstream"]
+
+
+def test_a_duplicate_carries_the_upstreams_readme(app: FastAPI, bundled: Path) -> None:
+    (bundled / "README.md").write_text("# Name keychain\n", encoding="utf-8")
+    with TestClient(app) as client:
+        slug = _duplicate(client, BUILTIN, "My keychain")["slug"]
+        assert client.get(f"/api/v1/models/{slug}/readme").text == "# Name keychain\n"
+
+
+def test_a_duplicate_has_no_plate_fallback_until_it_is_generated(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Outputs are derived, so not copied: the upstream's plate image is not the
+    duplicate's, and a slug a gone model used leaves no cached cover behind."""
+    created = client.post("/api/v1/models", json={"name": "Upstream", "source": SOURCE})
+    model = created.json()["slug"]
+    _generate_with_cover(client, paths, model, PNG_BYTES + b"upstream")
+    assert client.get(f"/api/v1/models/{model}").json()["thumbnail_source"] == "output"
+
+    # A model of the duplicate's slug that was generated, listed, then deleted.
+    gone = client.post("/api/v1/models", json={"name": "Copy", "source": SOURCE}).json()["slug"]
+    _generate_with_cover(client, paths, gone, PNG_BYTES + b"gone")
+    assert client.get("/api/v1/models").status_code == 200
+    assert client.delete(f"/api/v1/models/{gone}").status_code == 204
+
+    record = _duplicate(client, model, "Copy")
+    assert record["slug"] == gone
+    assert (record["has_thumbnail"], record["thumbnail_output_id"]) == (False, None)
+
+    own = _generate_with_cover(client, paths, gone, PNG_BYTES + b"own")
+    after = client.get(f"/api/v1/models/{gone}").json()
+    assert (after["thumbnail_source"], after["thumbnail_output_id"]) == ("output", own)
+    assert client.get(f"/api/v1/models/{gone}/thumbnail").content == PNG_BYTES + b"own"
+
+
+@pytest.mark.parametrize(
+    "bundled_meta",
+    [
+        {
+            "name": "Name keychain",
+            "origin_url": "javascript:alert(document.domain)",
+            "upstream": {"id": "elsewhere", "path": "elsewhere", "base": None},
+        }
+    ],
+)
+def test_a_built_ins_model_json_sets_neither_link_nor_upstream_on_it_or_its_copy(
+    client: TestClient, paths: DataPaths
+) -> None:
+    builtin = client.get(f"/api/v1/models/{BUILTIN}").json()
+    assert (builtin["origin_url"], builtin["upstream"]) == (None, None)
+
+    record = _duplicate(client, BUILTIN, "My keychain")
+
+    assert record["origin_url"] is None
+    assert record["upstream"]["id"] == BUILTIN
+    assert "origin_url" not in json.loads(paths.model_meta(record["slug"]).read_text("utf-8"))
+
+
+def test_a_dropped_model_json_cannot_claim_an_upstream(client: TestClient) -> None:
+    """Only a duplicate records one; as with `origin_url`, an upload's is dropped."""
+    meta = {"name": "Widget", "upstream": {"id": BUILTIN, "path": "_builtin/x", "base": None}}
+    response = client.post(
+        "/api/v1/models",
+        files={
+            "file": ("widget.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
+        },
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["upstream"] is None

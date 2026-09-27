@@ -10,8 +10,10 @@ import type {
   FontFamily,
   Job,
   LibraryEntry,
+  ModelPatch,
   ModelPrintChoices,
   ModelSummary,
+  MergePreview,
   ModelVersion,
   Output,
   OutputPlate,
@@ -34,8 +36,17 @@ import type {
   SendResult,
   Settings,
   SourceCheck,
+  Upstream,
+  UpstreamState,
+  UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import {
+  MAX_META_BYTES,
+  MAX_META_SIZE,
+  MAX_THUMBNAIL_BYTES,
+  MAX_THUMBNAIL_SIZE,
+} from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
@@ -54,6 +65,8 @@ const state = {
     'name-keychain': fixtures.keychainSource,
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   } as Record<string, string>,
+  /** #179 — README text per model; a model's `has_readme` follows it. */
+  readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -70,6 +83,8 @@ const state = {
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
   versions: structuredClone(fixtures.versions) as Record<string, ModelVersion[]>,
+  /** #157 — each revision's `model.scad`, so a merge can read its `base`. */
+  sourceAt: initialSourceAt(),
   fontCatalogue: fixtures.fontCatalogue.map((f) => ({ ...f })) as CatalogueFont[],
   libraries: structuredClone(fixtures.libraries) as LibraryEntry[],
   /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
@@ -88,6 +103,7 @@ export function resetMockState(): void {
     'name-keychain': fixtures.keychainSource,
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   }
+  state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -99,6 +115,7 @@ export function resetMockState(): void {
   state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
   state.versions = structuredClone(fixtures.versions)
+  state.sourceAt = initialSourceAt()
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
@@ -110,6 +127,32 @@ export function resetMockState(): void {
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
+}
+
+function initialSourceAt(): Record<string, string> {
+  return {
+    [fixtures.versionIds.raised]: fixtures.keychainSource,
+    [fixtures.versionIds.synced]: fixtures.keychainSource,
+  }
+}
+
+/**
+ * #179 — one details change: records its revision and replaces the model's record,
+ * the way every catalogue change lands as a commit on the real backend.
+ */
+function reviseModel(
+  slug: string,
+  message: string,
+  files: ModelVersion['files'],
+  change: Partial<ModelSummary>,
+): ModelSummary | null {
+  const model = state.models.find((m) => m.slug === slug)
+  if (!model) return null
+  const version = recordVersion(slug, message, files)
+  const updated = { ...model, ...change, version: version.commit }
+  state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+  // As the API serves it: a duplicate's record carries its `upstream_state`.
+  return view(updated)
 }
 
 /** Adds a revision to the head of a model's history and returns it. */
@@ -131,7 +174,127 @@ function recordVersion(
   }
   const existing = (state.versions[slug] ?? []).map((v) => ({ ...v, current: false }))
   state.versions[slug] = [entry, ...existing]
+  const source = state.sources[slug]
+  if (source !== undefined) state.sourceAt[sha] = source
   return entry
+}
+
+/**
+ * #157 — `state_of` in `library/upstream.py`: the upstream's current revision is its
+ * newest commit, and a duplicate whose `base` is that revision is current.
+ */
+function upstreamStateOf(model: ModelSummary): UpstreamState | null {
+  const upstream = model.upstream
+  if (!upstream) return null
+  if (!state.models.some((m) => m.slug === upstream.id)) return 'gone'
+  const revision = state.versions[upstream.id]?.[0]?.commit
+  if (!revision || revision === upstream.base) return 'current'
+  return revision === upstream.dismissed ? 'dismissed' : 'update'
+}
+
+/** Where an upstream lives in the models repository (`model_path`). */
+function upstreamPath(id: string): string {
+  return id.startsWith('builtin:') ? `_builtin/${id.slice('builtin:'.length)}` : id
+}
+
+/**
+ * `_advance_base` in `library/catalogue.py`: a fresh upstream at `revision`, where it
+ * lives now, with nothing dismissed. Used by a clean merge and a resolved one alike.
+ */
+function advanceBase(upstream: Upstream, revision: string): Upstream {
+  return { id: upstream.id, path: upstreamPath(upstream.id), base: revision, dismissed: null }
+}
+
+/** A record as the API serves it: a duplicate's carries its `upstream_state`. */
+function view(model: ModelSummary): ModelSummary {
+  const upstreamState = upstreamStateOf(model)
+  return upstreamState ? { ...model, upstream_state: upstreamState } : model
+}
+
+function eol(text: string): string {
+  return text === '' || text.endsWith('\n') ? text : `${text}\n`
+}
+
+/**
+ * The mock's `git merge-file -p --diff3`: a side that did not change takes the other
+ * side, and when both changed the whole file is one conflict. Enough to drive both
+ * paths without shipping a real three-way merge.
+ */
+function planMerge(slug: string, model: ModelSummary): MergePreview {
+  const upstream = model.upstream as Upstream
+  const ours = state.sources[slug] ?? ''
+  const baseSource = (upstream.base && state.sourceAt[upstream.base]) || ''
+  const theirs = state.sources[upstream.id] ?? ''
+  // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
+  const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
+  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
+  if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
+  if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
+  const merged =
+    `<<<<<<< ${slug}/model.scad\n${eol(ours)}` +
+    `||||||| ${upstream.id} at base\n${eol(baseSource)}` +
+    `=======\n${eol(theirs)}>>>>>>> ${upstream.id}/model.scad\n`
+  return { ...plan, merged, clean: false }
+}
+
+/** `has_conflict_markers` in `library/upstream.py`. */
+function hasConflictMarkers(source: string): boolean {
+  return /^(<{7}|\|{7}|={7}|>{7})(?: |$)/m.test(source)
+}
+
+/**
+ * One hunk around whatever changed between two sources: what the version diff route
+ * serves for a revision the fixtures carry no recorded patch for.
+ */
+function sourcePatch(slug: string, before: string, after: string): string {
+  if (before === after) return ''
+  const a = before.replace(/\n$/, '').split('\n')
+  const b = after.replace(/\n$/, '').split('\n')
+  let start = 0
+  while (start < a.length && start < b.length && a[start] === b[start]) start += 1
+  let end = 0
+  while (
+    end < a.length - start &&
+    end < b.length - start &&
+    a[a.length - 1 - end] === b[b.length - 1 - end]
+  ) {
+    end += 1
+  }
+  const removed = a.slice(start, a.length - end)
+  const added = b.slice(start, b.length - end)
+  return [
+    `diff --git a/${slug}/model.scad b/${slug}/model.scad`,
+    `--- a/${slug}/model.scad`,
+    `+++ b/${slug}/model.scad`,
+    `@@ -${start + 1},${removed.length} +${start + 1},${added.length} @@`,
+    ...removed.map((line) => `-${line}`),
+    ...added.map((line) => `+${line}`),
+    '',
+  ].join('\n')
+}
+
+/** A duplicate an upstream action applies to, or the problem the backend answers. */
+function upstreamAction(slug: string, allowed: UpstreamState[], refusal: string) {
+  const model = state.models.find((m) => m.slug === slug)
+  if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+  const upstream = model.upstream
+  if (!upstream) {
+    return problem(404, 'Not Found', `'${slug}' is not a duplicate, so it has no upstream`)
+  }
+  const upstreamState = upstreamStateOf(model) as UpstreamState
+  if (!allowed.includes(upstreamState)) {
+    return problem(409, 'Conflict', `'${slug}' ${refusal}`, { state: upstreamState })
+  }
+  const revision = state.versions[upstream.id]?.[0]?.commit ?? ''
+  return { model, upstream, revision }
+}
+
+/** Rewrites a duplicate's `upstream` in `model.json` as one commit. */
+function writeUpstream(model: ModelSummary, upstream: Upstream | null, message: string) {
+  const version = recordVersion(model.slug, message, [{ status: 'M', path: 'model.json' }])
+  const updated = { ...model, upstream, version: version.commit, updated_at: version.date }
+  state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
+  return view(updated)
 }
 
 /** Job and output ids are 32 hex characters — the routes reject anything else. */
@@ -242,6 +405,74 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+
+/**
+ * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
+ * bytes -- not its name or type -- and at most `MAX_THUMBNAIL_BYTES`. The 422 the
+ * backend answers, or null when the upload passes.
+ */
+async function thumbnailRefusal(upload: File) {
+  const bytes = new Uint8Array(await upload.arrayBuffer())
+  if (bytes.length < PNG_MAGIC.length || PNG_MAGIC.some((byte, i) => bytes[i] !== byte)) {
+    return problem(422, 'Unprocessable Content', 'the thumbnail is not a PNG')
+  }
+  if (bytes.length > MAX_THUMBNAIL_BYTES) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `the thumbnail is too large: ${bytes.length} bytes, ` +
+        `and a thumbnail is at most ${MAX_THUMBNAIL_BYTES} bytes (${MAX_THUMBNAIL_SIZE})`,
+    )
+  }
+  return null
+}
+
+/**
+ * A multipart text field as the backend receives it: FastAPI reads an empty string
+ * as the field being absent.
+ */
+function formText(form: FormData, name: string): string | undefined {
+  const value = form.get(name)
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * `_parse_tags`: a JSON array, or a comma-separated list; blank is no tags. A string
+ * comes back when the backend would refuse the field, and is its 422 detail.
+ */
+function parseFormTags(raw: string | undefined): string[] | undefined | string {
+  if (raw === undefined) return undefined
+  const text = raw.trim()
+  // Blank is absent, so the model.json's tags stand; an explicit `[]` still clears.
+  if (!text) return undefined
+  if (text.startsWith('[')) {
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(text)
+    } catch {
+      return 'tags is not valid JSON'
+    }
+    return Array.isArray(decoded) ? decoded.map(String) : 'tags must be a list'
+  }
+  return text
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+/** The value unless it is blank or only whitespace, which counts as absent. */
+function nonBlank(value: string | undefined): string | undefined {
+  return value?.trim() ? value : undefined
+}
+
+/** `_first_name`: the first candidate that is not blank, stripped; the slug never is. */
+function firstName(...candidates: (string | undefined)[]): string {
+  for (const candidate of candidates) {
+    if (candidate?.trim()) return candidate.trim()
+  }
+  return ''
+}
+
 /**
  * `require_mine` in `api/models.py`: a built-in is refused before the model is even
  * looked up, with the backend's problem (403 is not in its title table, so "Error").
@@ -296,7 +527,7 @@ function refusal(check: SourceCheck) {
 }
 
 export const handlers = [
-  http.get(`${base}/models`, () => HttpResponse.json(state.models)),
+  http.get(`${base}/models`, () => HttpResponse.json(state.models.map(view))),
 
   http.post(`${base}/models`, async ({ request }) => {
     if ((request.headers.get('content-type') ?? '').includes('application/json')) {
@@ -335,6 +566,38 @@ export const handlers = [
 
     const form = await request.formData()
     const file = form.get('file')
+    const part = (name: string) => {
+      const value = form.get(name)
+      return value !== null && typeof value !== 'string' ? (value as File) : null
+    }
+    const meta = part('meta')
+    const thumbnailPart = part('thumbnail')
+    const readmePart = part('readme')
+    // As `_read_meta_file`: a model.json that is not JSON, or not an object, is a 422.
+    let metaFields: { name?: string; description?: string; tags?: string[] } | null = null
+    if (meta) {
+      // As `_read_meta_part`: the cap is checked before the part is decoded.
+      if (meta.size > MAX_META_BYTES) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `the model.json is too large: ${meta.size} bytes, ` +
+            `and a model.json is at most ${MAX_META_BYTES} bytes (${MAX_META_SIZE})`,
+        )
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(await meta.text())
+      } catch {
+        return problem(422, 'Unprocessable Content', 'the model.json is not valid JSON')
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return problem(422, 'Unprocessable Content', 'the model.json is not an object')
+      }
+      metaFields = parsed as { name?: string; description?: string; tags?: string[] }
+    }
+    const tagsField = parseFormTags(formText(form, 'tags'))
+    if (typeof tagsField === 'string') return problem(422, 'Unprocessable Content', tagsField)
     // Not `instanceof File`: the entry's class differs between the browser worker
     // and the Node interceptor, so it is duck-typed instead.
     const filename = typeof file === 'string' || file === null ? '' : ((file as File).name ?? '')
@@ -349,16 +612,25 @@ export const handlers = [
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '')
+    if (thumbnailPart) {
+      const refused = await thumbnailRefusal(thumbnailPart)
+      if (refused) return refused
+    }
+    // As `create_model` resolves them: the form field, then the model.json, then
+    // the default -- and a name is the first that is not blank, stripped.
     const model: ModelSummary = {
       slug,
-      name: slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-      description: 'Uploaded just now. Open it to see its parameters.',
-      tags: ['uploaded'],
+      name: firstName(formText(form, 'name'), metaFields?.name, slug),
+      // Blank is absent, as for the name; a non-blank description is kept as given.
+      description: nonBlank(formText(form, 'description')) ?? metaFields?.description ?? '',
+      tags: tagsField ?? metaFields?.tags ?? [],
       updated_at: new Date().toISOString(),
-      has_thumbnail: false,
-      has_readme: false,
+      has_thumbnail: thumbnailPart !== null,
+      thumbnail_source: thumbnailPart ? 'model' : null,
+      has_readme: readmePart !== null,
       origin: 'mine',
     }
+    if (readmePart) state.readmes[slug] = await readmePart.text()
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
     state.schemas[slug] = fixtures.keychainSchema
     await delay(150)
@@ -427,6 +699,8 @@ export const handlers = [
       return problem(409, 'Conflict', `a model named '${slug}' already exists`)
     }
     const base = state.versions[id]?.[0]?.commit ?? null
+    const source = state.sources[id]
+    if (source !== undefined) state.sources[slug] = source
     const version = recordVersion(slug, `Duplicate ${id} as ${slug}`, [
       { status: 'A', path: 'model.scad' },
     ])
@@ -436,40 +710,104 @@ export const handlers = [
       name: body.name,
       origin: 'mine',
       origin_url: null,
-      has_thumbnail: false,
+      // #179: the copy is the upstream's directory, so its thumbnail.png and
+      // README.md come too; its outputs, and so any plate fallback, do not.
+      has_thumbnail: upstream.thumbnail_source === 'model',
+      thumbnail_source: upstream.thumbnail_source === 'model' ? 'model' : null,
+      thumbnail_output_id: null,
       updated_at: version.date,
       version: version.commit,
       upstream: {
         id,
-        path: id.startsWith('builtin:') ? `_builtin/${id.slice('builtin:'.length)}` : id,
+        path: upstreamPath(id),
         base,
       },
     }
     state.models = [copy, ...state.models]
     const schema = state.schemas[id]
     if (schema) state.schemas[slug] = { ...schema, title: body.name }
-    const source = state.sources[id]
-    if (source !== undefined) state.sources[slug] = source
+    // #179: the copy is the upstream's directory, so its README comes too.
+    const readme = state.readmes[id]
+    if (readme !== undefined) state.readmes[slug] = readme
     await delay(120)
-    return HttpResponse.json(copy, { status: 201 })
+    return HttpResponse.json(view(copy), { status: 201 })
   }),
 
-  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
+  // #157 — a duplicate's upstream, and taking, dismissing or detaching it.
+  http.get(`${base}/models/:slug/upstream`, ({ params }) => {
+    const slug = String(params['slug'])
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
+    if (!model.upstream) {
+      return problem(404, 'Not Found', `'${slug}' is not a duplicate, so it has no upstream`)
+    }
+    const upstreamState = upstreamStateOf(model) as UpstreamState
+    const status: UpstreamStatus = {
+      state: upstreamState,
+      upstream: model.upstream,
+      revision:
+        upstreamState === 'gone' ? null : (state.versions[model.upstream.id]?.[0]?.commit ?? null),
+      preview: upstreamState === 'update' ? planMerge(slug, model) : null,
+    }
+    return HttpResponse.json(status)
+  }),
+
+  http.post(`${base}/models/:slug/upstream/merge`, async ({ params }) => {
     const slug = String(params['slug'])
     const refused = refuseBuiltin(slug)
     if (refused) return refused
-    const model = state.models.find((m) => m.slug === slug)
-    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
-    const patch = (await request.json()) as Partial<ModelSummary>
-    const missing = (patch.libraries ?? []).filter(
-      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
-    )
-    if (missing.length > 0) {
-      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
+    const found = upstreamAction(slug, ['update', 'dismissed'], 'has no upstream update to merge')
+    if (found instanceof Response) return found
+    const { model, upstream, revision } = found
+    const plan = planMerge(slug, model)
+    if (!plan.clean) {
+      return problem(
+        409,
+        'Conflict',
+        `the merge into '${slug}' has 1 conflict(s); resolve them and save with ` +
+          `PUT /models/${slug}/source?merge_base=${revision}`,
+        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: [], kept: [] },
+      )
     }
-    const updated = { ...model, ...patch }
-    state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
-    return HttpResponse.json(updated)
+    state.sources[slug] = plan.merged
+    const version = recordVersion(slug, `Merge ${upstream.id} into ${slug}`, [
+      { status: 'M', path: 'model.scad' },
+    ])
+    const updated: ModelSummary = {
+      ...model,
+      version: version.commit,
+      updated_at: version.date,
+      upstream: advanceBase(upstream, revision),
+    }
+    state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+    await delay(120)
+    return HttpResponse.json({ model: view(updated), taken: plan.taken, kept: plan.kept })
+  }),
+
+  http.post(`${base}/models/:slug/upstream/dismiss`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const found = upstreamAction(slug, ['update', 'dismissed'], 'has no upstream update to dismiss')
+    if (found instanceof Response) return found
+    const { model, upstream, revision } = found
+    return HttpResponse.json(
+      writeUpstream(
+        model,
+        { ...upstream, dismissed: revision },
+        `Dismiss ${upstream.id} update in ${slug}`,
+      ),
+    )
+  }),
+
+  http.post(`${base}/models/:slug/upstream/detach`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const found = upstreamAction(slug, ['gone'], 'stays linked: its upstream still exists')
+    if (found instanceof Response) return found
+    const { model, upstream } = found
+    return HttpResponse.json(writeUpstream(model, null, `Detach ${slug} from ${upstream.id}`))
   }),
 
   http.post(`${base}/models/check`, async ({ request }) => {
@@ -496,29 +834,176 @@ export const handlers = [
       force?: boolean
       message?: string | null
     }
+    // #157 — `merge_base` saves the resolution of a conflicted upstream merge.
+    const mergeBase = new URL(request.url).searchParams.get('merge_base')
+    if (mergeBase !== null && hasConflictMarkers(body.source)) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        'the source still has conflict markers; resolve every conflict first',
+      )
+    }
     const check = checkOf(body.source)
     if (!check.ok && !body.force) return refusal(check)
+    const upstream = model.upstream
+    if (mergeBase !== null) {
+      if (!upstream) {
+        return problem(
+          409,
+          'Conflict',
+          `'${slug}' is not a duplicate, so it has no merge to resolve`,
+        )
+      }
+      if (!(state.versions[upstream.id] ?? []).some((v) => v.commit === mergeBase)) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `${mergeBase} is not a revision of ${upstream.id}`,
+        )
+      }
+    }
     state.sources[slug] = body.source
     if (!check.ok) delete state.schemas[slug]
-    const version = recordVersion(slug, body.message || `Edit ${slug} source`, [
-      { status: 'M', path: 'model.scad' },
-    ])
-    const updated = { ...model, version: version.commit, updated_at: version.date }
+    const resolved = mergeBase !== null && upstream ? advanceBase(upstream, mergeBase) : null
+    const message =
+      body.message || (resolved ? `Merge ${resolved.id} into ${slug}` : `Edit ${slug} source`)
+    const version = recordVersion(slug, message, [{ status: 'M', path: 'model.scad' }])
+    const updated = {
+      ...model,
+      version: version.commit,
+      updated_at: version.date,
+      ...(resolved ? { upstream: resolved } : {}),
+    }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     await delay(120)
+    return HttpResponse.json(view(updated))
+  }),
+
+  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const patch = (await request.json()) as ModelPatch
+    // #93: only libraries that have been added (and so are pinned) can be declared.
+    const missing = (patch.libraries ?? []).filter(
+      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
+    )
+    if (missing.length > 0) {
+      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
+    }
+    const change = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
+    ) as Partial<ModelSummary>
+    const updated = reviseModel(slug, `Update ${slug} metadata`, [
+      { status: 'M', path: 'model.json' },
+    ], change)
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  // Multipart with a `file` part, like the output thumbnail PUT.
+  http.put(`${base}/models/:slug/thumbnail`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const upload = (await request.formData()).get('file')
+    if (upload === null || typeof upload === 'string') {
+      return problem(422, 'Unprocessable Content', 'the upload needs a file part')
+    }
+    const notPng = await thumbnailRefusal(upload as File)
+    if (notPng) return notPng
+    const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
+    const updated = reviseModel(
+      slug,
+      `Set ${slug} thumbnail`,
+      [{ status: had ? 'M' : 'A', path: 'thumbnail.png' }],
+      { has_thumbnail: true, thumbnail_source: 'model', thumbnail_output_id: null },
+    )
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  http.delete(`${base}/models/:slug/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Model not found')
+    if (model.thumbnail_source !== 'model') {
+      return problem(404, 'Not Found', `'${slug}' has no thumbnail of its own to remove`)
+    }
+    // The fixtures' generated models fall back to their first output's plate image.
+    // Which is the first output: the one whose plate image the backend serves.
+    const first = state.outputs
+      .filter((o) => o.slug === slug)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+    const updated = reviseModel(slug, `Remove ${slug} thumbnail`, [
+      { status: 'D', path: 'thumbnail.png' },
+    ], {
+      has_thumbnail: first !== undefined,
+      thumbnail_source: first ? 'output' : null,
+      thumbnail_output_id: first?.id ?? null,
+    })
+    return HttpResponse.json(updated)
+  }),
+
+  http.get(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const readme = state.readmes[slug]
+    return readme === undefined
+      ? problem(404, 'Not Found', `'${slug}' has no README`)
+      : HttpResponse.text(readme, { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } })
+  }),
+
+  http.put(`${base}/models/:slug/readme`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const { content } = (await request.json()) as { content: string }
+    const had = state.readmes[slug] !== undefined
+    const updated = reviseModel(slug, `Set ${slug} README`, [
+      { status: had ? 'M' : 'A', path: 'README.md' },
+    ], { has_readme: true })
+    if (!updated) return problem(404, 'Model not found')
+    state.readmes[slug] = content
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (state.readmes[slug] === undefined) {
+      return problem(404, 'Not Found', `'${slug}' has no README to remove`)
+    }
+    delete state.readmes[slug]
+    const updated = reviseModel(slug, `Remove ${slug} README`, [
+      { status: 'D', path: 'README.md' },
+    ], { has_readme: false })
     return HttpResponse.json(updated)
   }),
 
   http.get(`${base}/models/:slug`, ({ params }) => {
     const model = state.models.find((m) => m.slug === params['slug'])
-    return model ? HttpResponse.json(model) : problem(404, 'Model not found')
+    return model ? HttpResponse.json(view(model)) : problem(404, 'Model not found')
   }),
 
-  http.delete(`${base}/models/:slug`, ({ params }) => {
+  http.delete(`${base}/models/:slug`, ({ params, request }) => {
     const refused = refuseBuiltin(String(params['slug']))
     if (refused) return refused
     if (!state.models.some((m) => m.slug === params['slug'])) {
       return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
+    }
+    const slugs = state.models.filter((m) => m.upstream?.id === params['slug']).map((m) => m.slug)
+    if (slugs.length && new URL(request.url).searchParams.get('force') !== 'true') {
+      return problem(
+        409,
+        'Conflict',
+        `${slugs.length} template(s) are duplicates of '${String(params['slug'])}' and would ` +
+          'lose their upstream; delete with ?force=true to go ahead',
+        { duplicates: slugs.length, slugs },
+      )
     }
     state.models = state.models.filter((m) => m.slug !== params['slug'])
     return new HttpResponse(null, { status: 204 })
@@ -542,10 +1027,17 @@ export const handlers = [
     const requested = new URL(request.url).searchParams.get('base')
     const headIndex = entries.findIndex((v) => v.commit === commit)
     const baseIndex = requested ? entries.findIndex((v) => v.commit === requested) : headIndex + 1
-    const patch = entries
+    const recorded = entries
       .slice(headIndex, baseIndex < 0 ? headIndex + 1 : baseIndex)
       .map((v) => fixtures.versionPatches[v.commit] ?? '')
       .join('')
+    // A revision made in the mock has no recorded patch: diff the sources it kept.
+    const parent = requested ?? entries[headIndex + 1]?.commit
+    const before = parent === undefined ? undefined : state.sourceAt[parent]
+    const after = state.sourceAt[commit]
+    const patch =
+      recorded ||
+      (before !== undefined && after !== undefined ? sourcePatch(slug, before, after) : '')
     return HttpResponse.json({
       slug,
       base: requested ?? (entries[headIndex + 1]?.commit ?? ''),

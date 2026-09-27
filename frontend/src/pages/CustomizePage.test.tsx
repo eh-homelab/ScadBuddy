@@ -2,6 +2,7 @@ import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
+import { api } from '../api/client'
 import type { Job, PipelineChoices, Plate } from '../api/types'
 import {
   BUILTIN_SLUG,
@@ -12,6 +13,7 @@ import {
   versionIds,
 } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { RENDER_DEBOUNCE_MS } from '../lib/useRenderJob'
 import { CustomizePage } from './CustomizePage'
@@ -82,6 +84,30 @@ describe('CustomizePage', () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
     expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
+  })
+
+  it('offers to edit the model details (#179)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(dialog).findByLabelText('Name')).toHaveValue('Name Keychain')
+  })
+
+  it('takes a rename from Edit details into the heading and Duplicate without a reload (#179)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+    const details = screen.getByRole('dialog', { name: 'Edit details' })
+    const name = await within(details).findByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Keyring')
+    await user.click(within(details).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // The still-open page's heading and Duplicate's prefill both take the new name.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Keyring')
+    await user.click(screen.getByRole('button', { name: 'Duplicate' }))
+    const duplicate = screen.getByRole('dialog', { name: /^Duplicate / })
+    expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
   })
 
   it('renders the defaults without being asked', async () => {
@@ -785,6 +811,7 @@ describe('CustomizePage', () => {
     expect(alert).toHaveTextContent('Could not load this model')
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
 
     fail = false
@@ -792,6 +819,7 @@ describe('CustomizePage', () => {
 
     expect(await screen.findByRole('button', { name: 'Delete' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit details' })).toBeInTheDocument()
     expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
   })
 
@@ -802,6 +830,8 @@ describe('CustomizePage', () => {
     )
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    // #179: its details are the image's too.
+    expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
   })
 
   it('still customizes a built-in template, and links its read-only pages encoded (#184)', async () => {
@@ -842,11 +872,61 @@ describe('CustomizePage', () => {
     // The copy is the user's: its write actions are back.
     expect(await screen.findByRole('link', { name: 'Edit source' })).toBeInTheDocument()
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+    // #179: Edit details among them, opening on the copy's own details.
+    await user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const details = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(details).findByLabelText('Name')).toHaveValue('Keychain Template copy')
   })
 
   it('offers Duplicate on a model of the user\'s own too (#159)', async () => {
     render()
     expect(await screen.findByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
     expect(screen.queryByTestId('duplicated-from')).not.toBeInTheDocument()
+  })
+
+  it('takes an upstream update from its header badge, re-reading the schema (#160)', async () => {
+    await duplicateWithUpdate()
+    const seen = watchRequests()
+    const { user } = render(`/m/${COPY}`)
+
+    await user.click(await screen.findByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog', { name: 'Update available' })
+    await within(dialog).findByTestId('merge-result')
+    const schemaReads = seen.filter((path) => path.endsWith(`/${COPY}/schema`)).length
+    await user.click(within(dialog).getByRole('button', { name: 'Take update' }))
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Update available' })).not.toBeInTheDocument(),
+    )
+    expect(await api.getSource(COPY)).toBe(theirs)
+    // The merge changed the source, so the schema is read again.
+    await waitFor(() =>
+      expect(seen.filter((path) => path.endsWith(`/${COPY}/schema`)).length).toBe(schemaReads + 1),
+    )
+  })
+
+  it('dismisses an update without re-reading the unchanged schema (#160)', async () => {
+    await duplicateWithUpdate()
+    const seen = watchRequests()
+    const { user } = render(`/m/${COPY}`)
+
+    await user.click(await screen.findByRole('button', { name: 'Update available' }))
+    const dialog = screen.getByRole('dialog', { name: 'Update available' })
+    await within(dialog).findByTestId('merge-result')
+    const schemaReads = seen.filter((path) => path.endsWith(`/${COPY}/schema`)).length
+    await user.click(within(dialog).getByRole('button', { name: 'Not now' }))
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Update available' })).not.toBeInTheDocument(),
+    )
+    expect((await api.getModel(COPY)).upstream_state).toBe('dismissed')
+    expect(seen.filter((path) => path.endsWith(`/${COPY}/schema`))).toHaveLength(schemaReads)
+  })
+
+  it('shows no update badge on a model that is not a duplicate (#160)', async () => {
+    render()
+    await screen.findByRole('button', { name: 'Duplicate' })
+    expect(screen.queryByTestId('update-badge')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('upstream-gone')).not.toBeInTheDocument()
   })
 })

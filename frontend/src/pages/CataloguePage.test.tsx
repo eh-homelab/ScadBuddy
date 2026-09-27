@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
 
@@ -132,6 +133,32 @@ describe('CataloguePage', () => {
     expect(screen.getAllByRole('button', { name: 'Import from URL' })).toHaveLength(2)
   })
 
+  it('refetches a thumbnail whose fallback moved to another output with no new commit', async () => {
+    const base = { ...(models[0] as (typeof models)[number]), version: 'a'.repeat(40) }
+    let record: typeof base = { ...base, thumbnail_source: 'output', thumbnail_output_id: 'f'.repeat(32) }
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([record])))
+    const imageOf = async () =>
+      (await screen.findByRole('img', { name: 'Name Keychain' })).getAttribute('src')
+
+    const first = renderPage(<CataloguePage />)
+    const before = await imageOf()
+    first.unmount()
+
+    // Same revision, a different covering output: the URL must still change.
+    record = { ...base, thumbnail_source: 'output', thumbnail_output_id: 'e'.repeat(32) }
+    const second = renderPage(<CataloguePage />)
+    const moved = await imageOf()
+    second.unmount()
+    expect(moved).not.toBe(before)
+
+    // Same revision again, the model's own image now: different again.
+    record = { ...base, thumbnail_source: 'model', thumbnail_output_id: null }
+    renderPage(<CataloguePage />)
+    const own = await imageOf()
+    expect(new Set([before, moved, own]).size).toBe(3)
+    expect(own).toContain(`/api/v1/models/name-keychain/thumbnail?v=`)
+  })
+
   it('links an imported model back to where it came from', async () => {
     const origin = 'https://raw.githubusercontent.com/someone/models/main/bin.scad'
     server.use(
@@ -144,6 +171,28 @@ describe('CataloguePage', () => {
     const link = await screen.findByRole('link', { name: /raw\.githubusercontent\.com/ })
     expect(link).toHaveAttribute('href', origin)
     expect(link).toHaveAttribute('target', '_blank')
+  })
+
+  it.each([
+    'javascript:alert(document.domain)',
+    'JAVASCRIPT:alert(1)',
+    'data:text/html,<script>alert(1)</script>',
+    'not a url',
+  ])('links no origin that is not http(s): %s', async (origin) => {
+    server.use(
+      http.get('/api/v1/models', () =>
+        HttpResponse.json([{ ...(models[0] as (typeof models)[number]), origin_url: origin }]),
+      ),
+    )
+    renderPage(<CataloguePage />)
+
+    const heading = await screen.findByRole('heading', { name: 'Name Keychain' })
+    const card = heading.closest('li') as HTMLElement
+    expect(within(card).queryByText(/^From/)).not.toBeInTheDocument()
+    // The card's own link is the only anchor, and it points into the app.
+    for (const anchor of card.querySelectorAll('a')) {
+      expect(anchor.getAttribute('href')).toBe('/m/name-keychain')
+    }
   })
 
   it('marks a built-in template read-only and links it with its id encoded (#184)', async () => {
@@ -202,5 +251,28 @@ describe('CataloguePage', () => {
       'href',
       `/m/${encodeURIComponent(BUILTIN_SLUG)}`,
     )
+  })
+
+  it('badges a duplicate whose upstream has an update (#160)', async () => {
+    await duplicateWithUpdate()
+    renderPage(<CataloguePage />)
+
+    const copy = (await screen.findByRole('heading', { name: 'Keychain for Nova' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(copy).getByTestId('update-badge')).toHaveTextContent('Update available')
+    expect(screen.getAllByTestId('update-badge')).toHaveLength(1)
+  })
+
+  it('says so on a duplicate whose upstream is gone (#160)', async () => {
+    await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
+    await api.deleteModel(UPSTREAM, true)
+    renderPage(<CataloguePage />)
+
+    const copy = (await screen.findByRole('heading', { name: 'Keychain for Nova' })).closest(
+      'li',
+    ) as HTMLElement
+    expect(within(copy).getByTestId('upstream-gone')).toHaveTextContent('Upstream gone')
+    expect((await api.getModel(COPY)).upstream_state).toBe('gone')
   })
 })

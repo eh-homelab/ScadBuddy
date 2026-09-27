@@ -5,10 +5,12 @@ import type { Output, ParamValue, Plate } from '../api/types'
 import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
+import { EditDetailsButton } from '../components/EditDetailsButton'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
+import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
 
 // three.js is a third of the bundle and only the customizer needs it.
 const Preview = lazy(async () => ({ default: (await import('../components/Preview')).Preview }))
@@ -179,6 +181,11 @@ export function CustomizePage() {
     )
   }
 
+  // The model's own name (#179): what Edit details renames, and what the page
+  // shows once its record is in. `schema.title` is OpenSCAD's customizer title,
+  // which no metadata edit changes, so it only stands in until then.
+  const displayName = modelState.data?.name ?? schema.title ?? slug
+
   return (
     <div className="grid h-full min-h-0 grid-rows-[auto_auto_minmax(0,1fr)]">
       <div className="flex items-center justify-between gap-3 border-b border-line bg-surface px-3 py-1.5">
@@ -187,7 +194,7 @@ export function CustomizePage() {
             Models
           </Link>
           <span className="text-faint">/</span>
-          <h1 className="truncate text-[13px] font-medium">{schema.title}</h1>
+          <h1 className="truncate text-[13px] font-medium">{displayName}</h1>
           <DuplicatedFrom upstream={modelState.data?.upstream} className="shrink-0" />
           {reopened && (
             <span className="sb-num shrink-0 text-[11px] text-faint">
@@ -225,6 +232,18 @@ export function CustomizePage() {
               Built-in template — read-only
             </span>
           )}
+          {origin === 'mine' && (
+            <UpstreamUpdateButton
+              slug={slug}
+              state={modelState.data?.upstream_state}
+              // Every action rewrites the record. Only a merge changes the source, so only
+              // a merge re-reads the schema (which re-seeds the values and re-renders).
+              onChanged={(action) => {
+                modelState.reload()
+                if (action === 'merge') schemaState.reload()
+              }}
+            />
+          )}
           {origin && (
             <Link
               to={modelPath(slug, 'source')}
@@ -249,18 +268,27 @@ export function CustomizePage() {
             )}
           </Link>
           {origin && (
-            <DuplicateModelButton slug={slug} name={modelState.data?.name ?? schema.title ?? slug} />
+            <DuplicateModelButton slug={slug} name={displayName} />
           )}
           {origin === 'mine' && (
             <>
               <ModelLibrariesButton
                 slug={slug}
-                name={schema.title ?? slug}
+                name={displayName}
                 // The library path changes what the source resolves to: re-read the
                 // schema, which re-seeds the values and so re-renders the preview.
                 onSaved={schemaState.reload}
               />
-              <DeleteModelButton slug={slug} name={schema.title ?? slug} />
+              {/* #179: only a template of mine is writable, so its details are too. */}
+              <EditDetailsButton
+                slug={slug}
+                // The record this page holds (its name feeds Duplicate's prefill) is
+                // stale after a save. The save answers with the new one, so it is
+                // taken as it is: no refetch, and no flicker of the actions while
+                // the record reloads.
+                onSaved={modelState.setData}
+              />
+              <DeleteModelButton slug={slug} name={displayName} />
             </>
           )}
         </div>

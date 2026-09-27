@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { Route, Routes } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { CataloguePage } from '../pages/CataloguePage'
+import { api } from '../api/client'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { DeleteModelButton } from './DeleteModelButton'
@@ -71,5 +72,70 @@ describe('DeleteModelButton', () => {
       expect(screen.getByRole('button', { name: 'Delete model' })).toBeEnabled(),
     )
     expect(screen.getByRole('dialog')).toBeInTheDocument()
+  })
+
+  it('names the duplicates that track the model and deletes only on "Delete anyway"', async () => {
+    await api.duplicateModel('name-keychain', 'My Keychain')
+    const deletes: string[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'DELETE') deletes.push(new URL(request.url).search)
+    })
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('1 template is a duplicate of this one')
+    expect(alert).toHaveTextContent('my-keychain')
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+
+    await user.click(await screen.findByRole('button', { name: 'Delete anyway' }))
+
+    expect(await screen.findByRole('heading', { name: 'My Keychain' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Name Keychain' })).not.toBeInTheDocument()
+    expect(deletes).toEqual(['', '?force=true'])
+  })
+
+  it('forgets the duplicates on cancel, so the next delete asks again', async () => {
+    await api.duplicateModel('name-keychain', 'My Keychain')
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+    await screen.findByRole('button', { name: 'Delete anyway' })
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+
+    expect(screen.getByRole('button', { name: 'Delete model' })).toBeInTheDocument()
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('shows only the new error when the forced delete fails for another reason', async () => {
+    await api.duplicateModel('name-keychain', 'My Keychain')
+    const { user } = render()
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }))
+    await user.click(screen.getByRole('button', { name: 'Delete model' }))
+    await screen.findByRole('button', { name: 'Delete anyway' })
+    server.use(
+      http.delete('/api/v1/models/:slug', () =>
+        HttpResponse.json(
+          {
+            type: 'about:blank',
+            title: 'Conflict',
+            status: 409,
+            detail: "'name-keychain' has a render in progress; try again when it ends",
+          },
+          { status: 409, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    await user.click(screen.getByRole('button', { name: 'Delete anyway' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('render in progress')
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.queryByText('my-keychain')).not.toBeInTheDocument()
   })
 })

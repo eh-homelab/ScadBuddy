@@ -98,3 +98,14 @@ export function refusedCheck(problem: Problem): SourceCheck | undefined {
     log_tail: Array.isArray(log) ? log.map(String) : [],
   }
 }
+
+/**
+ * A delete refused because templates of mine are duplicates of this one carries their
+ * slugs as the `slugs` problem extension (and the count as `duplicates`).
+ */
+export function trackingDuplicates(problem: Problem): string[] | undefined {
+  const { duplicates, slugs } = problem
+  if (typeof duplicates !== 'number' || duplicates < 1) return undefined
+  if (!Array.isArray(slugs) || slugs.length === 0) return undefined
+  return slugs.map(String)
+}

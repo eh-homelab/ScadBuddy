@@ -36,11 +36,12 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import BoundingBox, write_glb
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
-from scadbuddy.render.solids import CSS_COLOURS, STAGED_ASSET_PREFIX, render_solids
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids
 from scadbuddy.render.split import ColourPart, split_by_material
 from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 
@@ -162,16 +163,22 @@ class JobStore:
         return removed
 
 
-def _as_material_colour(value: ParamValue | None) -> str | None:
-    """A colour parameter's value as the `#RRGGBB` its material would carry."""
-    if not isinstance(value, str):
-        return None
-    if not value.startswith("#"):
-        return CSS_COLOURS.get(value.strip().lower())
-    digits = value[1:].upper()
-    if len(digits) in (3, 4):
-        digits = "".join(digit * 2 for digit in digits)
-    return "#" + digits[:6]
+def unreadable_colour_warnings(
+    schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> list[str]:
+    """A warning for each colour parameter whose value is not a colour OpenSCAD reads
+    (a malformed hex, an unknown name): no part can match it, so it gets no extruder."""
+    warnings: list[str] = []
+    for parameter in schema.parameters:
+        if parameter.type != "color":
+            continue
+        value = params.get(parameter.name, parameter.initial)
+        if colour_hex(value) is None:
+            warnings.append(
+                f"colour parameter {parameter.name!r} is {value!r}, not a colour; "
+                "it gets no extruder"
+            )
+    return warnings
 
 
 def extruder_order(
@@ -191,7 +198,7 @@ def extruder_order(
     for parameter in schema.parameters:
         if parameter.type != "color":
             continue
-        colour = _as_material_colour(params.get(parameter.name, parameter.initial))
+        colour = colour_hex(params.get(parameter.name, parameter.initial))
         if colour is not None:
             ranks.setdefault(colour, len(ranks))
 
@@ -498,6 +505,7 @@ async def render_job(
         parts, config=config, executor=thumbnail_executor
     )
     warnings += thumbnail_warnings
+    warnings += unreadable_colour_warnings(schema, job.params)
 
     model_3mf = work / MODEL_NAME
     # A built-in's bare slug, as download_filename names the file: the id's
