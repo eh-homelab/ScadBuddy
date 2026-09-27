@@ -413,6 +413,12 @@ jobs:
             echo "::error::unexpected /healthz body from the agent container"
             exit 1
           fi
+          # The tmpfs hides the image's own claude/ and work/, so these exist
+          # only if the service recreated them at start (harness/stateDirs.ts).
+          if ! docker exec scadbuddy-agent-ci test -d /var/lib/scadbuddy-agent/claude -a -w /var/lib/scadbuddy-agent/claude -a -d /var/lib/scadbuddy-agent/work -a -w /var/lib/scadbuddy-agent/work; then
+            echo "::error::the agent did not recreate its state directories on the mounted volume"
+            exit 1
+          fi
 
       - name: Tear down
         if: always()

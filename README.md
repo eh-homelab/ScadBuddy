@@ -162,7 +162,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `/healthz` reports `"ai": "disabled (no database)"`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
-  (spec §4.4; the CI smoke test runs it with `--read-only`).
+  (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
+  recreates `claude/` and `work/` in that volume, and it exits 1 with a
+  message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
 - Nothing deploys it yet. The clusters manifest, and the ingress routes for
   `/mcp`, `/api/v1/ai/*` and `/api/v1/ws` (spec §4.2), come with the stories
   that give it routes. Until then the image's publish job is

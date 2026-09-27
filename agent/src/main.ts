@@ -3,6 +3,8 @@ import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { loadConfig } from './config.js'
 import { connectDatabase } from './db.js'
+import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { shutdown } from './shutdown.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
@@ -11,6 +13,16 @@ import { shutdown } from './shutdown.js'
 const PORT = 8081
 
 const config = loadConfig()
+
+// Before listening: a mounted, empty state volume must get its `claude/` and
+// `work/` back, and an unwritable one should stop the pod here, visibly.
+try {
+  await ensureStateDirs({ stateDir: DEFAULT_STATE_DIR })
+} catch (err) {
+  console.error(err instanceof StateDirError ? err.message : err)
+  process.exit(1)
+}
+
 const database = config.databaseUrl ? connectDatabase(config.databaseUrl) : undefined
 const backend = createBackendClient(config.backendUrl)
 
