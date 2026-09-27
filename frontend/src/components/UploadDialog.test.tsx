@@ -167,6 +167,30 @@ describe('UploadDialog', () => {
     expect(upload.mock.calls[0]?.[1]?.thumbnail).toBeUndefined()
   })
 
+  it('refuses a README over the server limit, attached or in a folder', async () => {
+    const upload = vi.spyOn(api, 'uploadModel').mockResolvedValue(uploaded)
+    const { dialog, user } = render()
+    const long = 'x'.repeat(1_000_001)
+
+    await user.upload(within(dialog).getByLabelText('OpenSCAD source file'), file('widget.scad'))
+    await user.upload(within(dialog).getByLabelText('README (Markdown)'), file('notes.md', long))
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent('at most 1,000,000 characters')
+    expect(within(dialog).getByTestId('upload-readme')).toHaveTextContent('None')
+
+    await user.upload(within(dialog).getByLabelText('Model folder'), [
+      inFolder('widget', 'model.scad'),
+      inFolder('widget', 'README.md', long),
+    ])
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'The README must be at most 1,000,000 characters. README.md was left out.',
+    )
+    expect(within(dialog).getByTestId('upload-readme')).toHaveTextContent('None')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Add model' }))
+    await waitFor(() => expect(upload).toHaveBeenCalledOnce())
+    expect(upload.mock.calls[0]?.[1]?.readme).toBeUndefined()
+  })
+
   it('says so when a folder holds no source', async () => {
     const { dialog, user } = render()
 

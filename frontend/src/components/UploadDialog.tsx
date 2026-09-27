@@ -7,6 +7,7 @@ import {
   folderOf,
   isMarkdown,
   readMetaName,
+  readmeProblem,
   thumbnailProblem,
   uploadFilename,
   type ModelFiles,
@@ -59,21 +60,32 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
     // A folder's own thumbnail.png is held to the same limit as one attached by hand;
     // the rest of the folder still goes up without it.
     const tooLarge = picked.thumbnail ? thumbnailProblem(picked.thumbnail) : null
-    setError(tooLarge ? `${tooLarge} ${picked.thumbnail?.name} was left out.` : null)
-    setFiles(tooLarge ? { ...picked, thumbnail: undefined } : picked)
+    // Its README too, against the limit every write path holds a README to.
+    const tooLong = picked.readme ? readmeProblem(await picked.readme.text()) : null
+    const leftOut = [
+      tooLarge && `${tooLarge} ${picked.thumbnail?.name} was left out.`,
+      tooLong && `${tooLong} ${picked.readme?.name} was left out.`,
+    ].filter(Boolean)
+    setError(leftOut.length > 0 ? leftOut.join(' ') : null)
+    setFiles({
+      ...picked,
+      thumbnail: tooLarge ? undefined : picked.thumbnail,
+      readme: tooLong ? undefined : picked.readme,
+    })
     setIgnored(unused)
     setMetaName(await readMetaName(picked.meta))
   }
 
-  function attach(kind: 'thumbnail' | 'readme', file: File | undefined) {
+  async function attach(kind: 'thumbnail' | 'readme', file: File | undefined) {
     if (!file || !files) return
-    const problem = kind === 'thumbnail' ? thumbnailProblem(file) : null
+    const problem =
+      kind === 'thumbnail'
+        ? thumbnailProblem(file)
+        : !isMarkdown(file)
+          ? 'The README must be a Markdown (.md) file.'
+          : readmeProblem(await file.text())
     if (problem) {
       setError(problem)
-      return
-    }
-    if (kind === 'readme' && !isMarkdown(file)) {
-      setError('The README must be a Markdown (.md) file.')
       return
     }
     setError(null)
@@ -280,7 +292,7 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         className="sr-only"
         aria-label="Thumbnail (PNG)"
         onChange={(event) => {
-          attach('thumbnail', event.target.files?.[0])
+          void attach('thumbnail', event.target.files?.[0])
           event.target.value = ''
         }}
       />
@@ -291,7 +303,7 @@ export function UploadDialog({ open, onClose, onUploaded }: Props) {
         className="sr-only"
         aria-label="README (Markdown)"
         onChange={(event) => {
-          attach('readme', event.target.files?.[0])
+          void attach('readme', event.target.files?.[0])
           event.target.value = ''
         }}
       />

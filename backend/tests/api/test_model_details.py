@@ -13,7 +13,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES
+from scadbuddy.api.models import MAX_SOURCE_CHARS, MAX_THUMBNAIL_BYTES, _mib
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import outputs as outputs_module
 from scadbuddy.render import provenance
@@ -253,7 +253,10 @@ def test_a_thumbnail_one_byte_over_the_cap_is_refused_and_nothing_is_committed(
 
     assert response.status_code == 422
     assert response.headers["content-type"] == "application/problem+json"
-    assert str(MAX_THUMBNAIL_BYTES) in response.json()["detail"]
+    assert response.json()["detail"] == (
+        f"the thumbnail is too large: {MAX_THUMBNAIL_BYTES + 1} bytes, "
+        f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes (2 MiB)"
+    )
     assert not (paths.model_dir(SLUG) / "thumbnail.png").exists()
     assert client.get(f"/api/v1/models/{SLUG}/versions").json() == history
     assert client.get(f"/api/v1/models/{SLUG}").json()["version"] == before["version"]
@@ -969,3 +972,11 @@ def test_every_details_change_is_one_revision_in_the_models_history(client: Test
         (change["path"], change["status"])
         for change in by_message[f"Remove {SLUG} README"]["files"]
     ] == [("README.md", "D")]
+
+
+def test_the_size_in_a_message_is_derived_from_the_limit() -> None:
+    assert (_mib(2 * 1024 * 1024), _mib(3 * 1024 * 1024 // 2), _mib(512 * 1024)) == (
+        "2 MiB",
+        "1.5 MiB",
+        "0.5 MiB",
+    )

@@ -37,12 +37,30 @@ export const isMarkdown = (file: File) => /\.(md|markdown)$/.test(lower(file))
 
 /** The server's `MAX_THUMBNAIL_BYTES`: each thumbnail set is kept in the history. */
 export const MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+/** The limit as people read it, derived so the message cannot drift from it. */
+export const MAX_THUMBNAIL_SIZE = `${MAX_THUMBNAIL_BYTES / (1024 * 1024)} MiB`
 
 /** Why a file cannot be a model's thumbnail, or null when it can. */
 export function thumbnailProblem(file: File): string | null {
   if (!isPng(file)) return 'The thumbnail must be a PNG.'
-  if (file.size > MAX_THUMBNAIL_BYTES) return 'The thumbnail must be 2 MiB or smaller.'
+  if (file.size > MAX_THUMBNAIL_BYTES) {
+    return `The thumbnail must be ${MAX_THUMBNAIL_SIZE} or smaller.`
+  }
   return null
+}
+
+/** The server's `MAX_SOURCE_CHARS`, which caps a README on every write path. */
+export const MAX_README_CHARS = 1_000_000
+
+/**
+ * Why text cannot be a model's README, or null when it can. Counted in code points,
+ * as the server counts a Python `str` -- not UTF-16 units, which count an emoji
+ * twice. `length` is never below the code-point count, so text within it is fine
+ * without counting.
+ */
+export function readmeProblem(text: string): string | null {
+  if (text.length <= MAX_README_CHARS || [...text].length <= MAX_README_CHARS) return null
+  return `The README must be at most ${MAX_README_CHARS.toLocaleString('en')} characters.`
 }
 
 /** Code-unit order: the same on every browser, OS and locale, unlike `localeCompare`. */

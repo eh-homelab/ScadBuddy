@@ -1,7 +1,12 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary } from '../api/types'
-import { isMarkdown, thumbnailProblem } from '../lib/modelFolder'
+import {
+  MAX_THUMBNAIL_SIZE,
+  isMarkdown,
+  readmeProblem,
+  thumbnailProblem,
+} from '../lib/modelFolder'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
@@ -178,6 +183,9 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     ? readmeChange(readme, baseline.readme, baseline.model.has_readme)
     : 'none'
   const nameMissing = name.trim() === ''
+  // Checked here as the server checks it, so a README it would refuse never goes
+  // up -- and nor, with Save disabled, do the other fields' changes beside it.
+  const readmeTooLong = readmeProblem(readme)
 
   return (
     <>
@@ -201,7 +209,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
             <Button
               variant="primary"
               onClick={() => void save()}
-              disabled={!model || saving || nameMissing}
+              disabled={!model || saving || nameMissing || readmeTooLong !== null}
             >
               {saving && <Spinner />}
               {saving ? 'Saving' : 'Save'}
@@ -283,7 +291,7 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                     {thumbnail ? 'Keep current' : 'Remove thumbnail'}
                   </Button>
                 )}
-                <span className="text-[12px] text-faint">PNG, up to 2 MiB</span>
+                <span className="text-[12px] text-faint">PNG, up to {MAX_THUMBNAIL_SIZE}</span>
               </div>
             </fieldset>
 
@@ -297,6 +305,11 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 onChange={(e) => setReadme(e.target.value)}
               />
             </label>
+            {readmeTooLong && (
+              <p role="alert" data-testid="readme-limit" className="text-[12px] text-warn">
+                {readmeTooLong}
+              </p>
+            )}
             {pendingReadme === 'remove' && (
               <p role="status" data-testid="readme-state" className="text-[12px] text-warn">
                 Saving will remove the README.

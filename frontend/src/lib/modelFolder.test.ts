@@ -3,7 +3,9 @@ import {
   classifyFiles,
   droppedFiles,
   folderOf,
+  MAX_README_CHARS,
   readMetaName,
+  readmeProblem,
   thumbnailProblem,
   uploadFilename,
 } from './modelFolder'
@@ -139,6 +141,18 @@ describe('thumbnailProblem', () => {
     expect(thumbnailProblem(png(2 * 1024 * 1024))).toBeNull()
     expect(thumbnailProblem(png(2 * 1024 * 1024 + 1))).toBe('The thumbnail must be 2 MiB or smaller.')
     expect(thumbnailProblem(file('cover.jpg'))).toBe('The thumbnail must be a PNG.')
+  })
+})
+
+describe('readmeProblem', () => {
+  it('takes a README up to the server limit, counted in code points', () => {
+    expect(readmeProblem('x'.repeat(MAX_README_CHARS))).toBeNull()
+    expect(readmeProblem('x'.repeat(MAX_README_CHARS + 1))).toBe(
+      'The README must be at most 1,000,000 characters.',
+    )
+    // Each emoji is two UTF-16 units but one character to the server.
+    expect(readmeProblem('😀'.repeat(MAX_README_CHARS))).toBeNull()
+    expect(readmeProblem('😀'.repeat(MAX_README_CHARS + 1))).not.toBeNull()
   })
 })
 

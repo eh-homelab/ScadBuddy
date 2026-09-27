@@ -1,4 +1,4 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
@@ -239,6 +239,27 @@ describe('EditDetailsButton', () => {
 
     expect(within(dialog).getByRole('alert')).toHaveTextContent('must be a PNG')
     expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Set on this model')
+  })
+
+  it('holds a README over the server limit back, and every other change with it', async () => {
+    const sent = recordWrites()
+    const { dialog, user } = await open()
+    const readme = within(dialog).getByLabelText('README')
+    await user.clear(within(dialog).getByLabelText('Name'))
+    await user.type(within(dialog).getByLabelText('Name'), 'Keyring')
+
+    // Pasted, not typed: a million keystrokes would take all day.
+    fireEvent.change(readme, { target: { value: 'x'.repeat(1_000_000) } })
+    expect(within(dialog).queryByTestId('readme-limit')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeEnabled()
+
+    fireEvent.change(readme, { target: { value: 'x'.repeat(1_000_001) } })
+    expect(within(dialog).getByTestId('readme-limit')).toHaveTextContent(
+      'The README must be at most 1,000,000 characters.',
+    )
+    expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    expect(sent).toEqual([])
   })
 
   it('refuses a thumbnail over 2 MiB before anything is sent', async () => {

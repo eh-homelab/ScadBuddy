@@ -75,6 +75,15 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 #: user's own without letting one set grow the history by megabytes.
 MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 
+
+def _mib(size: int) -> str:
+    """``size`` bytes in MiB, for a message: `2 MiB`, `1.5 MiB`."""
+    return f"{size / (1024 * 1024):g} MiB"
+
+
+#: The thumbnail limit as people read it, derived so no message can drift from it.
+MAX_THUMBNAIL_SIZE = _mib(MAX_THUMBNAIL_BYTES)
+
 #: What the multipart branch will read a body from. `text/*` at large is NOT accepted:
 #: the route documents `text/plain`, and silently treating `text/html` as OpenSCAD
 #: source is a wider contract than anything here promises.
@@ -288,7 +297,9 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
-    thumbnail: Annotated[UploadFile | None, File(description="Optional PNG, at most 2 MiB")] = None,
+    thumbnail: Annotated[
+        UploadFile | None, File(description=f"Optional PNG, at most {MAX_THUMBNAIL_SIZE}")
+    ] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
     meta: Annotated[
         UploadFile | None,
@@ -463,7 +474,7 @@ def _require_png(payload: bytes) -> bytes:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the thumbnail is too large: {len(payload)} bytes, "
-            f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes (2 MiB)",
+            f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes ({MAX_THUMBNAIL_SIZE})",
         )
     return payload
 
@@ -876,7 +887,9 @@ def get_thumbnail(
 async def put_thumbnail(
     slug: SlugPath,
     catalogue: CatalogueDep,
-    file: Annotated[UploadFile, File(description="The thumbnail, a PNG of at most 2 MiB")],
+    file: Annotated[
+        UploadFile, File(description=f"The thumbnail, a PNG of at most {MAX_THUMBNAIL_SIZE}")
+    ],
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
