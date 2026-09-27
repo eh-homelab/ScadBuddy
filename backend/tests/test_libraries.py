@@ -7,10 +7,12 @@ network is never involved.
 from __future__ import annotations
 
 import json
+import shutil
 import threading
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,10 +29,12 @@ from scadbuddy.library.libraries import (
     LibraryNotInstalledError,
     LibraryPin,
     LibraryStore,
+    Lock,
     LockfileError,
     _write_pins,
     declared_libraries,
-    pins_at,
+    lock_at,
+    read_lock,
     read_pins,
     restore_pins,
     search_path,
@@ -543,12 +547,21 @@ def test_a_ref_that_is_not_a_ref_is_refused(store: LibraryStore, ref: str) -> No
         store.install("BOSL2", ref=ref)
 
 
+def _entry(**fields: str) -> str:
+    return json.dumps(
+        {"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40, **fields}}
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "match"),
     [
         ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "v1"}}', "'BOSL2'"),
         ('{"BOSL2": {"url": "https://x.invalid/b.git", "ref": "v1"}}', "commit"),
+        (_entry(ref="a..b"), "ref"),
+        (_entry(ref="-x"), "ref"),
         ("{not json", "not valid JSON"),
+        ("[]", "not a JSON object"),
     ],
 )
 def test_a_hand_edited_lock_that_is_not_valid_is_refused_by_name(
@@ -556,8 +569,69 @@ def test_a_hand_edited_lock_that_is_not_valid_is_refused_by_name(
 ) -> None:
     (paths.models / LOCKFILE_NAME).write_text(body, encoding="utf-8")
 
+    lock = read_lock(paths)
+
+    assert lock.pins == {}
     with pytest.raises(LockfileError, match=match):
-        read_pins(paths)
+        search_path(paths, ["BOSL2"], lock)
+    assert search_path(paths, [], lock) == ()
+
+
+def test_a_bad_entry_fails_only_the_models_that_declare_it(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    store.install("other", url=url, ref="v2")
+    lock_file = paths.models / LOCKFILE_NAME
+    written = json.loads(lock_file.read_text(encoding="utf-8"))
+    written["broken"] = {"url": url, "ref": "v1", "commit": "HEAD"}
+    lock_file.write_text(json.dumps(written), encoding="utf-8")
+
+    lock = read_lock(paths)
+
+    assert set(lock.pins) == {"other"}
+    assert search_path(paths, ["other"], lock) == (paths.libraries / "other" / commits["v2"],)
+    assert search_path(paths, [], lock) == ()
+    with pytest.raises(LockfileError, match="'broken'"):
+        search_path(paths, ["other", "broken"], lock)
+
+
+def test_adding_a_library_keeps_a_broken_entry_as_it_was_written(
+    store: LibraryStore, paths: DataPaths
+) -> None:
+    broken = {"url": "https://x.invalid/b.git", "ref": "v1", "commit": "HEAD"}
+    (paths.models / LOCKFILE_NAME).write_text(json.dumps({"hand": broken}), encoding="utf-8")
+
+    store.install("BOSL2")
+
+    written = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
+    assert written["hand"] == broken
+    assert set(read_pins(paths)) == {"BOSL2"}
+
+
+def test_re_adding_a_broken_entry_fixes_it(
+    store: LibraryStore, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    (paths.models / LOCKFILE_NAME).write_text(
+        json.dumps({"BOSL2": {"url": url, "ref": "v1", "commit": "HEAD"}}), encoding="utf-8"
+    )
+
+    store.install("BOSL2")
+
+    assert read_lock(paths).broken == {}
+    assert read_pins(paths)["BOSL2"].commit == commits["v1"]
+
+
+def test_an_unreadable_lock_is_not_overwritten_by_an_add(
+    store: LibraryStore, paths: DataPaths
+) -> None:
+    (paths.models / LOCKFILE_NAME).write_text("{not json", encoding="utf-8")
+
+    with pytest.raises(LockfileError, match="not valid JSON"):
+        store.install("BOSL2")
+
+    assert (paths.models / LOCKFILE_NAME).read_text(encoding="utf-8") == "{not json"
 
 
 @pytest.mark.parametrize("commit", ["a" * 40, "b" * 64])
@@ -571,6 +645,30 @@ def test_sweep_staging_leaves_the_checkouts(store: LibraryStore, paths: DataPath
 
     assert store.sweep_staging() == [f"{STAGING_PREFIX}dead"]
     assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
+
+
+def test_sweep_staging_goes_on_past_one_it_cannot_remove(
+    store: LibraryStore,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    stuck, gone = (paths.libraries / f"{STAGING_PREFIX}{tag}" for tag in ("a", "b"))
+    for staging in (stuck, gone):
+        (staging / "BOSL2").mkdir(parents=True)
+    real_rmtree = shutil.rmtree
+
+    def rmtree(path: Path, *args: Any, **kwargs: Any) -> None:
+        if Path(path) == stuck:
+            raise PermissionError("EACCES")
+        real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(shutil, "rmtree", rmtree)
+
+    assert store.sweep_staging() == [gone.name]
+    assert stuck.is_dir()
+    assert not gone.exists()
+    assert "could not remove a staging clone" in caplog.text
 
 
 def test_an_unknown_ref_leaves_nothing_behind(store: LibraryStore, paths: DataPaths) -> None:
@@ -587,15 +685,15 @@ def test_search_path_is_only_what_the_model_declares(
     url, commits = upstream
     store.install("BOSL2")
     store.install("other", url=url, ref="v2")
-    pins = read_pins(paths)
+    lock = read_lock(paths)
 
-    assert search_path(paths, ["BOSL2"], pins) == (paths.libraries / "BOSL2" / commits["v1"],)
-    assert search_path(paths, [], pins) == ()
+    assert search_path(paths, ["BOSL2"], lock) == (paths.libraries / "BOSL2" / commits["v1"],)
+    assert search_path(paths, [], lock) == ()
 
 
 def test_declaring_a_library_that_is_not_pinned_is_an_error(paths: DataPaths) -> None:
     with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
-        search_path(paths, ["BOSL2"], {})
+        search_path(paths, ["BOSL2"], Lock())
 
 
 def test_a_pin_whose_checkout_is_gone_is_an_error(
@@ -607,10 +705,10 @@ def test_a_pin_whose_checkout_is_gone_is_an_error(
     (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2").rename(paths.root / "moved")
 
     with pytest.raises(LibraryNotInstalledError, match="BOSL2"):
-        search_path(paths, ["BOSL2"], read_pins(paths))
+        search_path(paths, ["BOSL2"], read_lock(paths))
 
 
-def test_pins_at_reads_the_lock_as_it_was_at_a_revision(
+def test_lock_at_reads_the_lock_as_it_was_at_a_revision(
     store: LibraryStore, history: ModelHistory, upstream: tuple[str, dict[str, str]]
 ) -> None:
     _, commits = upstream
@@ -621,8 +719,8 @@ def test_pins_at_reads_the_lock_as_it_was_at_a_revision(
     assert first is not None
     store.install("BOSL2", ref="v2")
 
-    assert pins_at(history, before_any) == {}
-    assert pins_at(history, first)["BOSL2"].commit == commits["v1"]
+    assert lock_at(history, before_any) == Lock()
+    assert lock_at(history, first).pins["BOSL2"].commit == commits["v1"]
 
 
 def test_declared_libraries_reads_model_json(tmp_path: Path) -> None:

@@ -29,8 +29,8 @@ from scadbuddy.core.paths import (
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
     declared_libraries,
+    lock_at,
     model_search_path,
-    pins_at,
     search_path,
 )
 from scadbuddy.render.bambu3mf import write_bambu_3mf
@@ -349,13 +349,13 @@ async def resolve_source(
         await asyncio.to_thread(_export_atomically, history, slug, requested, directory)
     # The lockfile as it was at that revision, not as it is now: an old revision
     # renders against the library versions it was written with.
-    pins = await asyncio.to_thread(pins_at, history, requested)
+    lock = await asyncio.to_thread(lock_at, history, requested)
     return ModelSource(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
         library_path=await asyncio.to_thread(
-            lambda: search_path(paths, declared_libraries(directory), pins)
+            lambda: search_path(paths, declared_libraries(directory), lock)
         ),
     )
 

@@ -1526,6 +1526,11 @@ export interface components {
         LibraryEntry: {
             /** Curated */
             curated: boolean;
+            /**
+             * Error
+             * @description Why its `libraries.lock` entry is unusable (a hand edit); models declaring it cannot render until it is added again
+             */
+            error?: string | null;
             /** Homepage */
             homepage?: string | null;
             /** Licence */
