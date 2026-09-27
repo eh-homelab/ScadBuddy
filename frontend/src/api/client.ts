@@ -14,6 +14,7 @@ import type {
   ModelSummary,
   ModelVersion,
   Output,
+  OutputPlate,
   PastedSource,
   ParamValue,
   PipelineChoices,
@@ -25,6 +26,7 @@ import type {
   PlateFit,
   PresetOptions,
   PresetRef,
+  PrinterBedType,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -215,6 +217,12 @@ export const api = {
 
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
+  /** #83 — the 3MF's plates; ScadBuddy's own renders are always one. */
+  getOutputPlates: (id: string) => request<OutputPlate[]>(`/outputs/${seg(id)}/plates`),
+
+  outputPlateThumbnailUrl: (id: string, index: number) =>
+    `${API_BASE}/outputs/${seg(id)}/plates/${index}/thumbnail`,
+
   sendOutput: (id: string, body: SendRequest) =>
     request<SendResult>(`/outputs/${seg(id)}/send`, { method: 'POST', body: JSON.stringify(body) }),
 
@@ -255,6 +263,13 @@ export const api = {
     request<ModelPrintChoices>(`/print/models/${seg(slug)}/choices`, {
       method: 'PUT',
       body: JSON.stringify(body),
+    }),
+
+  /** #83 — the plate on this printer, which the picker opens on next; `null` forgets it. */
+  putPrinterBedType: (printerId: number, bedType: string | null) =>
+    request<PrinterBedType>(`/print/printers/${printerId}/bed-type`, {
+      method: 'PUT',
+      body: JSON.stringify({ bed_type: bedType }),
     }),
 
   /** Uploads the 3MF if Bambuddy has not got it yet, then asks each pipeline. */

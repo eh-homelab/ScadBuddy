@@ -407,6 +407,47 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/plates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The 3MF's plates
+         * @description What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
+         *     always one plate, which the picker does not ask about.
+         */
+        get: operations["get_output_plates_api_v1_outputs__output_id__plates_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/outputs/{output_id}/plates/{index}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A plate's cover image
+         * @description The plate's own cover from inside the 3MF, the one Bambu Studio would show.
+         */
+        get: operations["get_output_plate_thumbnail_api_v1_outputs__output_id__plates__index__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs/{output_id}/send": {
         parameters: {
             query?: never;
@@ -760,6 +801,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/print/printers/{printer_id}/bed-type": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Remember the plate on this printer
+         * @description What the picker last printed on this printer with (#83), which it opens on next.
+         *
+         *     ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
+         *     Needs no Bambuddy, like the model's other remembered choices.
+         */
+        put: operations["put_printer_bed_type_api_v1_print_printers__printer_id__bed_type_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/print/projects": {
         parameters: {
             query?: never;
@@ -942,6 +1006,17 @@ export interface components {
             pipelines?: components["schemas"]["Pipeline"][];
             /** Printers */
             printers?: components["schemas"]["Printer"][];
+        };
+        /**
+         * BedTypeChoice
+         * @description One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``
+         *     carries, ``label`` what Bambu Studio's own bed picker calls it.
+         */
+        BedTypeChoice: {
+            /** Label */
+            label: string;
+            /** Value */
+            value: string;
         };
         /** Body_create_model_api_v1_models_post */
         Body_create_model_api_v1_models_post: {
@@ -1553,6 +1628,8 @@ export interface components {
             parts?: components["schemas"]["PartInfo"][];
             /** Pipeline Run Id */
             pipeline_run_id?: number | null;
+            /** Plates */
+            plates?: components["schemas"]["PlateSend"][];
             /** Print Route */
             print_route?: ("pipeline" | "slice_queue") | null;
             /** Project Id */
@@ -1565,6 +1642,16 @@ export interface components {
             slug: string;
             /** Warnings */
             warnings?: string[];
+        };
+        /**
+         * OutputPlate
+         * @description One plate of the output's 3MF (#83): the ``plate_id`` a print of it queues.
+         */
+        OutputPlate: {
+            /** Has Thumbnail */
+            has_thumbnail: boolean;
+            /** Index */
+            index: number;
         };
         /** Overshoot */
         Overshoot: {
@@ -1700,6 +1787,10 @@ export interface components {
             model_pipeline_id?: number | null;
             /** Pipelines */
             pipelines?: components["schemas"]["PipelineView"][];
+            /** Printer Bed Types */
+            printer_bed_types?: {
+                [key: string]: string;
+            };
             /** Printers */
             printers?: components["schemas"]["Printer"][];
         };
@@ -1862,6 +1953,8 @@ export interface components {
         PipelineView: {
             /** Bed Type */
             bed_type?: string | null;
+            /** Bed Types */
+            bed_types?: components["schemas"]["BedTypeChoice"][];
             /** Description */
             description?: string | null;
             /**
@@ -1927,6 +2020,18 @@ export interface components {
             plate: components["schemas"]["PlateView"];
             /** Problem */
             problem?: string | null;
+        };
+        /**
+         * PlateSend
+         * @description One plate's queue item and the slice job that produced it (#83).
+         */
+        PlateSend: {
+            /** Plate Id */
+            plate_id: number;
+            /** Queue Item Id */
+            queue_item_id: number;
+            /** Slice Job Id */
+            slice_job_id: number;
         };
         /**
          * PlateView
@@ -2167,11 +2272,20 @@ export interface components {
          *       queue-item fields exist on no other Bambuddy call (#87); or
          *     - a remembered print option applies that a run cannot carry (#124). The options
          *       resolve global → per-printer → per-model → this request's ``options`` and
-         *       ``copies``.
+         *       ``copies``; or
+         *     - it names a plate type, or any plate but the first (#83). A run slices plate 1
+         *       with the pipeline's own bed type.
          *
          *     Otherwise it runs the pipeline exactly as before.
          */
         PrintRunRequest: {
+            /**
+             * All Plates
+             * @default false
+             */
+            all_plates: boolean;
+            /** Bed Type */
+            bed_type?: string | null;
             /** Copies */
             copies?: number | null;
             filament_plan?: components["schemas"]["FilamentPlan"] | null;
@@ -2254,6 +2368,24 @@ export interface components {
             name: string;
             /** Nozzle Count */
             nozzle_count?: number | null;
+        };
+        /**
+         * PrinterBedType
+         * @description The plate remembered on one printer (#83).
+         */
+        PrinterBedType: {
+            /** Bed Type */
+            bed_type?: string | null;
+            /** Printer Id */
+            printer_id: number;
+        };
+        /**
+         * PrinterBedTypePut
+         * @description The plate to remember on the printer the path names (#83); ``null`` forgets it.
+         */
+        PrinterBedTypePut: {
+            /** Bed Type */
+            bed_type?: string | null;
         };
         /**
          * ProjectAttach
@@ -3507,6 +3639,69 @@ export interface operations {
             };
         };
     };
+    get_output_plates_api_v1_outputs__output_id__plates_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OutputPlate"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_output_plate_thumbnail_api_v1_outputs__output_id__plates__index__thumbnail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     send_output_to_bambuddy_api_v1_outputs__output_id__send_post: {
         parameters: {
             query?: never;
@@ -4022,6 +4217,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PresetOptions"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    put_printer_bed_type_api_v1_print_printers__printer_id__bed_type_put: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                printer_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PrinterBedTypePut"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PrinterBedType"];
                 };
             };
             /** @description Validation Error */

@@ -11,6 +11,10 @@ table; nothing here is typed in by hand.
 ``extruder_printable_height`` is read by nothing, deliberately: see the
 ``printable_height`` entry in the generated module's docstring (#122).
 
+The bed types each model takes (#83) come from the same directory's
+``machine_model`` files: every ``curr_bed_type`` value less the model's
+``not_support_bed_type``.
+
 Usage::
 
     uv run python scripts/generate_plate_profiles.py          # downloads master
@@ -41,6 +45,18 @@ EXTRA_ALIASES = {
     "X1C": "Bambu Lab X1 Carbon",
     "A1M": "Bambu Lab A1 mini",
     "H2DP": "Bambu Lab H2D Pro",
+}
+
+#: ``curr_bed_type`` in ``src/libslic3r/PrintConfig.cpp``: each value with the label
+#: Bambu Studio shows for it, in its order. ``not_support_bed_type`` names the
+#: *labels* (``Plater.cpp`` compares it with ``enum_labels``), which is why both are
+#: kept; the value is what a slice request's ``bed_type`` carries.
+BED_TYPE_LABELS = {
+    "Cool Plate": "Cool Plate",
+    "Engineering Plate": "Engineering Plate",
+    "High Temp Plate": "Smooth PEI Plate / High Temp Plate",
+    "Textured PEI Plate": "Textured PEI Plate",
+    "Supertack Plate": "Bambu Cool Plate SuperTack",
 }
 
 HEADER = '''"""Plate geometry per Bambu printer model.
@@ -80,6 +96,10 @@ millimetres, the values those profiles declare:
 
 Geometry is identical across a model's nozzle variants, so the table is keyed by
 model rather than by preset.
+
+:data:`BED_TYPES` is, per model, every ``curr_bed_type`` value its
+``machine_model`` profile does not list under ``not_support_bed_type`` — the
+plates Bambu Studio's own bed picker offers for that printer (#83).
 """
 
 from __future__ import annotations
@@ -96,6 +116,12 @@ FOOTER = """}}
 #: Short codes Bambuddy reports in ``Printer.model`` that are not the model name
 #: with "Bambu Lab " removed.
 EXTRA_ALIASES: dict[str, str] = {aliases}
+
+#: ``curr_bed_type`` value -> the label Bambu Studio shows for it.
+BED_TYPE_LABELS: dict[str, str] = {labels}
+
+#: ``printer_model`` -> the ``curr_bed_type`` values that model takes.
+BED_TYPES: dict[str, tuple[str, ...]] = {bed_types}
 """
 
 
@@ -192,6 +218,31 @@ def collect(root: Path) -> dict[str, tuple[Any, ...]]:
     return table
 
 
+def collect_bed_types(root: Path) -> dict[str, tuple[str, ...]]:
+    by_label = {label: value for value, label in BED_TYPE_LABELS.items()}
+    table: dict[str, tuple[str, ...]] = {}
+    for path in _load_profiles(root).values():
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if raw.get("type") != "machine_model":
+            continue
+        refused = [label for label in raw.get("not_support_bed_type", "").split(";") if label]
+        unknown = [label for label in refused if label not in by_label]
+        if unknown:
+            raise SystemExit(
+                f"{raw['name']}: not_support_bed_type names {unknown}, which is not a "
+                "curr_bed_type label this script knows; re-read PrintConfig.cpp"
+            )
+        excluded = {by_label[label] for label in refused}
+        table[raw["name"]] = tuple(value for value in BED_TYPE_LABELS if value not in excluded)
+    return table
+
+
+def _mapping(entries: dict[str, Any]) -> str:
+    return (
+        "{\n" + "".join(f"    {key!r}: {_render(value)},\n" for key, value in entries.items()) + "}"
+    )
+
+
 def _render(value: Any) -> str:
     if isinstance(value, tuple):
         inner = ", ".join(_render(item) for item in value)
@@ -207,12 +258,16 @@ def main() -> None:
     if not table:
         raise SystemExit(f"no machine profiles found under {root}")
     body = "".join(f"    {model!r}: {_render(entry)},\n" for model, entry in sorted(table.items()))
-    aliases = (
-        "{\n"
-        + "".join(f"    {code!r}: {name!r},\n" for code, name in sorted(EXTRA_ALIASES.items()))
-        + "}"
+    bed_types = collect_bed_types(root)
+    missing = sorted(set(table) - set(bed_types))
+    if missing:
+        raise SystemExit(f"no machine_model profile for {missing}, so no bed types for them")
+    footer = FOOTER.format(
+        aliases=_mapping(dict(sorted(EXTRA_ALIASES.items()))),
+        labels=_mapping(BED_TYPE_LABELS),
+        bed_types=_mapping({model: bed_types[model] for model in sorted(table)}),
     )
-    OUTPUT.write_text(HEADER + body + FOOTER.format(aliases=aliases), encoding="utf-8")
+    OUTPUT.write_text(HEADER + body + footer, encoding="utf-8")
     # The rows are far past the 100-column limit as one line each; ruff owns the
     # wrapping so a regeneration lands already formatted rather than failing CI.
     subprocess.run(["ruff", "format", str(OUTPUT)], check=True)

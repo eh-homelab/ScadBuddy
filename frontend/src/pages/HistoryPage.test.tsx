@@ -92,6 +92,43 @@ describe('HistoryPage', () => {
     )
   })
 
+  it('deep-links every plate of a multi-plate print', async () => {
+    server.use(
+      http.get('/api/v1/models/:slug/outputs', () =>
+        HttpResponse.json([
+          {
+            id: '9'.repeat(32),
+            slug: 'name-keychain',
+            name: 'Plates',
+            job_id: '8'.repeat(32),
+            created_at: '2026-09-22T10:00:00Z',
+            has_thumbnail: false,
+            params: {},
+            bbox_mm: bbox(10, 10, 10),
+            colors: ['#1B6CA8'],
+            queue_item_id: 72,
+            slice_job_id: 10,
+            plates: [
+              { plate_id: 1, queue_item_id: 71, slice_job_id: 9 },
+              { plate_id: 2, queue_item_id: 72, slice_job_id: 10 },
+            ],
+          },
+        ]),
+      ),
+    )
+    render()
+    const plates = await row('Plates')
+    expect(within(plates).getByRole('link', { name: 'plate 1 queued #71' })).toHaveAttribute(
+      'href',
+      'https://bambuddy.internal.nullreference.io/queue/71',
+    )
+    expect(within(plates).getByRole('link', { name: 'plate 2 queued #72' })).toHaveAttribute(
+      'href',
+      'https://bambuddy.internal.nullreference.io/queue/72',
+    )
+    expect(within(plates).queryByText('queued #72')).not.toBeInTheDocument()
+  })
+
   it('edits an output through its deep link', async () => {
     const { user } = render()
     await user.click(within(await row('Nova')).getByRole('button', { name: 'Edit' }))

@@ -21,7 +21,7 @@ One `PrintRequest`, assembled by the print dialog and submitted once:
 | Pipeline | `pipeline_id`, the eligibility report | #86 (merged) |
 | Printer | `printer_id` — scoping, and binding on the queue route | #86 / #87 |
 | Filaments | a `FilamentPlan`: one chosen spool per plate slot | **#87** |
-| Plate | `plate_id` | #83 (reserved, not built here) |
+| Plate | `bed_type` (sliced with; remembered per printer), `plate_id` / `all_plates` | #83 |
 | Options | the sparse `PrintOptions` overlay | #88 |
 | Project | `project_id` + the folder sends land in | **#79** |
 | Copies | `copies` / `quantity` | #86 |
