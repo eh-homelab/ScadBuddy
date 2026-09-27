@@ -354,10 +354,21 @@ WS = [for (w = W1) w * s];
 LS = total(WS);
 CS = [for (i = [0:1:n - 1]) -LS / 2 + cumsum(WS, i) + WS[i] / 2];
 
+if (auto_fit && max_length > plate_len && !is_circle)
+    echo(str("NOTE: max_length capped from ", max_length, " to ", round(plate_len),
+             " mm so the sign fits the 300 x 320 mm plate"));
+if (is_circle && circle_radius > 0 && k_circ < 1)
+    echo(str("NOTE: circle_radius reduced from ", circle_radius, " to ", round(R_circ),
+             " mm so the badge fits the 300 mm plate"));
+
 // Stairs rise across the plate's depth (its width when rotated); the step
 // shrinks so the whole staircase, one letter tall at the top, still fits.
 st_room = layout == "horizontal" ? PLATE_D - frame - foot_below : PLATE_W - frame;
 st_step = n > 1 ? max(0, min(stair_step, (st_room - 1.2 * s) / (n - 1))) : stair_step;
+
+if (shape == "stairs" && st_step < stair_step)
+    echo(str("NOTE: stair_step reduced from ", stair_step, " to ", round(st_step * 10) / 10,
+             " mm so the staircase fits the plate"));
 
 R_arc = shape == "circle" ? R_circ : arc_radius;
 

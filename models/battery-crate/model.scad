@@ -104,6 +104,10 @@ bed_y = 320;
 ncols = max(1, min(cols, floor((bed_x - 2 * end_t + t) / (cx + t))));
 nrows = max(1, min(rows, floor((bed_y - 2 * ow + t) / (cy + t))));
 
+if (ncols < cols || nrows < rows)
+    echo(str("NOTE: grid reduced from ", cols, " x ", rows, " to ", ncols, " x ", nrows,
+             " ", cell, " cells so the crate fits the 300 x 320 mm plate"));
+
 grid_x = ncols * cx + (ncols - 1) * t;
 grid_y = nrows * cy + (nrows - 1) * t;
 X = grid_x + 2 * end_t;
