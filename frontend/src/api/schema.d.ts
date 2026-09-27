@@ -190,6 +190,26 @@ export interface paths {
         patch: operations["patch_model_api_v1_models__slug__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a template
+         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.
+         */
+        post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/outputs": {
         parameters: {
             query?: never;
@@ -1200,6 +1220,14 @@ export interface components {
              */
             severity: "error" | "warning" | "trace";
         };
+        /** DuplicateRequest */
+        DuplicateRequest: {
+            /**
+             * Name
+             * @description Display name of the duplicate; its slug is derived from it
+             */
+            name: string;
+        };
         /**
          * EditTarget
          * @description What ``/edit/{output_id}`` needs to reopen the customizer.
@@ -1631,6 +1659,7 @@ export interface components {
              * Format: date-time
              */
             updated_at: string;
+            upstream?: components["schemas"]["Upstream"] | null;
             /** Version */
             version?: string | null;
         };
@@ -2773,6 +2802,32 @@ export interface components {
             /** Subtype */
             subtype?: string | null;
         };
+        /**
+         * Upstream
+         * @description The template a duplicate was copied from, and the revision of it it includes.
+         */
+        Upstream: {
+            /**
+             * Base
+             * @description The upstream commit this template includes; None without history
+             */
+            base: string | null;
+            /**
+             * Dismissed
+             * @description An upstream commit the user chose not to take
+             */
+            dismissed?: string | null;
+            /**
+             * Id
+             * @description The upstream template's id: a slug, or `builtin:<slug>`
+             */
+            id: string;
+            /**
+             * Path
+             * @description The upstream's directory in the models repository
+             */
+            path: string;
+        };
         /** UrlImport */
         UrlImport: {
             /**
@@ -3242,6 +3297,41 @@ export interface operations {
         responses: {
             /** @description Successful Response */
             200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    duplicate_model_api_v1_models__slug__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DuplicateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
                 headers: {
                     [name: string]: unknown;
                 };
