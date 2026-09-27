@@ -107,7 +107,7 @@ can never reach the border or the edge.
 ./verify.sh
 ```
 
-Renders the defaults and seven variations (every shape, both text styles,
+Renders the defaults and nine variations (every shape, both text styles,
 both hangers, border on and off, a 40 mm heart where the loop extends above
 the top, a 120 mm bauble with a long name, an empty name, and the snowflake disc
 with a hole at 70 and 40 mm) in

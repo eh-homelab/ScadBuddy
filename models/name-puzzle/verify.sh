@@ -89,7 +89,7 @@ CASES = [
     ("spaces", dict(name="   ", tray_shape="train")),
 ]
 FIT_CASES = ["defaults", "cloud-lobster", "train-knobs", "big-clamped", "small-generic",
-             "other-font", "train-ten", "rect-shrunk"]
+             "other-font", "train-ten", "rect-shrunk", "cloud-shrunk"]
 
 
 def scad(v):
