@@ -13,6 +13,9 @@ MODEL_META_NAME = "model.json"
 # so keeping it in the versioned tree would leave the repository permanently
 # dirty and fold a cache blob into the next unrelated metadata commit.
 SCHEMA_CACHE_NAME = "schema.json"
+#: Presets a template ships with, beside its source: read-only through the API. The
+#: presets people save are not kept here -- see :meth:`DataPaths.model_presets`.
+TEMPLATE_PRESETS_NAME = "presets.json"
 #: Where the built-in templates are mirrored from the image, inside the models
 #: repository. Slugs are `[a-z0-9-]`, so it can never be one.
 BUILTIN_DIR = "_builtin"
@@ -62,6 +65,17 @@ class DataPaths:
         """Third-party OpenSCAD library checkouts (#93). Not under ``models/``: they
         are pinned by ``models/libraries.lock``, not versioned themselves."""
         return self.root / "libraries"
+
+    @property
+    def presets(self) -> Path:
+        """The presets people save, one file per template. Not under ``models/``: a
+        built-in's directory is the image's and only the boot sync writes it, and a
+        saved preset is not a change to the template, so it must not move the
+        template's revision (which outputs are stamped with, and duplicates track)."""
+        return self.root / "presets"
+
+    def model_presets(self, slug: str) -> Path:
+        return self.presets / f"{slug}.json"
 
     @property
     def builtins(self) -> Path:
@@ -122,5 +136,6 @@ class DataPaths:
             self.cache,
             self.fonts,
             self.libraries,
+            self.presets,
         ):
             directory.mkdir(parents=True, exist_ok=True)

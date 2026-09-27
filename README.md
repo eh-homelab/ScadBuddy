@@ -21,6 +21,11 @@ multi-colour rules, connecting Bambuddy and each feature.
 
 - **MakerWorld-parity customizer**: tabs from `/* [Group] */`, sliders, dropdowns,
   toggles, text limits, and `// color` / `// font` pickers.
+- **Presets**: save named parameter sets per template — built-ins too — and start
+  from one, changing only what differs this time (a name, a colour, a size). A
+  preset keeps only the values that differ from the defaults. A template can ship
+  its own read-only presets in a `presets.json` beside `model.scad`
+  (`{"presets": [{"name": "…", "params": {…}}]}`).
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, type ReactNode } from 'react'
 import type { CustomizerSchema, FontFamily, ParamValue } from '../api/types'
 import { diffFromDefaults, extrudersOf, groupsOf, type ParamValues } from '../lib/params'
 import { ParamWidget } from './widgets/ParamWidget'
@@ -12,9 +12,11 @@ interface Props {
   fonts: FontFamily[]
   onChange: (name: string, value: ParamValue) => void
   onReset: () => void
+  /** Above the group tabs: the preset picker. */
+  toolbar?: ReactNode
 }
 
-export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Props) {
+export function ParameterPanel({ schema, values, fonts, onChange, onReset, toolbar }: Props) {
   const groups = useMemo(() => groupsOf(schema), [schema])
   const tabs = useMemo(() => groups.filter((group) => group.name !== GLOBAL_GROUP), [groups])
   const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
@@ -39,6 +41,7 @@ export function ParameterPanel({ schema, values, fonts, onChange, onReset }: Pro
       aria-label="Parameters"
       className="flex h-full min-h-0 w-full flex-col border-r border-line bg-surface"
     >
+      {toolbar}
       <div
         role="tablist"
         aria-label="Parameter groups"

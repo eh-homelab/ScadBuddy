@@ -29,6 +29,7 @@ from scadbuddy.api.deps import (
     ConfigDep,
     HistoryDep,
     PathsDep,
+    PresetsDep,
     QueueDep,
     SlugPath,
 )
@@ -745,14 +746,16 @@ class DuplicateRequest(BaseModel):
         "derived from `name` as `POST /models` derives it, and records the template it "
         "came from as `upstream`, with `base` the upstream's current revision. One "
         "revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, "
-        "outputs, revisions) are not copied."
+        "outputs, revisions) are not copied; the presets saved on it are."
     ),
 )
-def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep) -> ModelRecord:
+def duplicate_model(
+    slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep, presets: PresetsDep
+) -> ModelRecord:
     require_model_exists(catalogue, slug)
     new_slug = _slug_from_name(body.name)
     try:
-        return catalogue.duplicate(slug, new_slug, body.name)
+        record = catalogue.duplicate(slug, new_slug, body.name)
     except ModelExistsError:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
@@ -764,6 +767,14 @@ def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: Catalogue
         # Reading the upstream at `base` failed; as every other route that reads
         # the history maps it. Nothing of the duplicate is left behind.
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    # The presets saved on the upstream come along. Best effort: the duplicate
+    # exists by now, and failing it over its presets would report a copy that was
+    # made as one that was not.
+    try:
+        presets.copy(slug, new_slug)
+    except (OSError, ValueError):
+        logger.exception("could not copy presets to a duplicate", extra={"slug": new_slug})
+    return record
 
 
 @router.delete(

@@ -52,6 +52,11 @@ export type RenderAccepted = Schemas['RenderAccepted']
 export type Output = Schemas['OutputDetail']
 export type EditTarget = Schemas['EditTarget']
 
+/** Named parameter sets per template: shipped with it (`template`) or saved (`mine`). */
+export type ParamPreset = Schemas['ParamPreset']
+export type ParamPresetCreate = Schemas['ParamPresetCreate']
+export type ParamPresetUpdate = Schemas['ParamPresetUpdate']
+
 export type FontFamily = Schemas['FontFamily']
 export type FontCatalogue = Schemas['FontCatalogueView']
 export type CatalogueFont = Schemas['CatalogueEntry']

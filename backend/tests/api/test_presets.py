@@ -1,0 +1,207 @@
+"""Per-template presets: named parameter sets saved on a template, or shipped with it."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
+from scadbuddy.library.presets import MAX_PRESET_NAME
+
+BUILTIN = "builtin:keychain"
+SOURCE = 'width = 10;\nlabel = "hi";\n'
+SHIPPED = {"presets": [{"name": "Wide", "params": {"width": 40}}]}
+
+
+@pytest.fixture
+def bundled(seed_dir: Path) -> Path:
+    directory = seed_dir / "keychain"
+    directory.mkdir()
+    (directory / "model.scad").write_text(SOURCE, encoding="utf-8")
+    (directory / "model.json").write_text(json.dumps({"name": "Keychain"}), encoding="utf-8")
+    (directory / TEMPLATE_PRESETS_NAME).write_text(json.dumps(SHIPPED), encoding="utf-8")
+    return directory
+
+
+@pytest.fixture
+def client(app: FastAPI, bundled: Path) -> Iterator[TestClient]:
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def _url(model_id: str, preset_id: str | None = None) -> str:
+    base = f"/api/v1/models/{model_id}/presets"
+    return base if preset_id is None else f"{base}/{preset_id}"
+
+
+def _save(client: TestClient, model_id: str, name: str, params: dict[str, Any]) -> Any:
+    response = client.post(_url(model_id), json={"name": name, "params": params})
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_a_template_without_presets_lists_none(client: TestClient, model: str) -> None:
+    response = client.get(_url(model))
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_a_saved_preset_is_listed_with_its_values(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "  Big   label ", {"width": 25, "label": "Ada"})
+    assert saved["name"] == "Big label"
+    assert saved["origin"] == "mine"
+    assert saved["params"] == {"width": 25, "label": "Ada"}
+    listed = client.get(_url(model)).json()
+    assert [(p["id"], p["name"], p["params"]) for p in listed] == [
+        (saved["id"], "Big label", {"width": 25, "label": "Ada"})
+    ]
+
+
+def test_presets_are_kept_outside_the_template(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _save(client, model, "Big", {"width": 25})
+    assert paths.model_presets(model).is_file()
+    assert not (paths.model_dir(model) / TEMPLATE_PRESETS_NAME).exists()
+
+
+def test_a_preset_is_checked_as_a_render_is(client: TestClient, model: str) -> None:
+    unknown = client.post(_url(model), json={"name": "X", "params": {"depth": 3}})
+    assert unknown.status_code == 422
+    assert unknown.json()["parameters"] == ["depth"]
+    wrong_type = client.post(_url(model), json={"name": "X", "params": {"width": "wide"}})
+    assert wrong_type.status_code == 422
+    assert client.get(_url(model)).json() == []
+
+
+def test_names_are_unique_per_template_ignoring_case(client: TestClient, model: str) -> None:
+    _save(client, model, "Big", {"width": 25})
+    clash = client.post(_url(model), json={"name": "big", "params": {}})
+    assert clash.status_code == 409
+    assert clash.json()["name"] == "big"
+
+
+def test_a_blank_or_long_name_is_refused(client: TestClient, model: str) -> None:
+    assert client.post(_url(model), json={"name": "   ", "params": {}}).status_code == 422
+    too_long = "x" * (MAX_PRESET_NAME + 1)
+    assert client.post(_url(model), json={"name": too_long, "params": {}}).status_code == 422
+
+
+def test_a_preset_can_be_renamed_and_its_values_replaced(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25, "label": "Ada"})
+    response = client.patch(_url(model, saved["id"]), json={"params": {"width": 30}})
+    assert response.status_code == 200, response.text
+    assert response.json()["params"] == {"width": 30}
+    assert response.json()["name"] == "Big"
+    renamed = client.patch(_url(model, saved["id"]), json={"name": "Bigger"})
+    assert renamed.json()["name"] == "Bigger"
+    assert renamed.json()["params"] == {"width": 30}
+
+
+def test_a_rename_onto_another_preset_is_refused(client: TestClient, model: str) -> None:
+    _save(client, model, "Big", {"width": 25})
+    small = _save(client, model, "Small", {"width": 5})
+    response = client.patch(_url(model, small["id"]), json={"name": "BIG"})
+    assert response.status_code == 409
+
+
+def test_an_update_is_checked_too(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    response = client.patch(_url(model, saved["id"]), json={"params": {"nope": 1}})
+    assert response.status_code == 422
+    assert client.get(_url(model)).json()[0]["params"] == {"width": 25}
+
+
+def test_a_preset_can_be_deleted(client: TestClient, model: str, paths: DataPaths) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    assert client.delete(_url(model, saved["id"])).status_code == 204
+    assert client.get(_url(model)).json() == []
+    assert not paths.model_presets(model).exists()
+    assert client.delete(_url(model, saved["id"])).status_code == 404
+
+
+def test_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
+    missing = "0" * 32
+    assert client.patch(_url(model, missing), json={"name": "X"}).status_code == 404
+
+
+def test_an_unknown_model_is_a_404(client: TestClient) -> None:
+    assert client.get(_url("nope")).status_code == 404
+    assert client.post(_url("nope"), json={"name": "X", "params": {}}).status_code == 404
+
+
+@pytest.mark.requires_git
+def test_a_built_in_lists_its_shipped_presets_first(client: TestClient) -> None:
+    saved = _save(client, BUILTIN, "Mine", {"label": "Bo"})
+    listed = client.get(_url(BUILTIN)).json()
+    assert [(p["name"], p["origin"], p["params"]) for p in listed] == [
+        ("Wide", "template", {"width": 40}),
+        ("Mine", "mine", {"label": "Bo"}),
+    ]
+    assert listed[1]["id"] == saved["id"]
+
+
+@pytest.mark.requires_git
+def test_shipped_presets_are_read_only(client: TestClient) -> None:
+    shipped = client.get(_url(BUILTIN)).json()[0]
+    patch = client.patch(_url(BUILTIN, shipped["id"]), json={"name": "Other"})
+    assert patch.status_code == 403
+    assert client.delete(_url(BUILTIN, shipped["id"])).status_code == 403
+    # Nor can a saved one take its name.
+    assert client.post(_url(BUILTIN), json={"name": "wide", "params": {}}).status_code == 409
+
+
+@pytest.mark.requires_git
+def test_saving_a_preset_does_not_move_the_template_revision(client: TestClient) -> None:
+    before = client.get(f"/api/v1/models/{BUILTIN}").json()["version"]
+    _save(client, BUILTIN, "Mine", {"label": "Bo"})
+    assert client.get(f"/api/v1/models/{BUILTIN}").json()["version"] == before
+
+
+def test_a_broken_shipped_file_costs_only_the_shipped_presets(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    (paths.model_dir(model) / TEMPLATE_PRESETS_NAME).write_text("{not json", encoding="utf-8")
+    saved = _save(client, model, "Big", {"width": 25})
+    assert [p["id"] for p in client.get(_url(model)).json()] == [saved["id"]]
+
+
+def test_a_broken_saved_file_is_a_409_and_is_not_overwritten(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    paths.model_presets(model).write_text("[1, 2", encoding="utf-8")
+    assert client.get(_url(model)).status_code == 409
+    response = client.post(_url(model), json={"name": "Big", "params": {}})
+    assert response.status_code == 409
+    assert paths.model_presets(model).read_text(encoding="utf-8") == "[1, 2"
+
+
+@pytest.mark.requires_git
+def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
+    saved = _save(client, BUILTIN, "Mine", {"label": "Bo"})
+    created = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "My keychain"})
+    assert created.status_code == 201, created.text
+    slug = created.json()["slug"]
+    listed = client.get(_url(slug)).json()
+    assert [(p["name"], p["origin"]) for p in listed] == [
+        ("Wide", "template"),
+        ("Mine", "mine"),
+    ]
+    # Copies, not the same presets: editing one leaves the other alone.
+    assert listed[1]["id"] != saved["id"]
+    client.patch(_url(slug, listed[1]["id"]), json={"name": "Renamed"})
+    assert client.get(_url(BUILTIN)).json()[1]["name"] == "Mine"
+
+
+def test_deleting_a_model_takes_its_presets(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    _save(client, model, "Big", {"width": 25})
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+    assert not paths.model_presets(model).exists()

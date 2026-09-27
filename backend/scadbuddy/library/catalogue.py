@@ -859,12 +859,16 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        for root in (self.paths.outputs, self.paths.model_revisions, self.paths.schema_cache):
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
+        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
+        for root in roots:
             try:
                 if not root.is_dir():
                     continue
                 for entry in root.iterdir():
-                    if root != self.paths.schema_cache:
+                    if root not in keyed_by_file:
                         candidates.append((entry.name, entry))
                     elif entry.suffix == ".json":
                         candidates.append((entry.stem, entry))
@@ -913,6 +917,8 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
+            # Not derived, but the previous model's: its saved presets.
+            self.paths.model_presets(slug),
         ):
             _remove_tree(path)
         self._forget_cover(slug)

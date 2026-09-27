@@ -16,6 +16,9 @@ import type {
   ModelVersion,
   Output,
   OutputPlate,
+  ParamPreset,
+  ParamPresetCreate,
+  ParamPresetUpdate,
   ParamValue,
   PipelineChoices,
   PipelineCreate,
@@ -66,6 +69,8 @@ const state = {
   } as Record<string, string>,
   /** #179 — README text per model; a model's `has_readme` follows it. */
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
+  /** Per-template presets, shipped (`template-*`) and saved. */
+  presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -101,6 +106,7 @@ export function resetMockState(): void {
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
+  state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -444,6 +450,30 @@ function refuseBuiltin(slug: string) {
     : undefined
 }
 
+/** Why a preset save is refused, as the server words it, or undefined. */
+function presetRefusal(
+  slug: string,
+  name: string,
+  params: Record<string, ParamValue>,
+  own: string | null,
+) {
+  if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+  const known = new Set((state.schemas[slug]?.parameters ?? []).map((p) => p.name))
+  const unknown = Object.keys(params).filter((key) => !known.has(key))
+  if (unknown.length > 0) {
+    return problem(422, 'Unprocessable Content', `unknown parameters: ${unknown.join(', ')}`, {
+      parameters: unknown,
+    })
+  }
+  const clash = (state.presets[slug] ?? []).some(
+    (p) => p.id !== own && p.name.toLowerCase() === name.toLowerCase(),
+  )
+  if (clash) {
+    return problem(409, 'Conflict', `'${slug}' already has a preset named '${name}'`, { name })
+  }
+  return undefined
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -690,6 +720,13 @@ export const handlers = [
     // #179: the copy is the upstream's directory, so its README comes too.
     const readme = state.readmes[id]
     if (readme !== undefined) state.readmes[slug] = readme
+    // Its shipped presets are in the copied directory; the saved ones are copied.
+    const copied = state.presets[id]
+    if (copied) {
+      state.presets[slug] = copied.map((preset) =>
+        preset.origin === 'mine' ? { ...preset, id: nextHexId() } : { ...preset },
+      )
+    }
     await delay(120)
     return HttpResponse.json(view(copy), { status: 201 })
   }),
@@ -1044,6 +1081,63 @@ export const handlers = [
           "OpenSCAD could not build a customizer schema from this model's source",
         )
       : problem(404, 'Model not found')
+  }),
+
+  // Per-template presets. Values are checked against the schema as a render is.
+  http.get(`${base}/models/:slug/presets`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    return HttpResponse.json(state.presets[slug] ?? [])
+  }),
+
+  http.post(`${base}/models/:slug/presets`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const body = (await request.json()) as ParamPresetCreate
+    const name = body.name.trim().replace(/\s+/g, ' ')
+    const refused = presetRefusal(slug, name, body.params ?? {}, null)
+    if (refused) return refused
+    const created: ParamPreset = {
+      id: nextHexId(),
+      name,
+      origin: 'mine',
+      params: body.params ?? {},
+      updated_at: new Date().toISOString(),
+    }
+    state.presets[slug] = [...(state.presets[slug] ?? []), created]
+    await delay(60)
+    return HttpResponse.json(created, { status: 201 })
+  }),
+
+  http.patch(`${base}/models/:slug/presets/:id`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    const existing = (state.presets[slug] ?? []).find((p) => p.id === id)
+    if (!existing) return problem(404, 'Preset not found')
+    const body = (await request.json()) as ParamPresetUpdate
+    const name = body.name?.trim().replace(/\s+/g, ' ')
+    const refused = presetRefusal(slug, name ?? existing.name, body.params ?? {}, id)
+    if (refused) return refused
+    const updated: ParamPreset = {
+      ...existing,
+      name: name ?? existing.name,
+      params: body.params ?? existing.params,
+      updated_at: new Date().toISOString(),
+    }
+    state.presets[slug] = (state.presets[slug] ?? []).map((p) => (p.id === id ? updated : p))
+    await delay(60)
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/presets/:id`, ({ params }) => {
+    const slug = String(params['slug'])
+    const id = String(params['id'])
+    if (id.startsWith('template-')) return problem(403, 'Error', `'${id}' is read-only`)
+    const presets = state.presets[slug] ?? []
+    if (!presets.some((p) => p.id === id)) return problem(404, 'Preset not found')
+    state.presets[slug] = presets.filter((p) => p.id !== id)
+    return new HttpResponse(null, { status: 204 })
   }),
 
   http.post(`${base}/models/:slug/render`, async ({ params, request }) => {

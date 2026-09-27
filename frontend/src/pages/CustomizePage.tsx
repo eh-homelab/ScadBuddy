@@ -8,6 +8,7 @@ import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateMod
 import { EditDetailsButton } from '../components/EditDetailsButton'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
+import { PresetPicker } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
@@ -140,6 +141,10 @@ export function CustomizePage() {
   const onReset = useCallback(() => {
     if (schema) setEdits((current) => ({ of: current.of, values: defaultValues(schema) }))
   }, [schema])
+
+  const onApplyPreset = useCallback((next: ParamValues) => {
+    setEdits((current) => ({ of: current.of, values: next }))
+  }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
 
@@ -317,6 +322,16 @@ export function CustomizePage() {
             fonts={fontsState.data ?? []}
             onChange={onChange}
             onReset={onReset}
+            toolbar={
+              <PresetPicker
+                // A preset picked on one model means nothing on the next.
+                key={slug}
+                slug={slug}
+                schema={schema}
+                values={values}
+                onApply={onApplyPreset}
+              />
+            }
           />
         </div>
 

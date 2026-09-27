@@ -204,7 +204,7 @@ export interface paths {
         put?: never;
         /**
          * Duplicate a template
-         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied.
+         * @description Copies any template, built-in or mine, to a new template of mine whose slug is derived from `name` as `POST /models` derives it, and records the template it came from as `upstream`, with `base` the upstream's current revision. One revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, outputs, revisions) are not copied; the presets saved on it are.
          */
         post: operations["duplicate_model_api_v1_models__slug__duplicate_post"];
         delete?: never;
@@ -233,6 +233,54 @@ export interface paths {
         options?: never;
         head?: never;
         patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A template's presets
+         * @description The presets the template ships with (`origin: template`, read-only), then the ones saved on it (`origin: mine`). A preset holds only the values it sets: apply it over the template's defaults. A value for a parameter the template no longer has is kept here and is the client's to skip.
+         */
+        get: operations["list_presets_api_v1_models__slug__presets_get"];
+        put?: never;
+        /**
+         * Save a preset
+         * @description Saves a named set of parameter values on any template, built-in or mine. The values are checked as a render checks them (422 naming an unknown parameter or a wrong type). Names are at most 80 characters and unique per template, ignoring case (409).
+         */
+        post: operations["create_preset_api_v1_models__slug__presets_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/presets/{preset_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete a preset
+         * @description A template's own presets are read-only (403).
+         */
+        delete: operations["delete_preset_api_v1_models__slug__presets__preset_id__delete"];
+        options?: never;
+        head?: never;
+        /**
+         * Rename a preset or replace its values
+         * @description `params`, when given, replaces the preset's values whole. A template's own presets are read-only (403).
+         */
+        patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
     "/api/v1/models/{slug}/readme": {
@@ -1957,6 +2005,46 @@ export interface components {
             /** Size */
             size: number;
         };
+        /** ParamPreset */
+        ParamPreset: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /**
+             * Origin
+             * @description `template`: shipped in the template's presets.json, read-only. `mine`: saved here, editable -- on built-ins too.
+             * @enum {string}
+             */
+            origin: "template" | "mine";
+            /** Params */
+            params: {
+                [key: string]: boolean | number | string;
+            };
+            /** Updated At */
+            updated_at?: string | null;
+        };
+        /** ParamPresetCreate */
+        ParamPresetCreate: {
+            /** Name */
+            name: string;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            };
+        };
+        /**
+         * ParamPresetUpdate
+         * @description A rename, a new set of values, or both. ``params`` replaces the old ones whole.
+         */
+        ParamPresetUpdate: {
+            /** Name */
+            name?: string | null;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            } | null;
+        };
         /** Parameter */
         Parameter: {
             /** Caption */
@@ -3623,6 +3711,138 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OutputDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_presets_api_v1_models__slug__presets_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    create_preset_api_v1_models__slug__presets_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_preset_api_v1_models__slug__presets__preset_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    update_preset_api_v1_models__slug__presets__preset_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetUpdate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
                 };
             };
             /** @description Validation Error */

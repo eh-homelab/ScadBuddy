@@ -62,7 +62,9 @@ Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
-  (`history.py`), fonts (`fonts.py`, `googlefonts.py`).
+  (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
+  (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
+  template's revision; shipped read-only ones in a template's `presets.json`).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
