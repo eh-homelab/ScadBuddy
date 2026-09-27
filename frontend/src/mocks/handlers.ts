@@ -211,6 +211,46 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+/**
+ * A multipart text field as the backend receives it: FastAPI reads an empty string
+ * as the field being absent.
+ */
+function formText(form: FormData, name: string): string | undefined {
+  const value = form.get(name)
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * `_parse_tags`: a JSON array, or a comma-separated list; blank is no tags. A string
+ * comes back when the backend would refuse the field, and is its 422 detail.
+ */
+function parseFormTags(raw: string | undefined): string[] | undefined | string {
+  if (raw === undefined) return undefined
+  const text = raw.trim()
+  if (!text) return []
+  if (text.startsWith('[')) {
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(text)
+    } catch {
+      return 'tags is not valid JSON'
+    }
+    return Array.isArray(decoded) ? decoded.map(String) : 'tags must be a list'
+  }
+  return text
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+/** `_first_name`: the first candidate that is not blank, stripped; the slug never is. */
+function firstName(...candidates: (string | undefined)[]): string {
+  for (const candidate of candidates) {
+    if (candidate?.trim()) return candidate.trim()
+  }
+  return ''
+}
+
 function slugify(value: string): string {
   return value
     .toLowerCase()
@@ -303,6 +343,8 @@ export const handlers = [
     const metaFields = meta
       ? (JSON.parse(await meta.text()) as { name?: string; description?: string; tags?: string[] })
       : null
+    const tagsField = parseFormTags(formText(form, 'tags'))
+    if (typeof tagsField === 'string') return problem(422, 'Unprocessable Content', tagsField)
     // Not `instanceof File`: the entry's class differs between the browser worker
     // and the Node interceptor, so it is duck-typed instead.
     const filename = typeof file === 'string' || file === null ? '' : ((file as File).name ?? '')
@@ -317,11 +359,13 @@ export const handlers = [
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '')
+    // As `create_model` resolves them: the form field, then the model.json, then
+    // the default -- and a name is the first that is not blank, stripped.
     const model: ModelSummary = {
       slug,
-      name: metaFields?.name ?? slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-      description: metaFields?.description ?? 'Uploaded just now. Open it to see its parameters.',
-      tags: metaFields?.tags ?? ['uploaded'],
+      name: firstName(formText(form, 'name'), metaFields?.name, slug),
+      description: formText(form, 'description') ?? metaFields?.description ?? '',
+      tags: tagsField ?? metaFields?.tags ?? [],
       updated_at: new Date().toISOString(),
       has_thumbnail: thumbnailPart !== null,
       thumbnail_source: thumbnailPart ? 'model' : null,
