@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ModelSummary } from '../api/types'
 
 /**
@@ -8,6 +8,14 @@ import type { ModelSummary } from '../api/types'
  *
  * The body is written by hand: jsdom's `File` and Node's fetch cannot agree on a
  * `FormData` body (see CataloguePage.test), but a multipart string is just text.
+ *
+ * Parsing it back has the same disagreement, the other way round. Node 24's undici
+ * builds each file part with whatever `File` is global -- jsdom's, in this
+ * environment -- and then asserts it is an instance of the `File` it captured when
+ * it loaded, which is Node's own. Every request with a file part then dies in the
+ * parser and the handler answers 500 (Node 22's undici does not check). So for
+ * these requests the global `File` is Node's, which is what the browser worker and
+ * the real server see anyway.
  */
 const BOUNDARY = 'scadbuddy-test-boundary'
 
@@ -49,6 +57,20 @@ async function upload(
 }
 
 describe('mock POST /models (multipart), as the backend resolves details', () => {
+  // Node's own `File`. Imported by a computed name because the app's tsconfig
+  // (which covers these tests) deliberately carries no Node types.
+  let NodeFile: typeof File
+  beforeAll(async () => {
+    const builtin = 'node:buffer'
+    ;({ File: NodeFile } = (await import(/* @vite-ignore */ builtin)) as { File: typeof File })
+  })
+  beforeEach(() => {
+    vi.stubGlobal('File', NodeFile)
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
   it('names a model after its slug when nothing else names it', async () => {
     const { status, body } = await upload()
     expect(status).toBe(201)
