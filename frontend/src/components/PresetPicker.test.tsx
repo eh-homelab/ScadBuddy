@@ -161,4 +161,53 @@ describe('PresetPicker', () => {
       expect(screen.getByRole('combobox', { name: 'Preset' })).toHaveDisplayValue('Mine'),
     )
   })
+
+  it('duplicates a preset the template ships into one of the user\'s own', async () => {
+    const duplicate = vi.spyOn(api, 'duplicatePreset')
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Tiny')
+
+    await user.click(screen.getByRole('button', { name: 'Duplicate preset Tiny' }))
+    const dialog = screen.getByRole('dialog', { name: 'Duplicate Tiny' })
+    const field = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    expect(field).toHaveValue('Tiny copy')
+    await user.clear(field)
+    await user.type(field, 'Tiny for Bo')
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(duplicate).toHaveBeenCalledWith('name-keychain', 'template-0', { name: 'Tiny for Bo' })
+    const select = screen.getByRole('combobox', { name: 'Preset' })
+    expect(select).toHaveDisplayValue('Tiny for Bo')
+    expect(within(select).getByRole('group', { name: 'Saved' })).toHaveTextContent('Tiny for Bo')
+    // The copy is the user's, so it can be changed and deleted, unlike the original.
+    await user.type(screen.getByRole('textbox', { name: 'Name on the tag' }), 'x')
+    expect(screen.getByRole('button', { name: 'Update' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete preset Tiny for Bo' })).toBeInTheDocument()
+  })
+
+  it('keeps edits made before duplicating on screen, as a change to the copy', async () => {
+    const { user } = render()
+    await user.selectOptions(await picker(), 'Mum')
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Dad')
+
+    await user.click(screen.getByRole('button', { name: 'Duplicate preset Mum' }))
+    await user.click(
+      within(screen.getByRole('dialog', { name: 'Duplicate Mum' })).getByRole('button', {
+        name: 'Duplicate',
+      }),
+    )
+
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    expect(name).toHaveValue('Dad')
+    expect(screen.getByTestId('preset-modified')).toHaveTextContent('Changed from Mum copy')
+  })
+
+  it('offers no Duplicate until a preset is picked', async () => {
+    render()
+    await picker()
+    expect(screen.queryByRole('button', { name: /^Duplicate preset/ })).not.toBeInTheDocument()
+  })
 })

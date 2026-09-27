@@ -234,3 +234,51 @@ def test_deleting_a_model_takes_its_presets(
     _save(client, model, "Big", {"width": 25})
     assert client.delete(f"/api/v1/models/{model}").status_code == 204
     assert not paths.model_presets(model).exists()
+
+
+def _duplicate(client: TestClient, model_id: str, preset_id: str, name: str) -> Any:
+    return client.post(f"{_url(model_id, preset_id)}/duplicate", json={"name": name})
+
+
+@pytest.mark.requires_git
+def test_a_shipped_preset_is_duplicated_to_an_editable_one(client: TestClient) -> None:
+    shipped = client.get(_url(BUILTIN)).json()[0]
+    response = _duplicate(client, BUILTIN, shipped["id"], "  Wide   copy ")
+    assert response.status_code == 201, response.text
+    copy = response.json()
+    assert copy["name"] == "Wide copy"
+    assert copy["origin"] == "mine"
+    assert copy["params"] == shipped["params"]
+    assert copy["id"] != shipped["id"]
+    # The copy is the one to change; the shipped one stays as it ships.
+    renamed = client.patch(_url(BUILTIN, copy["id"]), json={"params": {"width": 12}})
+    assert renamed.status_code == 200
+    assert client.get(_url(BUILTIN)).json()[0]["params"] == {"width": 40}
+
+
+def test_a_saved_preset_is_duplicated_with_its_values(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25, "label": "Ada"})
+    copy = _duplicate(client, model, saved["id"], "Big for Bo").json()
+    assert copy["params"] == {"width": 25, "label": "Ada"}
+    assert [p["name"] for p in client.get(_url(model)).json()] == ["Big", "Big for Bo"]
+
+
+def test_a_duplicate_needs_a_free_name(client: TestClient, model: str) -> None:
+    saved = _save(client, model, "Big", {"width": 25})
+    assert _duplicate(client, model, saved["id"], "big").status_code == 409
+    assert _duplicate(client, model, saved["id"], "   ").status_code == 422
+
+
+def test_duplicating_an_unknown_preset_is_a_404(client: TestClient, model: str) -> None:
+    assert _duplicate(client, model, "0" * 32, "Copy").status_code == 404
+    assert _duplicate(client, model, "template-9", "Copy").status_code == 404
+
+
+def test_a_shipped_preset_the_template_outgrew_is_refused(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    stale = {"presets": [{"name": "Old", "params": {"depth": 3}}]}
+    (paths.model_dir(model) / TEMPLATE_PRESETS_NAME).write_text(json.dumps(stale), "utf-8")
+    response = _duplicate(client, model, "template-0", "Old copy")
+    assert response.status_code == 422
+    assert response.json()["parameters"] == ["depth"]

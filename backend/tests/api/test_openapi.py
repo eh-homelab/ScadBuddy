@@ -22,6 +22,7 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/readme",
     "/api/v1/models/{slug}/presets",
     "/api/v1/models/{slug}/presets/{preset_id}",
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate",
     "/api/v1/models/{slug}/render",
     "/api/v1/models/{slug}/versions",
     "/api/v1/models/{slug}/versions/{commit}/source",
