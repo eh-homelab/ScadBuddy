@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import shutil
+import zipfile
 from pathlib import Path
 from typing import cast
 
@@ -11,15 +12,20 @@ import trimesh
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render import geometry
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.geometry import (
     MAX_REPORTED_EDGES,
+    WALL_MIN_SAMPLES,
+    WALL_SAMPLES,
     GeometryAnalysis,
     OverhangBucket,
+    Unreadable3MFError,
     analyze_3mf,
     analyze_geometry,
     parts_from_3mf,
     split_colours,
+    wall_samples,
 )
 from scadbuddy.render.jobs import UNCOLOURED_WARNING, RenderQueue
 from scadbuddy.render.split import ColourPart
@@ -217,6 +223,73 @@ def test_the_3mf_round_trips_to_the_same_parts(tmp_path: Path) -> None:
 def test_nothing_to_analyse_is_an_error() -> None:
     with pytest.raises(ValueError, match="no geometry"):
         analyze_geometry([])
+
+
+def test_an_empty_part_is_still_reported() -> None:
+    empty = trimesh.Trimesh(np.zeros((0, 3)), np.zeros((0, 3), dtype=np.int64), process=False)
+
+    analysis = analyze_geometry([_part(_cube(), "#FF0000", 1), _part(empty, "#0000FF", 2)])
+
+    assert [(p.part, p.colour, p.triangles) for p in analysis.parts] == [
+        (1, "#FF0000", 12),
+        (2, "#0000FF", 0),
+    ]
+    empty_part = analysis.parts[1]
+    assert empty_part.bbox is None
+    assert not empty_part.edges_checked
+    assert empty_part.open_edges is None
+    assert analysis.bbox.size == pytest.approx((10, 10, 10))
+
+
+def _rewrite(source: Path, target: Path, entry: str, payload: bytes) -> None:
+    with zipfile.ZipFile(source) as original, zipfile.ZipFile(target, "w") as out:
+        for info in original.infolist():
+            out.writestr(info, payload if info.filename == entry else original.read(info))
+
+
+@pytest.mark.parametrize(
+    ("entry", "payload"),
+    [
+        ("3D/Objects/object_1.model", b"<model><resources><object"),
+        ("Metadata/project_settings.config", b"{not json"),
+    ],
+)
+def test_a_damaged_3mf_is_unreadable_not_a_crash(
+    tmp_path: Path, entry: str, payload: bytes
+) -> None:
+    good = tmp_path / "good.3mf"
+    write_bambu_3mf([_part(_cube())], good, thumbnails=None)
+    bad = tmp_path / "bad.3mf"
+    _rewrite(good, bad, entry, payload)
+
+    with pytest.raises(Unreadable3MFError):
+        analyze_3mf(bad)
+
+
+def test_a_file_that_is_not_a_zip_is_unreadable(tmp_path: Path) -> None:
+    path = tmp_path / "model.3mf"
+    path.write_bytes(b"not a zip")
+    with pytest.raises(Unreadable3MFError):
+        analyze_3mf(path)
+
+
+def test_the_wall_ray_count_shrinks_with_the_part_so_the_work_is_bounded() -> None:
+    assert wall_samples(0) == 0
+    assert wall_samples(12) == WALL_SAMPLES
+    for triangles in (10_000, 200_000, 1_000_000, 5_000_000):
+        rays = wall_samples(triangles)
+        assert WALL_MIN_SAMPLES <= rays <= WALL_SAMPLES
+        assert rays == WALL_MIN_SAMPLES or rays * triangles <= geometry.WALL_PAIR_BUDGET
+
+
+def test_a_large_part_casts_fewer_rays(monkeypatch: pytest.MonkeyPatch) -> None:
+    sphere = trimesh.creation.icosphere(subdivisions=3)  # 1280 faces
+    monkeypatch.setattr(geometry, "WALL_PAIR_BUDGET", 100 * len(sphere.faces))
+
+    analysis = analyze_geometry([_part(sphere)])
+
+    assert analysis.thinnest_wall is not None
+    assert analysis.thinnest_wall.samples == 100
 
 
 @pytest.mark.requires_openscad

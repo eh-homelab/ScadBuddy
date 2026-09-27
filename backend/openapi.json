@@ -2689,7 +2689,14 @@
       "PartGeometry": {
         "properties": {
           "bbox": {
-            "$ref": "#/components/schemas/BoundingBox"
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "colour": {
             "title": "Colour",

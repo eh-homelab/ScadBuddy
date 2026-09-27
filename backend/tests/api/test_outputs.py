@@ -344,3 +344,25 @@ def test_the_geometry_of_an_output_without_a_3mf_is_404(
     response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
     assert response.status_code == 404
     assert client.get(f"/api/v1/outputs/{'0' * 32}/geometry").status_code == 404
+
+
+def test_the_geometry_of_a_damaged_3mf_is_422(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A truncated object entry raises ``ET.ParseError`` -- a ``SyntaxError``, not a
+    ``ValueError`` -- which must still come back as the documented 422, not a 500."""
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    path = paths.output_dir(model, created["id"]) / "model.3mf"
+    with zipfile.ZipFile(path) as archive:
+        entries = [(info, archive.read(info)) for info in archive.infolist()]
+    with zipfile.ZipFile(path, "w") as archive:
+        for info, payload in entries:
+            if info.filename == "3D/Objects/object_1.model":
+                payload = payload[: len(payload) // 2]
+            archive.writestr(info, payload)
+
+    response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
+    assert response.status_code == 422, response.text
+    assert "cannot be analysed" in response.json()["detail"]

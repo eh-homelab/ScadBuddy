@@ -45,8 +45,12 @@ Methods and their limits
     *Thinnest wall.* A ray cast from the centroid of each sampled face straight
     inwards (against its normal) to the first other triangle of the same part;
     the shortest such distance is the estimate. At most :data:`WALL_SAMPLES`
-    faces per part are sampled, evenly by index, which favours finely tessellated
-    regions -- curves and text, where thin walls usually are. It measures
+    faces per part are sampled, fewer on a part so large that the rays times its
+    triangles would pass :data:`WALL_PAIR_BUDGET` (never fewer than
+    :data:`WALL_MIN_SAMPLES`), so the cost is bounded by the budget rather than
+    growing with the square of the mesh. Samples are spread evenly by index,
+    which favours finely tessellated regions -- curves and text, where thin walls
+    usually are. It measures
     thickness *perpendicular to a face*, so it can miss a thin region no sampled
     face sits on, and it over-reads where a ray escapes through an open mesh
     (split parts). Treat it as an estimate, not a guarantee.
@@ -67,6 +71,7 @@ import json
 import math
 import xml.etree.ElementTree as ET
 import zipfile
+import zlib
 from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Literal
@@ -94,6 +99,13 @@ BED_TOLERANCE_MM = 0.01
 _DOWN_COSINE = math.cos(math.radians(1.0))
 #: Faces per part the wall estimate casts a ray from.
 WALL_SAMPLES = 1024
+#: Upper bound on ray x triangle pairs the wall estimate tests per part. A part with
+#: more triangles than ``WALL_PAIR_BUDGET / WALL_SAMPLES`` casts fewer rays, down to
+#: :data:`WALL_MIN_SAMPLES`, so the cost stops growing with the square of the mesh.
+#: At the budget this is roughly two seconds of numpy on one core.
+WALL_PAIR_BUDGET = 1 << 27
+#: The fewest rays a part casts, however large it is.
+WALL_MIN_SAMPLES = 64
 #: Hits nearer than this are the ray's own face or a neighbour it touches.
 _RAY_EPSILON = 1e-5
 #: Upper bound on ray x triangle pairs the bounding-sphere pass holds at once.
@@ -129,7 +141,8 @@ class PartGeometry(BaseModel):
     #: to the preview's split mesh, whose seams are open by design.
     source: PartSource
     triangles: int
-    bbox: BoundingBox
+    #: ``None`` for a part with no triangles.
+    bbox: BoundingBox | None
     edges_checked: bool
     open_edges: int | None = None
     non_manifold_edges: int | None = None
@@ -214,12 +227,29 @@ def split_colours(warnings: Sequence[str], colours: Sequence[str]) -> set[str]:
     }
 
 
+class Unreadable3MFError(ValueError):
+    """The 3MF cannot be read: not a zip, a corrupt entry, or malformed XML/JSON.
+
+    One type for every way a file on disk can be damaged, so a caller maps them all
+    the same way rather than letting ``ET.ParseError`` (a ``SyntaxError``) or a
+    ``zlib.error`` escape as a server error.
+    """
+
+
 def parts_from_3mf(path: Path) -> list[ColourPart]:
     """The per-extruder parts of a ScadBuddy 3MF, in extruder order.
 
     Read from ``3D/Objects/object_<n>.model`` as `bambu3mf.write_bambu_3mf` wrote
     them -- the meshes in model coordinates, without the build item's placement.
+    Raises :class:`Unreadable3MFError` when the file is damaged.
     """
+    try:
+        return _read_parts(path)
+    except (zipfile.BadZipFile, ET.ParseError, zlib.error, EOFError, ValueError) as error:
+        raise Unreadable3MFError(f"{type(error).__name__}: {error}") from error
+
+
+def _read_parts(path: Path) -> list[ColourPart]:
     parts: list[ColourPart] = []
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -363,6 +393,13 @@ def _nearest_hits(
     return best
 
 
+def wall_samples(triangles: int) -> int:
+    """How many rays the wall estimate casts on a part of ``triangles`` faces."""
+    if triangles <= 0:
+        return 0
+    return max(WALL_MIN_SAMPLES, min(WALL_SAMPLES, WALL_PAIR_BUDGET // triangles))
+
+
 def _islands(vertex_count: int, faces: IntArray) -> IntArray:
     """A component label per vertex: vertices joined by an edge share one."""
     labels = np.arange(vertex_count, dtype=np.int64)
@@ -418,6 +455,19 @@ def analyze_geometry(
     for number, (part, (vertices, faces)) in enumerate(zip(parts, welded, strict=True), start=1):
         source: PartSource = "split" if part.colour in split else "solid"
         if len(faces) == 0:
+            # Still one entry per extruder, so `parts` lines up with the output's
+            # colours; there is nothing to check or measure on it.
+            part_results.append(
+                PartGeometry(
+                    part=number,
+                    name=part.name,
+                    colour=part.colour,
+                    source=source,
+                    triangles=0,
+                    bbox=None,
+                    edges_checked=False,
+                )
+            )
             continue
         normals, areas = _face_geometry(vertices, faces)
         corners = vertices[faces]
@@ -483,9 +533,10 @@ def analyze_geometry(
 
         # Thinnest wall.
         candidates = np.flatnonzero(areas > 0)
-        if len(candidates) > WALL_SAMPLES:
+        rays = wall_samples(len(faces))
+        if len(candidates) > rays:
             candidates = candidates[
-                np.linspace(0, len(candidates) - 1, WALL_SAMPLES).round().astype(np.int64)
+                np.linspace(0, len(candidates) - 1, rays).round().astype(np.int64)
             ]
         if len(candidates):
             origins = corners[candidates].mean(axis=1)

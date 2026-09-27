@@ -2284,7 +2284,7 @@ export interface components {
         };
         /** PartGeometry */
         PartGeometry: {
-            bbox: components["schemas"]["BoundingBox"];
+            bbox: components["schemas"]["BoundingBox"] | null;
             /** Colour */
             colour: string;
             /** Edges Checked */
