@@ -1327,7 +1327,7 @@ export interface components {
             description?: string | null;
             /**
              * File
-             * @description The .scad source
+             * @description The .scad source, at most 1,000,000 characters
              */
             file?: string | null;
             /**
@@ -1349,7 +1349,7 @@ export interface components {
             tags?: string | null;
             /**
              * Thumbnail
-             * @description Optional PNG, at most 2 MiB
+             * @description Optional PNG, at most 10 MiB
              */
             thumbnail?: string | null;
         };
@@ -1365,7 +1365,7 @@ export interface components {
         Body_put_thumbnail_api_v1_models__slug__thumbnail_put: {
             /**
              * File
-             * @description The thumbnail, a PNG of at most 2 MiB
+             * @description The thumbnail, a PNG of at most 10 MiB
              */
             file: string;
         };

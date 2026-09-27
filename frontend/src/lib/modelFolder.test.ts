@@ -7,6 +7,7 @@ import {
   metaProblem,
   readMetaName,
   readmeProblem,
+  sourceProblem,
   thumbnailProblem,
   uploadFilename,
 } from './modelFolder'
@@ -137,10 +138,12 @@ describe('classifyFiles with no preferred name among several', () => {
 })
 
 describe('thumbnailProblem', () => {
-  it('takes a PNG up to 2 MiB, and names what is wrong otherwise', () => {
+  it('takes a PNG up to 10 MiB, and names what is wrong otherwise', () => {
     const png = (size: number) => new File([new Uint8Array(size)], 'cover.png')
-    expect(thumbnailProblem(png(2 * 1024 * 1024))).toBeNull()
-    expect(thumbnailProblem(png(2 * 1024 * 1024 + 1))).toBe('The thumbnail must be 2 MiB or smaller.')
+    expect(thumbnailProblem(png(10 * 1024 * 1024))).toBeNull()
+    expect(thumbnailProblem(png(10 * 1024 * 1024 + 1))).toBe(
+      'The thumbnail must be 10 MiB or smaller.',
+    )
     expect(thumbnailProblem(file('cover.jpg'))).toBe('The thumbnail must be a PNG.')
   })
 })
@@ -150,6 +153,18 @@ describe('metaProblem', () => {
     const meta = (size: number) => new File([new Uint8Array(size)], 'model.json')
     expect(metaProblem(meta(64 * 1024))).toBeNull()
     expect(metaProblem(meta(64 * 1024 + 1))).toBe('The model.json must be 64 KiB or smaller.')
+  })
+})
+
+describe('sourceProblem', () => {
+  it('takes a .scad up to 1,000,000 characters, counting code points as the server does', async () => {
+    const scad = (text: string) => new File([text], 'widget.scad')
+    expect(await sourceProblem(scad('x'.repeat(1_000_000)))).toBeNull()
+    // Four bytes each: over the cap in bytes, within it in characters.
+    expect(await sourceProblem(scad('\u{1F600}'.repeat(1_000_000)))).toBeNull()
+    expect(await sourceProblem(scad('x'.repeat(1_000_001)))).toBe(
+      'The source must be at most 1,000,000 characters.',
+    )
   })
 })
 

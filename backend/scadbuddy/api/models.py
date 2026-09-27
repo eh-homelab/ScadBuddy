@@ -97,13 +97,13 @@ router = APIRouter(tags=["models"])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
-#: The largest thumbnail a model takes (#179): every set is a commit in the models
-#: repository, which keeps each one forever, so the multipart cap (32 MiB) is far
-#: too loose a bound. 2 MiB is still generous: the bundled thumbnails are 30 KB at
-#: most, and a plate image this server renders is 512x512 -- at most 1 MiB even as
-#: raw RGBA, which PNG never is -- so this leaves room for a larger image of the
-#: user's own without letting one set grow the history by megabytes.
-MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+#: The largest thumbnail a model takes (#179). Every set is a commit in the models
+#: repository, which keeps each one for good, so this is what stops that history
+#: growing without bound -- the multipart cap (32 MiB) alone would not. 10 MiB leaves
+#: room for a high-fidelity image of the user's own: on a self-hosted volume, space
+#: and bandwidth are not the constraint, only an unbounded history is. (The bundled
+#: thumbnails are 30 KB at most, and a plate image this server renders is 512x512.)
+MAX_THUMBNAIL_BYTES = 10 * 1024 * 1024
 
 
 def _mib(size: int) -> str:
@@ -341,7 +341,10 @@ async def create_model(
     catalogue: CatalogueDep,
     config: ConfigDep,
     checks: ChecksDep,
-    file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
+    file: Annotated[
+        UploadFile | None,
+        File(description=f"The .scad source, at most {MAX_SOURCE_CHARS:,} characters"),
+    ] = None,
     thumbnail: Annotated[
         UploadFile | None, File(description=f"Optional PNG, at most {MAX_THUMBNAIL_SIZE}")
     ] = None,
@@ -427,6 +430,9 @@ async def create_model(
         source = decode_source(await file.read())
     except NotOpenSCADError as error:
         raise _rejected(error) from None
+    # The cap the JSON and text/plain branches hold a source to, before the parse
+    # check spends an openscad run -- and a check permit -- on it.
+    _require_within_cap(source, "the source")
 
     thumbnail_bytes: bytes | None = None
     if thumbnail is not None:
