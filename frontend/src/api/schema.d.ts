@@ -1828,8 +1828,10 @@ export interface components {
             tags?: string[];
             /** Thumbnail Output Id */
             thumbnail_output_id?: string | null;
+            /** Thumbnail Preview Id */
+            thumbnail_preview_id?: string | null;
             /** Thumbnail Source */
-            thumbnail_source?: ("model" | "output") | null;
+            thumbnail_source?: ("model" | "output" | "preview") | null;
             /**
              * Updated At
              * Format: date-time

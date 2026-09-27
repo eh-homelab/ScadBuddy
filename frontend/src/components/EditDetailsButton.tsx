@@ -263,7 +263,9 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                       ? 'Set on this model.'
                       : model.thumbnail_source === 'output'
                         ? 'None set; the first generated plate stands in.'
-                        : 'None set. The first generated plate will stand in.'}
+                        : model.thumbnail_source === 'preview'
+                          ? 'None set; a render of the default settings stands in.'
+                          : 'None set. The first generated plate will stand in.'}
               </p>
               <div className="flex items-center gap-2">
                 <label className="inline-flex cursor-pointer items-center rounded-[6px] border border-line bg-surface-2 px-2.5 py-1 text-[13px] hover:border-line-strong">

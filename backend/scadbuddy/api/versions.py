@@ -255,6 +255,9 @@ def restore_version(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    # Straight through the history, so the catalogue did not see it: the source, and
+    # whether the model has a thumbnail of its own, can both have changed.
+    catalogue.notify_change(slug)
     # The model's own latest revision, not the commit the restore made: when only
     # the pins differed, that commit touches `libraries.lock` alone and the model
     # stays at the revision it was restored to.

@@ -159,6 +159,28 @@ describe('CataloguePage', () => {
     expect(own).toContain(`/api/v1/models/name-keychain/thumbnail?v=`)
   })
 
+  it('refetches a default-render preview re-rendered after a source edit', async () => {
+    const base = {
+      ...(models[0] as (typeof models)[number]),
+      version: 'a'.repeat(40),
+      has_thumbnail: true,
+      thumbnail_source: 'preview' as const,
+    }
+    let record = { ...base, thumbnail_preview_id: '1'.repeat(16) }
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([record])))
+    const imageOf = async () =>
+      (await screen.findByRole('img', { name: 'Name Keychain' })).getAttribute('src')
+
+    const first = renderPage(<CataloguePage />)
+    const before = await imageOf()
+    first.unmount()
+
+    // The same revision key otherwise: only the preview's id says it was re-rendered.
+    record = { ...base, thumbnail_preview_id: '2'.repeat(16) }
+    renderPage(<CataloguePage />)
+    expect(await imageOf()).not.toBe(before)
+  })
+
   it('links an imported model back to where it came from', async () => {
     const origin = 'https://raw.githubusercontent.com/someone/models/main/bin.scad'
     server.use(

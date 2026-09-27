@@ -6,6 +6,7 @@ import shutil
 import threading
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -120,6 +121,18 @@ class OutputStore:
         #: flight across a forget still knows not to store what it found.
         self._cover_epoch = 0
         self._covers_lock = threading.Lock()
+        #: Called with a model's id when one of its outputs is saved or deleted --
+        #: which moves the catalogue's fallback cover, and with it whether the
+        #: default-render preview is needed. Must not raise.
+        self.on_change: Callable[[str], None] | None = None
+
+    def _changed(self, slug: str) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change(slug)
+        except Exception:
+            logger.exception("an output change listener failed", extra={"slug": slug})
 
     def _find_dir(self, output_id: str) -> Path:
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
@@ -202,6 +215,7 @@ class OutputStore:
         # After the record is complete: a lookup racing the writes above may have
         # resolved against a half-written output.
         self.forget_plate_cover(job.slug)
+        self._changed(job.slug)
         return meta
 
     def record_send(
@@ -268,6 +282,7 @@ class OutputStore:
         directory = self._find_dir(output_id)
         shutil.rmtree(directory, ignore_errors=True)
         self.forget_plate_cover(directory.parent.name)
+        self._changed(directory.parent.name)
 
     def _oldest_first(self, slug: str) -> list[OutputMeta]:
         """The model's outputs, oldest first, skipping any record that cannot be read.

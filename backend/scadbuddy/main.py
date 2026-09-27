@@ -114,6 +114,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    if state.settings.preview_renders:
+        state.previews.start()
+        # Every model without a thumbnail gets its default render, one at a time and
+        # behind any render someone asks for; one already made from the current
+        # source is left alone, so after the first boot this renders nothing.
+        records = await asyncio.to_thread(state.catalogue.list_models)
+        state.previews.request_all(record.slug for record in records)
     logger.info(
         "scadbuddy started",
         extra={
@@ -128,6 +135,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        await state.previews.aclose()
         await state.queue.aclose()
 
 

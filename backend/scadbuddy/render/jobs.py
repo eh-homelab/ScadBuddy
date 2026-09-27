@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import logging
 import os
@@ -11,10 +12,10 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -499,6 +500,22 @@ async def render_job(
 
 RenderCallable = Callable[[Job], Awaitable[tuple[JobResult, list[str]]]]
 
+#: A render someone asked for goes ahead of any background work that is waiting.
+USER_PRIORITY = 0
+BACKGROUND_PRIORITY = 1
+
+
+@dataclass(order=True)
+class _Queued:
+    """One entry on the workers' queue: a job's id, or a piece of background work."""
+
+    priority: int
+    #: Submission order within a priority, so the queue stays first in, first out.
+    sequence: int
+    job_id: str | None = field(default=None, compare=False)
+    work: Callable[[], Awaitable[Any]] | None = field(default=None, compare=False)
+    done: asyncio.Future[Any] | None = field(default=None, compare=False)
+
 
 class RenderQueue:
     def __init__(
@@ -527,8 +544,16 @@ class RenderQueue:
                 thumbnail_executor=self._thumbnails,
             )
         )
-        self._queue: asyncio.Queue[str] = asyncio.Queue()
+        # Priority-ordered, so background work never starts ahead of a render
+        # someone is waiting for.
+        self._queue: asyncio.PriorityQueue[_Queued] = asyncio.PriorityQueue()
+        self._sequence = itertools.count()
         self._workers: list[asyncio.Task[None]] = []
+
+    @property
+    def thumbnail_executor(self) -> Executor:
+        """The cover rasteriser's pool, for background work that draws plate images."""
+        return self._thumbnails
 
     async def start(self) -> None:
         self.paths.ensure()
@@ -562,19 +587,55 @@ class RenderQueue:
             created_at=_now(),
         )
         self.store.write(job)
-        await self._queue.put(job.id)
+        await self._queue.put(_Queued(USER_PRIORITY, next(self._sequence), job_id=job.id))
         return job
+
+    async def run_background(self, work: Callable[[], Awaitable[Any]]) -> Any:
+        """Run ``work`` on one of the render workers, behind every render queued.
+
+        For work that shares the renderers' budget but that nobody is waiting on --
+        the default-render previews. It holds a worker while it runs, so the pod
+        never runs more openscad than ``render_concurrency`` allows; it is never
+        persisted as a job, so it neither shows up as one nor blocks a model's
+        delete. It is not preempted once started: a caller keeps at most one of
+        these in flight, which leaves every other worker to the renders people
+        ask for. Returns what ``work`` returns, or raises what it raised.
+        """
+        done: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+        await self._queue.put(
+            _Queued(BACKGROUND_PRIORITY, next(self._sequence), work=work, done=done)
+        )
+        return await done
 
     async def join(self) -> None:
         await self._queue.join()
 
     async def _worker(self) -> None:
         while True:
-            job_id = await self._queue.get()
+            queued = await self._queue.get()
             try:
-                await self._run(job_id)
+                if queued.job_id is not None:
+                    await self._run(queued.job_id)
+                else:
+                    await self._run_background(queued)
             finally:
                 self._queue.task_done()
+
+    async def _run_background(self, queued: _Queued) -> None:
+        assert queued.work is not None and queued.done is not None
+        if queued.done.done():  # its caller gave up waiting
+            return
+        try:
+            result = await queued.work()
+        except asyncio.CancelledError:
+            queued.done.cancel()
+            raise
+        except Exception as error:  # the caller's to handle; the worker lives on
+            if not queued.done.done():
+                queued.done.set_exception(error)
+        else:
+            if not queued.done.done():
+                queued.done.set_result(result)
 
     async def _run(self, job_id: str) -> None:
         job = self.store.read(job_id)

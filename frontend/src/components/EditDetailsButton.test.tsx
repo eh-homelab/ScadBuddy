@@ -212,6 +212,26 @@ describe('EditDetailsButton', () => {
     expect(removeReadme).not.toHaveBeenCalled()
   })
 
+  it('says a render of the default settings stands in when that is the thumbnail', async () => {
+    server.use(
+      http.get('/api/v1/models/gridfinity-bin', async () => {
+        const model = await (await fetch('/api/v1/models')).json()
+        const bin = (model as { slug: string }[]).find(({ slug }) => slug === 'gridfinity-bin')
+        return HttpResponse.json({
+          ...bin,
+          has_thumbnail: true,
+          thumbnail_source: 'preview',
+          thumbnail_preview_id: '1'.repeat(16),
+        })
+      }),
+    )
+    const { dialog } = await open('gridfinity-bin')
+
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+      'None set; a render of the default settings stands in.',
+    )
+  })
+
   it('sets a new thumbnail from a chosen PNG', async () => {
     // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
     const setThumbnail = vi

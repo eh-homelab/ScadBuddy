@@ -16,9 +16,11 @@ from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
+from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.jobs import RenderQueue
+from scadbuddy.render.previews import TIMEOUT_FACTOR, PreviewScheduler, render_preview
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 logger = logging.getLogger(__name__)
@@ -43,6 +45,8 @@ class AppState:
     fonts: FontService
     libraries: LibraryStore
     queue: RenderQueue
+    #: Default-render previews: the thumbnail of a model with none and no output.
+    previews: PreviewScheduler
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -69,13 +73,34 @@ def build_state(settings: Settings) -> AppState:
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     outputs = OutputStore(paths)
+    # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
+    # stand in behind them.
+    preview_store = PreviewStore(paths)
+    catalogue = Catalogue(paths, history, outputs, preview_store)
+    queue = RenderQueue(config, paths, history=history)
+    previews = PreviewScheduler(
+        catalogue,
+        preview_store,
+        queue,
+        lambda slug: render_preview(
+            slug,
+            config=config,
+            paths=paths,
+            history=history,
+            executor=queue.thumbnail_executor,
+        ),
+        timeout=config.render_timeout * TIMEOUT_FACTOR,
+    )
+    if settings.preview_renders:
+        # Everything that can change whether a model needs a preview, or which one.
+        catalogue.on_change = previews.request
+        outputs.on_change = previews.request
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
         history=history,
-        # The outputs feed the catalogue's fallback thumbnail (#179).
-        catalogue=Catalogue(paths, history, outputs),
+        catalogue=catalogue,
         outputs=outputs,
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
         fonts=FontService(
@@ -84,7 +109,8 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, history),
-        queue=RenderQueue(config, paths, history=history),
+        queue=queue,
+        previews=previews,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
     )

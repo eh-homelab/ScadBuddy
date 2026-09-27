@@ -1758,12 +1758,24 @@
             ],
             "title": "Thumbnail Output Id"
           },
+          "thumbnail_preview_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Thumbnail Preview Id"
+          },
           "thumbnail_source": {
             "anyOf": [
               {
                 "enum": [
                   "model",
-                  "output"
+                  "output",
+                  "preview"
                 ],
                 "type": "string"
               },
