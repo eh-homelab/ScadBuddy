@@ -463,9 +463,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
 
 - One job at a time per worker; a small in-process queue (asyncio) with
   `SCADBUDDY_RENDER_CONCURRENCY` (default 2).
-- **Every render request is accepted**; there is no admission limit. `RenderQueue`
-  runs `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest
-  job first, and keeps latency down without refusing anything:
+- **Every render request is accepted by default.** `RenderQueue` runs
+  `SCADBUDDY_RENDER_CONCURRENCY` workers per process over a job store, oldest job
+  first, and keeps latency down without refusing anything:
   - **Supersede.** A render request may name the job it replaces
     (`supersedes`); the preview's debounce sends its previous unsettled job, which
     is dropped unrendered if no worker has taken it (failed as superseded).
@@ -484,11 +484,17 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   jobs survive a restart. Migrations are append-only and applied at startup under
   an advisory lock. Without a database URL the store is JSON files under `jobs/`
   with the wait list in the process, and a restart fails unfinished jobs.
+- **Admission (opt-in).** `SCADBUDDY_RENDER_QUEUE_MAX` (default 0 = no limit): set,
+  a request that would be a new job while that many already wait is refused with
+  503 and `Retry-After` (about one mean render). The check comes after a supersede
+  frees its place, a request that coalesces is never refused, and a refusal changes
+  nothing (the Postgres store rolls its transaction back). A soft limit across
+  replicas.
 - SLO targets `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and
   `SCADBUDDY_RENDER_LATENCY_SLO` (60 s) are exported as gauges for alerts to
   compare against; they limit nothing.
 - `GET /metrics` (Prometheus text) reports queue depth, oldest wait and running jobs
-  (read from the store per scrape), submissions/coalesced/retried, jobs finished by
+  (read from the store per scrape), submissions/coalesced/rejected/retried, jobs finished by
   outcome
   (`done`/`failed`/`expired`/`superseded`), histograms of queue wait, worker time,
   submit-to-settled latency and per-stage time (`source`, `render`, `split`,

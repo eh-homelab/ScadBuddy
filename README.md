@@ -74,9 +74,13 @@ for the project picker).
   source editor holds one `openscad-lsp` process for as long as it stays open,
   so size CPU and memory for the sum of all three. Past the session cap an
   editor still works, without completion and hover.
-- **Render queue.** Every render request is accepted; `SCADBUDDY_RENDER_CONCURRENCY`
-  jobs are rendered at once per process, oldest first. A preview replaced before it
-  started is dropped, and identical waiting requests share one job.
+- **Render queue.** By default every render request is accepted;
+  `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
+  first. A preview replaced before it started is dropped, and identical waiting
+  requests share one job.
+  - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
+    job while that many already wait gets 503 with `Retry-After`. A request that
+    supersedes a waiting preview, or matches one, is never refused.
   - `SCADBUDDY_DATABASE_URL` (libpq URL): keep the queue in Postgres. Accepted
     renders then survive a restart, and replicas share one queue. Unset, it lives
     in `/data/jobs` and this process, and a restart fails what was unfinished.

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import os
 import shutil
 import threading
@@ -41,6 +42,7 @@ from scadbuddy.render.job_store import SUPERSEDED_ERROR as SUPERSEDED_ERROR
 from scadbuddy.render.job_store import JobBackend, render_key
 from scadbuddy.render.job_store import JobNotFoundError as JobNotFoundError
 from scadbuddy.render.job_store import JobStore as JobStore
+from scadbuddy.render.job_store import QueueFullError as QueueFullError
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -415,6 +417,11 @@ async def render_job(
 
 RenderCallable = Callable[[Job], Awaitable[tuple[JobResult, list[str]]]]
 
+#: What Retry-After says before any render has finished to measure.
+INITIAL_RENDER_ESTIMATE = 10.0
+#: Weight of the newest render in the running mean that sizes Retry-After.
+RENDER_ESTIMATE_WEIGHT = 0.2
+
 
 class RenderQueue:
     """The render queue: every submit is accepted, and `render_concurrency` workers
@@ -435,6 +442,11 @@ class RenderQueue:
       that for a worker is failed unrendered rather than rendered for nobody.
     - **Leases** (Postgres). A worker heartbeats its job; one whose worker died is
       requeued after `render_lease_timeout`, up to `render_max_attempts` tries.
+
+    **Admission is off by default**: `render_queue_max` (SCADBUDDY_RENDER_QUEUE_MAX)
+    0 accepts every render. Set, a submit that would be a new job past that many
+    waiting is refused with `QueueFullError` (503 + Retry-After), after superseding
+    frees its place and never when it coalesces.
 
     The depth and latency SLO targets are not limits: they are exported beside the
     measurements so alerts can compare the two.
@@ -457,6 +469,7 @@ class RenderQueue:
         self.metrics = metrics if metrics is not None else Metrics()
         self.metrics.workers.set(config.render_concurrency)
         self.metrics.queue_depth_slo.set(config.render_queue_depth_slo)
+        self.metrics.queue_max.set(config.render_queue_max)
         self.metrics.latency_slo.set(config.render_latency_slo)
         # The cover rasteriser's own threads, sized like the workers that feed it.
         self._thumbnails = ThreadPoolExecutor(
@@ -477,6 +490,8 @@ class RenderQueue:
         # next poll; the poll is what finds jobs another replica submitted.
         self._wakeup = asyncio.Event()
         self._busy = 0
+        #: Worker seconds per render, smoothed: what Retry-After says on a 503.
+        self._render_estimate = INITIAL_RENDER_ESTIMATE
 
     async def start(self) -> None:
         self.paths.ensure()
@@ -521,12 +536,17 @@ class RenderQueue:
             model_version=model_version,
             created_at=_now(),
         )
-        submitted = await asyncio.to_thread(
-            self.store.submit,
-            job,
-            render_key(slug, params, model_version),
-            supersedes=supersedes,
-        )
+        try:
+            submitted = await asyncio.to_thread(
+                self.store.submit,
+                job,
+                render_key(slug, params, model_version),
+                supersedes=supersedes,
+                max_pending=self.config.render_queue_max,
+            )
+        except QueueFullError as error:
+            self.metrics.render_rejected.inc()
+            raise QueueFullError(error.depth, self.retry_after()) from None
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
         if submitted.coalesced:
@@ -535,6 +555,11 @@ class RenderQueue:
             self.metrics.render_submitted.inc()
             self._wakeup.set()
         return submitted.job
+
+    def retry_after(self) -> int:
+        """Seconds a refused client should wait: about one render, the time it takes
+        a worker to free a place."""
+        return max(1, math.ceil(self._render_estimate))
 
     def refresh_metrics(self) -> None:
         """Read the queue's gauges from the store. Called per scrape, from a sync
@@ -661,7 +686,9 @@ class RenderQueue:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):
                 await heartbeat
-        self.metrics.render_duration.labels(outcome).observe(time.monotonic() - started)
+        elapsed = time.monotonic() - started
+        self.metrics.render_duration.labels(outcome).observe(elapsed)
+        self._render_estimate += RENDER_ESTIMATE_WEIGHT * (elapsed - self._render_estimate)
         job.finished_at = _now()
         if await asyncio.to_thread(self.store.finish, job):
             self._settled(job, outcome)

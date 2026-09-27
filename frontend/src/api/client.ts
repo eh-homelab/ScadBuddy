@@ -277,7 +277,8 @@ export const api = {
   /**
    * `version` renders an old revision without restoring it ("Customize this version").
    * `supersedes` names the job this render replaces: the server drops it if no worker
-   * has started it yet. Never refused for load: the queue accepts every render.
+   * has started it yet. Refused (503 + `Retry-After`) only when the server sets
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
    */
   render: (
     slug: string,

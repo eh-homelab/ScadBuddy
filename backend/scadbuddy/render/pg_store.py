@@ -36,6 +36,7 @@ from scadbuddy.render.job_store import (
     SUPERSEDED_ERROR,
     JobNotFoundError,
     QueueCounts,
+    QueueFullError,
     Reaped,
     Submitted,
 )
@@ -190,7 +191,14 @@ class PostgresJobStore:
                     failed.append(_job(dead))
         return Reaped(requeued=requeued, failed=failed)
 
-    def submit(self, job: Job, key: str, *, supersedes: str | None = None) -> Submitted:
+    def submit(
+        self,
+        job: Job,
+        key: str,
+        *,
+        supersedes: str | None = None,
+        max_pending: int = 0,
+    ) -> Submitted:
         superseded: Job | None = None
         with self._pool.connection() as conn, conn.transaction():
             if supersedes is not None:
@@ -212,6 +220,21 @@ class PostgresJobStore:
                     ).fetchone()
                     assert dropped is not None
                     superseded = _job(dropped)
+            if max_pending:
+                # Inside the transaction: raising rolls the supersede above back,
+                # so a refusal changes nothing. A soft limit across replicas --
+                # two may each see one place left -- which is all it needs to be.
+                twin = conn.execute(
+                    "SELECT 1 FROM render_jobs WHERE state = 'pending' AND render_key = %s",
+                    (key,),
+                ).fetchone()
+                if twin is None:
+                    counted = conn.execute(
+                        "SELECT count(*) AS pending FROM render_jobs WHERE state = 'pending'"
+                    ).fetchone()
+                    assert counted is not None
+                    if counted["pending"] >= max_pending:
+                        raise QueueFullError(counted["pending"])
             row = conn.execute(
                 "INSERT INTO render_jobs"
                 " (id, slug, params, model_version, state, created_at, render_key)"

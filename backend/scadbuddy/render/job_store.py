@@ -39,6 +39,20 @@ RESTART_ERROR = "interrupted by a restart"
 LOST_WORKER_ERROR = "the worker rendering it stopped responding, and it has no attempts left"
 
 
+class QueueFullError(Exception):
+    """``max_pending`` jobs are already waiting (SCADBUDDY_RENDER_QUEUE_MAX). Raised
+    before anything changes: a refused submit supersedes nothing and queues nothing.
+    `RenderQueue` fills in ``retry_after``."""
+
+    def __init__(self, depth: int, retry_after: int = 1) -> None:
+        super().__init__(
+            f"the render queue is full ({depth} jobs waiting for a worker); "
+            f"try again in {retry_after} s"
+        )
+        self.depth = depth
+        self.retry_after = retry_after
+
+
 class JobNotFoundError(LookupError):
     def __init__(self, job_id: str) -> None:
         super().__init__(f"no job with id {job_id!r}")
@@ -94,12 +108,23 @@ class JobBackend(Protocol):
         once they have had ``max_attempts``."""
         ...
 
-    def submit(self, job: Job, key: str, *, supersedes: str | None = None) -> Submitted:
+    def submit(
+        self,
+        job: Job,
+        key: str,
+        *,
+        supersedes: str | None = None,
+        max_pending: int = 0,
+    ) -> Submitted:
         """Queue ``job`` -- or answer with the pending job whose key is ``key``.
 
         ``supersedes`` names a job this one replaces. If it is still pending, one
         claim on it is released, and it is failed as superseded when that was the
-        last. When it is itself this render, it is simply returned."""
+        last. When it is itself this render, it is simply returned.
+
+        ``max_pending`` > 0 refuses a NEW job with `QueueFullError` once that many
+        wait, counted after the supersede frees its place. A submit answered by
+        coalescing takes no place and is never refused. 0 accepts everything."""
         ...
 
     def claim(self) -> Job | None:
@@ -215,14 +240,25 @@ class JobStore:
         # process, and `abandon_orphans` deals with that at the next start.
         return Reaped()
 
-    def submit(self, job: Job, key: str, *, supersedes: str | None = None) -> Submitted:
+    def submit(
+        self,
+        job: Job,
+        key: str,
+        *,
+        supersedes: str | None = None,
+        max_pending: int = 0,
+    ) -> Submitted:
         with self._lock:
-            superseded: Job | None = None
-            if supersedes is not None:
-                previous = self._waiting.get(supersedes)
-                if previous is not None and previous.key == key:
-                    return Submitted(previous.job, coalesced=True)
-                superseded = self._release(supersedes)
+            previous = self._waiting.get(supersedes) if supersedes is not None else None
+            if previous is not None and previous.key == key:
+                return Submitted(previous.job, coalesced=True)
+            if max_pending and key not in self._by_key:
+                # Decided before anything changes, so a refusal supersedes nothing.
+                frees = previous is not None and previous.claims == 1
+                depth = len(self._waiting) - (1 if frees else 0)
+                if depth >= max_pending:
+                    raise QueueFullError(depth)
+            superseded = self._release(supersedes) if supersedes is not None else None
             existing = self._by_key.get(key)
             if existing is not None:
                 waiting = self._waiting[existing]

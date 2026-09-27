@@ -59,6 +59,11 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
+        self.render_rejected = Counter(
+            "scadbuddy_render_jobs_rejected",
+            "Render requests refused (503) because SCADBUDDY_RENDER_QUEUE_MAX were waiting.",
+            registry=r,
+        )
         self.render_retried = Counter(
             "scadbuddy_render_jobs_retried",
             "Running jobs requeued because their worker stopped heartbeating.",
@@ -93,6 +98,12 @@ class Metrics:
         self.running = Gauge(
             "scadbuddy_render_jobs_running",
             "Render jobs a worker is on right now.",
+            registry=r,
+        )
+        self.queue_max = Gauge(
+            "scadbuddy_render_queue_max",
+            "SCADBUDDY_RENDER_QUEUE_MAX: waiting jobs past which a submit gets a 503; "
+            "0 accepts everything.",
             registry=r,
         )
         self.workers = Gauge(

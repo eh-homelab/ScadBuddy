@@ -10,6 +10,10 @@ DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
 # Jobs rendered at once by each process: each is one or more `openscad` processes.
 DEFAULT_RENDER_CONCURRENCY = 2
+# Admission control, OFF by default: 0 accepts every render. Set, a render that would
+# be a new job while this many already wait is refused with 503 + Retry-After.
+# Superseded and coalesced submits never count against it.
+DEFAULT_RENDER_QUEUE_MAX = 0
 # How long a job may wait for a worker before it is failed unrendered; 0 (the
 # default) never expires one -- every submit is accepted and, in time, rendered.
 DEFAULT_RENDER_QUEUE_TIMEOUT = 0.0
@@ -48,6 +52,7 @@ class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
     render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
@@ -77,6 +82,7 @@ class Config:
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
         for name, value in (
+            ("SCADBUDDY_RENDER_QUEUE_MAX", self.render_queue_max),
             ("SCADBUDDY_RENDER_QUEUE_TIMEOUT", self.render_queue_timeout),
             ("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO", self.render_queue_depth_slo),
             ("SCADBUDDY_RENDER_LATENCY_SLO", self.render_latency_slo),
@@ -108,6 +114,7 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         render_concurrency=int(
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
         ),
+        render_queue_max=int(source.get("SCADBUDDY_RENDER_QUEUE_MAX") or DEFAULT_RENDER_QUEUE_MAX),
         render_queue_timeout=float(
             source.get("SCADBUDDY_RENDER_QUEUE_TIMEOUT") or DEFAULT_RENDER_QUEUE_TIMEOUT
         ),

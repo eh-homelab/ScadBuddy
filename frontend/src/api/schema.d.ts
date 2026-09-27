@@ -3605,6 +3605,13 @@ export interface operations {
                     "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
         };
     };
     get_schema_api_v1_models__slug__schema_get: {

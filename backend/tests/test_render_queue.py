@@ -26,6 +26,7 @@ from scadbuddy.render.jobs import (
     JobResult,
     JobStore,
     PartInfo,
+    QueueFullError,
     RenderQueue,
 )
 from scadbuddy.render.pg_store import MIGRATIONS, PostgresJobStore
@@ -244,6 +245,62 @@ async def test_every_render_is_accepted_however_deep_the_queue(
     gate.release.set()
     await queue.join()
     assert all(queue.store.read(job.id).state == "done" for job in waiting)
+
+
+async def test_a_configured_limit_refuses_with_a_retry_hint(make_queue: QueueFactory) -> None:
+    gate = Gate()
+    queue = await make_queue(gate, replace(CONFIG, render_queue_max=3))
+    await _occupy_the_worker(queue, gate)
+    for n in range(1, 4):
+        await queue.submit("demo", {"n": n})
+
+    with pytest.raises(QueueFullError) as refused:
+        await queue.submit("demo", {"n": 4})
+
+    assert refused.value.depth == 3
+    assert refused.value.retry_after >= 1
+    assert _pending(queue) == 3
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_rejected_total") == 1
+    assert _sample(queue.metrics, "scadbuddy_render_queue_max") == 3
+    # A request that coalesces takes no place, so it is still answered.
+    assert (await queue.submit("demo", {"n": 3})).slug == "demo"
+    gate.release.set()
+    await queue.join()
+
+
+async def test_superseding_frees_its_place_before_the_limit(make_queue: QueueFactory) -> None:
+    """A slider drag is never refused for the room its own stale previews take up."""
+    gate = Gate()
+    queue = await make_queue(gate, replace(CONFIG, render_queue_max=3))
+    await _occupy_the_worker(queue, gate)
+    waiting = [await queue.submit("demo", {"n": n}) for n in range(1, 4)]
+
+    fresh = await queue.submit("demo", {"n": 9}, supersedes=waiting[-1].id)
+
+    assert _pending(queue) == 3
+    gate.release.set()
+    await queue.join()
+    assert queue.store.read(fresh.id).state == "done"
+
+
+async def test_a_refused_submit_supersedes_nothing(make_queue: QueueFactory) -> None:
+    """A shared job keeps its place when one of its two claims moves on, so the
+    submit is refused -- and the claim it tried to release is still there."""
+    gate = Gate()
+    queue = await make_queue(gate, replace(CONFIG, render_queue_max=2))
+    await _occupy_the_worker(queue, gate)
+    shared = await queue.submit("demo", {"n": 1})
+    assert (await queue.submit("demo", {"n": 1})).id == shared.id
+    await queue.submit("demo", {"n": 2})
+
+    with pytest.raises(QueueFullError):
+        await queue.submit("demo", {"n": 3}, supersedes=shared.id)
+    # Had the refusal released a claim, this second release (by a submit that
+    # coalesces, so is never refused) would be the last one and drop the job.
+    await queue.submit("demo", {"n": 2}, supersedes=shared.id)
+    gate.release.set()
+    await queue.join()
+    assert queue.store.read(shared.id).state == "done"
 
 
 async def test_jobs_are_rendered_oldest_first(make_queue: QueueFactory) -> None:
@@ -488,6 +545,7 @@ def test_every_outcome_series_exists_before_the_first_job() -> None:
 @pytest.mark.parametrize(
     ("field", "value", "env"),
     [
+        ("render_queue_max", -1, "SCADBUDDY_RENDER_QUEUE_MAX"),
         ("render_queue_timeout", -1.0, "SCADBUDDY_RENDER_QUEUE_TIMEOUT"),
         ("render_poll_interval", 0.0, "SCADBUDDY_RENDER_POLL_INTERVAL"),
         ("render_lease_timeout", 0.0, "SCADBUDDY_RENDER_LEASE_TIMEOUT"),
