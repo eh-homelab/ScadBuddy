@@ -5,6 +5,7 @@ The upstream is a local bare repository, so the clone is real and offline.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
@@ -21,8 +22,11 @@ import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import scadbuddy.api.models as models_api
+import scadbuddy.library.libraries as libraries_module
 from scadbuddy.api.deps import INSTALL_CONCURRENCY, STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.catalogue import ModelMeta, ModelRecord
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
@@ -566,3 +570,120 @@ def test_restoring_the_current_revision_still_restores_its_pins(
     assert restored.json()["commit"] == current
     lock = json.loads((paths.models / LOCKFILE_NAME).read_text(encoding="utf-8"))
     assert lock["BOSL2"]["commit"] == commits["v1"]
+
+
+# ── a dropped model.json's declaration (#179) ─────────────────────────────────
+
+
+def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Response:
+    response: httpx.Response = client.post(
+        "/api/v1/models",
+        files={
+            "file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream"),
+            "meta": ("model.json", json.dumps(meta).encode(), "application/json"),
+        },
+    )
+    return response
+
+
+def test_a_dropped_model_json_can_declare_only_a_pinned_library(lib_client: TestClient) -> None:
+    """Held to what PATCH holds a declaration to, and nothing is created on a refusal."""
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+    assert refused.status_code == 422
+    assert refused.json()["libraries"] == ["BOSL2"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_declares_its_libraries_and_is_checked_with_them(
+    lib_client: TestClient,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, commits = upstream
+    add(lib_client, name="BOSL2")
+    log = tmp_path / "openscadpath.log"
+    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2", "BOSL2"]})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["libraries"] == ["BOSL2"]
+    # The parse check ran with the declared checkout, as every render will.
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        str(paths.libraries / "BOSL2" / commits["v1"])
+    ]
+
+
+def test_a_dropped_model_json_cannot_declare_a_library_whose_lock_entry_is_broken(
+    lib_client: TestClient, paths: DataPaths
+) -> None:
+    """#216's check, on #179's create path as on PATCH: a hand-broken lock entry is
+    the 409 that every render of it would be, and nothing is created."""
+    add(lib_client, name="BOSL2")
+    lock_file = paths.models / LOCKFILE_NAME
+    lock = json.loads(lock_file.read_text(encoding="utf-8"))
+    lock["BOSL2"]["commit"] = "HEAD"
+    lock_file.write_text(json.dumps(lock), encoding="utf-8")
+
+    refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+
+    assert refused.status_code == 409, refused.text
+    assert "libraries.lock entry 'BOSL2' is not valid" in refused.json()["detail"]
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_reads_the_lockfile_once(
+    lib_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The pin check and the parse check's OPENSCADPATH share one read of it."""
+    add(lib_client, name="BOSL2")
+    reads: list[object] = []
+    real = libraries_module.read_lock
+
+    def counting(paths: DataPaths) -> Any:
+        reads.append(paths)
+        return real(paths)
+
+    monkeypatch.setattr(models_api, "read_lock", counting)
+
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
+
+    assert created.status_code == 201, created.text
+    assert len(reads) == 1
+
+
+def test_a_create_given_libraries_but_no_lock_reads_it_off_the_event_loop(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_create` falls back to reading the lockfile itself when no caller passed
+    one, and that read is file I/O -- in a worker thread, never on the loop."""
+    add(lib_client, name="BOSL2")
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    real = libraries_module.read_lock
+    readers: list[int] = []
+
+    def recording(paths: DataPaths) -> Any:
+        readers.append(threading.get_ident())
+        return real(paths)
+
+    monkeypatch.setattr(models_api, "read_lock", recording)
+
+    async def create() -> tuple[int, ModelRecord]:
+        record = await models_api._create(
+            state.catalogue,
+            state.config,
+            asyncio.Semaphore(1),
+            slug=SLUG,
+            source=SOURCE,
+            meta=ModelMeta(name="Widget", libraries=["BOSL2"]),
+            force=False,
+        )
+        return threading.get_ident(), record
+
+    loop_thread, record = asyncio.run(create())
+
+    assert record.libraries == ["BOSL2"]
+    assert len(readers) == 1
+    assert readers[0] != loop_thread

@@ -86,6 +86,30 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
   })
 
+  it('offers to edit the model details (#179)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(dialog).findByLabelText('Name')).toHaveValue('Name Keychain')
+  })
+
+  it('takes a rename from Edit details into the heading and Duplicate without a reload (#179)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Edit details' }))
+    const details = screen.getByRole('dialog', { name: 'Edit details' })
+    const name = await within(details).findByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Keyring')
+    await user.click(within(details).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    // The still-open page's heading and Duplicate's prefill both take the new name.
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Keyring')
+    await user.click(screen.getByRole('button', { name: 'Duplicate' }))
+    const duplicate = screen.getByRole('dialog', { name: /^Duplicate / })
+    expect(within(duplicate).getByLabelText('Name')).toHaveValue('Keyring copy')
+  })
+
   it('renders the defaults without being asked', async () => {
     render()
     await firstRender()
@@ -787,6 +811,7 @@ describe('CustomizePage', () => {
     expect(alert).toHaveTextContent('Could not load this model')
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
 
     fail = false
@@ -794,6 +819,7 @@ describe('CustomizePage', () => {
 
     expect(await screen.findByRole('button', { name: 'Delete' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Edit details' })).toBeInTheDocument()
     expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
   })
 
@@ -804,6 +830,8 @@ describe('CustomizePage', () => {
     )
     expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    // #179: its details are the image's too.
+    expect(screen.queryByRole('button', { name: 'Edit details' })).not.toBeInTheDocument()
   })
 
   it('still customizes a built-in template, and links its read-only pages encoded (#184)', async () => {
@@ -844,6 +872,10 @@ describe('CustomizePage', () => {
     // The copy is the user's: its write actions are back.
     expect(await screen.findByRole('link', { name: 'Edit source' })).toBeInTheDocument()
     expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+    // #179: Edit details among them, opening on the copy's own details.
+    await user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const details = screen.getByRole('dialog', { name: 'Edit details' })
+    expect(await within(details).findByLabelText('Name')).toHaveValue('Keychain Template copy')
   })
 
   it('offers Duplicate on a model of the user\'s own too (#159)', async () => {

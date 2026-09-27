@@ -9,6 +9,7 @@ import type {
   FontFamily,
   Job,
   LibraryEntry,
+  ModelPatch,
   ModelPrintChoices,
   ModelSummary,
   MergePreview,
@@ -39,6 +40,12 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import {
+  MAX_META_BYTES,
+  MAX_META_SIZE,
+  MAX_THUMBNAIL_BYTES,
+  MAX_THUMBNAIL_SIZE,
+} from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
 import * as fixtures from './fixtures'
@@ -57,6 +64,8 @@ const state = {
     'name-keychain': fixtures.keychainSource,
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   } as Record<string, string>,
+  /** #179 — README text per model; a model's `has_readme` follows it. */
+  readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -91,6 +100,7 @@ export function resetMockState(): void {
     'name-keychain': fixtures.keychainSource,
     [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
   }
+  state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -120,6 +130,25 @@ function initialSourceAt(): Record<string, string> {
     [fixtures.versionIds.raised]: fixtures.keychainSource,
     [fixtures.versionIds.synced]: fixtures.keychainSource,
   }
+}
+
+/**
+ * #179 — one details change: records its revision and replaces the model's record,
+ * the way every catalogue change lands as a commit on the real backend.
+ */
+function reviseModel(
+  slug: string,
+  message: string,
+  files: ModelVersion['files'],
+  change: Partial<ModelSummary>,
+): ModelSummary | null {
+  const model = state.models.find((m) => m.slug === slug)
+  if (!model) return null
+  const version = recordVersion(slug, message, files)
+  const updated = { ...model, ...change, version: version.commit }
+  state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+  // As the API serves it: a duplicate's record carries its `upstream_state`.
+  return view(updated)
 }
 
 /** Adds a revision to the head of a model's history and returns it. */
@@ -192,7 +221,9 @@ function planMerge(slug: string, model: ModelSummary): MergePreview {
   const ours = state.sources[slug] ?? ''
   const baseSource = (upstream.base && state.sourceAt[upstream.base]) || ''
   const theirs = state.sources[upstream.id] ?? ''
-  const plan = { ours, base: baseSource, theirs, taken: [], kept: [] }
+  // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
+  const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
+  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
   if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
   if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
   const merged =
@@ -334,6 +365,75 @@ function problem(status: number, title: string, detail?: string, extensions: obj
   )
 }
 
+const PNG_MAGIC = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]
+
+/**
+ * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
+ * bytes -- not its name or type -- and at most `MAX_THUMBNAIL_BYTES`. The 422 the
+ * backend answers, or null when the upload passes.
+ */
+async function thumbnailRefusal(upload: File) {
+  const bytes = new Uint8Array(await upload.arrayBuffer())
+  if (bytes.length < PNG_MAGIC.length || PNG_MAGIC.some((byte, i) => bytes[i] !== byte)) {
+    return problem(422, 'Unprocessable Content', 'the thumbnail is not a PNG')
+  }
+  if (bytes.length > MAX_THUMBNAIL_BYTES) {
+    return problem(
+      422,
+      'Unprocessable Content',
+      `the thumbnail is too large: ${bytes.length} bytes, ` +
+        `and a thumbnail is at most ${MAX_THUMBNAIL_BYTES} bytes (${MAX_THUMBNAIL_SIZE})`,
+    )
+  }
+  return null
+}
+
+/**
+ * A multipart text field as the backend receives it: FastAPI reads an empty string
+ * as the field being absent.
+ */
+function formText(form: FormData, name: string): string | undefined {
+  const value = form.get(name)
+  return typeof value === 'string' && value !== '' ? value : undefined
+}
+
+/**
+ * `_parse_tags`: a JSON array, or a comma-separated list; blank is no tags. A string
+ * comes back when the backend would refuse the field, and is its 422 detail.
+ */
+function parseFormTags(raw: string | undefined): string[] | undefined | string {
+  if (raw === undefined) return undefined
+  const text = raw.trim()
+  // Blank is absent, so the model.json's tags stand; an explicit `[]` still clears.
+  if (!text) return undefined
+  if (text.startsWith('[')) {
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(text)
+    } catch {
+      return 'tags is not valid JSON'
+    }
+    return Array.isArray(decoded) ? decoded.map(String) : 'tags must be a list'
+  }
+  return text
+    .split(',')
+    .map((tag) => tag.trim())
+    .filter(Boolean)
+}
+
+/** The value unless it is blank or only whitespace, which counts as absent. */
+function nonBlank(value: string | undefined): string | undefined {
+  return value?.trim() ? value : undefined
+}
+
+/** `_first_name`: the first candidate that is not blank, stripped; the slug never is. */
+function firstName(...candidates: (string | undefined)[]): string {
+  for (const candidate of candidates) {
+    if (candidate?.trim()) return candidate.trim()
+  }
+  return ''
+}
+
 /**
  * `require_mine` in `api/models.py`: a built-in is refused before the model is even
  * looked up, with the backend's problem (403 is not in its title table, so "Error").
@@ -427,6 +527,38 @@ export const handlers = [
 
     const form = await request.formData()
     const file = form.get('file')
+    const part = (name: string) => {
+      const value = form.get(name)
+      return value !== null && typeof value !== 'string' ? (value as File) : null
+    }
+    const meta = part('meta')
+    const thumbnailPart = part('thumbnail')
+    const readmePart = part('readme')
+    // As `_read_meta_file`: a model.json that is not JSON, or not an object, is a 422.
+    let metaFields: { name?: string; description?: string; tags?: string[] } | null = null
+    if (meta) {
+      // As `_read_meta_part`: the cap is checked before the part is decoded.
+      if (meta.size > MAX_META_BYTES) {
+        return problem(
+          422,
+          'Unprocessable Content',
+          `the model.json is too large: ${meta.size} bytes, ` +
+            `and a model.json is at most ${MAX_META_BYTES} bytes (${MAX_META_SIZE})`,
+        )
+      }
+      let parsed: unknown
+      try {
+        parsed = JSON.parse(await meta.text())
+      } catch {
+        return problem(422, 'Unprocessable Content', 'the model.json is not valid JSON')
+      }
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        return problem(422, 'Unprocessable Content', 'the model.json is not an object')
+      }
+      metaFields = parsed as { name?: string; description?: string; tags?: string[] }
+    }
+    const tagsField = parseFormTags(formText(form, 'tags'))
+    if (typeof tagsField === 'string') return problem(422, 'Unprocessable Content', tagsField)
     // Not `instanceof File`: the entry's class differs between the browser worker
     // and the Node interceptor, so it is duck-typed instead.
     const filename = typeof file === 'string' || file === null ? '' : ((file as File).name ?? '')
@@ -441,16 +573,25 @@ export const handlers = [
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/(^-|-$)/g, '')
+    if (thumbnailPart) {
+      const refused = await thumbnailRefusal(thumbnailPart)
+      if (refused) return refused
+    }
+    // As `create_model` resolves them: the form field, then the model.json, then
+    // the default -- and a name is the first that is not blank, stripped.
     const model: ModelSummary = {
       slug,
-      name: slug.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-      description: 'Uploaded just now. Open it to see its parameters.',
-      tags: ['uploaded'],
+      name: firstName(formText(form, 'name'), metaFields?.name, slug),
+      // Blank is absent, as for the name; a non-blank description is kept as given.
+      description: nonBlank(formText(form, 'description')) ?? metaFields?.description ?? '',
+      tags: tagsField ?? metaFields?.tags ?? [],
       updated_at: new Date().toISOString(),
-      has_thumbnail: false,
-      has_readme: false,
+      has_thumbnail: thumbnailPart !== null,
+      thumbnail_source: thumbnailPart ? 'model' : null,
+      has_readme: readmePart !== null,
       origin: 'mine',
     }
+    if (readmePart) state.readmes[slug] = await readmePart.text()
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
     state.schemas[slug] = fixtures.keychainSchema
     await delay(150)
@@ -530,7 +671,11 @@ export const handlers = [
       name: body.name,
       origin: 'mine',
       origin_url: null,
-      has_thumbnail: false,
+      // #179: the copy is the upstream's directory, so its thumbnail.png and
+      // README.md come too; its outputs, and so any plate fallback, do not.
+      has_thumbnail: upstream.thumbnail_source === 'model',
+      thumbnail_source: upstream.thumbnail_source === 'model' ? 'model' : null,
+      thumbnail_output_id: null,
       updated_at: version.date,
       version: version.commit,
       upstream: {
@@ -542,6 +687,9 @@ export const handlers = [
     state.models = [copy, ...state.models]
     const schema = state.schemas[id]
     if (schema) state.schemas[slug] = { ...schema, title: body.name }
+    // #179: the copy is the upstream's directory, so its README comes too.
+    const readme = state.readmes[id]
+    if (readme !== undefined) state.readmes[slug] = readme
     await delay(120)
     return HttpResponse.json(view(copy), { status: 201 })
   }),
@@ -623,24 +771,6 @@ export const handlers = [
     return HttpResponse.json(writeUpstream(model, null, `Detach ${slug} from ${upstream.id}`))
   }),
 
-  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
-    const slug = String(params['slug'])
-    const refused = refuseBuiltin(slug)
-    if (refused) return refused
-    const model = state.models.find((m) => m.slug === slug)
-    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
-    const patch = (await request.json()) as Partial<ModelSummary>
-    const missing = (patch.libraries ?? []).filter(
-      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
-    )
-    if (missing.length > 0) {
-      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
-    }
-    const updated = { ...model, ...patch }
-    state.models = state.models.map((m) => (m.slug === model.slug ? updated : m))
-    return HttpResponse.json(view(updated))
-  }),
-
   http.post(`${base}/models/check`, async ({ request }) => {
     const body = (await request.json()) as { source: string; slug?: string | null }
     await delay(80)
@@ -708,6 +838,111 @@ export const handlers = [
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     await delay(120)
     return HttpResponse.json(view(updated))
+  }),
+
+  http.patch(`${base}/models/:slug`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const patch = (await request.json()) as ModelPatch
+    // #93: only libraries that have been added (and so are pinned) can be declared.
+    const missing = (patch.libraries ?? []).filter(
+      (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
+    )
+    if (missing.length > 0) {
+      return problem(422, 'Unprocessable Content', `not added yet: ${missing.join(', ')}`)
+    }
+    const change = Object.fromEntries(
+      Object.entries(patch).filter(([, value]) => value !== null && value !== undefined),
+    ) as Partial<ModelSummary>
+    const updated = reviseModel(slug, `Update ${slug} metadata`, [
+      { status: 'M', path: 'model.json' },
+    ], change)
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  // Multipart with a `file` part, like the output thumbnail PUT.
+  http.put(`${base}/models/:slug/thumbnail`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const upload = (await request.formData()).get('file')
+    if (upload === null || typeof upload === 'string') {
+      return problem(422, 'Unprocessable Content', 'the upload needs a file part')
+    }
+    const notPng = await thumbnailRefusal(upload as File)
+    if (notPng) return notPng
+    const had = state.models.find((m) => m.slug === slug)?.thumbnail_source === 'model'
+    const updated = reviseModel(
+      slug,
+      `Set ${slug} thumbnail`,
+      [{ status: had ? 'M' : 'A', path: 'thumbnail.png' }],
+      { has_thumbnail: true, thumbnail_source: 'model', thumbnail_output_id: null },
+    )
+    return updated ? HttpResponse.json(updated) : problem(404, 'Model not found')
+  }),
+
+  http.delete(`${base}/models/:slug/thumbnail`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Model not found')
+    if (model.thumbnail_source !== 'model') {
+      return problem(404, 'Not Found', `'${slug}' has no thumbnail of its own to remove`)
+    }
+    // The fixtures' generated models fall back to their first output's plate image.
+    // Which is the first output: the one whose plate image the backend serves.
+    const first = state.outputs
+      .filter((o) => o.slug === slug)
+      .sort((a, b) => a.created_at.localeCompare(b.created_at))[0]
+    const updated = reviseModel(slug, `Remove ${slug} thumbnail`, [
+      { status: 'D', path: 'thumbnail.png' },
+    ], {
+      has_thumbnail: first !== undefined,
+      thumbnail_source: first ? 'output' : null,
+      thumbnail_output_id: first?.id ?? null,
+    })
+    return HttpResponse.json(updated)
+  }),
+
+  http.get(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    const readme = state.readmes[slug]
+    return readme === undefined
+      ? problem(404, 'Not Found', `'${slug}' has no README`)
+      : HttpResponse.text(readme, { headers: { 'Content-Type': 'text/markdown; charset=utf-8' } })
+  }),
+
+  http.put(`${base}/models/:slug/readme`, async ({ params, request }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const { content } = (await request.json()) as { content: string }
+    const had = state.readmes[slug] !== undefined
+    const updated = reviseModel(slug, `Set ${slug} README`, [
+      { status: had ? 'M' : 'A', path: 'README.md' },
+    ], { has_readme: true })
+    if (!updated) return problem(404, 'Model not found')
+    state.readmes[slug] = content
+    return HttpResponse.json(updated)
+  }),
+
+  http.delete(`${base}/models/:slug/readme`, ({ params }) => {
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (state.readmes[slug] === undefined) {
+      return problem(404, 'Not Found', `'${slug}' has no README to remove`)
+    }
+    delete state.readmes[slug]
+    const updated = reviseModel(slug, `Remove ${slug} README`, [
+      { status: 'D', path: 'README.md' },
+    ], { has_readme: false })
+    return HttpResponse.json(updated)
   }),
 
   http.get(`${base}/models/:slug`, ({ params }) => {

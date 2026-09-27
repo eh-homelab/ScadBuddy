@@ -80,13 +80,15 @@ def build_state(settings: Settings) -> AppState:
         if settings.database_url
         else JobStore(paths)
     )
+    outputs = OutputStore(paths)
     return AppState(
         settings=settings,
         config=config,
         paths=paths,
         history=history,
-        catalogue=Catalogue(paths, history),
-        outputs=OutputStore(paths),
+        # The outputs feed the catalogue's fallback thumbnail (#179).
+        catalogue=Catalogue(paths, history, outputs),
+        outputs=outputs,
         settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings),
         fonts=FontService(
             paths.root,

@@ -11,9 +11,9 @@ import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
@@ -43,6 +43,11 @@ from scadbuddy.library.upstream import (
     state_of,
 )
 from scadbuddy.render.solids import WRAPPER_PREFIX
+
+if TYPE_CHECKING:
+    # Type-only: `library.outputs` reaches this module again through
+    # `render.provenance`, so a runtime import here would be circular.
+    from scadbuddy.library.outputs import OutputStore
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +111,22 @@ class ModelNotFoundError(KeyError):
     pass
 
 
+class SidecarNotFoundError(KeyError):
+    """The model exists, but the thumbnail or README being removed does not."""
+
+
 class ModelExistsError(ValueError):
     pass
+
+
+class InvalidModelMetaError(ValueError):
+    """A ``model.json`` on disk that cannot be read as a model's metadata: not JSON,
+    or a field of the wrong type -- a hand edit, or a directory placed on the volume
+    by hand. It costs its own model only (#179)."""
+
+    def __init__(self, slug: str, reason: str) -> None:
+        super().__init__(f"the model.json of {slug!r} is not valid: {reason}")
+        self.slug = slug
 
 
 class ModelMeta(BaseModel):
@@ -128,19 +147,67 @@ class ModelMeta(BaseModel):
     libraries: list[str] = Field(default_factory=list)
 
 
+#: The model.json fields with a default and no `None` of their own: a `null` for
+#: one is the field left out, as a missing one is (#179).
+DEFAULTED_META_FIELDS = frozenset({"name", "description", "tags", "libraries"})
+
+
+def meta_from_raw(raw: dict[str, Any], default_name: str) -> ModelMeta:
+    """A model.json's contents as :class:`ModelMeta`, read the same permissive way
+    however it arrived -- uploaded, on disk, or from the image.
+
+    A `null` for a defaulted field, or a blank name, falls through to the default
+    (the name to ``default_name``). Anything else invalid raises pydantic's
+    ``ValidationError`` for the caller to report in its own terms.
+    """
+    cleaned = {
+        key: value
+        for key, value in raw.items()
+        if not (key in DEFAULTED_META_FIELDS and value is None)
+    }
+    name = cleaned.get("name")
+    if isinstance(name, str) and not name.strip():
+        del cleaned["name"]
+    return ModelMeta.model_validate({"name": default_name, **cleaned})
+
+
 class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
     libraries: list[str] | None = None
 
+    @field_validator("name")
+    @classmethod
+    def _name_is_not_blank(cls, name: str | None) -> str | None:
+        """A model is never renamed to nothing. Stored stripped, as the upload
+        path stores a name (#179)."""
+        if name is None:
+            return None
+        if not name.strip():
+            raise ValueError("the name cannot be blank")
+        return name.strip()
+
+
+#: Where a model's catalogue thumbnail comes from: ``model`` is one set on the model
+#: itself, ``output`` the first generated output's plate cover, standing in until one
+#: is set (#179).
+ThumbnailSource = Literal["model", "output"]
+
 
 class ModelRecord(ModelMeta):
     # The template's id: a bare slug for mine, `builtin:<slug>` for a built-in.
     slug: str
     origin: Literal["builtin", "mine"]
+    #: True when ``GET /models/{slug}/thumbnail`` has an image, from either source.
     has_thumbnail: bool
     has_readme: bool
+    thumbnail_source: ThumbnailSource | None = None
+    #: The output whose plate image stands in when ``thumbnail_source`` is
+    #: ``output``, else None. That fallback moves with no commit (the covering
+    #: output is deleted, or an older one gains a cover), so this -- not
+    #: ``version`` -- is what tells a client its cached image is stale.
+    thumbnail_output_id: str | None = None
     updated_at: datetime
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
@@ -153,9 +220,16 @@ class ModelRecord(ModelMeta):
 class Catalogue:
     """``data/models/<slug>/`` — one directory per model, metadata in a JSON sidecar."""
 
-    def __init__(self, paths: DataPaths, history: ModelHistory | None = None) -> None:
+    def __init__(
+        self,
+        paths: DataPaths,
+        history: ModelHistory | None = None,
+        outputs: OutputStore | None = None,
+    ) -> None:
         self.paths = paths
         self.history = history
+        #: Where the fallback thumbnail is read from; None turns the fallback off.
+        self.outputs = outputs
 
     def _commit(self, message: str, *slugs: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
@@ -236,12 +310,50 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
+    def thumbnail_source(self, slug: str) -> tuple[ThumbnailSource | None, str | None]:
+        """Where the thumbnail comes from, and which output when it is the fallback."""
+        if self.thumbnail_path(slug).is_file():
+            return "model", None
+        if self.outputs is not None:
+            output_id = self.outputs.plate_cover_output(slug)
+            if output_id is not None:
+                return "output", output_id
+        return None, None
+
+    def thumbnail(self, slug: str) -> bytes | None:
+        """The catalogue thumbnail: the model's own, else the first generated
+        output's plate cover, else None."""
+        self._require(slug)
+        try:
+            return self.thumbnail_path(slug).read_bytes()
+        except FileNotFoundError:
+            pass
+        if self.outputs is None:
+            return None
+        return self.outputs.plate_cover(slug)
+
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
         if not meta_path.is_file():
             return {}
-        loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
+        try:
+            loaded: Any = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+            raise InvalidModelMetaError(slug, f"not JSON ({error})") from None
         return loaded if isinstance(loaded, dict) else {}
+
+    def _meta(self, slug: str, raw: dict[str, Any]) -> ModelMeta:
+        """``raw`` as this model's metadata, or :class:`InvalidModelMetaError`."""
+        try:
+            return meta_from_raw(raw, slug.removeprefix(BUILTIN_PREFIX))
+        except ValidationError as error:
+            problems = "; ".join(
+                f"{'.'.join(str(part) for part in detail['loc'])}: {detail['msg']}"
+                for detail in error.errors()
+            )
+            raise InvalidModelMetaError(slug, problems) from None
+        except RecursionError:
+            raise InvalidModelMetaError(slug, "nested too deeply") from None
 
     def write_raw_meta(self, slug: str, meta: dict[str, Any]) -> None:
         # `schema` is derived and lives under `cache/` (see `SCHEMA_CACHE_NAME`).
@@ -266,7 +378,16 @@ class Catalogue:
         walk a listing makes -- and is asked for an upstream's as well as this one's."""
         self._require(slug)
         raw = self.read_raw_meta(slug)
-        meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
+        if is_builtin(slug):
+            # Only `POST /models/import` sets `origin_url`, after fetching it over
+            # https, and the catalogue renders it as a link -- a bundled model.json
+            # never supplies one (#179). Dropped on read: the mirror must stay
+            # byte-identical to the image or it re-syncs on every boot.
+            raw.pop("origin_url", None)
+            # Nor is a built-in anything's duplicate (#156): only a duplicate of
+            # mine records an upstream.
+            raw.pop("upstream", None)
+        meta = self._meta(slug, raw)
         version = version_of(slug)
         upstream_state: UpstreamState | None = None
         if meta.upstream is not None and history:
@@ -281,11 +402,14 @@ class Catalogue:
         except FileNotFoundError:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
+        thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug)
         return ModelRecord(
             **meta.model_dump(),
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
-            has_thumbnail=self.thumbnail_path(slug).is_file(),
+            has_thumbnail=thumbnail_source is not None,
+            thumbnail_source=thumbnail_source,
+            thumbnail_output_id=thumbnail_output_id,
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
@@ -306,7 +430,15 @@ class Catalogue:
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
         history = self._has_history
-        return [self._record(slug, versions.get, history) for slug in slugs]
+        records: list[ModelRecord] = []
+        for slug in slugs:
+            try:
+                records.append(self._record(slug, versions.get, history))
+            except InvalidModelMetaError as error:
+                # One broken model.json costs its own model, never the whole page;
+                # `GET /models/{slug}` says what is wrong with it.
+                logger.warning("left a model out of the listing: %s", error, extra={"slug": slug})
+        return records
 
     def create(
         self,
@@ -387,6 +519,11 @@ class Catalogue:
             loaded: Any = json.loads(meta_path.read_text("utf-8")) if meta_path.is_file() else {}
             meta: dict[str, Any] = loaded if isinstance(loaded, dict) else {}
             meta.pop("schema", None)
+            if is_builtin(upstream_id):
+                # A built-in never has an `origin_url` (#179): the record drops one
+                # its image's model.json carries, and the copy must not bring it
+                # back as a template of mine's link.
+                meta.pop("origin_url", None)
             meta["name"] = name
             meta["upstream"] = Upstream(
                 id=upstream_id, path=model_path(upstream_id), base=base
@@ -423,6 +560,60 @@ class Catalogue:
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
+
+    def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
+        """Set or replace the model's own thumbnail, as one revision."""
+        self._write_sidecar(slug, THUMBNAIL_NAME, png)
+        self._commit(f"Set {slug} thumbnail", slug)
+        return self.record(slug)
+
+    def delete_thumbnail(self, slug: str) -> ModelRecord:
+        """Remove the model's own thumbnail, as one revision. The record may still
+        report one: the fallback takes over when the model has been generated."""
+        self._remove_sidecar(slug, THUMBNAIL_NAME)
+        self._commit(f"Remove {slug} thumbnail", slug)
+        return self.record(slug)
+
+    def read_readme(self, slug: str) -> str:
+        self._require(slug)
+        try:
+            return self.readme_path(slug).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise SidecarNotFoundError(README_NAME) from None
+
+    def write_readme(self, slug: str, text: str) -> ModelRecord:
+        """Set or replace the model's README, as one revision."""
+        self._write_sidecar(slug, README_NAME, text.encode("utf-8"))
+        self._commit(f"Set {slug} README", slug)
+        return self.record(slug)
+
+    def delete_readme(self, slug: str) -> ModelRecord:
+        self._remove_sidecar(slug, README_NAME)
+        self._commit(f"Remove {slug} README", slug)
+        return self.record(slug)
+
+    def _write_sidecar(self, slug: str, name: str, payload: bytes) -> None:
+        """Swap one of the model's files in atomically, as `write_source` does.
+
+        The same reasons apply: a reader (a GET, or git staging a concurrent
+        commit) must never see a half-written file, and a write racing a delete
+        must fail with the delete's 404 rather than recreate the directory.
+        """
+        self._require(slug)
+        try:
+            _write_atomic(self.paths.model_dir(slug) / name, payload)
+        except FileNotFoundError:
+            raise ModelNotFoundError(slug) from None
+
+    def _remove_sidecar(self, slug: str, name: str) -> None:
+        self._require(slug)
+        try:
+            (self.paths.model_dir(slug) / name).unlink()
+        except FileNotFoundError:
+            # Either the file was never there or a delete took the whole model;
+            # which one decides the answer.
+            self._require(slug)
+            raise SidecarNotFoundError(name) from None
 
     def write_source(
         self,
@@ -482,7 +673,7 @@ class Catalogue:
     # ── upstream (#157) ───────────────────────────────────────────────────────
 
     def _upstream(self, slug: str) -> Upstream:
-        upstream = ModelMeta.model_validate({"name": slug, **self.read_raw_meta(slug)}).upstream
+        upstream = self._meta(slug, self.read_raw_meta(slug)).upstream
         if upstream is None:
             raise NoUpstreamError(slug)
         return upstream
@@ -631,6 +822,8 @@ class Catalogue:
         # outputs (NOT in the repository: a 3MF is a build artefact, not source)
         # -- and any an earlier delete failed to clear or a race wrote since.
         self.sweep_orphans()
+        # Whether or not the sweep got to its outputs: the model is gone either way.
+        self._forget_cover(slug)
 
     def sweep_tombstones(self) -> list[str]:
         """Remove every tombstone left under ``cache/tombstones/``.
@@ -687,6 +880,8 @@ class Catalogue:
                 continue
             if _remove_tree(path):
                 removed.append(str(path.relative_to(self.paths.root)))
+                if path.parent == self.paths.outputs:
+                    self._forget_cover(slug)
         return removed
 
     def _claim(self, slug: str) -> Path:
@@ -720,6 +915,13 @@ class Catalogue:
             self.paths.outputs / slug,
         ):
             _remove_tree(path)
+        self._forget_cover(slug)
+
+    def _forget_cover(self, slug: str) -> None:
+        """Drop the output store's resolved fallback cover for ``slug``, whose
+        outputs are gone -- so a removed model leaves nothing behind in memory."""
+        if self.outputs is not None:
+            self.outputs.forget_plate_cover(slug)
 
     def sync_builtins(self, bundled: Path) -> str | None:
         """Mirror the image's bundled models into ``_builtin/`` as one commit.
@@ -823,6 +1025,10 @@ class Catalogue:
                     raw["upstream"] = Upstream(
                         id=f"{BUILTIN_PREFIX}{slug}", path=path, base=base
                     ).model_dump()
+                    # Linked, it is a duplicate of the built-in, and holds what a
+                    # duplicate does (#179): no `origin_url` its image's model.json
+                    # carried, which only `POST /models/import` may set.
+                    raw.pop("origin_url", None)
                     self.write_raw_meta(slug, raw)
                 except (OSError, ValueError, ModelNotFoundError):
                     logger.exception("could not link a seeded template", extra={"slug": slug})

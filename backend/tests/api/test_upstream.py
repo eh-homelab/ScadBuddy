@@ -119,11 +119,18 @@ def test_a_built_in_update_merges_clean_into_an_edited_duplicate(
         "ours": ours,
         "base": SOURCE,
         "theirs": theirs,
+        "patch": status["preview"]["patch"],
         "merged": both,
         "clean": True,
         "taken": [],
         "kept": [],
     }
+    # The built-in's own change, headed by its slug, not its `_builtin/` mirror.
+    assert (
+        "--- a/name-keychain/model.scad\n+++ b/name-keychain/model.scad\n"
+        in (status["preview"]["patch"])
+    )
+    assert '-layout = "row";\n+layout = "column";\n' in status["preview"]["patch"]
     # From the one history walk the listing makes, and from a single record alike.
     assert _listed(client)["upstream_state"] == "update"
     assert _json(client.get(f"/api/v1/models/{MINE}"))["upstream_state"] == "update"
@@ -427,3 +434,55 @@ def test_upstream_changes_and_metadata_edits_racing_both_land(
         assert raw["upstream"]["dismissed"] == revision
     else:
         assert raw["upstream"]["base"] == revision
+
+
+# ── #179's details through an upstream merge ─────────────────────────────────
+
+
+def test_a_merge_takes_the_upstreams_new_thumbnail_and_readme(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """Set through #179's routes on a template of mine, they reach its duplicate the
+    way any other file does, and the duplicate serves them as its own afterwards."""
+    upstream = _json(client.post("/api/v1/models", json={"name": "Parent", "source": SOURCE}), 201)
+    child = _duplicate(client, upstream["slug"], "Child")
+    assert child["has_thumbnail"] is False
+    before = client.get(f"/api/v1/models/{child['slug']}/thumbnail")
+    assert before.status_code == 404
+
+    new_thumbnail = PNG_BYTES + b"parent"
+    _json(
+        client.put(
+            f"/api/v1/models/{upstream['slug']}/thumbnail",
+            files={"file": ("t.png", new_thumbnail, "image/png")},
+        )
+    )
+    _json(client.put(f"/api/v1/models/{upstream['slug']}/readme", json={"content": "# P\n"}))
+
+    status = _upstream(client, child["slug"])
+    assert status["state"] == "update"
+    assert status["preview"]["taken"] == ["README.md", "thumbnail.png"]
+
+    merged = _json(client.post(f"/api/v1/models/{child['slug']}/upstream/merge"))
+
+    assert (merged["model"]["thumbnail_source"], merged["model"]["has_readme"]) == ("model", True)
+    served = client.get(f"/api/v1/models/{child['slug']}/thumbnail")
+    assert served.content == new_thumbnail
+    assert (
+        served.headers["etag"]
+        == client.get(f"/api/v1/models/{upstream['slug']}/thumbnail").headers["etag"]
+    )
+    assert client.get(f"/api/v1/models/{child['slug']}/readme").text == "# P\n"
+    # Its own details stay editable after the merge.
+    assert client.delete(f"/api/v1/models/{child['slug']}/thumbnail").status_code == 200
+    assert paths.model_meta(child["slug"]).is_file()
+
+
+@pytest.mark.parametrize("action", ["merge", "dismiss", "detach"])
+def test_a_built_ins_upstream_actions_and_details_writes_are_all_refused(
+    client: TestClient, action: str
+) -> None:
+    response = client.post(f"/api/v1/models/{BUILTIN}/upstream/{action}")
+    assert response.status_code == 403, response.text
+    readme = client.put(f"/api/v1/models/{BUILTIN}/readme", json={"content": "# x\n"})
+    assert readme.status_code == 403

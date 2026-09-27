@@ -148,6 +148,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
     app.add_middleware(HttpMetrics, metrics=state.metrics)
+    models.install_model_handlers(app)
     # Outermost, so an oversized body is refused on its headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
 
