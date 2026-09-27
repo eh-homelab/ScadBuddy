@@ -34,7 +34,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
     SidecarNotFoundError,
 )
-from scadbuddy.library.history import MAX_SUBJECT
+from scadbuddy.library.history import MAX_SUBJECT, GitError
 from scadbuddy.library.libraries import model_search_path, read_pins, search_path
 from scadbuddy.library.scad import (
     CheckedSource,
@@ -400,6 +400,9 @@ async def create_model(
                 else base.description,
                 "tags": parsed_tags if parsed_tags is not None else base.tags,
                 "origin_url": None,
+                # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
+                # which template this one came from.
+                "upstream": None,
             }
         ),
         force=force,
@@ -632,6 +635,41 @@ def patch_model(
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+class DuplicateRequest(BaseModel):
+    name: str = Field(description="Display name of the duplicate; its slug is derived from it")
+
+
+@router.post(
+    "/models/{slug}/duplicate",
+    response_model=ModelRecord,
+    status_code=status.HTTP_201_CREATED,
+    summary="Duplicate a template",
+    description=(
+        "Copies any template, built-in or mine, to a new template of mine whose slug is "
+        "derived from `name` as `POST /models` derives it, and records the template it "
+        "came from as `upstream`, with `base` the upstream's current revision. One "
+        "revision: `Duplicate <id> as <new slug>`. Derived files (schema cache, "
+        "outputs, revisions) are not copied."
+    ),
+)
+def duplicate_model(slug: SlugPath, body: DuplicateRequest, catalogue: CatalogueDep) -> ModelRecord:
+    require_model_exists(catalogue, slug)
+    new_slug = _slug_from_name(body.name)
+    try:
+        return catalogue.duplicate(slug, new_slug, body.name)
+    except ModelExistsError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT, f"a model named {new_slug!r} already exists"
+        ) from None
+    except ModelNotFoundError:
+        # A concurrent delete of the upstream got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except GitError as error:
+        # Reading the upstream at `base` failed; as every other route that reads
+        # the history maps it. Nothing of the duplicate is left behind.
+        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
 @router.delete("/models/{slug}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete a model")
