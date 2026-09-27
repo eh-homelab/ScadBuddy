@@ -1,8 +1,9 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
 import { BUILTIN_SLUG } from '../mocks/fixtures'
+import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
 import { CustomizePage } from '../pages/CustomizePage'
 import { renderPage } from '../test/utils'
@@ -36,6 +37,9 @@ function watchRenders(): Promise<{ params: Record<string, unknown> }>[] {
 }
 
 describe('PresetPicker', () => {
+  // Saves and deletes write the mock's state, which no global hook resets.
+  beforeEach(() => resetMockState())
+
   it('lists the template\'s presets apart from the saved ones', async () => {
     render()
     const select = await picker()

@@ -3,7 +3,7 @@ import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
-import { MAX_PRESET_NAME, MAX_PRESETS, setMockPresets } from './handlers'
+import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -526,6 +526,8 @@ describe('mock API: delete a template duplicates track (#223)', () => {
 })
 
 describe('mock API: presets keep the server limits', () => {
+  beforeEach(() => resetMockState())
+
   it('refuses a name longer than the server takes', async () => {
     const long = 'x'.repeat(MAX_PRESET_NAME + 1)
     await expect(api.createPreset('name-keychain', { name: long, params: {} })).rejects.toMatchObject(
