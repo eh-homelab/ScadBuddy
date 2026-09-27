@@ -277,7 +277,7 @@ resolves to a principal through `authenticate(request) → principal { id, tiers
 | browser user | the UI's own chat or session | `outward` (approves in the UI) |
 | bearer token | `/mcp` in `bearer` mode, minted in Settings, stored hashed | per token |
 | OIDC subject | `/mcp` in `oidc` mode (#262), scopes `scadbuddy:read|write|outward` | per scope |
-| `anonymous` | `/mcp` in `disabled` mode | configurable, `write` by default |
+| `anonymous` | `/mcp` in `disabled` mode | configurable, **`read` by default**; an operator must opt in to `write` |
 | flow | analyzer (#284) or plugin hook (#297) session | the skill's declared `permissions` |
 
 Tiers: `read`, `write` (reversible through history), and `outward` (send, print,
@@ -305,8 +305,9 @@ settings write, so it needs approval.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
-- **`disabled`.** No credential. Calls run as `anonymous` with a tier cap; a persistent
-  warning banner shows; the audit log records the client IP.
+- **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`,
+  capped at `read` unless an operator raises the cap in Settings (least privilege, D7);
+  a persistent warning banner shows; the audit log records the client IP.
 - **`oidc` (#262).** `/mcp` becomes an OAuth 2.1 resource server per the
   [MCP authorization spec][mcp-auth]: protected-resource metadata, and JWTs validated
   against the IdP's JWKS. Bearer tokens keep working alongside it. The mode can't be
@@ -319,8 +320,10 @@ that reaches the UI. Putting the UI behind OIDC is a separate issue.
 
 ### 8.4 Transport rules
 
-- HTTPS only: `X-Forwarded-Proto` is trusted from the ingress only, and plain HTTP gets
-  `403` in `bearer` and `oidc` modes, except from loopback.
+- HTTPS only, **in every auth mode including `disabled`** (D5): `X-Forwarded-Proto` is
+  trusted from the ingress only, and plain HTTP gets `403` naming the HTTPS URL. The
+  only exception is loopback, for local development and tests. `disabled` mode removes
+  the credential requirement, not the transport requirement.
 - An `Origin` check on `/mcp` and `/api/v1/ws` prevents DNS rebinding.
 - Nothing in the path may buffer SSE. A test asserts that events arrive before the
   response completes.
@@ -337,7 +340,7 @@ not skip pairing.
 | Threat | Mitigation |
 |---|---|
 | Prompt injection via model READMEs, upstream sources, library code, plugin output, Bambuddy data | Tool results wrap such content as untrusted; outward actions always need a human approval; `tools: []` means injected text can't reach a shell or the filesystem |
-| Stray or hostile MCP client on the LAN | `bearer` default, tier caps, audit log, rate limits on agent-triggered renders |
+| Stray or hostile MCP client on the LAN | `bearer` default; `anonymous` capped at `read` by default in `disabled` mode; HTTPS in every mode; audit log; rate limits on agent-triggered renders |
 | Credential leakage | Credentials encrypted at rest (§9), never returned by any route, passed per query, redacted in logs and audit |
 | Malicious or changed plugin | Fetched at a pinned commit; reviewed part by part before enabling; command hooks refused; unknown tools default to `outward`; re-pinning shows a diff |
 | Runaway agent | `maxTurns`, per-session budget, render rate limits, interrupt from any watcher |
