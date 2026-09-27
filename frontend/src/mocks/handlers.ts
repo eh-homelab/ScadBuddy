@@ -12,6 +12,7 @@ import type {
   ModelSummary,
   ModelVersion,
   Output,
+  OutputPlate,
   ParamValue,
   PipelineChoices,
   PipelineCreate,
@@ -56,6 +57,8 @@ const state = {
   modelPipelines: {} as Record<string, number>,
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
   modelChoices: {} as Record<string, ModelPrintChoices>,
+  /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
+  printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
   /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
   lastProjectId: null as number | null,
@@ -80,6 +83,7 @@ export function resetMockState(): void {
   state.pipelines = fixtures.pipelineViews.map((p) => ({ ...p }))
   state.modelPipelines = {}
   state.modelChoices = {}
+  state.printerBedTypes = {}
   state.projects = fixtures.projectViews.map((p) => ({ ...p }))
   state.lastProjectId = null
   state.fonts = fixtures.fonts.map((f) => ({ ...f }))
@@ -592,6 +596,12 @@ export const handlers = [
     })
   }),
 
+  // #83 — every ScadBuddy render is one plate; a test overrides this for a multi-plate 3MF.
+  http.get(`${base}/outputs/:id/plates`, ({ params }) => {
+    if (!state.outputs.some((o) => o.id === params['id'])) return problem(404, 'Output not found')
+    return HttpResponse.json([{ index: 1, has_thumbnail: true }] satisfies OutputPlate[])
+  }),
+
   // Multipart with a `file` part, at /thumbnail — not a raw PNG body at /thumbnail.png.
   http.put(`${base}/outputs/:id/thumbnail`, async ({ params, request }) => {
     const form = await request.formData()
@@ -708,7 +718,19 @@ export const handlers = [
       global_pipeline_id: state.settings.pipeline_id ?? null,
       default_pipeline_id: modelPipelineId ?? state.settings.pipeline_id ?? null,
       model_choices: state.modelChoices[slug] ?? { printer_id: null, filament_plan: [] },
+      printer_bed_types: state.printerBedTypes,
     } satisfies PipelineChoices)
+  }),
+
+  http.put(`${base}/print/printers/:id/bed-type`, async ({ params, request }) => {
+    const printerId = String(params['id'])
+    const body = (await request.json()) as { bed_type: string | null }
+    if (body.bed_type === null) delete state.printerBedTypes[printerId]
+    else state.printerBedTypes[printerId] = body.bed_type
+    return HttpResponse.json({
+      printer_id: Number(printerId),
+      bed_type: state.printerBedTypes[printerId] ?? null,
+    })
   }),
 
   http.put(`${base}/print/models/:slug/choices`, async ({ params, request }) => {
@@ -794,6 +816,8 @@ export const handlers = [
       force?: boolean
       printer_id?: number | null
       plate_id?: number
+      all_plates?: boolean
+      bed_type?: string | null
       filament_plan?: { slots?: { slot_id: number; spool_id: number }[] } | null
       project_id?: number | null
     }
@@ -850,7 +874,10 @@ export const handlers = [
      * and posts queue entries itself. `run` is null on that route — there is no
      * pipeline run to report — which is why the success panel has to guard it.
      */
-    if (body.filament_plan || typeof body.printer_id === 'number') {
+    // #83 — a plate type or any plate but the first cannot ride on a run either.
+    const plateChosen =
+      Boolean(body.bed_type) || Boolean(body.all_plates) || (body.plate_id ?? 1) !== 1
+    if (body.filament_plan || typeof body.printer_id === 'number' || plateChosen) {
       const sliceJobId = nextNumber()
       const queueItemIds = Array.from({ length: copies }, () => nextNumber())
       const queued: PrintRunResult = {

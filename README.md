@@ -68,8 +68,12 @@ for the project picker).
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
-  `SCADBUDDY_CHECK_CONCURRENCY` (1). Each concurrent render or check is its own
-  `openscad` process, so size CPU and memory for their sum.
+  `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
+  `SCADBUDDY_OPENSCAD_LSP` (default `openscad-lsp`, the language server binary).
+  Each concurrent render or check is its own `openscad` process, and each open
+  source editor holds one `openscad-lsp` process for as long as it stays open,
+  so size CPU and memory for the sum of all three. Past the session cap an
+  editor still works, without completion and hover.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is
   writable, and the build revision.
 

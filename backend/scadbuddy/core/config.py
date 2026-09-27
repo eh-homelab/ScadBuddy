@@ -15,6 +15,11 @@ DEFAULT_RENDER_CONCURRENCY = 2
 # plenty — a check parses and exports parameters, it renders no geometry.
 DEFAULT_CHECK_CONCURRENCY = 1
 DEFAULT_JOB_TTL = 86400.0
+DEFAULT_OPENSCAD_LSP = "openscad-lsp"
+# Each open editor is one openscad-lsp process for as long as the tab stays open, so
+# the cap is on sessions rather than on work: past it an editor simply goes without
+# completion and hover, which it already has to cope with when no server is installed.
+DEFAULT_LSP_SESSIONS = 4
 DEFAULT_FONTS_CATALOGUE_TTL = 86400.0
 DEFAULT_GIT_TIMEOUT = 30.0
 
@@ -32,6 +37,8 @@ class Config:
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
     # Bounds every git call and the wait for the model repository's write lock.
     git_timeout: float = DEFAULT_GIT_TIMEOUT
+    openscad_lsp: str = DEFAULT_OPENSCAD_LSP
+    lsp_sessions: int = DEFAULT_LSP_SESSIONS
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
@@ -61,4 +68,6 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
             source.get("SCADBUDDY_FONTS_CATALOGUE_TTL") or DEFAULT_FONTS_CATALOGUE_TTL
         ),
         git_timeout=float(source.get("SCADBUDDY_GIT_TIMEOUT") or DEFAULT_GIT_TIMEOUT),
+        openscad_lsp=source.get("SCADBUDDY_OPENSCAD_LSP") or DEFAULT_OPENSCAD_LSP,
+        lsp_sessions=int(source.get("SCADBUDDY_LSP_SESSIONS") or DEFAULT_LSP_SESSIONS),
     )

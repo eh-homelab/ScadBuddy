@@ -868,3 +868,160 @@ describe('PrintPicker · Projects', () => {
     expect(attaches).toEqual([])
   })
 })
+
+describe('PrintPicker · Plate', () => {
+  beforeEach(() => resetMockState())
+
+  /** Every run body, and every plate remembered for a printer, in order. */
+  function watch() {
+    const runs: Record<string, unknown>[] = []
+    const remembered: { url: string; body: unknown }[] = []
+    server.events.on('request:start', async ({ request }) => {
+      if (request.method === 'POST' && request.url.endsWith('/run')) {
+        runs.push((await request.clone().json()) as Record<string, unknown>)
+      }
+      if (request.method === 'PUT' && request.url.endsWith('/bed-type')) {
+        remembered.push({ url: request.url, body: await request.clone().json() })
+      }
+    })
+    return { runs, remembered }
+  }
+
+  it('offers the plate types the printer takes, opening on the pipeline’s own', async () => {
+    open()
+    await listed()
+
+    const select = await screen.findByLabelText('Plate type')
+    expect(select).toHaveValue('Textured PEI Plate')
+    // The H2C's Bambu Studio profile refuses the Cool and Smooth PEI plates.
+    expect(within(select).getAllByRole('option').map((option) => option.textContent)).toEqual([
+      'Engineering Plate',
+      'Textured PEI Plate',
+      'Bambu Cool Plate SuperTack',
+    ])
+    expect(screen.queryByTestId('bed-type-warning')).not.toBeInTheDocument()
+  })
+
+  it('keeps a pipeline run while the plate type is the pipeline’s own', async () => {
+    const { runs } = watch()
+    const { user } = open()
+    await listed()
+    await screen.findByLabelText('Plate type')
+
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByText(/Pipeline run/)
+    server.events.removeAllListeners()
+
+    expect(runs[0]).not.toHaveProperty('bed_type')
+    expect(runs[0]).not.toHaveProperty('printer_id')
+  })
+
+  it('slices for another plate type on the printer and remembers it for that printer', async () => {
+    const { runs, remembered } = watch()
+    const { user } = open()
+    await listed()
+
+    await user.selectOptions(await screen.findByLabelText('Plate type'), 'Supertack Plate')
+    expect(screen.getByTestId('bed-type-route')).toHaveTextContent(
+      'sliced and queued for 3DP-31B-598',
+    )
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+    await waitFor(() => expect(remembered).toHaveLength(1))
+    server.events.removeAllListeners()
+
+    expect(runs[0]).toMatchObject({ bed_type: 'Supertack Plate', printer_id: 1, plate_id: 1 })
+    expect(remembered[0]?.url).toContain('/print/printers/1/bed-type')
+    expect(remembered[0]?.body).toEqual({ bed_type: 'Supertack Plate' })
+  })
+
+  it('opens on the plate this printer last printed with', async () => {
+    await fetch('/api/v1/print/printers/1/bed-type', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bed_type: 'Engineering Plate' }),
+    })
+    open()
+    await listed()
+
+    expect(await screen.findByLabelText('Plate type')).toHaveValue('Engineering Plate')
+  })
+
+  it('warns before Run when the plate type is not one the printer takes', async () => {
+    const { user } = open()
+    await listed()
+
+    // The Draft pipeline slices for a Cool Plate, which the H2C profile refuses.
+    await user.click(screen.getByRole('radio', { name: DRAFT }))
+
+    expect(await screen.findByTestId('bed-type-warning')).toHaveTextContent(
+      'Cool Plate is not a plate the H2C takes',
+    )
+    expect(screen.getByLabelText('Plate type')).toHaveValue('Cool Plate')
+    await user.selectOptions(screen.getByLabelText('Plate type'), 'Textured PEI Plate')
+    expect(screen.queryByTestId('bed-type-warning')).not.toBeInTheDocument()
+  })
+
+  it('does not ask which plate of a one-plate output to print', async () => {
+    open()
+    await listed()
+    await screen.findByLabelText('Plate type')
+
+    expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
+  })
+
+  it('offers each plate of a multi-plate output, and all of them', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: true },
+        ]),
+      ),
+    )
+    const reads: string[] = []
+    const { runs } = watch()
+    server.events.on('request:start', ({ request }) => {
+      if (request.url.includes('/filaments')) reads.push(request.url)
+    })
+    const { user } = open()
+    await listed()
+
+    const plates = await screen.findByTestId('plate-choice')
+    expect(within(plates).getByRole('img', { name: 'Plate 2' })).toHaveAttribute(
+      'src',
+      expect.stringContaining(`/outputs/${output.id}/plates/2/thumbnail`),
+    )
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    // The slots are the chosen plate's.
+    await waitFor(() => expect(reads.at(-1)).toContain('plate_id=2'))
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+    server.events.removeAllListeners()
+
+    expect(runs[0]).toMatchObject({ plate_id: 2, all_plates: false })
+  })
+
+  it('queues every plate as its own item when asked for all of them', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const { runs } = watch()
+    const { user } = open()
+    await listed()
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+    await user.click(screen.getByTestId('run-pipeline'))
+    await screen.findByTestId('queued-items')
+    server.events.removeAllListeners()
+
+    expect(runs[0]).toMatchObject({ all_plates: true })
+  })
+})

@@ -1,0 +1,6 @@
+{
+  "name": "Travel Tic-Tac-Toe",
+  "description": "A tic-tac-toe board with nine recessed wells and inlaid grid lines, plus five pieces for each player: X and O, or star and heart. Print it as a flat board, or as a box that stores all ten pieces under a sliding lid whose top is the board. Four colours: board, grid, and one per player. Everything prints flat without supports.",
+  "tags": ["kids", "game", "travel", "tic-tac-toe", "multi-colour"],
+  "source": "inspired by Printables Tic-Tac-Toe Game Set (Easy To Print) (#996434, 5796 downloads) and Tic Tac Toe in a box (#68328, 3360 downloads)"
+}

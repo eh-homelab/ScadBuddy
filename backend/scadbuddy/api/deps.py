@@ -41,8 +41,12 @@ class AppState:
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
-    #: the pod's worst case is render_concurrency + check_concurrency.
+    #: the pod's worst case is render_concurrency + check_concurrency + lsp_sessions.
     checks: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
+    #: One permit per open editor's openscad-lsp process (``SCADBUDDY_LSP_SESSIONS``),
+    #: held for as long as the editor stays open rather than for one piece of work —
+    #: the third term in the pod's worst case above.
+    language_servers: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
 
 
@@ -65,6 +69,7 @@ def build_state(settings: Settings) -> AppState:
         ),
         queue=RenderQueue(config, paths, history=history),
         checks=asyncio.Semaphore(config.check_concurrency),
+        language_servers=asyncio.Semaphore(config.lsp_sessions),
     )
 
 

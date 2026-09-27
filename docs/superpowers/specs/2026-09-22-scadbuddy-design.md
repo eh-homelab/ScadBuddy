@@ -650,6 +650,10 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
   budget rather than silently borrowing the render one. A check parses and exports
   parameters without rendering geometry, so 1 is the default; raise it only alongside
   the limits above.
+- **On top of that, up to `SCADBUDDY_LSP_SESSIONS` (default 4) `openscad-lsp`
+  processes** (#95): one per open source editor, held for as long as the editor stays
+  open. Past the cap an editor is refused a language server and works without
+  completion and hover.
 - `clusters/prod/scadbuddy/`: HTTPRoute `scadbuddy.internal.nullreference.io`
   on the internal Envoy gateway, `OnePasswordItem` for the Bambuddy API key
   (item `scadbuddy-bambuddy-api-key`), env from it.

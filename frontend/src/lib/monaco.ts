@@ -12,6 +12,11 @@ import 'monaco-editor/editor/contrib/folding/browser/folding.js'
 import 'monaco-editor/editor/contrib/hover/browser/hoverContribution.js'
 import 'monaco-editor/editor/contrib/linesOperations/browser/linesOperations.js'
 import 'monaco-editor/editor/contrib/wordOperations/browser/wordOperations.js'
+// What the language server's answers are shown through (./languageClient).
+import 'monaco-editor/editor/contrib/format/browser/formatActions.js'
+import 'monaco-editor/editor/contrib/gotoSymbol/browser/goToCommands.js'
+import 'monaco-editor/editor/contrib/gotoSymbol/browser/link/goToDefinitionAtPosition.js'
+import 'monaco-editor/editor/contrib/suggest/browser/suggestController.js'
 
 import { registerOpenscad } from './openscadLanguage'
 

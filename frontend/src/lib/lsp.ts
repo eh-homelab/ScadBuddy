@@ -1,0 +1,163 @@
+/**
+ * The Language Server Protocol shapes openscad-lsp answers with, and their Monaco
+ * equivalents. Like `markers.ts`, this module pulls no editor in: Monaco's enums are
+ * spelled out as numbers, so the mapping is testable without a DOM.
+ */
+
+export interface LspPosition {
+  line: number
+  character: number
+}
+
+export interface LspRange {
+  start: LspPosition
+  end: LspPosition
+}
+
+interface MarkupContent {
+  kind: 'markdown' | 'plaintext'
+  value: string
+}
+
+type MarkedString = string | { language: string; value: string }
+
+export interface LspCompletionItem {
+  label: string
+  kind?: number
+  detail?: string
+  documentation?: string | MarkupContent
+  insertText?: string
+  insertTextFormat?: number
+  textEdit?: { newText: string; range: LspRange }
+  filterText?: string
+  sortText?: string
+}
+
+export interface LspHover {
+  contents: MarkupContent | MarkedString | MarkedString[]
+  range?: LspRange
+}
+
+interface LspLocation {
+  uri: string
+  range: LspRange
+}
+
+interface LspLocationLink {
+  targetUri: string
+  targetRange: LspRange
+  targetSelectionRange: LspRange
+}
+
+export interface LspTextEdit {
+  newText: string
+  range: LspRange
+}
+
+export interface MonacoRange {
+  startLineNumber: number
+  startColumn: number
+  endLineNumber: number
+  endColumn: number
+}
+
+/** `monaco.languages.CompletionItemKind` by LSP `CompletionItemKind`; the two differ. */
+const COMPLETION_KIND: Record<number, number> = {
+  1: 18, // Text
+  2: 0, // Method
+  3: 1, // Function
+  4: 2, // Constructor
+  5: 3, // Field
+  6: 4, // Variable
+  7: 5, // Class
+  8: 7, // Interface
+  9: 8, // Module
+  10: 9, // Property
+  11: 12, // Unit
+  12: 13, // Value
+  13: 15, // Enum
+  14: 17, // Keyword
+  15: 28, // Snippet
+  16: 19, // Color
+  17: 20, // File
+  18: 21, // Reference
+  19: 23, // Folder
+  20: 16, // EnumMember
+  21: 14, // Constant
+  22: 6, // Struct
+  23: 10, // Event
+  24: 11, // Operator
+  25: 24, // TypeParameter
+}
+const TEXT_KIND = 18
+/** LSP `InsertTextFormat.Snippet`, and `CompletionItemInsertTextRule.InsertAsSnippet`. */
+const SNIPPET_FORMAT = 2
+const INSERT_AS_SNIPPET = 4
+
+export function toRange(range: LspRange): MonacoRange {
+  return {
+    startLineNumber: range.start.line + 1,
+    startColumn: range.start.character + 1,
+    endLineNumber: range.end.line + 1,
+    endColumn: range.end.character + 1,
+  }
+}
+
+function toDocumentation(documentation: string | MarkupContent | undefined) {
+  return typeof documentation === 'object' ? { value: documentation.value } : documentation
+}
+
+/** `word` is where the item lands when the server names no range of its own. */
+export function toCompletion(item: LspCompletionItem, word: MonacoRange) {
+  return {
+    label: item.label,
+    kind: COMPLETION_KIND[item.kind ?? 1] ?? TEXT_KIND,
+    insertText: item.textEdit?.newText ?? item.insertText ?? item.label,
+    insertTextRules: item.insertTextFormat === SNIPPET_FORMAT ? INSERT_AS_SNIPPET : 0,
+    range: item.textEdit ? toRange(item.textEdit.range) : word,
+    documentation: toDocumentation(item.documentation),
+    detail: item.detail,
+    filterText: item.filterText,
+    sortText: item.sortText,
+  }
+}
+
+function toMarkdown(content: MarkedString | MarkupContent) {
+  if (typeof content === 'string') return { value: content }
+  if ('language' in content) return { value: `\`\`\`${content.language}\n${content.value}\n\`\`\`` }
+  return { value: content.value }
+}
+
+export function toHover(hover: LspHover | null) {
+  if (!hover) return undefined
+  const contents = Array.isArray(hover.contents) ? hover.contents : [hover.contents]
+  return {
+    contents: contents.map(toMarkdown),
+    range: hover.range ? toRange(hover.range) : undefined,
+  }
+}
+
+export function toLocations(result: LspLocation | (LspLocation | LspLocationLink)[] | null) {
+  if (!result) return []
+  return (Array.isArray(result) ? result : [result]).map((location) =>
+    'targetUri' in location
+      ? { uri: location.targetUri, range: toRange(location.targetSelectionRange) }
+      : { uri: location.uri, range: toRange(location.range) },
+  )
+}
+
+export function toEdits(edits: LspTextEdit[] | null) {
+  return (edits ?? []).map((edit) => ({ text: edit.newText, range: toRange(edit.range) }))
+}
+
+/** The workspace root the client names: the directory the model's URI is in. */
+export function directoryOf(uri: string): string {
+  return uri.slice(0, uri.lastIndexOf('/') + 1)
+}
+
+/** The socket is on the page's own origin — inside Bambuddy's iframe that is still ScadBuddy's. */
+export function socketUrl(path: string, page: string = window.location.href): string {
+  const url = new URL(path, page)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.toString()
+}

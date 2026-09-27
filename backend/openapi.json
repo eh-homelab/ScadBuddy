@@ -57,6 +57,25 @@
         "title": "BambuddyTargets",
         "type": "object"
       },
+      "BedTypeChoice": {
+        "description": "One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``\ncarries, ``label`` what Bambu Studio's own bed picker calls it.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "BedTypeChoice",
+        "type": "object"
+      },
       "Body_create_model_api_v1_models_post": {
         "properties": {
           "description": {
@@ -1699,6 +1718,13 @@
             ],
             "title": "Pipeline Run Id"
           },
+          "plates": {
+            "items": {
+              "$ref": "#/components/schemas/PlateSend"
+            },
+            "title": "Plates",
+            "type": "array"
+          },
           "print_route": {
             "anyOf": [
               {
@@ -1768,6 +1794,25 @@
           "has_thumbnail"
         ],
         "title": "OutputDetail",
+        "type": "object"
+      },
+      "OutputPlate": {
+        "description": "One plate of the output's 3MF (#83): the ``plate_id`` a print of it queues.",
+        "properties": {
+          "has_thumbnail": {
+            "title": "Has Thumbnail",
+            "type": "boolean"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "index",
+          "has_thumbnail"
+        ],
+        "title": "OutputPlate",
         "type": "object"
       },
       "Overshoot": {
@@ -2163,6 +2208,13 @@
             },
             "title": "Pipelines",
             "type": "array"
+          },
+          "printer_bed_types": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Printer Bed Types",
+            "type": "object"
           },
           "printers": {
             "items": {
@@ -2669,6 +2721,13 @@
             ],
             "title": "Bed Type"
           },
+          "bed_types": {
+            "items": {
+              "$ref": "#/components/schemas/BedTypeChoice"
+            },
+            "title": "Bed Types",
+            "type": "array"
+          },
           "description": {
             "anyOf": [
               {
@@ -2907,6 +2966,30 @@
           "overshoots"
         ],
         "title": "PlateFit",
+        "type": "object"
+      },
+      "PlateSend": {
+        "description": "One plate's queue item and the slice job that produced it (#83).",
+        "properties": {
+          "plate_id": {
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "queue_item_id": {
+            "title": "Queue Item Id",
+            "type": "integer"
+          },
+          "slice_job_id": {
+            "title": "Slice Job Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "plate_id",
+          "queue_item_id",
+          "slice_job_id"
+        ],
+        "title": "PlateSend",
         "type": "object"
       },
       "PlateView": {
@@ -3499,8 +3582,25 @@
         "type": "object"
       },
       "PrintRunRequest": {
-        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\nThe request does not choose its route; what it needs does. A pipeline run takes\nonly a source, ``copies`` and ``force``, so it is sliced and queued instead when\neither:\n\n- it carries a ``filament_plan``. A plan names one spool per plate slot, and those\n  queue-item fields exist on no other Bambuddy call (#87); or\n- a remembered print option applies that a run cannot carry (#124). The options\n  resolve global \u2192 per-printer \u2192 per-model \u2192 this request's ``options`` and\n  ``copies``.\n\nOtherwise it runs the pipeline exactly as before.",
+        "description": "``pipeline_id`` omitted means \"whatever this model defaults to\".\n\n``force`` is the caller's explicit override of a blocking eligibility issue; the UI\nonly offers it once the issues have been shown.\n\nThe request does not choose its route; what it needs does. A pipeline run takes\nonly a source, ``copies`` and ``force``, so it is sliced and queued instead when\neither:\n\n- it carries a ``filament_plan``. A plan names one spool per plate slot, and those\n  queue-item fields exist on no other Bambuddy call (#87); or\n- a remembered print option applies that a run cannot carry (#124). The options\n  resolve global \u2192 per-printer \u2192 per-model \u2192 this request's ``options`` and\n  ``copies``; or\n- it names a plate type, or any plate but the first (#83). A run slices plate 1\n  with the pipeline's own bed type.\n\nOtherwise it runs the pipeline exactly as before.",
         "properties": {
+          "all_plates": {
+            "default": false,
+            "title": "All Plates",
+            "type": "boolean"
+          },
+          "bed_type": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
           "copies": {
             "anyOf": [
               {
@@ -3736,6 +3836,50 @@
           "name"
         ],
         "title": "Printer",
+        "type": "object"
+      },
+      "PrinterBedType": {
+        "description": "The plate remembered on one printer (#83).",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "printer_id": {
+            "title": "Printer Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "printer_id"
+        ],
+        "title": "PrinterBedType",
+        "type": "object"
+      },
+      "PrinterBedTypePut": {
+        "description": "The plate to remember on the printer the path names (#83); ``null`` forgets it.",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          }
+        },
+        "title": "PrinterBedTypePut",
         "type": "object"
       },
       "ProjectAttach": {
@@ -6132,6 +6276,103 @@
         ]
       }
     },
+    "/api/v1/outputs/{output_id}/plates": {
+      "get": {
+        "description": "What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are\nalways one plate, which the picker does not ask about.",
+        "operationId": "get_output_plates_api_v1_outputs__output_id__plates_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OutputPlate"
+                  },
+                  "title": "Response Get Output Plates Api V1 Outputs  Output Id  Plates Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The 3MF's plates",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
+    "/api/v1/outputs/{output_id}/plates/{index}/thumbnail": {
+      "get": {
+        "description": "The plate's own cover from inside the 3MF, the one Bambu Studio would show.",
+        "operationId": "get_output_plate_thumbnail_api_v1_outputs__output_id__plates__index__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "output_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Output Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "image/png": {}
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A plate's cover image",
+        "tags": [
+          "outputs"
+        ]
+      }
+    },
     "/api/v1/outputs/{output_id}/send": {
       "post": {
         "description": "Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,\nslice and queue it.\n\nThe file is read from the PVC and pushed by the server, so the API key never\nreaches the browser. A re-send replaces the file Bambuddy already holds rather\nthan adding a second copy.",
@@ -7007,6 +7248,59 @@
           }
         },
         "summary": "Presets a new pipeline can be built from",
+        "tags": [
+          "print"
+        ]
+      }
+    },
+    "/api/v1/print/printers/{printer_id}/bed-type": {
+      "put": {
+        "description": "What the picker last printed on this printer with (#83), which it opens on next.\n\nScadBuddy's own memory, because Bambuddy's printer status reports no plate type.\nNeeds no Bambuddy, like the model's other remembered choices.",
+        "operationId": "put_printer_bed_type_api_v1_print_printers__printer_id__bed_type_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "printer_id",
+            "required": true,
+            "schema": {
+              "title": "Printer Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PrinterBedTypePut"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrinterBedType"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remember the plate on this printer",
         "tags": [
           "print"
         ]

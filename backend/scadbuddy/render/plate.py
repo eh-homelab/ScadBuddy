@@ -48,7 +48,12 @@ from typing import Literal
 
 import numpy as np
 
-from scadbuddy.render.plate_profiles import EXTRA_ALIASES, PLATE_PROFILES
+from scadbuddy.render.plate_profiles import (
+    BED_TYPE_LABELS,
+    BED_TYPES,
+    EXTRA_ALIASES,
+    PLATE_PROFILES,
+)
 
 #: Widest ``prime_tower_width`` across BBL process profiles, and the side of the
 #: square this module reserves for the tower.
@@ -206,6 +211,16 @@ def plate_for(model: str | None) -> PlateGeometry:
         return DEFAULT_PLATE
     key = _NOZZLE_SUFFIX.sub("", model.strip()).lower()
     return _BY_ALIAS.get(key, DEFAULT_PLATE)
+
+
+def bed_types_for(model: str | None) -> tuple[str, ...]:
+    """The bed types a printer takes (#83), named as :func:`plate_for` names it.
+
+    An unknown printer is offered every type rather than none: its profile is the
+    only thing that could rule one out.
+    """
+    known = plate_for(model).model
+    return BED_TYPES[known] if known is not None else tuple(BED_TYPE_LABELS)
 
 
 def nozzle_diameter_of(preset_name: str | None) -> str | None:
