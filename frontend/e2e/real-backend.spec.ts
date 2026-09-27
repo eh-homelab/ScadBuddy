@@ -191,7 +191,7 @@ test.describe('real backend', () => {
     // The first frame back is the answer to `initialize`: until then there is no
     // provider registered, and a keystroke would get Monaco's word list alone.
     const socket = page.waitForEvent('websocket')
-    await page.goto('/m/name-keychain/source')
+    await page.goto('/m/builtin:name-keychain/source')
     await (await socket).waitForEvent('framereceived')
 
     const lines = page.locator('.monaco-editor .view-lines').first()
