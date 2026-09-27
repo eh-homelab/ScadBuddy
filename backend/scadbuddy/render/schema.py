@@ -28,7 +28,8 @@ FILE_KINDS: tuple[str, ...] = ("svg", "png")
 #: never a path. Uploads are staged under names that match (#204), and a template's
 #: own sample files are offered only when theirs do. No leading dot, so a dotfile is
 #: never one.
-_BARE_FILENAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}")
+BARE_FILENAME_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$"
+_BARE_FILENAME = re.compile(BARE_FILENAME_PATTERN)
 
 
 def is_bare_filename(name: str) -> bool:

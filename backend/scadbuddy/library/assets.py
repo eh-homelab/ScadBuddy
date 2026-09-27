@@ -34,6 +34,7 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
+from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -56,7 +57,7 @@ MEDIA_TYPES: dict[AssetKind, str] = {"svg": "image/svg+xml", "png": "image/png"}
 
 #: Files in a model's directory that are never offered as samples: the catalogue's
 #: cover image is a PNG beside every model, not a picture for its parameters.
-NOT_SAMPLES = frozenset({"thumbnail.png"})
+NOT_SAMPLES = frozenset({THUMBNAIL_NAME})
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 SVG_NS = "http://www.w3.org/2000/svg"

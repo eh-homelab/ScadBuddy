@@ -12,6 +12,7 @@ from PIL import Image, PngImagePlugin
 from scadbuddy.library.assets import (
     MAX_ASSET_BYTES,
     MAX_PNG_SIDE,
+    NOT_SAMPLES,
     AssetNotFoundError,
     AssetRejectedError,
     AssetStore,
@@ -22,6 +23,7 @@ from scadbuddy.library.assets import (
     sniff,
     with_samples,
 )
+from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.schema import CustomizerSchema, Parameter
 
 HEART_SVG = b"""<?xml version="1.0" encoding="UTF-8"?>
@@ -362,3 +364,10 @@ def test_only_a_listed_sample_is_taken(store: AssetStore, model_dir: Path, value
     (model_dir / "sub" / "nested.svg").write_bytes(HEART_SVG)
     with pytest.raises(ValueError, match="overlay"):
         file_assets(_file_schema(accept=("svg",)), {"overlay": value}, store, model_dir)
+
+
+def test_the_catalogue_thumbnail_is_never_a_sample(model_dir: Path) -> None:
+    # Tied to the catalogue's own constant, so a renamed cover image stays excluded.
+    _ship(model_dir, THUMBNAIL_NAME, "sample-cat.svg")
+    assert THUMBNAIL_NAME in NOT_SAMPLES
+    assert sample_files(model_dir) == ["sample-cat.svg"]

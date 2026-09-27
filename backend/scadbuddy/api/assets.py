@@ -27,13 +27,14 @@ from scadbuddy.library.assets import (
 )
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.schema import BARE_FILENAME_PATTERN
 
 router = APIRouter(tags=["assets"])
 
 AssetIdPath = Annotated[str, Path(pattern=ASSET_ID_PATTERN)]
 #: A sample's bare file name, as `sample_files` lists it. The pattern is a first
 #: fence; membership in that list is what actually decides.
-SampleNamePath = Annotated[str, Path(pattern=r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$")]
+SampleNamePath = Annotated[str, Path(pattern=BARE_FILENAME_PATTERN)]
 
 #: Served back for the customizer's preview. The SVG is already sanitised; these
 #: make a browser that opens the URL directly treat it as an inert image anyway.
