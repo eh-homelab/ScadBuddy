@@ -48,10 +48,16 @@ function headline(progress: PrintProgress): string {
       progress.copies === 1 ? 'copy' : 'copies'
     } queued`
   }
-  // An all-plates print is one queue item per plate, each followed on its own (#200).
-  if (progress.copies > 1) return `${progress.copies} plates queued`
   // The slice-and-queue route has no run: the queue item is the whole print, and until
-  // the plate has sliced it does not exist yet.
+  // a plate has sliced it does not exist yet. An all-plates print is still slicing until
+  // one of its plates has an entry (#295).
+  const queued = (progress.copies_detail ?? []).some(
+    (copy) => copy.queue_entry_id !== null && copy.queue_entry_id !== undefined,
+  )
+  if (progress.copies > 1) {
+    // One queue item per plate, each followed on its own (#200).
+    return queued ? `${progress.copies} plates queued` : 'Slicing…'
+  }
   if (progress.queue_item_id === null || progress.queue_item_id === undefined) {
     return 'Slicing…'
   }

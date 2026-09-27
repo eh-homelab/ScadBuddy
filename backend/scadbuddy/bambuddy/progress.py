@@ -278,7 +278,7 @@ async def _queued_progress(
 
 
 #: How far along an unsettled plate is; a slicing plate already reads as ``running``.
-_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "pending": 1, "queued": 2, "running": 3}
+_UNSETTLED_RANK: dict[Stage, int] = {"unknown": 0, "queued": 1, "running": 2}
 
 
 def from_plates(
