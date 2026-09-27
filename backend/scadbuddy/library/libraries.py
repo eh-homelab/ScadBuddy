@@ -50,6 +50,7 @@ import re
 import shutil
 import signal
 import subprocess
+import time
 import uuid
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
@@ -59,6 +60,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from scadbuddy.core.config import DEFAULT_LIBRARY_MAX_BYTES
 from scadbuddy.core.paths import MODEL_META_NAME, DataPaths, is_builtin, model_path
 from scadbuddy.library.history import (
     GIT,
@@ -163,6 +165,10 @@ class LibraryError(RuntimeError):
 
 class LibraryFetchError(LibraryError):
     """git could not fetch it: an unknown ref, an unreachable URL, a timeout."""
+
+
+class LibraryTooLargeError(LibraryError):
+    """The clone is larger than the store allows (``SCADBUDDY_LIBRARY_MAX_BYTES``)."""
 
 
 class LibraryNotFoundError(KeyError):
@@ -466,6 +472,33 @@ def migrate_lockfile(
 # ── installing ────────────────────────────────────────────────────────────────
 
 
+# How often a running clone's staging directory is measured against the cap:
+# every SIZE_POLL_INTERVAL, or nine times as long as the last walk took so that
+# walking costs at most about a tenth of the clone's wall time, but never less
+# often than SIZE_POLL_MAX_INTERVAL. A clone can overshoot the cap by what it
+# transfers in one interval before it is killed.
+SIZE_POLL_INTERVAL = 0.2
+SIZE_POLL_MAX_INTERVAL = 2.0
+# How long to wait for a killed git to be reaped before giving up on it.
+KILL_WAIT = 5.0
+
+
+def _tree_size(root: Path) -> int:
+    """Bytes of every file under ``root``, ``.git`` included: what it takes on the
+    volume. Symlinks count as themselves, never what they point at. A file git
+    renames or removes mid-walk (a running clone's temporaries) counts as nothing."""
+    total = 0
+    for directory, _, files in os.walk(root):
+        for file in files:
+            with contextlib.suppress(FileNotFoundError):
+                total += (Path(directory) / file).lstat().st_size
+    return total
+
+
+def _size(n: int) -> str:
+    return f"{n / 1e6:.0f} MB" if n >= 1_000_000 else f"{n} bytes"
+
+
 def _same_repository(first: str, second: str) -> bool:
     """``https://host/o/r``, ``.../r.git`` and ``.../r/`` all name one repository,
     whatever the case of the scheme and host (the path's case is significant)."""
@@ -495,12 +528,14 @@ class LibraryStore:
         protocols: Sequence[str] = ("https",),
         git: str = GIT,
         timeout: float = CLONE_TIMEOUT,
+        max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES,
     ) -> None:
         self.paths = paths
         self.catalogue = {entry.name: entry for entry in catalogue}
         self.protocols = tuple(protocols)
         self.git = git
         self.timeout = timeout
+        self.max_bytes = max_bytes
 
     def sweep_staging(self) -> list[str]:
         """Remove the staging clones an install killed mid-clone left behind.
@@ -619,9 +654,16 @@ class LibraryStore:
                     "--",
                     url,
                     str(staging / name),
+                    watch=staging,
                 )
             except LibraryFetchError as error:
                 raise LibraryFetchError(f"could not clone {ref!r} from {url}: {error}") from error
+            except LibraryTooLargeError as error:
+                raise LibraryTooLargeError(f"{url} at {ref!r} {error}") from None
+            # The last poll can land before the clone's final writes.
+            size = _tree_size(staging)
+            if size > self.max_bytes:
+                raise LibraryTooLargeError(f"{url} at {ref!r} {self._over(size)}")
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
             destination = self.paths.libraries / name / commit
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -636,7 +678,9 @@ class LibraryStore:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-    def _git(self, *args: str) -> str:
+    def _git(self, *args: str, watch: Path | None = None) -> str:
+        """Run git; with ``watch``, also kill it once that directory grows past
+        ``max_bytes``, so an oversized clone is stopped rather than finished."""
         env = {**git_env(), "GIT_ALLOW_PROTOCOL": ":".join(self.protocols)}
         try:
             # A fixed argv with no shell; the URL and ref are validated above and
@@ -663,13 +707,30 @@ class LibraryStore:
             )
         except OSError as error:
             raise LibraryFetchError(f"could not run {self.git!r}: {error}") from error
-        try:
-            stdout, stderr = process.communicate(timeout=self.timeout)
-        except subprocess.TimeoutExpired as error:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.communicate()
-            raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
+        deadline = time.monotonic() + self.timeout
+        next_walk = time.monotonic() + SIZE_POLL_INTERVAL
+        while True:
+            now = time.monotonic()
+            wait = max(deadline - now, 0)
+            if watch is not None:
+                wait = min(wait, max(next_walk - now, 0))
+            try:
+                stdout, stderr = process.communicate(timeout=wait)
+                break
+            except subprocess.TimeoutExpired as error:
+                if time.monotonic() >= deadline:
+                    self._kill(process)
+                    raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
+                if watch is not None:
+                    started = time.monotonic()
+                    size = _tree_size(watch)
+                    if size > self.max_bytes:
+                        self._kill(process)
+                        raise LibraryTooLargeError(self._over(size)) from None
+                    walked = time.monotonic() - started
+                    next_walk = time.monotonic() + min(
+                        max(SIZE_POLL_INTERVAL, 9 * walked), SIZE_POLL_MAX_INTERVAL
+                    )
         completed = subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
         if completed.returncode != 0:
             # git's stderr stays in the log: it describes what the fetch reached,
@@ -679,3 +740,16 @@ class LibraryStore:
             )
             raise LibraryFetchError("no such ref, or the repository could not be reached")
         return completed.stdout.strip()
+
+    def _over(self, size: int) -> str:
+        return f"reached {_size(size)}, over the {_size(self.max_bytes)} a library may take"
+
+    @staticmethod
+    def _kill(process: subprocess.Popen[str]) -> None:
+        # The whole group: a clone's git-remote-https child goes too. A git that
+        # is not reaped in time (stuck in the kernel) is left behind rather than
+        # holding up the caller's error.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGKILL)
+        with contextlib.suppress(subprocess.TimeoutExpired):
+            process.communicate(timeout=KILL_WAIT)
