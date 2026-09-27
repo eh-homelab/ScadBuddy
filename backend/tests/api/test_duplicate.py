@@ -314,6 +314,20 @@ def test_a_git_failure_reading_the_base_fails_the_duplicate(
     assert _no_staging_left(paths)
 
 
+def test_an_unreadable_base_fails_the_duplicate(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`git log` failing without a timeout answers None, not an exception; that
+    must not read as "no history" and copy the working tree."""
+    monkeypatch.setattr(ModelHistory, "last_commit", lambda self, slug: None)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 500
+    assert "could not read the current revision" in response.json()["detail"]
+    assert not paths.model_dir("copy").exists()
+
+
 def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
     catalogue = Catalogue(paths)
     catalogue.create(

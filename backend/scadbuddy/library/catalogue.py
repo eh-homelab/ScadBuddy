@@ -284,11 +284,13 @@ class Catalogue:
         # Not `self.version`, which logs a git failure and answers None: here that
         # would record no base and copy the working tree instead of the revision.
         # A failure reading it fails the duplicate, as a failed export does.
-        base = (
-            self.history.last_commit(model_path(upstream_id))
-            if self.history is not None and self.history.available
-            else None
-        )
+        base: str | None = None
+        if self.history is not None and self.history.available:
+            base = self.history.last_commit(model_path(upstream_id))
+            if base is None:
+                # `last_commit` answers None for a failed `git log` as well as for
+                # no commit; either way there is no revision to copy or to record.
+                raise GitError(f"could not read the current revision of {upstream_id!r}")
         self.paths.cache.mkdir(parents=True, exist_ok=True)
         staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
         staged = staging / slug
