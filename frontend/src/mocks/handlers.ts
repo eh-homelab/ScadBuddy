@@ -95,6 +95,8 @@ const state = {
   libraries: structuredClone(fixtures.libraries) as CatalogueLibrary[],
   /** #204 — uploads for `file` parameters, keyed by their SHA-256 id. */
   assets: new Map<string, { meta: Asset; bytes: ArrayBuffer }>(),
+  /** #237 — other files a duplicate's merge takes or keeps; none unless a test sets them. */
+  mergeFiles: {} as Record<string, MergeFiles>,
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
@@ -126,6 +128,7 @@ export function resetMockState(): void {
   state.fontCatalogue = fixtures.fontCatalogue.map((f) => ({ ...f }))
   state.libraries = structuredClone(fixtures.libraries)
   state.assets.clear()
+  state.mergeFiles = {}
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
@@ -134,6 +137,17 @@ export function resetMockState(): void {
 /** Replaces a template's presets, so a test can start at a state that is slow to build. */
 export function setMockPresets(slug: string, presets: ParamPreset[]): void {
   state.presets[slug] = presets
+}
+
+type MergeFiles = Pick<MergePreview, 'taken' | 'kept'>
+
+/**
+ * #237 — the files besides `model.scad` that merging `slug`'s upstream takes (unchanged
+ * here since `base`) or keeps (changed on both sides). The mock tracks no other files,
+ * so without this both lists are empty.
+ */
+export function setMockMergeFiles(slug: string, files: MergeFiles): void {
+  state.mergeFiles[slug] = files
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
@@ -239,7 +253,8 @@ function planMerge(slug: string, model: ModelSummary): MergePreview {
   const theirs = state.sources[upstream.id] ?? ''
   // `diff_dirs` in `library/history.py`: headed by the upstream's slug, `_builtin/` aside.
   const patch = sourcePatch(upstream.id.replace(/^builtin:/, ''), baseSource, theirs)
-  const plan = { ours, base: baseSource, theirs, patch, taken: [], kept: [] }
+  const { taken = [], kept = [] } = state.mergeFiles[slug] ?? {}
+  const plan = { ours, base: baseSource, theirs, patch, taken, kept }
   if (ours === baseSource || ours === theirs) return { ...plan, merged: theirs, clean: true }
   if (theirs === baseSource) return { ...plan, merged: ours, clean: true }
   const merged =
@@ -864,7 +879,7 @@ export const handlers = [
         'Conflict',
         `the merge into '${slug}' has 1 conflict(s); resolve them and save with ` +
           `PUT /models/${slug}/source?merge_base=${revision}`,
-        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: [], kept: [] },
+        { merged: plan.merged, merge_base: revision, conflicts: 1, taken: plan.taken, kept: plan.kept },
       )
     }
     state.sources[slug] = plan.merged
