@@ -1,6 +1,6 @@
 # ScadBuddy — design
 
-**Status:** approved 2026-09-22 (Elan). **Repo:** `eh-homelab/ScadBuddy` (public, MIT).
+**Status:** approved 2026-09-22 (Elan). **Repo:** `eh-homelab/ScadBuddy` (public, Apache-2.0).
 **Owner of record:** [Hindsight initiative `kp-474d5fa02f3e48fdb7c3833356e385c3`](https://hindsight.internal.nullreference.io).
 
 ScadBuddy is a self-hosted OpenSCAD customizer that reproduces the MakerWorld
