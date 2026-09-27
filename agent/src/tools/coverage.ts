@@ -32,12 +32,6 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
  */
 export const PENDING_ROUTES: readonly { operation: string; pr: number; tool: string; reason: string }[] = [
   {
-    operation: 'GET /api/v1/outputs/{output_id}/geometry',
-    pr: 320,
-    tool: 'get_output_geometry',
-    reason: 'Geometry facts about an output (volume, overhangs, walls) for analyzers; route added by #320.',
-  },
-  {
     operation: 'GET /api/v1/models/{slug}/diagnostics',
     pr: 324,
     tool: 'get_render_diagnostics',

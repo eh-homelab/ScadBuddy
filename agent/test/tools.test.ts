@@ -196,6 +196,19 @@ describe('print_output (as it will run once approved, #258)', () => {
   })
 })
 
+describe('analyze_geometry', () => {
+  it('is a read tool returning the backend analysis', async () => {
+    const id = 'a'.repeat(32)
+    server.use(
+      http.get(`${BACKEND}/api/v1/outputs/${id}/geometry`, () => HttpResponse.json({ open_edges: 0, bbox_mm: { size: [1, 2, 3] } })),
+    )
+    const t = tool('analyze_geometry')
+    expect(t.risk).toBe('read')
+    const result = await runTool(t, { output_id: id }, ctx({ principal: { id: 'r', kind: 'bearer', tiers: ['read'] } }))
+    expect(firstText(result)).toEqual({ open_edges: 0, bbox_mm: { size: [1, 2, 3] } })
+  })
+})
+
 describe('invalid arguments', () => {
   it('come back as a tool error, not an exception', async () => {
     const result = await runTool(tool('get_model'), { slug: 'Not A Slug' }, ctx())

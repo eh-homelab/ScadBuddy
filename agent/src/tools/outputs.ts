@@ -123,6 +123,24 @@ export const outputTools: Tool[] = [
   }),
 
   defineTool({
+    name: 'analyze_geometry',
+    description:
+      "Printability measurements of an output's closed per-colour solids: open and non-manifold edges with " +
+      'their locations, bounding box, bed contact, height-to-base ratio, overhang area by angle, and ' +
+      'estimates of the thinnest wall and smallest feature (mm, Z up, model coordinates).',
+    input: z.object({ output_id: outputId }),
+    risk: 'read',
+    routes: ['GET /api/v1/outputs/{output_id}/geometry'],
+    handler: async ({ output_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/outputs/{output_id}/geometry', { params: { path: { output_id } } }),
+          `analyze geometry of ${output_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'list_plates',
     description: 'Every build plate ScadBuddy knows, by printer model.',
     input: z.object({}),
