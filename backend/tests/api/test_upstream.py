@@ -119,11 +119,18 @@ def test_a_built_in_update_merges_clean_into_an_edited_duplicate(
         "ours": ours,
         "base": SOURCE,
         "theirs": theirs,
+        "patch": status["preview"]["patch"],
         "merged": both,
         "clean": True,
         "taken": [],
         "kept": [],
     }
+    # The built-in's own change, headed by its slug, not its `_builtin/` mirror.
+    assert (
+        "--- a/name-keychain/model.scad\n+++ b/name-keychain/model.scad\n"
+        in (status["preview"]["patch"])
+    )
+    assert '-layout = "row";\n+layout = "column";\n' in status["preview"]["patch"]
     # From the one history walk the listing makes, and from a single record alike.
     assert _listed(client)["upstream_state"] == "update"
     assert _json(client.get(f"/api/v1/models/{MINE}"))["upstream_state"] == "update"

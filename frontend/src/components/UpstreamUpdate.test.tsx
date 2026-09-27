@@ -1,7 +1,9 @@
 import { render, screen, within } from '@testing-library/react'
+import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
+import { server } from '../mocks/server'
 import type { UpstreamState } from '../api/types'
 import { renderPage } from '../test/utils'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
@@ -64,6 +66,41 @@ describe('UpstreamUpdateButton (#160)', () => {
     expect((await api.getModel(COPY)).upstream_state).toBe('current')
     expect(await api.getSource(COPY)).toBe(theirs)
     expect((await api.listVersions(COPY))[0]?.message).toBe(`Merge ${UPSTREAM} into ${COPY}`)
+  })
+
+  it("shows the preview's patch, from where the upstream was at base (#236)", async () => {
+    // A seeded template linked to its built-in: base is the seed commit at `<slug>`,
+    // the built-in lives at `_builtin/<slug>`. The upstream's own version diff cannot
+    // see across that move, so the dialog shows the patch the preview carries.
+    await duplicateWithUpdate()
+    const status = await api.getUpstream(COPY)
+    const patch = [
+      `--- a/${UPSTREAM}/model.scad`,
+      `+++ b/${UPSTREAM}/model.scad`,
+      '@@ -1 +1 @@',
+      '-size = 10;',
+      '+size = 12;',
+      '',
+    ].join('\n')
+    const versionDiff = vi.fn()
+    server.use(
+      http.get('/api/v1/models/:slug/upstream', () =>
+        HttpResponse.json({ ...status, preview: { ...status.preview, patch } }),
+      ),
+      http.get('/api/v1/models/:slug/versions/:commit/diff', () => {
+        versionDiff()
+        return HttpResponse.json({ patch: 'new file mode 100644' })
+      }),
+    )
+    const { user } = await renderButton()
+
+    await user.click(screen.getByRole('button', { name: 'Update available' }))
+    const diff = await within(screen.getByRole('dialog')).findByTestId('diff')
+
+    expect(diff).toHaveTextContent('-size = 10;')
+    expect(diff).toHaveTextContent('+size = 12;')
+    expect(diff).not.toHaveTextContent('new file')
+    expect(versionDiff).not.toHaveBeenCalled()
   })
 
   it('says a conflicted merge will open in the editor, and opens it', async () => {
