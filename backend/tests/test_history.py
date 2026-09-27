@@ -293,6 +293,26 @@ def test_diff_defaults_to_the_parent_and_handles_the_root_commit(
     ] == ["A"]
 
 
+def test_a_diff_through_a_file_git_takes_for_text_but_is_not_utf8_still_renders(
+    models: Path, history: ModelHistory
+) -> None:
+    """A thumbnail with the PNG signature and no NUL is all `_require_png` asks of
+    one (#179), and git diffs it as text -- the 0x89 must not fail the whole patch,
+    in the versions diff or in an upstream preview's tree diff (#239)."""
+    write_model(models, "keychain", "cube(10);\n")
+    first = history.ensure_repo()
+    (models / "keychain" / "thumbnail.png").write_bytes(b"\x89PNG\r\n\x1a\nno nul here")
+    second = history.commit("Set keychain thumbnail", "keychain")
+    assert first is not None and second is not None
+
+    patch = history.diff(history.revision_range(None, second), "keychain")
+    tree_patch = history.diff_dirs(first, "keychain", second, "keychain", label="keychain")
+
+    for shown in (patch, tree_patch):
+        assert "thumbnail.png" in shown
+        assert "\ufffdPNG" in shown
+
+
 def test_a_default_diff_resolves_its_endpoints_once(
     models: Path, history: ModelHistory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -642,6 +662,23 @@ def test_a_template_of_mine_is_never_touched_by_the_sync(
     )
     records = {record.slug: record.origin for record in catalogue.list_models()}
     assert records == {"builtin:keychain": "builtin", "keychain": "mine"}
+
+
+def test_a_built_in_model_json_never_sets_origin_url(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Only a URL import sets `origin_url` (#179); a built-in keeps the rest of its file,
+    and its mirror stays byte-identical to the image."""
+    image = tmp_path / "image"
+    (image / "keychain").mkdir(parents=True)
+    (image / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    meta = {"name": "Keychain", "source": "inspired", "origin_url": "javascript:alert(1)"}
+    (image / "keychain" / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    assert catalogue.sync_builtins(image) is not None
+
+    record = catalogue.record("builtin:keychain")
+    assert (record.name, record.source, record.origin_url) == ("Keychain", "inspired", None)
+    # Dropped on read, not rewritten: a rewrite would make every boot re-sync it.
+    assert catalogue.sync_builtins(image) is None
 
 
 def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:

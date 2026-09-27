@@ -255,6 +255,14 @@ class ModelHistory:
         assert isinstance(completed.stdout, str)
         return completed.stdout
 
+    def _patch(self, *args: str) -> str:
+        """A ``git diff`` for display. Git prints a file it does not take for binary
+        byte for byte -- a PNG thumbnail with no NUL in it, which is all `_require_png`
+        checks for -- so undecodable bytes are replaced, not the whole diff refused."""
+        completed = self._run(*args, text=False)
+        assert isinstance(completed.stdout, bytes)
+        return completed.stdout.decode("utf-8", "replace")
+
     @contextmanager
     def _exclusive(self) -> Iterator[None]:
         """One writer at a time, across threads *and* processes.
@@ -564,7 +572,7 @@ class ModelHistory:
         args += [revisions.base, revisions.head]
         if slug is not None:
             args += ["--", slug]
-        return self._out(*args)
+        return self._patch(*args)
 
     def diff_dirs(
         self,
@@ -586,7 +594,7 @@ class ModelHistory:
         args += [self._tree(base, base_path), self._tree(head, head_path)]
         if exclude:
             args += ["--", ".", *(f":(exclude){name}" for name in exclude)]
-        return self._out(*args)
+        return self._patch(*args)
 
     def _tree(self, commit: str | None, path: str) -> str:
         if commit is None:

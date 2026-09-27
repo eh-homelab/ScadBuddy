@@ -162,6 +162,9 @@ export const models: ModelSummary[] = [
     tags: ['keychain', 'two-colour', 'text'],
     updated_at: '2026-09-21T18:04:00Z',
     has_thumbnail: true,
+    thumbnail_source: 'model',
+    thumbnail_output_id: null,
+    upstream: null,
     has_readme: true,
     origin: 'mine',
   },
@@ -182,6 +185,9 @@ export const models: ModelSummary[] = [
     tags: ['keychain', 'template'],
     updated_at: '2026-09-01T00:00:00Z',
     has_thumbnail: false,
+    thumbnail_source: null,
+    thumbnail_output_id: null,
+    upstream: null,
     has_readme: false,
     origin: 'builtin',
   },
@@ -878,6 +884,12 @@ export const OPENSCAD_LOG_TAIL = [
   'WARNING: Object may not be a valid 2-manifold and may need repair!',
   'Execution aborted',
 ]
+
+/** #179 — the README `name-keychain` has, since its fixture says `has_readme`. */
+export const keychainReadme = `# Name Keychain
+
+A name in raised letters on a base plate, with a keyring hole.
+`
 
 /** What `GET /models/{slug}/source` serves, and what the editor opens prefilled. */
 export const keychainSource = `/* [Text] */

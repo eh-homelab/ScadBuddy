@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import replace
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, File, Form, Header, Query, Request, Response, UploadFile, status
-from fastapi.responses import FileResponse
+from fastapi import (
+    APIRouter,
+    FastAPI,
+    File,
+    Form,
+    Header,
+    Query,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
@@ -23,14 +35,17 @@ from scadbuddy.api.deps import (
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import is_builtin
-from scadbuddy.core.problems import ApiError
+from scadbuddy.core.problems import ApiError, problem_response
 from scadbuddy.library.catalogue import (
     Catalogue,
+    InvalidModelMetaError,
     ModelExistsError,
     ModelMeta,
     ModelNotFoundError,
     ModelPatch,
     ModelRecord,
+    SidecarNotFoundError,
+    meta_from_raw,
 )
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
@@ -38,7 +53,7 @@ from scadbuddy.library.history import (
     GitError,
     GitUnavailableError,
 )
-from scadbuddy.library.libraries import model_search_path, read_lock
+from scadbuddy.library.libraries import Lock, model_search_path, read_lock, search_path
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -74,6 +89,38 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["models"])
 
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+#: The largest thumbnail a model takes (#179): every set is a commit in the models
+#: repository, which keeps each one forever, so the multipart cap (32 MiB) is far
+#: too loose a bound. 2 MiB is still generous: the bundled thumbnails are 30 KB at
+#: most, and a plate image this server renders is 512x512 -- at most 1 MiB even as
+#: raw RGBA, which PNG never is -- so this leaves room for a larger image of the
+#: user's own without letting one set grow the history by megabytes.
+MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
+
+
+def _mib(size: int) -> str:
+    """``size`` bytes in MiB, for a message: `2 MiB`, `1.5 MiB`."""
+    return f"{size / (1024 * 1024):g} MiB"
+
+
+#: The thumbnail limit as people read it, derived so no message can drift from it.
+MAX_THUMBNAIL_SIZE = _mib(MAX_THUMBNAIL_BYTES)
+
+#: The cap on a multipart create's `meta` part, the model's model.json. It is small
+#: metadata -- name, description, tags, libraries, attribution -- and the largest
+#: bundled one is about 1 KiB, so 64 KiB leaves room for a long description while
+#: refusing a part large enough to make decoding and parsing it cost real time.
+MAX_META_BYTES = 64 * 1024
+
+
+def _kib(size: int) -> str:
+    """``size`` bytes in KiB, for a message: `64 KiB`."""
+    return f"{size / 1024:g} KiB"
+
+
+#: The model.json limit as people read it, derived like the thumbnail's.
+MAX_META_SIZE = _kib(MAX_META_BYTES)
 
 #: What the multipart branch will read a body from. `text/*` at large is NOT accepted:
 #: the route documents `text/plain`, and silently treating `text/html` as OpenSCAD
@@ -111,20 +158,36 @@ def require_mine(slug: str) -> None:
         )
 
 
+#: What a hand-parsed client JSON can raise. `RecursionError` too: `json.loads`
+#: recurses per level of nesting, so `[` * 100000 is a stack overflow rather than
+#: a decode error -- a bare 500 unless it is caught like any other bad JSON.
+_BAD_JSON = (UnicodeDecodeError, ValueError, RecursionError)
+
+
+def _client_json(text: str | bytes, refusal: str) -> Any:
+    """JSON a client sent in a form field or part, or a 422 saying ``refusal``.
+
+    `ValueError` covers `json.JSONDecodeError`, which subclasses it.
+    """
+    try:
+        return json.loads(text)
+    except _BAD_JSON:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+
+
 def _parse_tags(raw: str | None) -> list[str] | None:
-    """Tags arrive as a JSON array or a comma-separated list, whichever the form sends."""
+    """Tags arrive as a JSON array or a comma-separated list, whichever the form sends.
+
+    None when the field is missing or blank, so it falls through to the model.json
+    (#179); an explicit `[]` is still an empty list.
+    """
     if raw is None:
         return None
     text = raw.strip()
     if not text:
-        return []
+        return None
     if text.startswith("["):
-        try:
-            decoded = json.loads(text)
-        except json.JSONDecodeError:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "tags is not valid JSON"
-            ) from None
+        decoded = _client_json(text, "tags is not valid JSON")
         if not isinstance(decoded, list):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "tags must be a list")
         return [str(tag) for tag in decoded]
@@ -156,6 +219,10 @@ class SourceUpdate(BaseModel):
         max_length=MAX_SUBJECT,
         description="What the revision is called in the history; a default when omitted",
     )
+
+
+class ReadmeUpdate(BaseModel):
+    content: str = Field(max_length=MAX_SOURCE_CHARS, description="The README, as Markdown text")
 
 
 class CheckRequest(BaseModel):
@@ -246,7 +313,8 @@ async def _guard_source(
     summary="Add a model",
     description=(
         "Three request bodies, one code path. `multipart/form-data` uploads a `.scad` "
-        "file (plus an optional thumbnail and README); `application/json` posts "
+        "file (plus an optional thumbnail, README and `model.json`, the layout of a "
+        "bundled model's directory); `application/json` posts "
         "`{name, source}` pasted straight in; `text/plain` posts the bare source and "
         "takes its name from the `X-Model-Name` header. All three derive the slug, "
         "parse-check the source and build the customizer schema identically."
@@ -267,8 +335,20 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     file: Annotated[UploadFile | None, File(description="The .scad source")] = None,
-    thumbnail: Annotated[UploadFile | None, File(description="Optional PNG")] = None,
+    thumbnail: Annotated[
+        UploadFile | None, File(description=f"Optional PNG, at most {MAX_THUMBNAIL_SIZE}")
+    ] = None,
     readme: Annotated[UploadFile | None, File(description="Optional README.md")] = None,
+    meta: Annotated[
+        UploadFile | None,
+        File(
+            description=(
+                f"Optional model.json, at most {MAX_META_SIZE}. A non-blank name, "
+                "description or tags form field wins over it; a missing or blank one "
+                "falls through to it"
+            )
+        ),
+    ] = None,
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
     tags: Annotated[str | None, Form(description="JSON array or comma-separated")] = None,
@@ -282,7 +362,7 @@ async def create_model(
     if content_type == "application/json":
         try:
             pasted = PastedSource.model_validate(await request.json())
-        except (json.JSONDecodeError, UnicodeDecodeError, ValidationError) as error:
+        except (*_BAD_JSON, ValidationError) as error:
             raise _malformed_body(error) from None
         return await _create(
             catalogue,
@@ -343,18 +423,23 @@ async def create_model(
 
     thumbnail_bytes: bytes | None = None
     if thumbnail is not None:
-        thumbnail_bytes = await thumbnail.read()
-        if not thumbnail_bytes.startswith(PNG_MAGIC):
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
+        thumbnail_bytes = _require_png(await thumbnail.read())
 
     readme_text: str | None = None
     if readme is not None:
-        try:
-            readme_text = decode_source(await readme.read())
-        except NotOpenSCADError:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
-            ) from None
+        readme_text = _readme_text(await readme.read())
+        # The cap `PUT /readme` holds it to, so what is created can be saved again.
+        _require_within_cap(readme_text, "the README")
+
+    # What a bundled model's `model.json` says, so a dropped `models/<slug>/`
+    # directory lands with the same metadata its bundled built-in has.
+    base = await _read_meta_part(meta, slug) if meta is not None else ModelMeta(name=slug)
+    # A model.json may declare libraries (#93); held to what PATCH holds it to. The
+    # lockfile is read once, here, and the parse check's path is built from it too.
+    lock = await asyncio.to_thread(read_lock, catalogue.paths) if base.libraries else None
+    if lock is not None:
+        base.libraries = _require_pinned(lock, base.libraries)
+    parsed_tags = _parse_tags(tags)
 
     return await _create(
         catalogue,
@@ -362,15 +447,119 @@ async def create_model(
         checks,
         slug=slug,
         source=source,
-        meta=ModelMeta(
-            name=name or slug,
-            description=description or "",
-            tags=_parse_tags(tags) or [],
+        # The model.json's `source` attribution carries over. Its `origin_url` never
+        # does: that is set only by `POST /models/import`, which fetched the URL over
+        # https itself, and the catalogue renders it as a link -- taken from an
+        # uploaded file it would be a stored `javascript:` link waiting for a click.
+        meta=base.model_copy(
+            update={
+                "name": _first_name(name, base.name, slug),
+                # Blank is absent, as for the name; a non-blank one is kept as given.
+                "description": description
+                if description is not None and description.strip()
+                else base.description,
+                "tags": parsed_tags if parsed_tags is not None else base.tags,
+                "origin_url": None,
+                # Nor `upstream` (#156): only `POST /models/{slug}/duplicate` records
+                # which template this one came from.
+                "upstream": None,
+            }
         ),
         force=force,
         thumbnail=thumbnail_bytes,
         readme=readme_text,
+        lock=lock,
     )
+
+
+def _first_name(*candidates: str | None) -> str:
+    """The first candidate that is not blank, stripped. The last one is the slug,
+    which never is, so a blank form field or model.json name can never name a model."""
+    for candidate in candidates:
+        if candidate is not None and candidate.strip():
+            return candidate.strip()
+    raise ValueError("every name candidate is blank")
+
+
+def _require_pinned(lock: Lock, libraries: list[str]) -> list[str]:
+    """Only a pinned library can be declared: the render has nothing to put on
+    OPENSCADPATH for any other (#93). The declaration, de-duplicated.
+
+    Shared by PATCH and a dropped model.json. A library whose lock entry is
+    broken is refused as it would fail every render (LockfileError, #216); one
+    with no entry at all needs adding first.
+    """
+    missing = [name for name in libraries if lock.pin(name) is None]
+    if missing:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"not added yet: {', '.join(missing)}; add them under Libraries first",
+            libraries=missing,
+        )
+    return list(dict.fromkeys(libraries))
+
+
+def _require_png(payload: bytes) -> bytes:
+    """A model thumbnail, on create and on PUT alike: a PNG, and no larger than
+    `MAX_THUMBNAIL_BYTES`. Checked before anything is written."""
+    if not payload.startswith(PNG_MAGIC):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the thumbnail is not a PNG")
+    if len(payload) > MAX_THUMBNAIL_BYTES:
+        # A 422 with the limit, as the source and README caps answer.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the thumbnail is too large: {len(payload)} bytes, "
+            f"and a thumbnail is at most {MAX_THUMBNAIL_BYTES} bytes ({MAX_THUMBNAIL_SIZE})",
+        )
+    return payload
+
+
+def _readme_text(payload: bytes) -> str:
+    try:
+        return decode_source(payload)
+    except NotOpenSCADError:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, "the README is not UTF-8 text"
+        ) from None
+
+
+async def _read_meta_part(meta: UploadFile, slug: str) -> ModelMeta:
+    """A ``model.json`` part, held to `MAX_META_BYTES` before any of it is decoded.
+
+    Reads at most one byte past the cap, so an oversized part is never pulled into
+    memory whole; the decode and parse then run off the event loop, as JSON of any
+    size is CPU work this handler must not stall every other request behind.
+    """
+    payload = await meta.read(MAX_META_BYTES + 1)
+    if len(payload) > MAX_META_BYTES:
+        size = meta.size if meta.size is not None else len(payload)
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"the model.json is too large: {size} bytes, "
+            f"and a model.json is at most {MAX_META_BYTES} bytes ({MAX_META_SIZE})",
+        )
+    return await asyncio.to_thread(_read_meta_file, payload, slug)
+
+
+def _read_meta_file(payload: bytes, slug: str) -> ModelMeta:
+    """A ``model.json`` part, read the way the catalogue reads one from disk."""
+    refusal = "the model.json is not valid JSON"
+    try:
+        text = payload.decode("utf-8")
+    except UnicodeDecodeError:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
+    raw = _client_json(text, refusal)
+    if not isinstance(raw, dict):
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, "the model.json is not an object")
+    # Read as the catalogue reads one on disk: a `null` for a defaulted field is
+    # the field left out, so the name falls through to the slug.
+    try:
+        return meta_from_raw(raw, slug)
+    except ValidationError as error:
+        raise _malformed_body(error) from None
+    except RecursionError:
+        # Nesting shallow enough to parse can still be too deep to validate.
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, refusal) from None
 
 
 def _require_within_cap(source: str, what: str) -> None:
@@ -400,11 +589,26 @@ async def _create(
     force: bool,
     thumbnail: bytes | None = None,
     readme: str | None = None,
+    lock: Lock | None = None,
 ) -> ModelRecord:
-    """The one path every create takes, whatever carried the source in."""
+    """The one path every create takes, whatever carried the source in.
+
+    ``lock`` is the lockfile a dropped model.json's ``libraries`` were checked
+    against, passed on so it is not read a second time.
+    """
     if catalogue.exists(slug):
         raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
-    checked = await _guard_source(source, config=config, force=force, limit=limit)
+    # The libraries a dropped model.json declares (#93) are on the parse check's
+    # OPENSCADPATH, as they will be on every render; none for any other create.
+    library_path: tuple[Path, ...] = ()
+    if meta.libraries:
+        if lock is None:
+            # A file read, so off the event loop like the search below.
+            lock = await asyncio.to_thread(read_lock, catalogue.paths)
+        library_path = await asyncio.to_thread(search_path, catalogue.paths, meta.libraries, lock)
+    checked = await _guard_source(
+        source, config=replace(config, library_path=library_path), force=force, limit=limit
+    )
     try:
         # `to_thread`, because a create is a `git add` + `git commit` against the
         # PVC and this handler is `async def` -- FastAPI only offloads plain `def`
@@ -418,7 +622,9 @@ async def _create(
     if checked is not None and checked.schema is not None:
         # The check already derived it; storing it here is what stops the first
         # customizer open paying for the same subprocess again.
-        store_cached_schema(catalogue.paths.model_schema_cache(slug), checked.schema)
+        store_cached_schema(
+            catalogue.paths.model_schema_cache(slug), checked.schema, library_path=library_path
+        )
     return record
 
 
@@ -517,19 +723,7 @@ def patch_model(
     require_mine(slug)
     require_model(catalogue, slug)
     if patch.libraries is not None:
-        # Only a pinned library can be declared: the render has nothing to put on
-        # OPENSCADPATH for any other (#93).
-        lock = read_lock(paths)
-        # A library whose lock entry is broken is refused as it would fail every
-        # render (LockfileError); one with no entry at all needs adding first.
-        missing = [name for name in patch.libraries if lock.pin(name) is None]
-        if missing:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"not added yet: {', '.join(missing)}; add them under Libraries first",
-                libraries=missing,
-            )
-        patch.libraries = list(dict.fromkeys(patch.libraries))
+        patch.libraries = _require_pinned(read_lock(paths), patch.libraries)
     try:
         return catalogue.update(slug, patch)
     except ModelNotFoundError:
@@ -741,15 +935,177 @@ async def get_schema(
         ) from None
 
 
+#: How a model thumbnail may be cached: kept, but revalidated on every use.
+#:
+#: Not `immutable`, although the catalogue's URL carries a `?v=` key (the model's
+#: version, the thumbnail's source and its covering output): that key is not proven
+#: to change with the bytes. `version` is None wherever git is not available, so
+#: there a replaced thumbnail keeps the key it had; and the model directory and the
+#: outputs are plain files on a volume anyone with access can change. A strong
+#: ETag over the bytes served costs one hash and saves the whole download instead,
+#: without ever serving a stale image.
+THUMBNAIL_CACHE_CONTROL = "no-cache"
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """RFC 9110 §13.1.2: `*`, or any listed tag, compared weakly."""
+    if if_none_match is None:
+        return False
+    candidates = [candidate.strip() for candidate in if_none_match.split(",")]
+    return "*" in candidates or etag in (c.removeprefix("W/") for c in candidates)
+
+
 @router.get(
     "/models/{slug}/thumbnail",
-    response_class=FileResponse,
-    responses={200: {"content": {"image/png": {}}}},
+    response_class=Response,
+    responses={
+        200: {"content": {"image/png": {}}},
+        304: {"description": "The copy named by `If-None-Match` is still current"},
+    },
     summary="Model thumbnail",
+    description=(
+        "The thumbnail set on the model or, when it has none, the plate image of its "
+        "first generated output. 404 when there is neither. Carries a strong `ETag` "
+        "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
+        "answered 304 with no body."
+    ),
 )
-def get_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> FileResponse:
-    require_model(catalogue, slug)
-    path = catalogue.thumbnail_path(slug)
-    if not path.is_file():
+def get_thumbnail(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
+    require_model_exists(catalogue, slug)
+    try:
+        png = catalogue.thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    if png is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
-    return FileResponse(path, media_type="image/png")
+    # Over the bytes themselves, so it changes exactly when the image does, from
+    # whichever source -- a set, a removal, or the fallback moving to another output.
+    etag = f'"{hashlib.sha256(png).hexdigest()}"'
+    headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(png, media_type="image/png", headers=headers)
+
+
+@router.put(
+    "/models/{slug}/thumbnail",
+    response_model=ModelRecord,
+    summary="Set a model's thumbnail",
+    description=(
+        "Sets or replaces the catalogue thumbnail with an uploaded PNG, as one revision "
+        "in the model's history."
+    ),
+)
+async def put_thumbnail(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    file: Annotated[
+        UploadFile, File(description=f"The thumbnail, a PNG of at most {MAX_THUMBNAIL_SIZE}")
+    ],
+) -> ModelRecord:
+    require_mine(slug)
+    require_model_exists(catalogue, slug)
+    png = _require_png(await file.read())
+    try:
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        return await asyncio.to_thread(catalogue.write_thumbnail, slug, png)
+    except ModelNotFoundError:
+        # A concurrent delete of the same slug got there first.
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+@router.delete(
+    "/models/{slug}/thumbnail",
+    response_model=ModelRecord,
+    summary="Remove a model's thumbnail",
+    description=(
+        "Removes the thumbnail set on the model, as one revision in its history. The "
+        "record that comes back can still have one: a generated model falls back to "
+        "its first output's plate image (`thumbnail_source` is then `output`)."
+    ),
+)
+def delete_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+    require_mine(slug)
+    require_model_exists(catalogue, slug)
+    try:
+        return catalogue.delete_thumbnail(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(
+            status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail of its own to remove"
+        ) from None
+
+
+@router.get(
+    "/models/{slug}/readme",
+    # `Response`, not `PlainTextResponse`: a response class with a media type of its
+    # own adds it to the documented 200 beside `text/markdown`, which is all this
+    # route ever answers.
+    response_class=Response,
+    responses={200: {"content": {"text/markdown": {"schema": {"type": "string"}}}}},
+    summary="Model README",
+)
+def get_readme(slug: SlugPath, catalogue: CatalogueDep) -> Response:
+    require_model_exists(catalogue, slug)
+    try:
+        text = catalogue.read_readme(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README") from None
+    return Response(text, media_type="text/markdown; charset=utf-8")
+
+
+@router.put(
+    "/models/{slug}/readme",
+    response_model=ModelRecord,
+    summary="Set a model's README",
+    description="Sets or replaces the README, as one revision in the model's history.",
+)
+async def put_readme(slug: SlugPath, body: ReadmeUpdate, catalogue: CatalogueDep) -> ModelRecord:
+    require_mine(slug)
+    require_model_exists(catalogue, slug)
+    if "\x00" in body.content:
+        # The same line `_guard_source` draws: the models repository holds text.
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the README contains a NUL byte, so it is binary, not text",
+        )
+    try:
+        return await asyncio.to_thread(catalogue.write_readme, slug, body.content)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+
+
+@router.delete(
+    "/models/{slug}/readme",
+    response_model=ModelRecord,
+    summary="Remove a model's README",
+    description="Removes the README, as one revision in the model's history.",
+)
+def delete_readme(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
+    require_mine(slug)
+    require_model_exists(catalogue, slug)
+    try:
+        return catalogue.delete_readme(slug)
+    except ModelNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except SidecarNotFoundError:
+        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no README to remove") from None
+
+
+def install_model_handlers(app: FastAPI) -> None:
+    """A model whose model.json on disk cannot be read is a 409 from every route that
+    reads it, as a hand-broken `libraries.lock` is: the model is in a state only an
+    edit of that file fixes, and naming the file beats the bare 500 it would be."""
+
+    @app.exception_handler(InvalidModelMetaError)
+    async def _bad_meta(request: Request, exc: InvalidModelMetaError) -> JSONResponse:
+        return problem_response(
+            request, status.HTTP_409_CONFLICT, str(exc), title="Invalid Model Metadata"
+        )
