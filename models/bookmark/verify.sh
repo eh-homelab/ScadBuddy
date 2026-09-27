@@ -80,6 +80,8 @@ CASES=(
     "missing-outline|base_color,border_color|shape=\"custom_mask\";mask_file=\"no-such-file.svg\";label=\"\";overlay_file=\"\""
     "missing-overlay|base_color,border_color,text_color,bead_color,bead_color_2|overlay_file=\"no-such-file.png\";overlay_type=\"image_threshold\""
     "refused-parent|base_color,border_color,text_color,bead_color,bead_color_2|mask_file=\"../model.scad\";overlay_file=\"/etc/hostname\""
+    "note-corner-outline|base_color,border_color|shape=\"corner\";mask_mode=\"outline\";mask_file=\"sample-cat.svg\";overlay_file=\"\";label=\"\""
+    "note-custom-mask-inlay|base_color,border_color|shape=\"custom_mask\";mask_mode=\"inlay\";mask_file=\"sample-cat.svg\";overlay_file=\"\";label=\"\""
     "dotdot-name-read|base_color,border_color|shape=\"custom_mask\";mask_file=\"cat..v2.svg\";label=\"\";overlay_file=\"\""
     "refused-subdir|base_color,border_color|shape=\"custom_mask\";mask_file=\"sub/x.svg\";overlay_file=\".hidden.svg\";label=\"\""
     "upload-names|base_color,border_color,overlay_color|shape=\"classic\";mask_file=\"_scadbuddy_solid_asset_0123456789abcdef.svg\";overlay_file=\"_scadbuddy_solid_asset_fedcba9876543210.png\";overlay_style=\"raised\";overlay_y=40;overlay_scale=40;label=\"\""
@@ -388,6 +390,13 @@ for line in open(os.path.join(OUT, "cases.txt")):
         for key in ("mask_file", "overlay_file"):
             if p[key]:
                 check(name, ('NOTE: %s "%s" ignored' % (key, p[key])) in log, "%s %r is refused with a NOTE" % (key, p[key]))
+
+    NOTES = {
+        "note-corner-outline": "NOTE: the page-corner shape keeps its triangle; mask_mode outline is ignored",
+        "note-custom-mask-inlay": "NOTE: shape custom_mask uses the mask file as the outline; mask_mode is ignored",
+    }
+    if name in NOTES:
+        check(name, NOTES[name] in log, "the ignored mask_mode is reported: %s" % NOTES[name])
 
     if name == "dotdot-name-read":
         check(name, ('NOTE: mask_file "%s" ignored' % p["mask_file"]) not in log and "Can't open" not in log,

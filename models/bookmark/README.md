@@ -268,7 +268,7 @@ tie bars; ScadBuddy renders once more per colour for the closed parts.
 ## Verifying
 
 ```bash
-./verify.sh                      # 31 cases, about 80 s
+./verify.sh                      # 33 cases, about 80 s
 ONLY='corner|missing' ./verify.sh    # a subset by name regex
 ```
 
@@ -299,7 +299,7 @@ files, refused names (`../model.scad`, `/etc/hostname`, `sub/x.svg`,
   the classic `width` x `length`); refused names are never opened and are
   logged with a NOTE.
 
-Last run: `OK: all cases passed` (31 cases, 363 checks).
+Last run: `OK: all cases passed` (33 cases, 390 checks).
 
 ## Upload widget (#204)
 
