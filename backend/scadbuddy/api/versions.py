@@ -13,8 +13,16 @@ from typing import Annotated
 from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import CatalogueDep, CommitPath, ConfigDep, HistoryDep, PathsDep, SlugPath
-from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.api.deps import (
+    CatalogueDep,
+    CommitPath,
+    ConfigDep,
+    EventsDep,
+    HistoryDep,
+    PathsDep,
+    SlugPath,
+)
+from scadbuddy.api.models import announce_source_change, require_mine, require_model_exists
 from scadbuddy.core.paths import SOURCE_NAME, model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import with_samples
@@ -246,6 +254,7 @@ def restore_version(
     catalogue: CatalogueDep,
     history: HistoryDep,
     paths: PathsDep,
+    events: EventsDep,
 ) -> ModelVersion:
     require_mine(slug)
     require_model_exists(catalogue, slug)
@@ -261,6 +270,7 @@ def restore_version(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
+    announce_source_change(events, slug)
     # The model's own latest revision: when nothing differed the restore made no
     # commit, and the repository HEAD may belong to another model.
     revisions = history.log(slug, limit=1)

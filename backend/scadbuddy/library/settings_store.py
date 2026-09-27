@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.models import PresetRef, SlotChoice
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import Settings
 
 SETTINGS_NAME = "settings.json"
@@ -132,9 +133,11 @@ class SettingsStore:
     follows the environment, so a variable added to a deployment later is honoured.
     """
 
-    def __init__(self, path: Path, defaults: Settings) -> None:
+    def __init__(self, path: Path, defaults: Settings, *, events: EventBus | None = None) -> None:
         self.path = path
         self.defaults = defaults
+        #: Told of every write, as ``settings.changed`` with the section it touched.
+        self.events = events
 
     def _from_env(self) -> StoredSettings:
         return StoredSettings(
@@ -174,7 +177,7 @@ class SettingsStore:
             else:
                 cleared.discard(name)
         current.update(changes, cleared=sorted(cleared))
-        return self._write(StoredSettings.model_validate(current))
+        return self._write(StoredSettings.model_validate(current), "connection")
 
     def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
         """Point one model at a pipeline, or clear it back to the global fallback.
@@ -188,7 +191,9 @@ class SettingsStore:
             pipelines.pop(slug, None)
         else:
             pipelines[slug] = pipeline_id
-        return self._write(settings.model_copy(update={"model_pipelines": pipelines}))
+        return self._write(
+            settings.model_copy(update={"model_pipelines": pipelines}), "model_pipeline"
+        )
 
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
@@ -198,7 +203,9 @@ class SettingsStore:
             remembered.pop(slug, None)
         else:
             remembered[slug] = choices
-        return self._write(settings.model_copy(update={"model_print_choices": remembered}))
+        return self._write(
+            settings.model_copy(update={"model_print_choices": remembered}), "model_choices"
+        )
 
     def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
         """Remember the plate on one printer; ``None`` forgets it."""
@@ -208,18 +215,23 @@ class SettingsStore:
             remembered.pop(str(printer_id), None)
         else:
             remembered[str(printer_id)] = bed_type
-        return self._write(settings.model_copy(update={"printer_bed_types": remembered}))
+        return self._write(
+            settings.model_copy(update={"printer_bed_types": remembered}), "printer_bed_type"
+        )
 
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
-        return self._write(self.load().model_copy(update={"last_project_id": project_id}))
+        return self._write(
+            self.load().model_copy(update={"last_project_id": project_id}), "last_project"
+        )
 
-    def _write(self, settings: StoredSettings) -> StoredSettings:
+    def _write(self, settings: StoredSettings, section: SettingsSection) -> StoredSettings:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.path.write_text(
             json.dumps(settings.model_dump(mode="json"), indent=2) + "\n", encoding="utf-8"
         )
         self.path.chmod(KEY_FILE_MODE)
+        emit(self.events, SettingsChanged(section=section))
         return settings
 
     def save_print_options(
@@ -236,7 +248,9 @@ class SettingsStore:
         """
         settings = self.load()
         if scope == "global":
-            return self._write(settings.model_copy(update={"print_options": options}))
+            return self._write(
+                settings.model_copy(update={"print_options": options}), "print_options"
+            )
         if not key:  # pragma: no cover - the route validates this first
             raise ValueError(f"the {scope!r} scope needs a key")
         field = "printer_print_options" if scope == "printer" else "model_print_options"
@@ -245,4 +259,4 @@ class SettingsStore:
             mapping.pop(key, None)
         else:
             mapping[key] = options
-        return self._write(settings.model_copy(update={field: mapping}))
+        return self._write(settings.model_copy(update={field: mapping}), "print_options")

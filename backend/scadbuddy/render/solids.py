@@ -24,6 +24,10 @@ WRAPPER_PREFIX = "_scadbuddy_solid_"
 #: wrapper's prefix so the same three places skip it -- the source hash, the
 #: .gitignore and a duplicate's copy -- without a second constant to keep in step.
 STAGED_ASSET_PREFIX = f"{WRAPPER_PREFIX}asset_"
+#: How a warning ends when a colour fell back to its open split mesh. The geometry
+#: analysis (`render/geometry.py`) reads it back to know which parts are not closed
+#: solids, so an open edge there is not reported as a defect of the model.
+SPLIT_FALLBACK = "used the split mesh"
 
 # A user-defined `color` module shadows the builtin, so a wrapper that keeps only the
 # children whose innermost color() matches a target renders that colour on its own --
@@ -92,10 +96,10 @@ async def render_solids(
                 )
                 parts = split_by_material(out_path)
             except OpenSCADError as error:
-                result.warnings.append(f"{colour}: no closed solid ({error}); used the split mesh")
+                result.warnings.append(f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}")
                 continue
             if not parts:
-                result.warnings.append(f"{colour}: the solid render was empty; used the split mesh")
+                result.warnings.append(f"{colour}: the solid render was empty; {SPLIT_FALLBACK}")
                 continue
             meshes = [part.mesh for part in parts]
             result.meshes[colour] = (

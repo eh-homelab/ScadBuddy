@@ -22,6 +22,7 @@ import type {
   OutputPlate,
   ParamPreset,
   ParamPresetCreate,
+  ParamPresetDuplicate,
   ParamPresetUpdate,
   PastedSource,
   ParamValue,
@@ -211,6 +212,13 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
+  /** Copies any preset, shipped or saved, to a new saved one with the same values. */
+  duplicatePreset: (slug: string, id: string, body: ParamPresetDuplicate) =>
+    request<ParamPreset>(`/models/${seg(slug)}/presets/${seg(id)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
   deletePreset: (slug: string, id: string) =>
     request<void>(`/models/${seg(slug)}/presets/${seg(id)}`, { method: 'DELETE' }),
 
@@ -352,11 +360,25 @@ export const api = {
       method: 'POST',
     }),
 
-  /** `version` renders an old revision without restoring it ("Customize this version"). */
-  render: (slug: string, params: Record<string, ParamValue>, version?: string) =>
+  /**
+   * `version` renders an old revision without restoring it ("Customize this version").
+   * `supersedes` names the job this render replaces: the server drops it if no worker
+   * has started it yet. Refused (503 + `Retry-After`) only when the server sets
+   * SCADBUDDY_RENDER_QUEUE_MAX and that many renders already wait.
+   */
+  render: (
+    slug: string,
+    params: Record<string, ParamValue>,
+    version?: string,
+    supersedes?: string,
+  ) =>
     request<RenderAccepted>(`/models/${seg(slug)}/render`, {
       method: 'POST',
-      body: JSON.stringify({ params, version: version ?? null }),
+      body: JSON.stringify({
+        params,
+        version: version ?? null,
+        ...(supersedes ? { supersedes } : {}),
+      }),
     }),
 
   getJob: (jobId: string) => request<Job>(`/jobs/${seg(jobId)}`),
