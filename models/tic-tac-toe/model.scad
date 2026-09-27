@@ -37,7 +37,7 @@ piece_style = "classic_xo"; // [classic_xo:X and O, animals:Star and heart]
 // Piece thickness in mm
 piece_thickness = 5; // [3:0.5:8]
 
-// Fit clearance per side, for the pieces in the wells and the lid in its grooves
+// Fit clearance in mm per side, for the pieces in the wells and the lid in its grooves
 clearance = 0.4; // [0.2:0.05:0.8]
 
 /* [Colors] */
@@ -206,7 +206,11 @@ module lid_body() { along_y(-lid_l / 2, lid_l) lid_profile(); }
 // ---------------------------------------------------------------- plate
 
 board_ymin = -S / 2;
-lid_x = S + part_gap - (S - lid_w - 2 * flange) / 2;
+// The box and lid side by side must fit the H2C's 300 mm (both nozzles): at
+// size 150 that takes the gap between them down to about 6 mm.
+bed_w = 300;
+lid_gap = max(3, min(part_gap, bed_w - (S + lid_w + 2 * flange)));
+lid_x = S + lid_gap - (S - lid_w - 2 * flange) / 2;
 
 if (is_box) {
     color(board_color) box();
@@ -232,5 +236,5 @@ for (i = [0:4]) {
 }
 
 plate_w = max(is_box ? lid_x + lid_w / 2 + flange + S / 2 : S, 5 * pitch - piece_gap);
-if (plate_w > 250)
-    echo(str("NOTE: the plate is ", round(plate_w), " mm wide; print the pieces or the lid on a second plate for a 256 mm bed"));
+if (plate_w > bed_w)
+    echo(str("NOTE: the plate is ", round(plate_w), " mm wide, more than the ", bed_w, " mm bed; print the lid on a second plate"));
