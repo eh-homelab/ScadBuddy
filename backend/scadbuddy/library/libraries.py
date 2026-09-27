@@ -59,7 +59,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from scadbuddy.core.paths import MODEL_META_NAME, DataPaths, model_path
+from scadbuddy.core.paths import MODEL_META_NAME, DataPaths, is_builtin, model_path
 from scadbuddy.library.history import (
     GIT,
     GitError,
@@ -400,11 +400,29 @@ def pin_restored_declaration(
     return []
 
 
+def _needs_lock(paths: DataPaths, slug: str, lock: Lock) -> bool:
+    """Does ``slug`` declare by name a library ``lock`` pins?"""
+    try:
+        meta: Any = json.loads(paths.model_meta(slug).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    libraries = meta.get("libraries") if isinstance(meta, dict) else None
+    return isinstance(libraries, list) and any(
+        isinstance(entry, str) and entry in lock.pins for entry in libraries
+    )
+
+
 def migrate_lockfile(
     paths: DataPaths, history: ModelHistory | None, slugs: Sequence[str]
 ) -> list[str]:
     """Move the pins of a legacy ``libraries.lock`` into the models that declare
     them, and remove it, as one revision. Returns the slugs rewritten.
+
+    Only a user's own models: a built-in's ``model.json`` is the image's, mirrored
+    by the boot sync and written by nothing else, which would put a rewrite back on
+    the next boot. A built-in still declaring by name reads the lockfile at render
+    time instead (:func:`model_search_path`), so the lockfile stays while one needs
+    it; it goes once the image pins its own libraries.
 
     A lockfile that cannot be read at all is left where it is, so nothing is lost;
     each model still declaring by name reads it until someone pins its libraries
@@ -417,13 +435,18 @@ def migrate_lockfile(
     if lock.unreadable is not None:
         logger.warning("legacy library lockfile not migrated", extra={"reason": lock.unreadable})
         return []
+    mine = [slug for slug in slugs if not is_builtin(slug)]
+    kept_for = [slug for slug in slugs if is_builtin(slug) and _needs_lock(paths, slug, lock)]
     changed: list[str] = []
 
     def migrate() -> None:
-        for slug in slugs:
+        for slug in mine:
             if _rewrite_meta(paths.model_meta(slug), lock):
                 changed.append(slug)
-        (paths.models / LOCKFILE_NAME).unlink(missing_ok=True)
+        if kept_for:
+            logger.info("legacy library lockfile kept for built-ins", extra={"slugs": kept_for})
+        else:
+            (paths.models / LOCKFILE_NAME).unlink(missing_ok=True)
 
     message = "Move library pins from libraries.lock into each model"
     if history is None or not history.available:
@@ -431,7 +454,7 @@ def migrate_lockfile(
         return changed
     try:
         history.commit(
-            message, LOCKFILE_NAME, *(model_path(slug) for slug in slugs), prepare=migrate
+            message, LOCKFILE_NAME, *(model_path(slug) for slug in mine), prepare=migrate
         )
     except (GitError, OSError):
         # As `Catalogue._commit`: the files are what renders read; a lost revision

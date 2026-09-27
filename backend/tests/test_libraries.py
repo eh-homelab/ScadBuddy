@@ -34,6 +34,7 @@ from scadbuddy.library.libraries import (
     declared_libraries,
     lock_at,
     migrate_lockfile,
+    model_search_path,
     pin_restored_declaration,
     read_lock,
     search_path,
@@ -798,3 +799,52 @@ def test_lock_at_reads_the_lock_as_it_was_at_a_revision(
 
     assert lock_at(history, before_any) == Lock()
     assert lock_at(history, legacy).pins["BOSL2"] == LibraryPin.model_validate(pin)
+
+
+def _builtin(paths: DataPaths, slug: str, libraries: list[Any]) -> str:
+    """A built-in's mirror, as the boot sync writes it from the image."""
+    builtin = f"builtin:{slug}"
+    paths.model_dir(builtin).mkdir(parents=True)
+    paths.model_source(builtin).write_text(SOURCE, encoding="utf-8")
+    meta = {"name": slug.title(), "libraries": libraries}
+    paths.model_meta(builtin).write_text(json.dumps(meta), encoding="utf-8")
+    return builtin
+
+
+def test_the_migration_never_writes_a_built_in_and_keeps_the_lock_it_needs(
+    store: LibraryStore,
+    catalogue: Catalogue,
+    history: ModelHistory,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """A built-in's model.json is the image's: the boot sync would put a rewrite
+    back, with the lockfile gone. So it is left as mirrored, and the lockfile stays
+    for its renders to read."""
+    _, commits = upstream
+    pin = _pin(store)
+    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
+    builtin = _builtin(paths, "kit", ["BOSL2"])
+    mirrored = paths.model_meta(builtin).read_text(encoding="utf-8")
+
+    migrated = migrate_lockfile(paths, history, ["widget", builtin])
+
+    assert migrated == ["widget"]
+    assert paths.model_meta(builtin).read_text(encoding="utf-8") == mirrored
+    assert (paths.models / LOCKFILE_NAME).is_file()
+    assert model_search_path(paths, builtin) == (paths.libraries / "BOSL2" / commits["v1"],)
+    # Its own model is migrated all the same, and a second boot changes nothing.
+    assert declared_libraries(paths.model_dir("widget")) == [ModelLibrary(name="BOSL2", **pin)]
+    assert migrate_lockfile(paths, history, ["widget", builtin]) == []
+
+
+def test_the_lock_goes_once_no_built_in_declares_by_name(
+    store: LibraryStore, catalogue: Catalogue, history: ModelHistory, paths: DataPaths
+) -> None:
+    pin = _pin(store)
+    _write_legacy(catalogue, history, paths, {"BOSL2": pin}, widget=["BOSL2"])
+    builtin = _builtin(paths, "kit", [{"name": "BOSL2", **pin}])
+
+    migrate_lockfile(paths, history, ["widget", builtin])
+
+    assert not (paths.models / LOCKFILE_NAME).exists()
