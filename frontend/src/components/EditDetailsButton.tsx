@@ -28,6 +28,19 @@ function parseTags(text: string): string[] {
     .filter(Boolean)
 }
 
+/**
+ * What a save does to the README. Blank or whitespace-only text is never written
+ * as a file: it removes the README a model has, and is nothing on one without.
+ */
+function readmeChange(
+  text: string,
+  saved: string,
+  hasReadme: boolean,
+): 'set' | 'remove' | 'none' {
+  if (text.trim() === '') return hasReadme ? 'remove' : 'none'
+  return text !== saved ? 'set' : 'none'
+}
+
 const sameTags = (a: string[], b: string[]) =>
   a.length === b.length && a.every((tag, index) => tag === b[index])
 
@@ -130,13 +143,15 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
         setRemoveThumbnail(false)
       }
 
-      // An emptied README is removed rather than saved as an empty file.
-      const wantsReadme = readme.trim() !== ''
-      if (wantsReadme && readme !== current.readme) {
+      // A README that is blank or only whitespace is never saved as a file: on a
+      // model that has one it is the removal the form says it is (`readmeChange`),
+      // and on one that has none there is nothing to do.
+      const change = readmeChange(readme, current.readme, record.has_readme)
+      if (change === 'set') {
         record = await api.setReadme(slug, readme)
         current = { model: record, readme }
         setBaseline(current)
-      } else if (!wantsReadme && record.has_readme) {
+      } else if (change === 'remove') {
         record = await api.removeReadme(slug)
         current = { model: record, readme: '' }
         setBaseline(current)
@@ -154,6 +169,10 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
 
   const model = baseline?.model
   const ownThumbnail = model?.thumbnail_source === 'model' && !removeThumbnail
+  const readmeBlank = readme.trim() === ''
+  const pendingReadme = baseline
+    ? readmeChange(readme, baseline.readme, baseline.model.has_readme)
+    : 'none'
   const nameMissing = name.trim() === ''
 
   return (
@@ -273,6 +292,21 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 onChange={(e) => setReadme(e.target.value)}
               />
             </label>
+            {pendingReadme === 'remove' && (
+              <p role="status" data-testid="readme-state" className="text-[12px] text-warn">
+                Saving will remove the README.
+              </p>
+            )}
+            {readmeBlank && readme !== '' && !model.has_readme && (
+              <p role="status" data-testid="readme-state" className="text-[12px] text-faint">
+                Only whitespace, so no README is saved.
+              </p>
+            )}
+            {model.has_readme && !readmeBlank && (
+              <Button size="sm" variant="ghost" className="w-fit" onClick={() => setReadme('')}>
+                Remove README
+              </Button>
+            )}
             <label className="inline-flex w-fit cursor-pointer items-center rounded-[6px] border border-line bg-surface-2 px-2.5 py-1 text-[13px] hover:border-line-strong">
               Load README from file
               <input

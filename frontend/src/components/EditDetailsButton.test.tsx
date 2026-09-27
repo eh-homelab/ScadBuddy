@@ -106,6 +106,68 @@ describe('EditDetailsButton', () => {
     expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ has_readme: false })
   })
 
+  it('says a whitespace-only README removes it, then removes it on save', async () => {
+    const removeReadme = vi.spyOn(api, 'removeReadme')
+    const setReadme = vi.spyOn(api, 'setReadme')
+    const { dialog, user, onSaved } = await open()
+    expect(within(dialog).queryByTestId('readme-state')).not.toBeInTheDocument()
+
+    await user.clear(within(dialog).getByLabelText('README'))
+    await user.type(within(dialog).getByLabelText('README'), '   ')
+
+    // Visible before anything is sent, the way a removed thumbnail is.
+    expect(within(dialog).getByTestId('readme-state')).toHaveTextContent(
+      'Saving will remove the README',
+    )
+    expect(removeReadme).not.toHaveBeenCalled()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(removeReadme).toHaveBeenCalledExactlyOnceWith('name-keychain')
+    expect(setReadme).not.toHaveBeenCalled()
+    expect(onSaved.mock.calls[0]?.[0]).toMatchObject({ has_readme: false })
+  })
+
+  it('offers Remove README, which empties it and says so', async () => {
+    const { dialog, user } = await open()
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove README' }))
+
+    expect(within(dialog).getByLabelText('README')).toHaveValue('')
+    expect(within(dialog).getByTestId('readme-state')).toHaveTextContent(
+      'Saving will remove the README',
+    )
+  })
+
+  it('makes no call for a whitespace-only README on a model without one', async () => {
+    const sent = recordWrites()
+    const { dialog, user, onSaved } = await open('gridfinity-bin')
+    expect(within(dialog).queryByRole('button', { name: 'Remove README' })).not.toBeInTheDocument()
+
+    await user.type(within(dialog).getByLabelText('README'), '  \n ')
+    expect(within(dialog).getByTestId('readme-state')).toHaveTextContent('no README is saved')
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(sent).toEqual([])
+    expect(within(dialog).queryByRole('alert')).not.toBeInTheDocument()
+  })
+
+  it('saves an edited README exactly as typed', async () => {
+    const setReadme = vi.spyOn(api, 'setReadme')
+    const removeReadme = vi.spyOn(api, 'removeReadme')
+    const { dialog, user, onSaved } = await open('gridfinity-bin')
+
+    await user.type(within(dialog).getByLabelText('README'), '  # Bin\n\nIndented.  ')
+    expect(within(dialog).queryByTestId('readme-state')).not.toBeInTheDocument()
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())
+    expect(setReadme).toHaveBeenCalledExactlyOnceWith('gridfinity-bin', '  # Bin\n\nIndented.  ')
+    expect(removeReadme).not.toHaveBeenCalled()
+  })
+
   it('sets a new thumbnail from a chosen PNG', async () => {
     // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
     const setThumbnail = vi
