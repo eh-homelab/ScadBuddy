@@ -107,6 +107,10 @@ dependency of `agent/`.
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
+| Which keys `filament_overrides` accepts on `PrintQueueItemCreate` (can it carry nozzle temperature and fan?) | §11 | #284 |
+| Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
+| Whether a 3MF that claims `Application: BambuStudio-…` has its `project_settings.config` override the pipeline's process preset (main spec §3 measured the preset winning before the claim was made) | §11 | #284 |
+| Which process preset each "level of detail" choice maps to | §11 | #284 |
 
 ## 4. Architecture
 
@@ -381,12 +385,34 @@ explains that they need the database. The rest of ScadBuddy works as today (§7)
 ## 11. Print analyzers (#284)
 
 Analyzers are skills in the ScadBuddy plugin, or in user and template scope folders.
-They run in the print flow as sessions with `flow` principals (§8.1). They diff against
-the resolved base profile from the in-flight **"easy print"** work (dynamic print
-profiles: pick a model, a level of detail and filaments). As of 2026-09-27 it is not
-filed in this repo: searches of issues, PRs, branches and commit messages for "easy
-print" and "dynamic profile" found nothing. #284 is blocked until it is linked. #284 holds the
+They run in the print flow as sessions with `flow` principals (§8.1). #284 holds the
 design: scopes, `checks.yaml`, CEL conditions, diagnostics and fixers, and citations.
+
+**Base profile.** The "easy print" work is the print-workflow epic **#84**. The base
+analyzers diff against is the resolved print request it already builds
+(`2026-09-24-print-flow-design.md` §1):
+
+- the pipeline's printer, process and filament presets, and bed type;
+- the per-slot filament plan (#87);
+- the plate (#83);
+- the print options (#88).
+
+The level-of-detail choice selects the process preset (§3.2).
+
+**Where an accepted diff lands.** ScadBuddy stores "never its own slicing settings"
+(#84), and a pipeline run carries only `source_library_file_id` /
+`source_archive_id` / `copies` / `force` (print-flow spec §2). So a diff is expressed
+as Bambuddy objects, and accepting one forces the slice-then-queue route that #88
+already escalates to:
+
+1. **Filament-level settings** go in `filament_overrides` on the queue item.
+2. **Process-level settings** become a **derived local preset**: the base process
+   preset plus the diff, created through `/local-presets/` and tagged with the
+   analyzers and scope that produced it.
+3. **3MF `project_settings.config`** only if §3.2 shows it beats the pipeline's
+   preset. Main spec §3 measured the preset winning.
+
+Each of these is in §3.2 until verified.
 
 ## 12. Order of work
 
