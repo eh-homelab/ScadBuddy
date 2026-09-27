@@ -3,6 +3,7 @@ import type {
   BambuddyTargets,
   ConnectionTest,
   CustomizerSchema,
+  DuplicateRequest,
   EditTarget,
   EligibilityOverview,
   FilamentOptions,
@@ -168,6 +169,13 @@ export const api = {
   /** Metadata, and since #93 the libraries the model renders with. */
   updateModel: (slug: string, patch: ModelPatch) =>
     request<ModelSummary>(`/models/${seg(slug)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  /** #156 — a new template of mine copied from `slug`, recording it as `upstream`. */
+  duplicateModel: (slug: string, name: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/duplicate`, {
+      method: 'POST',
+      body: JSON.stringify({ name } satisfies DuplicateRequest),
+    }),
 
   deleteModel: (slug: string) => request<void>(`/models/${seg(slug)}`, { method: 'DELETE' }),
 
