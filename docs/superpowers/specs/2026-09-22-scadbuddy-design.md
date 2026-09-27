@@ -356,6 +356,9 @@ normalised and overlaid:
   (`// font`) | `file` (`// file:svg,png`, §5.5) | `slider` (`number` with min
   and max).
 - `accept`: a `file` parameter's kinds, `["svg", "png"]` or a subset.
+- `samples`: a `file` parameter's sample files, the bare names of the files the
+  template ships in its own directory whose extension it accepts (§5.5). Listed on
+  every schema read, never cached with the schema.
 - `groups`: ordered list preserving first appearance; parameters in
   `/* [Hidden] */` are excluded (OpenSCAD convention), `/* [Global] */` shown
   on every tab.
@@ -375,7 +378,7 @@ when the source changes.
 | `select` | dropdown; option `name` is the label, `value` is passed to OpenSCAD |
 | `color` | colour picker; the value is passed as a `"#RRGGBB"` string |
 | `font` | free-text field with an installed-font datalist, plus a **Browse** button opening the Google Fonts picker (§5.4) |
-| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear** (§5.5) |
+| `file` | drop zone plus **Choose…**, a preview of the chosen SVG/PNG, its original name, and **Clear**; under it a row of thumbnails of the template's `samples`, one click to use one (§5.5) |
 
 ### 5.3 The page
 
@@ -497,6 +500,24 @@ string.
   working. The copies share the wrapper's prefix, so the source hash, the models
   repository's `.gitignore` and a duplicate's copy all skip them; they are deleted
   when the render ends, and each render gets its own.
+- **Samples.** A template can ship pictures for its file parameters beside its
+  source (`models/flexi-fabric/sample-overlay.svg`), and the viewer can pick one instead
+  of downloading and re-uploading it. The schema lists them per parameter as
+  `samples`: every regular file directly in the model's directory whose name is
+  bare (the runner's own rule: `[A-Za-z0-9_][A-Za-z0-9_.-]*`, no `..`, so no
+  dotfile and no subdirectory) and whose extension the parameter accepts. A
+  symlink is never one (it could point anywhere), nor are the render's staged
+  files and wrappers (`_scadbuddy_solid_*`) or the catalogue's `thumbnail.png`.
+  The list is built when the schema is served, not cached with it: the cache is
+  keyed by the source's hash, and a sample can come and go without the source
+  changing. A sample's value is its bare name; a render accepts it only while it
+  is in the list for that parameter, computed again from the directory of the
+  revision being rendered, and OpenSCAD reads it in place (nothing is staged).
+  `GET /models/{id}/samples/{name}` (`?version=` for an older revision) serves a
+  listed sample for the picker's thumbnails with the same `sandbox` CSP and
+  `nosniff` as an upload, but `Cache-Control: no-cache`, since an edit changes it
+  under the same URL; any other name is a 404. Provenance for a sample is its
+  name, so a re-render reproduces the output while the revision still ships it.
 - **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
   content hash; assets are never pruned, so a re-render and "Customize this
   version" reproduce the output.

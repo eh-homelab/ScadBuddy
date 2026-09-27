@@ -1244,17 +1244,19 @@ export const handlers = [
     if (unknown.length > 0) {
       return problem(422, 'Unknown parameter', `Not in the model schema: ${unknown.join(', ')}`)
     }
-    // #204 — `file_assets`: empty, the model's default, or an uploaded id; never a path.
+    // #204 — `file_assets`: empty, the model's default, one of its samples, or an
+    // uploaded id; never a path.
     for (const param of schema.parameters ?? []) {
       const value = body.params[param.name]
       if (param.type !== 'file' || value === undefined || value === '' || value === param.initial) {
         continue
       }
+      if (typeof value === 'string' && (param.samples ?? []).includes(value)) continue
       if (typeof value !== 'string' || !state.assets.has(value)) {
         return problem(
           422,
           'Unprocessable Content',
-          `parameter '${param.name}' is not an uploaded file: '${String(value)}'`,
+          `parameter '${param.name}' is not an uploaded or sample file: '${String(value)}'`,
         )
       }
     }
@@ -1302,6 +1304,17 @@ export const handlers = [
     if (!asset) return problem(404, 'Not Found', 'no uploaded file')
     const type = asset.meta.kind === 'svg' ? 'image/svg+xml' : 'image/png'
     return HttpResponse.arrayBuffer(asset.bytes, { headers: { 'Content-Type': type } })
+  }),
+
+  // #204 — a sample file the template ships; only a listed name is served.
+  http.get(`${base}/models/:slug/samples/:name`, ({ params }) => {
+    const sample = fixtures.sampleFiles[String(params['slug'])]?.[String(params['name'])]
+    if (!sample) return problem(404, 'Not Found', 'no such sample')
+    const bytes =
+      sample.type === 'image/png'
+        ? Uint8Array.from(atob(sample.body), (char) => char.charCodeAt(0))
+        : new TextEncoder().encode(sample.body)
+    return HttpResponse.arrayBuffer(bytes.buffer, { headers: { 'Content-Type': sample.type } })
   }),
 
   http.get(`${base}/jobs/:id`, ({ params }) => {

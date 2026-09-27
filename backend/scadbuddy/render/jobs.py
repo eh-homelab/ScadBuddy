@@ -314,7 +314,7 @@ def staged_assets(
     staged = dict(params)
     created: list[Path] = []
     try:
-        for name, meta in file_assets(schema, params, store).items():
+        for name, meta in file_assets(schema, params, store, model_dir).items():
             target = model_dir / f"{STAGED_ASSET_PREFIX}{secrets.token_hex(8)}.{meta.kind}"
             shutil.copyfile(store.blob_path(meta), target)
             created.append(target)

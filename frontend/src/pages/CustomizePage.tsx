@@ -321,6 +321,7 @@ export function CustomizePage() {
           <ParameterPanel
             schema={schema}
             slug={slug}
+            version={version}
             values={values}
             fonts={fontsState.data ?? []}
             onChange={onChange}

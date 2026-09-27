@@ -193,9 +193,12 @@ async def render_model(
     )
     require_valid_params(schema, body.params)
     try:
-        # A `file` parameter's value must name an upload (#204): checked here, so a
-        # bad one is a 422 rather than a job that fails later or renders without it.
-        await asyncio.to_thread(file_assets, schema, body.params, AssetStore(paths.assets))
+        # A `file` parameter's value must name an upload or one of the revision's
+        # own sample files (#204): checked here, so a bad one is a 422 rather than a
+        # job that fails later or renders without it.
+        await asyncio.to_thread(
+            file_assets, schema, body.params, AssetStore(paths.assets), source.scad.parent
+        )
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
