@@ -39,7 +39,7 @@ DOCKERFILE
 fi
 echo "==> rendering with $IMAGE"
 
-COLOURS=("#FFFFFF" "#000000")   # swatch, text (extruder order)
+COLOURS=("#0086D6" "#FFFFFF")   # swatch, text (extruder order)
 
 # name | -D overrides (space-separated, no spaces inside values)
 CASES=(

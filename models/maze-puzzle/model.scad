@@ -30,18 +30,21 @@ seed = 42; // [0:1:9999]
 cell_size = 10; // [6:1:16]
 
 // Outline: square, or round (the grid clipped inside a disc)
-shape = "square"; // [square, round]
+shape = "square"; // [square:Square, round:Round]
 
-// Height of the maze walls above the floor
+// Height of the maze walls above the floor in mm (raised automatically with the snap-on lid so the ball clears it)
 wall_height = 6; // [3:1:12]
 
-// Thickness of the maze walls
+// Thickness of the maze walls in mm
 wall_thickness = 1.6; // [1.2:0.2:3]
 
 /* [Play] */
 
 // Open tray, or a snap-on lid that keeps the ball in
 mode = "open_tray"; // [open_tray:Open tray, ball_lid:Ball with snap-on lid]
+
+// Snap-on lid only: which parts to put on the plate. A tray and lid too big to share the 300 x 320 mm bed print one at a time
+parts = "both"; // [both:Tray and lid, tray:Tray only, lid:Lid only]
 
 // Ball diameter in mm; corridors are widened to fit it
 ball_d = 6; // [4:0.5:12]
@@ -210,32 +213,50 @@ module vband(zc, hh, d, grow) {
 
 // ------------------------------------------------------------ parts
 
-color(floor_color)
-    difference() {
-        linear_extrude(floor_t) outline_2d();
-        if (markers) translate([0, 0, floor_t - inlay]) linear_extrude(inlay + 1) markers_2d();
-    }
+if (show_tray) {
+    color(floor_color)
+        difference() {
+            linear_extrude(floor_t) outline_2d();
+            if (markers) translate([0, 0, floor_t - inlay]) linear_extrude(inlay + 1) markers_2d();
+        }
 
-if (markers)
-    color(marker_color)
-        translate([0, 0, floor_t - inlay]) linear_extrude(inlay) markers_2d();
+    if (markers)
+        color(marker_color)
+            translate([0, 0, floor_t - inlay]) linear_extrude(inlay) markers_2d();
 
-color(wall_color)
-    difference() {
-        translate([0, 0, floor_t]) linear_extrude(wh)
-            difference() { outline_2d(); corridors_2d(); }
-        if (mode == "ball_lid")
-            vband(z_top - skirt_h / 2, snap_hh, groove_d, 1) outline_2d();
-    }
+    color(wall_color)
+        difference() {
+            translate([0, 0, floor_t]) linear_extrude(wh)
+                difference() { outline_2d(); corridors_2d(); }
+            if (mode == "ball_lid")
+                vband(z_top - skirt_h / 2, snap_hh, groove_d, 1) outline_2d();
+        }
+}
 
-// The lid prints upside down beside the tray: plate on the bed, skirt up.
-o_min = shape == "round" ? cx - R_out : -B;
-o_max = shape == "round" ? cx + R_out : W * p + B;
-lid_dx = o_max - o_min + lid_fit + skirt_t + part_gap;
+// The lid prints upside down beside the tray (plate on the bed, skirt up):
+// to the right if the pair fits the bed's 300 mm width with both nozzles,
+// else behind it within the 320 mm depth, else not at all -- then print the
+// tray and the lid one at a time with `parts`.
+BED = [300, 320];
+lid_grow = lid_fit + skirt_t;
+o_min = shape == "round" ? [cx - R_out, cy - R_out] : [-B, -B];
+o_max = shape == "round" ? [cx + R_out, cy + R_out] : [W * p + B, H * p + B];
+span = o_max - o_min;
+pair = [for (i = [0, 1]) 2 * span[i] + part_gap + 2 * lid_grow];
+lid_at = pair[0] <= BED[0] && span[1] + 2 * lid_grow <= BED[1] ? [span[0] + lid_grow + part_gap, 0]
+       : pair[1] <= BED[1] && span[0] + 2 * lid_grow <= BED[0] ? [0, span[1] + lid_grow + part_gap]
+       : undef;
+lid_mode = mode == "ball_lid";
+show_tray = !lid_mode || parts != "lid";
+show_lid = lid_mode && (parts == "lid" || (parts == "both" && lid_at != undef));
 
-if (mode == "ball_lid")
+if (lid_mode && parts == "both" && lid_at == undef)
+    echo(str("NOTE: the tray and lid (", pair[0], " mm side by side) do not fit the bed ",
+             "together; the lid is left off. Render again with parts = lid"));
+
+if (show_lid)
     color(lid_color)
-        translate([lid_dx, 0, 0]) {
+        translate(parts == "lid" ? [0, 0, 0] : [lid_at[0], lid_at[1], 0]) {
             linear_extrude(lid_t) offset(r = lid_fit + skirt_t) outline_2d();
             translate([0, 0, lid_t - 0.01]) linear_extrude(skirt_h + 0.01)
                 difference() {

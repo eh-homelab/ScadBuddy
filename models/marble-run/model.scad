@@ -25,7 +25,7 @@
 
 /* [Piece] */
 
-// Which piece to make
+// Which piece to make. The marble always enters at the west port; stack the next tile turned so its west port sits under this piece's exit
 type = "spiral"; // [straight_drop:Straight drop, zigzag:Zigzag run, spiral:Spiral, funnel_start:Funnel start, finish_cup:Finish cup, cross:Cross junction]
 
 // Footprint of the square tile in mm
@@ -37,7 +37,7 @@ height = 30; // [20:5:60]
 // Marble diameter in mm
 marble_d = 16; // [12:1:25]
 
-// Extra room around the marble in channels and holes (added to the diameter)
+// Extra room around the marble in channels and holes, in mm (added to the diameter)
 channel_clearance = 2; // [1:0.5:4]
 
 // Channel slope in degrees (reduced automatically if the level is too short)
@@ -48,7 +48,7 @@ slope = 6; // [3:1:12]
 // Registration pegs on top and matching sockets underneath
 peg = true;
 
-// Gap between a peg and its socket, per side
+// Gap between a peg and its socket, per side, in mm
 peg_clearance = 0.3; // [0.1:0.05:0.6]
 
 /* [Colours] */
