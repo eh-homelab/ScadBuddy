@@ -4,6 +4,7 @@ import re
 
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES
 from tests.api.conftest import wait_for_job
 
 
@@ -42,3 +43,16 @@ def test_http_requests_are_labelled_by_route_template(client: TestClient, model:
 
 def test_metrics_are_not_in_the_api_schema(client: TestClient) -> None:
     assert "/metrics" not in client.get("/openapi.json").json()["paths"]
+
+
+def test_a_body_refused_on_its_size_is_counted(client: TestClient) -> None:
+    """The gate answers a 413 without calling inward, so the counter must wrap it."""
+    refused = client.post(
+        "/api/v1/models",
+        content=b"x" * (MAX_TEXT_BODY_BYTES + 1),
+        headers={"Content-Type": "text/plain", "X-Model-Name": "Huge"},
+    )
+    assert refused.status_code == 413
+
+    text = client.get("/metrics").text
+    assert 'method="POST",route="other",status="413"' in text

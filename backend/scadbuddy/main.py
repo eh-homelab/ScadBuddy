@@ -147,10 +147,14 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
-    app.add_middleware(HttpMetrics, metrics=state.metrics)
     models.install_model_handlers(app)
-    # Outermost, so an oversized body is refused on its headers rather than buffered.
+    # Outside everything that reads a body, so an oversized one is refused on its
+    # headers rather than buffered.
     app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
+    # Outermost of all (added last): the gate answers a 413 itself without calling
+    # inward, so a counter inside it would never see the requests most worth
+    # counting. It reads no body, so wrapping the gate costs the gate nothing.
+    app.add_middleware(HttpMetrics, metrics=state.metrics)
 
     app.include_router(health.router)
     app.include_router(metrics.router)

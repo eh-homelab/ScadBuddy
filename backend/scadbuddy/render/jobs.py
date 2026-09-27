@@ -635,9 +635,16 @@ class RenderQueue:
                 logger.exception("render worker failed to claim or record a job")
                 self.metrics.store_errors.labels("work").inc()
                 job = None
-                await asyncio.sleep(self.config.render_poll_interval)
+                # One poll interval of back-off, and not the wakeup wait below on
+                # top of it: a submit's wakeup must not hammer a store that is down.
+                failed = True
+            else:
+                failed = False
             finally:
                 self._busy -= 1
+            if failed:
+                await asyncio.sleep(self.config.render_poll_interval)
+                continue
             if job is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(
