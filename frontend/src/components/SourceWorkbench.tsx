@@ -24,6 +24,8 @@ interface Props {
   canSave: boolean
   /** #184 — a built-in template: no save, and the editor refuses input. */
   readOnly?: boolean
+  /** #159 — what a read-only source offers in place of Save ("Duplicate to edit"). */
+  readOnlyActions?: ReactNode
   onSave: (force: boolean) => Promise<void>
 }
 
@@ -49,6 +51,7 @@ export function SourceWorkbench({
   saveLabel,
   canSave,
   readOnly = false,
+  readOnlyActions,
   onSave,
 }: Props) {
   const [verdict, setVerdict] = useState<Verdict | undefined>(undefined)
@@ -114,12 +117,15 @@ export function SourceWorkbench({
         <div className="flex items-center justify-between gap-3 px-3 py-1.5">
           <div className="flex min-w-0 items-baseline gap-2">{breadcrumb}</div>
           {readOnly ? (
-            <span
-              data-testid="builtin-badge"
-              className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
-            >
-              Built-in template — read-only
-            </span>
+            <div className="flex shrink-0 items-center gap-2">
+              <span
+                data-testid="builtin-badge"
+                className="shrink-0 rounded-[6px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted"
+              >
+                Built-in template — read-only
+              </span>
+              {readOnlyActions}
+            </div>
           ) : (
             <div className="flex shrink-0 items-center gap-2">
               <Button
