@@ -22,6 +22,7 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -191,6 +192,12 @@ async def render_model(
         slug, requested, paths=paths, history=history, config=config, version=body.version
     )
     require_valid_params(schema, body.params)
+    try:
+        # A `file` parameter's value must name an upload (#204): checked here, so a
+        # bad one is a 422 rather than a job that fails later or renders without it.
+        await asyncio.to_thread(file_assets, schema, body.params, AssetStore(paths.assets))
+    except ValueError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
     job = await queue.submit(slug, body.params, model_version=source.version)
     return RenderAccepted(job_id=job.id, status_url=request.url_for("get_job", job_id=job.id).path)

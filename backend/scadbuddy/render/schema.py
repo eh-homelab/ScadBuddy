@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, TypeGuard
 
@@ -12,17 +13,36 @@ from pydantic import BaseModel, Field
 from scadbuddy.render.colours import CSS_COLOURS
 
 ParameterType = Literal[
-    "number", "integer", "string", "boolean", "select", "color", "font", "slider"
+    "number", "integer", "string", "boolean", "select", "color", "font", "slider", "file"
 ]
 ParamValue = bool | int | float | str
 
 HIDDEN_GROUP = "Hidden"
 GLOBAL_GROUP = "Global"
 
+#: What a `// file` parameter can take (#204): an SVG for `import()`, a PNG for
+#: `surface()`. The upload route accepts exactly these, sniffed from the content.
+FILE_KINDS: tuple[str, ...] = ("svg", "png")
+
 _ANNOTATION_RE = re.compile(
-    r"^[^\S\n]*(?P<name>[A-Za-z_]\w*)[^\S\n]*=[^;\n]*;[^\S\n]*//[^\S\n]*(?P<kind>color|font)\b",
+    r"^[^\S\n]*(?P<name>[A-Za-z_]\w*)[^\S\n]*=[^;\n]*;[^\S\n]*//[^\S\n]*"
+    r"(?P<kind>color|font|file)\b"
+    # `// file:svg,png` -- the extensions a file parameter accepts. OpenSCAD's own
+    # customizer reads the whole comment as a (non-matching) hint and keeps the
+    # parameter a plain string, measured on 2026.09.23.
+    r"(?:[^\S\n]*:(?P<accept>[A-Za-z0-9.,\t ]*))?",
     re.MULTILINE,
 )
+
+#: Bumped when the derived schema changes shape for an UNCHANGED source, so a cache
+#: entry written by an older ScadBuddy is re-derived rather than served. 2: `file`.
+SCHEMA_FORMAT = 2
+
+
+@dataclass(frozen=True)
+class Annotation:
+    kind: str
+    accept: tuple[str, ...] = ()
 
 
 class Option(BaseModel):
@@ -41,6 +61,8 @@ class Parameter(BaseModel):
     step: float | None = None
     max_length: int | None = None
     options: list[Option] = Field(default_factory=list)
+    #: A `file` parameter's accepted kinds, from `// file:svg,png` (#204).
+    accept: list[str] = Field(default_factory=list)
 
 
 class CustomizerSchema(BaseModel):
@@ -59,8 +81,22 @@ def source_sha256(source: str) -> str:
     return hashlib.sha256(source.encode("utf-8")).hexdigest()
 
 
-def find_annotations(source: str) -> dict[str, str]:
-    return {m["name"]: m["kind"] for m in _ANNOTATION_RE.finditer(source)}
+def _accepted(raw: str | None) -> tuple[str, ...]:
+    """The kinds a `// file` annotation names, in FILE_KINDS order. A bare `// file`
+    takes every kind; one that names only kinds ScadBuddy cannot take takes none."""
+    if raw is None or not raw.strip():
+        return FILE_KINDS
+    named = {part.strip().lower().lstrip(".") for part in raw.split(",")}
+    return tuple(kind for kind in FILE_KINDS if kind in named)
+
+
+def find_annotations(source: str) -> dict[str, Annotation]:
+    return {
+        m["name"]: Annotation(
+            kind=m["kind"], accept=_accepted(m["accept"]) if m["kind"] == "file" else ()
+        )
+        for m in _ANNOTATION_RE.finditer(source)
+    }
 
 
 def _is_whole(value: Any) -> TypeGuard[int | float]:
@@ -69,17 +105,22 @@ def _is_whole(value: Any) -> TypeGuard[int | float]:
     return float(value).is_integer()
 
 
-def _resolve_type(raw: dict[str, Any], annotation: str | None) -> ParameterType:
+def _resolve_type(raw: dict[str, Any], annotation: Annotation | None) -> ParameterType:
     declared = raw.get("type")
     if declared == "boolean":
         return "boolean"
     if raw.get("options"):
         return "select"
     if declared == "string":
-        if annotation == "color":
+        kind = annotation.kind if annotation else None
+        if kind == "color":
             return "color"
-        if annotation == "font":
+        if kind == "font":
             return "font"
+        # An annotation naming no kind ScadBuddy can store (`// file:stl`) stays a
+        # plain string rather than a picker nothing can be dropped on.
+        if kind == "file" and annotation is not None and annotation.accept:
+            return "file"
         return "string"
     if raw.get("min") is not None and raw.get("max") is not None:
         return "slider"
@@ -88,9 +129,10 @@ def _resolve_type(raw: dict[str, Any], annotation: str | None) -> ParameterType:
     return "number"
 
 
-def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, str]) -> Parameter:
+def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, Annotation]) -> Parameter:
     name = str(raw["name"])
-    resolved = _resolve_type(raw, annotations.get(name))
+    annotation = annotations.get(name)
+    resolved = _resolve_type(raw, annotation)
     initial = raw.get("initial")
     if resolved == "integer" and _is_whole(initial):
         initial = int(initial)
@@ -113,6 +155,7 @@ def _normalise_parameter(raw: dict[str, Any], annotations: dict[str, str]) -> Pa
         step=raw.get("step") if resolved == "slider" else None,
         max_length=raw.get("maxLength"),
         options=[Option(name=str(o["name"]), value=o["value"]) for o in raw.get("options", [])],
+        accept=list(annotation.accept) if resolved == "file" and annotation else [],
     )
 
 
@@ -160,6 +203,10 @@ def load_cached_schema(
     # Absent on an entry written before #93, which had no libraries.
     if body.get("library_path", []) != [str(path) for path in library_path]:
         return None
+    # Absent on an entry written before #204, whose `// file` parameters it typed
+    # as plain strings.
+    if body.get("format", 1) != SCHEMA_FORMAT:
+        return None
     return CustomizerSchema.model_validate(cached)
 
 
@@ -171,5 +218,6 @@ def store_cached_schema(
         "version": SCHEMA_CACHE_VERSION,
         "schema": schema.model_dump(mode="json"),
         "library_path": [str(path) for path in library_path],
+        "format": SCHEMA_FORMAT,
     }
     cache_path.write_text(json.dumps(body, indent=2) + "\n", encoding="utf-8")

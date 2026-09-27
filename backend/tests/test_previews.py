@@ -5,14 +5,23 @@ from __future__ import annotations
 import json
 import threading
 from pathlib import Path
+from unittest import mock
 
 import pytest
+import trimesh
 
+from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.previews import PREVIEW_ID_LENGTH, PreviewStore, source_key
+from scadbuddy.render import previews as previews_module
+from scadbuddy.render.previews import render_preview
+from scadbuddy.render.runner import OpenSCADError
+from scadbuddy.render.schema import CustomizerSchema, Parameter
+from tests.conftest import write_openscad_3mf
 
 SLUG = "widget"
+CONFIG = Config(data_dir=Path("/unused"))
 
 
 @pytest.fixture
@@ -149,3 +158,54 @@ def test_a_drop_cannot_land_between_the_check_and_the_write(paths: DataPaths) ->
 
     assert store.record(SLUG) is None
     assert store.image(SLUG) is None
+
+
+# ── render_preview: the pipeline up to the plate image ────────────────────────
+
+
+async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameters(
+    paths: DataPaths,
+) -> None:
+    rendered_with: list[dict[str, object]] = []
+
+    async def one_box(*args: object, **kwargs: object) -> object:
+        rendered_with.append(dict(args[2]))  # type: ignore[call-overload]
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema(parameters=[Parameter(name="width", type="number", initial=10)])
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", one_box),
+        mock.patch.object(previews_module, "cached_schema", cached_schema),
+    ):
+        png = await render_preview(SLUG, config=CONFIG, paths=paths, history=None)
+
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    # Nothing passed: every parameter at the value the source declares.
+    assert rendered_with == [{}]
+    # Its scratch space is gone, and nothing was written beside the model.
+    assert not any(paths.previews.iterdir())
+    assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == ["model.scad"]
+
+
+async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) -> None:
+    async def nothing(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", nothing),
+        mock.patch.object(previews_module, "cached_schema", cached_schema),
+        pytest.raises(OpenSCADError, match="no geometry"),
+    ):
+        await render_preview(SLUG, config=CONFIG, paths=paths, history=None)
+    assert not any(paths.previews.iterdir())

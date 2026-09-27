@@ -1,4 +1,5 @@
 import type {
+  Asset,
   AttachResult,
   BambuddyTargets,
   ConnectionTest,
@@ -309,6 +310,22 @@ export const api = {
       .join('.')
     return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '...' ? '' : `?v=${seg(key)}`}`
   },
+
+  /**
+   * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the
+   * SHA-256 of what the server kept) is the value the render takes.
+   */
+  uploadAsset: (slug: string, file: File) => {
+    const body = new FormData()
+    body.append('file', file)
+    return request<Asset>(`/models/${seg(slug)}/assets`, { method: 'POST', body })
+  },
+
+  getAsset: (slug: string, id: string) =>
+    request<Asset>(`/models/${seg(slug)}/assets/${seg(id)}`),
+
+  assetContentUrl: (slug: string, id: string) =>
+    `${API_BASE}/models/${seg(slug)}/assets/${seg(id)}/content`,
 
   /** The editor's openscad-lsp socket: a saved model's directory, or a scratch one. */
   languageServerPath: (slug?: string) =>

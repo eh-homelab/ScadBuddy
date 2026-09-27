@@ -16,6 +16,7 @@ import trimesh
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.render import jobs
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.jobs import (
@@ -34,7 +35,7 @@ from scadbuddy.render.jobs import (
 )
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
-from scadbuddy.render.solids import SolidRender
+from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender
 from scadbuddy.render.split import ColourPart
 from tests.conftest import write_openscad_3mf
 
@@ -423,7 +424,7 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
                 ("Color 2", "#0047BB00", trimesh.creation.box(extents=(10, 10, 1))),
             ],
         )
-        return mock.Mock(log_tail=[])
+        return mock.Mock(log_tail=[], missing_files=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return schema
@@ -461,7 +462,7 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[])
+        return mock.Mock(log_tail=[], missing_files=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _colour_schema(("base_color", "#0047BB"))
@@ -538,3 +539,119 @@ async def test_background_work_raises_to_its_caller_and_the_worker_lives_on(
         assert [stored.id for stored in queue.store.list_jobs()] == [job.id]
     finally:
         await queue.aclose()
+
+
+# ── #204: uploaded files staged for the render and every wrapper render ───────
+
+OVERLAY_SVG = (
+    b'<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><path d="M0 0H4V4Z"/></svg>'
+)
+
+
+def _file_schema() -> CustomizerSchema:
+    return CustomizerSchema(
+        parameters=[
+            Parameter(name="overlay", type="file", initial="", accept=["svg", "png"]),
+            Parameter(name="base_color", type="color", initial="#0047BB"),
+        ]
+    )
+
+
+async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
+    paths: DataPaths,
+) -> None:
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+    seen: dict[str, tuple[str, bytes]] = {}
+
+    def staged(label: str, params: object) -> None:
+        assert isinstance(params, dict)
+        name = params["overlay"]
+        assert isinstance(name, str)
+        # A bare generated name, in the model's own directory, with the upload's bytes.
+        assert "/" not in name and name.startswith(STAGED_ASSET_PREFIX) and name.endswith(".svg")
+        seen[label] = (name, (model_dir / name).read_bytes())
+
+    async def render(*args: object, **kwargs: object) -> object:
+        staged("main", args[2])
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        # §6.3's wrapper renders run in the same directory, with the same values.
+        scad = args[0]
+        assert isinstance(scad, Path) and scad.parent == model_dir
+        staged("solids", args[2])
+        return SolidRender()
+
+    job = _job("s", params={"overlay": asset.id, "base_color": "#0047BB"})
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+
+    stored = AssetStore(paths.assets).blob_path(asset).read_bytes()
+    assert seen["main"] == seen["solids"]
+    assert seen["main"][1] == stored
+    # Gone once the render is: the model directory is the versioned one.
+    assert not any(p.name.startswith(STAGED_ASSET_PREFIX) for p in model_dir.iterdir())
+    # The job keeps the asset id, which is what params.json and provenance record.
+    assert job.params["overlay"] == asset.id
+    assert result.warnings == []
+
+
+async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None:
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+
+    async def render(*args: object, **kwargs: object) -> object:
+        raise OpenSCADError("openscad exited with 1", [])
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        pytest.raises(OpenSCADError),
+    ):
+        await jobs.render_job(_job("f", params={"overlay": asset.id}), config=CONFIG, paths=paths)
+
+    assert [p.name for p in model_dir.iterdir()] == ["model.scad"]
+
+
+async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=("pic.svg",))
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+
+    assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]

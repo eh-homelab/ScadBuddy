@@ -26,6 +26,7 @@ from contextlib import suppress
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.previews import PreviewStore, source_key
@@ -35,6 +36,7 @@ from scadbuddy.render.jobs import (
     extruder_order,
     plate_thumbnails,
     resolve_source,
+    staged_assets,
 )
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.split import split_by_material
@@ -79,8 +81,12 @@ async def render_preview(
     work.mkdir(parents=True)
     try:
         raw = work / RAW_RENDER_NAME
-        await render_3mf(source.scad, schema, {}, raw, config=config)
-        parts = extruder_order(await asyncio.to_thread(split_by_material, raw), schema, {})
+        # As `render_job`: a `// file` parameter's default is staged beside the
+        # source for the render to read (#204).
+        store = AssetStore(paths.assets)
+        with staged_assets(schema, {}, source.scad.parent, store) as params:
+            await render_3mf(source.scad, schema, params, raw, config=config)
+            parts = extruder_order(await asyncio.to_thread(split_by_material, raw), schema, params)
         if not parts:
             raise OpenSCADError("the render produced no geometry", [])
         thumbnails, warnings = await plate_thumbnails(parts, config=config, executor=executor)

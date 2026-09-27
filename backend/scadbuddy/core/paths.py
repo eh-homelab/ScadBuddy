@@ -68,6 +68,13 @@ class DataPaths:
         return self.root / "libraries"
 
     @property
+    def assets(self) -> Path:
+        """Files attached to `// file` parameters (#204), content-addressed. Not
+        under ``models/`` (they belong to renders, not to a template's history)
+        and not under ``cache/`` (an output's parameters name them for good)."""
+        return self.root / "assets"
+
+    @property
     def presets(self) -> Path:
         """The presets people save, one file per template. Not under ``models/``: a
         built-in's directory is the image's and only the boot sync writes it, and a
@@ -151,6 +158,7 @@ class DataPaths:
             self.cache,
             self.fonts,
             self.libraries,
+            self.assets,
             self.presets,
         ):
             directory.mkdir(parents=True, exist_ok=True)
