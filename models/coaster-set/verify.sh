@@ -52,7 +52,9 @@ options() {
 }
 PATTERNS=$(options pattern)
 SHAPES=$(options shape)
-[ -n "$PATTERNS" ] && [ -n "$SHAPES" ] || { echo "FAIL: could not read the dropdowns"; exit 1; }
+if [ -z "$PATTERNS" ] || [ -z "$SHAPES" ]; then
+    echo "FAIL: could not read the dropdowns"; exit 1
+fi
 
 # An upper-case extension, to prove auto type detection ignores case. It has
 # to be a bare name in the model directory; removed again on exit.
@@ -62,6 +64,9 @@ trap 'rm -f verify-upper-case.PNG' EXIT
 
 # name | -D overrides separated by ";"
 CASES=('defaults|')
+# Word-split on purpose: the positional parameters are the shapes list,
+# rotated one step per pattern below.
+# shellcheck disable=SC2086
 set -- $SHAPES
 for pat in $PATTERNS; do
     # Every pattern, cycling through the shapes.

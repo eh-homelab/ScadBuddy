@@ -295,7 +295,7 @@ if (OVERLAY_REFUSED)
              "\" is not a bare file name in the model directory; overlay off"));
 OVERLAY_ON = safe_file(overlay_file);
 
-function lower(s) = chr([for (c = s) let (o = ord(c)) (o >= 65 && o <= 90) ? o + 32 : o]);
+function lower(s) = s == "" ? "" : chr([for (c = s) let (o = ord(c)) (o >= 65 && o <= 90) ? o + 32 : o]);
 function ends_with(f, suffix) =
     len(f) >= len(suffix)
     && [for (i = [0 : len(suffix) - 1]) f[len(f) - len(suffix) + i]] == [for (c = suffix) c];

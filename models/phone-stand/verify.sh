@@ -50,7 +50,9 @@ options() {
     sed -n "s/^$1 = .*\/\/ \[\(.*\)\]\$/\1/p" model.scad | tr ',' '\n' | sed 's/:.*//; s/[" ]//g'
 }
 STYLES=$(options style)
-[ -n "$STYLES" ] || { echo "FAIL: could not read the style dropdown"; exit 1; }
+if [ -z "$STYLES" ]; then
+    echo "FAIL: could not read the style dropdown"; exit 1
+fi
 
 # name | -D overrides separated by ";"
 CASES=('defaults|')
