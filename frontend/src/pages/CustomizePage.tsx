@@ -8,6 +8,7 @@ import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateMod
 import { EditDetailsButton } from '../components/EditDetailsButton'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
+import { PresetPicker } from '../components/PresetPicker'
 import type { PreviewCapture } from '../components/Preview'
 import { Button } from '../components/ui/Button'
 import { UpstreamUpdateButton } from '../components/UpstreamUpdate'
@@ -18,6 +19,7 @@ import { Spinner } from '../components/ui/Spinner'
 import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { fitMessages } from '../lib/plate'
+import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
@@ -128,7 +130,8 @@ export function CustomizePage() {
     [printerModel, bbox?.size, colours],
   )
   const fit = fitState.data ?? undefined
-  const misfit = fit ? fitMessages(fit) : []
+  const unit = useDisplayUnit()
+  const misfit = fit ? fitMessages(fit, unit) : []
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
@@ -140,6 +143,10 @@ export function CustomizePage() {
   const onReset = useCallback(() => {
     if (schema) setEdits((current) => ({ of: current.of, values: defaultValues(schema) }))
   }, [schema])
+
+  const onApplyPreset = useCallback((next: ParamValues) => {
+    setEdits((current) => ({ of: current.of, values: next }))
+  }, [])
 
   const capture = useCallback(async () => captureRef.current?.capturePng() ?? null, [])
 
@@ -318,6 +325,16 @@ export function CustomizePage() {
             fonts={fontsState.data ?? []}
             onChange={onChange}
             onReset={onReset}
+            toolbar={
+              <PresetPicker
+                // A preset picked on one model means nothing on the next.
+                key={slug}
+                slug={slug}
+                schema={schema}
+                values={values}
+                onApply={onApplyPreset}
+              />
+            }
           />
         </div>
 

@@ -5,6 +5,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js'
 import * as THREE from 'three'
 import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
+import { plateSize, useDisplayUnit } from '../lib/units'
 import { Spinner } from './ui/Spinner'
 
 interface ViewerTheme {
@@ -131,23 +132,24 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
 }
 
 function PlateBadge({ plate }: { plate: Plate }) {
-  const [width, depth] = plate.size
+  const unit = useDisplayUnit()
   return (
     <span className="sb-num rounded-[6px] border border-line bg-surface/90 px-2 py-1 text-[11px] text-faint backdrop-blur-sm">
       {plate.model ? `${plate.name} · ` : ''}
-      {width} × {depth} mm plate
+      {plateSize(plate.size, unit)} plate
     </span>
   )
 }
 
 function Dimensions({ bbox }: { bbox: BoundingBox }) {
+  const unit = useDisplayUnit()
   return (
     <dl
       data-testid="bbox-readout"
       className="w-fit self-start rounded-[6px] border border-line bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm"
     >
       <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
-      <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox)}</dd>
+      <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox, unit)}</dd>
     </dl>
   )
 }

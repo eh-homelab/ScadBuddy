@@ -7,6 +7,11 @@ describe('formatBbox', () => {
     expect(formatBbox(bbox(95.7, 34.6, 6.8))).toBe('95.7 × 34.6 × 6.8 mm')
     expect(formatBbox(bbox(42, 42, 21))).toBe('42.0 × 42.0 × 21.0 mm')
   })
+
+  it('converts to inches, two decimals, when that is the display unit', () => {
+    expect(formatBbox(bbox(95.7, 34.6, 6.8), 'in')).toBe('3.77 × 1.36 × 0.27 in')
+    expect(formatBbox(bbox(25.4, 50.8, 254), 'in')).toBe('1.00 × 2.00 × 10.00 in')
+  })
 })
 
 describe('formatValue', () => {

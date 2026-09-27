@@ -34,8 +34,8 @@ on the bed and are bridged over.
 | `text_size` | `40` | Letter size in mm, about the height of a capital. Auto-fit only ever makes it smaller. |
 | `letter_spacing` | `0.9` | Spacing factor between letters; 1 is the font's own. Below 1 pulls chunky letters into each other. |
 | `boldness` | `1` | Thickens every letter by this many mm all round, so any face comes out chunkier. It scales down with the text when auto-fit shrinks it. |
-| `auto_fit` | `true` | Shrinks the text so the word is never longer than `max_length`. |
-| `max_length` | `180` | Longest the word may run in mm: its width when horizontal, its height in the vertical layouts. For the circle it limits the badge's diameter. |
+| `auto_fit` | `true` | Shrinks the text so the word is never longer than `max_length`. Off or on, a word too long for the plate is always shrunk to fit it (see [Plate fit](#plate-fit)). |
+| `max_length` | `180` | Longest the word may run in mm: its width when horizontal, its height in the vertical layouts. For the circle it limits the badge's diameter. Capped at what fits the plate. |
 
 ### Layout
 
@@ -53,15 +53,27 @@ height, a rotated word in height too.
 |---|---|---|
 | `text_shape` | `straight` | `straight`, `arch_up`, `arch_down` (valley), `circle` (round badge), `wave`, `slant_up`, `slant_down`, `bulge`, `pinch`, `perspective` (letters shrinking left to right), `stairs`. |
 | `arc_radius` | `120` | Arches: radius of the curve in mm. Smaller bends more. |
-| `circle_radius` | `0` | Circle: radius of the ring the letters stand on. `0` picks it so the word wraps 80 % of the ring (never less than two letter sizes). |
+| `circle_radius` | `0` | Circle: radius of the ring the letters stand on. `0` picks it so the word wraps 80 % of the ring (never less than two letter sizes). A badge too wide for the plate is shrunk. |
 | `wave_amplitude` | `8` | Wave height either side of the centre line, mm. |
 | `wave_length` | `120` | Length of one full wave, mm. |
 | `skew_angle` | `15` | Slant angle in degrees. |
 | `shape_amount` | `40` | Bulge, pinch and perspective: how much the letter size changes, in percent. |
-| `stair_step` | `6` | Stairs: how far each letter steps up from the one before, mm. |
+| `stair_step` | `6` | Stairs: how far each letter steps up from the one before, mm. Reduced when the staircase would not fit the plate. |
 
 Shapes apply to the horizontal and rotated layouts; the stacked layout ignores
 them.
+
+### Plate fit
+
+The sliders reach well past the H2C's 300 × 320 mm plate (a 400 mm
+`max_length`, 20 letters at 100 mm with `auto_fit` off, a 150 mm circle with a
+ring, 20 stairs of 30 mm). The model caps them: the word's run is held to the
+plate width (horizontal) or depth (vertical, less the foot) minus the border,
+ring and thickening, the circle badge to the plate width, and the stair step to
+what fits the depth. This applies with `auto_fit` off too — `auto_fit` only
+decides whether `max_length` is honoured below that. A tall slant or wave with
+a foot can still overflow the depth; ScadBuddy then refuses the plate with the
+size it needed.
 
 ### Backing
 
@@ -194,7 +206,7 @@ advance (see above).
 ./verify.sh
 ```
 
-Renders the defaults and 27 variations in `scadbuddy-verify:local` (building it
+Renders the defaults and 32 variations in `scadbuddy-verify:local` (building it
 from `openscad/openscad:dev` plus ScadBuddy's font packages when it is missing,
 and failing if `DejaVu Sans`, `Lobster Two` or `Noto Sans` is not installed),
 then checks each one:
@@ -212,6 +224,8 @@ then checks each one:
 - auto-fit holds the word to `max_length` (a long word is shrunk to it, and
   with auto-fit off it keeps its size); stacked and rotated words run up the
   sign;
+- the whole plate fits 300 × 320 mm, including five cases whose sliders
+  would run off it;
 - the straight backing is the letters grown by exactly `border`, and the ring
   is exactly `ring_width` outside the backing;
 - a flat bottom is a straight edge, and the foot is below the sign and 10 mm

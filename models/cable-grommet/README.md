@@ -39,15 +39,15 @@ supports:
 |---|---|---|
 | `cap_style` | `slot` | `slot`: a round-ended slot from the middle out through the edge (and the lip) for the cables. `brush_segments`: radial fingers 1.2 mm thick across the opening, split by 0.8 mm slits, that flex apart around cables — about one finger per 6 mm of circumference. `solid`: blank. `open_ring`: a trim ring only, the whole bore open. |
 | `slot_w` | `12` | Slot width. Capped at 80 % of the lip's bore so a wide slot on a small hole cannot cut the cap in two. |
-| `cap_text` | *(empty)* | Up to 12 characters inlaid 0.6 mm into the cap's top face, `slot` and `solid` styles only (the other two have no face to put it on). Letter height is `0.13 * hole_d`; text is centred in the solid half opposite the slot and cut off 1.5 mm inside the edges, not scaled. |
+| `cap_text` | *(empty)* | Up to 12 characters inlaid 0.6 mm into the cap's top face, `slot` and `solid` styles only (the other two have no face to put it on). Letters are up to `0.13 * hole_d` tall, centred in the solid half opposite the slot (or across the middle of a solid cap), and shrink to stay 1.5 mm inside the rim — a long word gets smaller rather than cut off. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for the cap text (`// font`). |
 
 ### Colors
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `sleeve_color` | `#1E1E1E` | Sleeve and flange. |
-| `cap_color` | `#1E1E1E` | Cap. |
+| `sleeve_color` | `#5B6470` | Sleeve and flange. |
+| `cap_color` | `#5B6470` | Cap. |
 | `cap_text_color` | `#FFFFFF` | Inlaid cap text. |
 
 Hidden: sleeve wall 2.4 mm, flange 3 mm, cap plate 3 mm, lip 6 mm deep with a
@@ -62,8 +62,9 @@ Hidden: sleeve wall 2.4 mm, flange 3 mm, cap plate 3 mm, lip 6 mm deep with a
 | `cap_text_color` | cap text | 3 |
 
 The order of the `color` parameters in the source is the extruder order. The
-defaults give the sleeve and the cap the same colour, so they merge into one
-part on one filament; with no `cap_text` the default plate is single-colour.
+defaults give the sleeve and the cap the same slate grey, so they merge into
+one part on one filament; with no `cap_text` the default plate is
+single-colour. Set both to black or white to match the desk.
 
 ## Dimensions
 
@@ -89,13 +90,14 @@ and the plate is `2 * flange + 6` long.
 
 Renders the defaults, the slot cap with text, brush fingers, a square solid cap
 with text, the open ring, a 20 mm hole with `fit = 0` and a too-wide slot, and a
-100 mm hole with `fit = 1`, and checks each 3MF: the number of non-empty
+100 mm hole with `fit = 1`, and a 12-character word on a slot cap and a solid cap, and checks each 3MF: no
+OpenSCAD warnings, the number of non-empty
 materials (1 for the defaults, 2 or 3 with a distinct cap colour and text),
 `Default` empty, the plate footprint and height, z=0, the sleeve and cap
 heights, that the pieces do not overlap, and for round holes the sleeve OD, bore
 and cap lip OD against `hole_d` and `fit` — plus fingers present for
 `brush_segments`, nothing inside the bore for `open_ring`, and the text in the
-cap's bed-side face. The 3MF parsing runs on the host with `python3` and the
+cap's bed-side face and inside the rim (shrunk, not cut off). The 3MF parsing runs on the host with `python3` and the
 standard library only.
 
 ## Needs a test print

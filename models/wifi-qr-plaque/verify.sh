@@ -79,6 +79,12 @@ VARIANTS = [
                                  error_correction="M")),
     ("long-text-ec-fallback", dict(mode="text", text=(LOREM * 2)[:250], error_correction="H",
                                    caption="", code_color="#1B3A6B")),
+    # Wide capitals used to overflow the plaque: the old average-advance
+    # estimate put 30 W's 152 mm wide on an 80 mm plaque.
+    ("wide-caption", dict(caption="W" * 30, caption_color="#E53935")),
+    ("wide-credentials-round", dict(caption="WIFI GUEST ACCESS MMMMMMM", show_credentials=True,
+                                    ssid="W" * 32, password="W" * 63, size=50, shape="round",
+                                    caption_color="#E53935")),
 ]
 
 
@@ -263,6 +269,14 @@ for name, over in VARIANTS:
             # merged with the code part: take the highest vertex below the quiet zone
             below = [verts[v][1] for v in per[code_i] if verts[v][1] < y0 - n * ms - 0.01]
             text_top = max(below) if below else None
+        if ti != code_i:
+            # Every line shrinks to the text band: 0.9 x size (square),
+            # 0.8 x size (rounded), the code block's side (round).
+            tw = {"square": 0.9 * W, "rounded": 0.8 * W}.get(p["shape"], ms * (n + 2 * info["qz"]))
+            tx = [abs(verts[v][0]) for v in per[ti]]
+            # 0.1 mm slack: halign=center centres the advance, not the ink.
+            check(max(tx) <= tw / 2 + 0.1, "%s: text within the %.2f mm text band (widest half %.2f)"
+                  % (name, tw, max(tx)))
         if text_top is not None:
             check(text_top <= y0 - n * ms - q + 1e-3,
                   "%s: text stays below the quiet zone (text top %.2f, zone bottom %.2f)"

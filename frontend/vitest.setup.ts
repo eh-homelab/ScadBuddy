@@ -2,11 +2,13 @@ import '@testing-library/jest-dom/vitest'
 import { afterAll, afterEach, beforeAll } from 'vitest'
 import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
+import { resetDisplayUnit } from './src/lib/units'
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
   server.resetHandlers()
   resetMockState()
+  resetDisplayUnit()
 })
 afterAll(() => server.close())
 

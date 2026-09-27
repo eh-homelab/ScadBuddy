@@ -8,6 +8,7 @@ import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { editPath, editTargetFor, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { formatBbox, formatValue, timeAgo } from '../lib/format'
+import { useDisplayUnit } from '../lib/units'
 import { diffFromDefaults } from '../lib/params'
 import { useAsync } from '../lib/useAsync'
 
@@ -151,6 +152,7 @@ function OutputRow({
   bambuddyUrl: string | undefined
 }) {
   const diff = diffFromDefaults(schema, output.params ?? {})
+  const unit = useDisplayUnit()
 
   return (
     <li className="rounded-[6px] border border-line bg-surface p-3">
@@ -162,7 +164,7 @@ function OutputRow({
             <span className="text-[12px] text-faint">{timeAgo(output.created_at)}</span>
           </div>
           <p className="sb-num mt-1 text-[12px] text-muted">
-            {output.bbox_mm ? formatBbox(output.bbox_mm) : 'No dimensions recorded'}
+            {output.bbox_mm ? formatBbox(output.bbox_mm, unit) : 'No dimensions recorded'}
             {(output.plates ?? []).length > 1 &&
               (output.plates ?? []).map((plate) => (
                 <BambuddyId

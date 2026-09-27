@@ -126,7 +126,7 @@ tip-coloured zone).
 | Parameter | Default | What it does |
 |---|---|---|
 | `pattern` | `spiral` | `spiral` (four arms), `rays` (eight), `rings` (four bands out of seven), `dots` (rings of 6 and 12; on the flower, both rings of 6 on the petals), or `none`. Half of it is in `pattern_color`, half in `pattern2_color`. Inlaid 0.6 mm (three layers) flush with the face; in the launcher's dome, 0.6 mm measured square to the dome. |
-| `name` | *(empty)* | Up to 12 characters around the face, twice, 180° apart, reading clockwise. Letters are 3.5 mm tall and shrink to fit; the pattern moves inwards to make room. On the flower the name stays inside the centre disc. |
+| `name` | *(empty)* | Up to 12 characters around the face, twice, 180° apart, reading clockwise. Letters are 3.5 mm tall, spaced by their own widths, and shrink to fit; the pattern moves inwards to make room. On the flower the name stays inside the centre disc. |
 
 The pattern fills the face from just outside the stem's well (or the gear) to
 just inside the rim border, following the petals on the flower. Guards: if the
@@ -202,8 +202,8 @@ face.
 ./verify.sh
 ```
 
-Renders the defaults and eleven variations (every variant, style, pattern and
-tip, names that fit and one that does not, the smallest and biggest tops,
+Renders the defaults and thirteen variations (every variant, style, pattern and
+tip, names that fit and one that does not, a name with narrow letters, the smallest and biggest tops,
 every gear module, the tightest and loosest clearances, the shortest and
 longest rack) in `scadbuddy-verify:local`, and checks:
 
@@ -223,7 +223,9 @@ longest rack) in `scadbuddy-verify:local`, and checks:
 - with the launcher, the top releases: nothing of the housing reaches into
   the gear's through-hole, and nothing of the top inside the housing's
   thickness is wider than the gear;
-- with the gyro ring, the ring is captive: its ridge reaches inside the rim.
+- with the gyro ring, the ring is captive: its ridge reaches inside the rim;
+- the letters of a name with narrow `l` and `i` are evenly spaced (they used
+  to be placed at a fixed pitch, which left gaps).
 
 The 3MF and STL parsing, the mass properties and the distance checks run on
 the host with `python3` and the standard library only.
