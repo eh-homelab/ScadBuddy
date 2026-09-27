@@ -101,7 +101,7 @@ describe('UpstreamUpdateButton (#160)', () => {
 
   it('offers Detach for an upstream that is gone', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
-    await api.deleteModel(UPSTREAM, true)
+    await api.deleteModel(UPSTREAM)
     const { user, onChanged } = await renderButton()
 
     await user.click(screen.getByRole('button', { name: 'Upstream gone' }))

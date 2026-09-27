@@ -138,12 +138,9 @@ describe('mock API: upstream updates (#157)', () => {
     }
   })
 
-  it('refuses to delete a template duplicates track unless forced, leaving them gone', async () => {
+  it('reports a deleted upstream gone, and detaches from it', async () => {
     await api.duplicateModel(UPSTREAM, 'Keychain for Nova')
-    const error: unknown = await api.deleteModel(UPSTREAM).catch((caught: unknown) => caught)
-    expect((error as ApiError).problem).toMatchObject({ status: 409, duplicates: 1, slugs: [COPY] })
-
-    await api.deleteModel(UPSTREAM, true)
+    await api.deleteModel(UPSTREAM)
     expect((await api.getUpstream(COPY)).state).toBe('gone')
     expect((await api.detachUpstream(COPY)).upstream).toBeNull()
   })
