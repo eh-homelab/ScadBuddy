@@ -5,8 +5,10 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -22,7 +24,6 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
     subject_line,
-    summarise,
 )
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -187,6 +188,23 @@ def test_last_commits_answers_the_whole_catalogue_in_one_walk(
         "plate": history.last_commit("plate"),
     }
     assert newest["keychain"] != newest["plate"]
+
+
+def test_last_commits_keys_a_built_in_by_its_own_id(models: Path, history: ModelHistory) -> None:
+    """Not by its first path component, which would fold every built-in into one."""
+    write_model(models, "_builtin/keychain", "cube(10);\n")
+    write_model(models, "_builtin/plate", "sphere(5);\n")
+    history.ensure_repo()
+    write_model(models, "_builtin/keychain", "cube(20);\n")
+    history.commit("Sync built-in templates from the image", "_builtin")
+
+    newest = history.last_commits()
+
+    assert newest == {
+        "builtin:keychain": history.last_commit("_builtin/keychain"),
+        "builtin:plate": history.last_commit("_builtin/plate"),
+    }
+    assert newest["builtin:keychain"] != newest["builtin:plate"]
 
 
 def test_last_commits_ignores_files_at_the_repository_root(
@@ -440,12 +458,6 @@ def test_a_message_is_flattened_to_one_bounded_line() -> None:
     assert len(subject_line("x" * (MAX_SUBJECT * 2))) == MAX_SUBJECT
 
 
-def test_summarise_reads_as_a_sentence() -> None:
-    assert summarise(["a"]) == "a"
-    assert summarise(["a", "b"]) == "a and b"
-    assert summarise(["a", "b", "c"]) == "a, b and c"
-
-
 # ── the catalogue's side of it ────────────────────────────────────────────────
 
 
@@ -521,34 +533,107 @@ def test_deleting_an_unversioned_model_still_succeeds(catalogue: Catalogue) -> N
     assert not directory.exists()
 
 
-def test_seeding_records_the_seed_as_a_commit(catalogue: Catalogue, tmp_path: Path) -> None:
+def _bundle(root: Path, slug: str, source: str) -> Path:
+    directory = root / slug
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "model.scad").write_text(source, encoding="utf-8")
+    return directory
+
+
+def test_syncing_mirrors_the_image_as_one_commit(catalogue: Catalogue, tmp_path: Path) -> None:
     assert catalogue.history is not None
-    seed = tmp_path / "seed"
-    (seed / "keychain").mkdir(parents=True)
-    (seed / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    (_bundle(image, "tag", "cube(5);\n") / ".gitignore").write_text("x\n", encoding="utf-8")
 
-    assert catalogue.seed(seed) == ["keychain"]
+    assert catalogue.sync_builtins(image) is not None
 
-    assert catalogue.history.log("keychain")[0].message == "Seed keychain from the image"
-    # A re-seed skips what is already there, so it produces no second commit.
-    assert catalogue.seed(seed) == []
+    mirror = catalogue.paths.models / "_builtin"
+    assert (mirror / "keychain" / "model.scad").read_text(encoding="utf-8") == "cube(10);\n"
+    # Dotfiles are repo furniture, not template content.
+    assert not (mirror / "tag" / ".gitignore").exists()
+    assert [revision.message for revision in catalogue.history.log("_builtin")] == [
+        "Sync built-in templates from the image"
+    ]
+    # An unchanged image is no commit at all.
+    assert catalogue.sync_builtins(image) is None
+    assert len(catalogue.history.log("_builtin")) == 1
 
 
-def test_a_seeded_model_json_never_sets_origin_url(catalogue: Catalogue, tmp_path: Path) -> None:
-    """Only a URL import sets `origin_url` (#179); a seed keeps the rest of its file."""
-    seed = tmp_path / "seed"
-    (seed / "keychain").mkdir(parents=True)
-    (seed / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
-    (seed / "keychain" / "model.json").write_text(
-        json.dumps({"name": "Keychain", "source": "inspired", "origin_url": "javascript:alert(1)"}),
-        encoding="utf-8",
+def test_an_unchanged_built_in_is_not_rewritten(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Every boot syncs; one that finds nothing changed must not write to the PVC."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    before = {path: path.stat() for path in mirror.rglob("*")}
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+
+    catalogue.sync_builtins(image)
+
+    keychain = {path: stat for path, stat in before.items() if "keychain" in path.parts}
+    assert keychain
+    for path, stat in keychain.items():
+        assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stat.st_ino, stat.st_mtime_ns)
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+
+
+def test_syncing_overwrites_and_drops_what_the_image_no_longer_has(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    assert catalogue.history is not None
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    (_bundle(image, "tag", "cube(5);\n") / "part.scad").write_text("x=1;\n", encoding="utf-8")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    # Nothing but the sync writes the mirror; a stray edit is overwritten too.
+    (mirror / "keychain" / "model.scad").write_text("tampered\n", encoding="utf-8")
+    (image / "tag" / "part.scad").unlink()
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    shutil.rmtree(image / "keychain")
+
+    assert catalogue.sync_builtins(image) is not None
+
+    assert not (mirror / "keychain").exists()
+    assert not (mirror / "tag" / "part.scad").exists()
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+    assert len(catalogue.history.log("_builtin")) == 2
+
+
+def test_a_template_of_mine_is_never_touched_by_the_sync(
+    catalogue: Catalogue, tmp_path: Path
+) -> None:
+    catalogue.create("keychain", "// mine\n", ModelMeta(name="Mine"))
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "// the image\n")
+
+    catalogue.sync_builtins(image)
+
+    assert catalogue.paths.model_source("keychain").read_text(encoding="utf-8") == "// mine\n"
+    assert catalogue.paths.model_source("builtin:keychain").read_text(encoding="utf-8") == (
+        "// the image\n"
     )
+    records = {record.slug: record.origin for record in catalogue.list_models()}
+    assert records == {"builtin:keychain": "builtin", "keychain": "mine"}
 
-    assert catalogue.seed(seed) == ["keychain"]
 
-    record = catalogue.record("keychain")
+def test_a_built_in_model_json_never_sets_origin_url(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Only a URL import sets `origin_url` (#179); a built-in keeps the rest of its file,
+    and its mirror stays byte-identical to the image."""
+    image = tmp_path / "image"
+    (image / "keychain").mkdir(parents=True)
+    (image / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    meta = {"name": "Keychain", "source": "inspired", "origin_url": "javascript:alert(1)"}
+    (image / "keychain" / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    assert catalogue.sync_builtins(image) is not None
+
+    record = catalogue.record("builtin:keychain")
     assert (record.name, record.source, record.origin_url) == ("Keychain", "inspired", None)
-    assert "origin_url" not in catalogue.read_raw_meta("keychain")
+    # Dropped on read, not rewritten: a rewrite would make every boot re-sync it.
+    assert catalogue.sync_builtins(image) is None
 
 
 def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:
@@ -613,3 +698,70 @@ def test_revision_exports_are_evicted_by_last_use(tmp_path: Path) -> None:
 
 def test_pruning_leaves_an_absent_cache_alone(tmp_path: Path) -> None:
     assert prune_revision_exports(DataPaths(tmp_path / "nothing"), ttl=1.0) == []
+
+
+def test_a_built_in_that_cannot_be_replaced_keeps_its_mirror_and_the_rest_sync(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """One built-in's failed swap is logged and skipped; it never stops the sync (or the boot)."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    (image / "keychain" / "model.scad").write_text("cube(11);\n", encoding="utf-8")
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_to_retire_tag(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(source) == mirror / "tag":
+            raise PermissionError("EACCES")
+        real_replace(source, target)
+
+    with patch("scadbuddy.library.catalogue.os.replace", fail_to_retire_tag):
+        assert catalogue.sync_builtins(image) is not None
+
+    assert (mirror / "keychain" / "model.scad").read_text(encoding="utf-8") == "cube(11);\n"
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(5);\n"
+    assert [getattr(record, "slug", None) for record in caplog.records if record.exc_info] == [
+        "tag"
+    ]
+    # The staged copy went to the tombstones, not into the mirror, and is cleared.
+    assert sorted(path.name for path in mirror.iterdir()) == ["keychain", "tag"]
+    assert list(catalogue.paths.tombstones.iterdir()) == []
+    # The next boot retries it.
+    assert catalogue.sync_builtins(image) is not None
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+
+
+def test_a_failed_swap_puts_the_previous_mirror_back(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image = tmp_path / "image"
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin"
+    (image / "tag" / "model.scad").write_text("cube(6);\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_to_install(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(target) == mirror / "tag" and not Path(source).name.endswith(".old"):
+            raise OSError("EIO")
+        real_replace(source, target)
+
+    with patch("scadbuddy.library.catalogue.os.replace", fail_to_install):
+        assert catalogue.sync_builtins(image) is None
+
+    assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(5);\n"
+    assert "could not sync a built-in template" in caplog.text
+
+
+def test_a_mirror_that_cannot_be_made_does_not_raise(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    image = tmp_path / "image"
+    _bundle(image, "tag", "cube(5);\n")
+    catalogue.paths.builtins.write_text("not a directory\n", encoding="utf-8")
+
+    assert catalogue.sync_builtins(image) is None
+    assert "could not sync built-in templates" in caplog.text

@@ -61,6 +61,19 @@ class PipelineDefaultPatch(BaseModel):
     pipeline_id: int | None = None
 
 
+class PrinterBedTypePut(BaseModel):
+    """The plate to remember on the printer the path names (#83); ``null`` forgets it."""
+
+    bed_type: str | None = Field(default=None, max_length=64)
+
+
+class PrinterBedType(BaseModel):
+    """The plate remembered on one printer (#83)."""
+
+    printer_id: int
+    bed_type: str | None = None
+
+
 class ProjectAttach(BaseModel):
     """Which of this output's queue entries to file under the project.
 
@@ -160,6 +173,25 @@ def put_model_choices(
     """
     settings = store.set_model_choices(slug, body)
     return settings.model_print_choices.get(slug, ModelPrintChoices())
+
+
+@router.put(
+    "/printers/{printer_id}/bed-type",
+    response_model=PrinterBedType,
+    summary="Remember the plate on this printer",
+)
+def put_printer_bed_type(
+    printer_id: int, body: PrinterBedTypePut, store: SettingsStoreDep
+) -> PrinterBedType:
+    """What the picker last printed on this printer with (#83), which it opens on next.
+
+    ScadBuddy's own memory, because Bambuddy's printer status reports no plate type.
+    Needs no Bambuddy, like the model's other remembered choices.
+    """
+    settings = store.set_printer_bed_type(printer_id, body.bed_type)
+    return PrinterBedType(
+        printer_id=printer_id, bed_type=settings.printer_bed_types.get(str(printer_id))
+    )
 
 
 @router.post(
@@ -340,6 +372,9 @@ async def post_attach_project(
             status.HTTP_409_CONFLICT,
             "this output has no project, so there is nothing to file it under",
         )
-    ids = body.queue_item_ids or ([meta.queue_item_id] if meta.queue_item_id else [])
+    ids = body.queue_item_ids or (
+        [plate.queue_item_id for plate in meta.plates]
+        or ([meta.queue_item_id] if meta.queue_item_id else [])
+    )
     async with client_for(settings) as client:
         return await attach_results(client, project_id, queue_item_ids=ids)

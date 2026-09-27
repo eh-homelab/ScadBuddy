@@ -226,5 +226,6 @@ The print picker runs one of Bambuddy's slicer pipelines for the output:
 
 **Delete** (top right of the customizer) removes the model and its outputs, after
 you confirm. It is refused while one of its renders is still running. The source
-stays in the git history. A bundled example model is added back on the next
+stays in the git history. A built-in template (a bundled example, such as the
+name keychain) cannot be deleted or edited; it is refreshed from the image on every
 restart.

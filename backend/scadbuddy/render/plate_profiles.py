@@ -35,6 +35,10 @@ millimetres, the values those profiles declare:
 
 Geometry is identical across a model's nozzle variants, so the table is keyed by
 model rather than by preset.
+
+:data:`BED_TYPES` is, per model, every ``curr_bed_type`` value its
+``machine_model`` profile does not list under ``not_support_bed_type`` — the
+plates Bambu Studio's own bed picker offers for that printer (#83).
 """
 
 from __future__ import annotations
@@ -150,4 +154,97 @@ EXTRA_ALIASES: dict[str, str] = {
     "A1M": "Bambu Lab A1 mini",
     "H2DP": "Bambu Lab H2D Pro",
     "X1C": "Bambu Lab X1 Carbon",
+}
+
+#: ``curr_bed_type`` value -> the label Bambu Studio shows for it.
+BED_TYPE_LABELS: dict[str, str] = {
+    "Cool Plate": "Cool Plate",
+    "Engineering Plate": "Engineering Plate",
+    "High Temp Plate": "Smooth PEI Plate / High Temp Plate",
+    "Textured PEI Plate": "Textured PEI Plate",
+    "Supertack Plate": "Bambu Cool Plate SuperTack",
+}
+
+#: ``printer_model`` -> the ``curr_bed_type`` values that model takes.
+BED_TYPES: dict[str, tuple[str, ...]] = {
+    "Bambu Lab A1": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab A1 mini": ("High Temp Plate", "Textured PEI Plate", "Supertack Plate"),
+    "Bambu Lab A2L": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab H2C": ("Engineering Plate", "Textured PEI Plate", "Supertack Plate"),
+    "Bambu Lab H2D": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab H2D Pro": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab H2S": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab P1P": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab P1S": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab P2S": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab X1": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab X1 Carbon": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab X1E": (
+        "Cool Plate",
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
+    "Bambu Lab X2D": (
+        "Engineering Plate",
+        "High Temp Plate",
+        "Textured PEI Plate",
+        "Supertack Plate",
+    ),
 }

@@ -14,8 +14,8 @@ from fastapi import APIRouter, Query, Response, status
 from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import CatalogueDep, CommitPath, ConfigDep, HistoryDep, PathsDep, SlugPath
-from scadbuddy.api.models import require_model_exists
-from scadbuddy.core.paths import SOURCE_NAME
+from scadbuddy.api.models import require_mine, require_model_exists
+from scadbuddy.core.paths import SOURCE_NAME, model_path
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
@@ -134,12 +134,13 @@ def list_versions(
     require_model_exists(catalogue, slug)
     require_history(history)
     try:
-        revisions = history.log(slug, limit=limit)
+        revisions = history.log(model_path(slug), limit=limit)
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     # Newest first, so the head of the list is the revision the model is at.
     return [
-        _version(revision, slug, current=index == 0) for index, revision in enumerate(revisions)
+        _version(revision, model_path(slug), current=index == 0)
+        for index, revision in enumerate(revisions)
     ]
 
 
@@ -156,7 +157,7 @@ def get_version_source(
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
-        body = history.show(resolved, f"{slug}/{SOURCE_NAME}")
+        body = history.show(resolved, f"{model_path(slug)}/{SOURCE_NAME}")
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no source at {commit}") from None
     except GitError as error:
@@ -215,15 +216,15 @@ def get_version_diff(
     # named rather than left implicit, so the UI can offer "diff against this".
     try:
         revisions = _require_range(history, base, commit)
-        patch = history.diff(revisions, slug)
-        files = history.diff_files(revisions, slug)
+        patch = history.diff(revisions, model_path(slug))
+        files = history.diff_files(revisions, model_path(slug))
     except GitError as error:
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
     return VersionDiff(
         slug=slug,
         base=revisions.base,
         head=revisions.head,
-        files=_relative(files, slug),
+        files=_relative(files, model_path(slug)),
         patch=patch,
     )
 
@@ -236,6 +237,7 @@ def get_version_diff(
 def restore_version(
     slug: SlugPath, commit: CommitPath, catalogue: CatalogueDep, history: HistoryDep
 ) -> ModelVersion:
+    require_mine(slug)
     require_model_exists(catalogue, slug)
     require_history(history)
     resolved = _require_revision(history, commit)

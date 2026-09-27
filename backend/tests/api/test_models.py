@@ -337,6 +337,35 @@ def test_a_failed_startup_sweep_does_not_stop_the_boot(
     assert "could not sweep tombstones" in caplog.text
 
 
+def test_a_built_in_that_fails_to_sync_does_not_stop_the_boot(
+    app: FastAPI, paths: DataPaths, seed_dir: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for slug in ("keychain", "tag"):
+        (seed_dir / slug).mkdir()
+        (seed_dir / slug / "model.scad").write_text(f"// {slug} v2\n", encoding="utf-8")
+    # A previous boot's mirror of `tag`, which this one cannot clear.
+    (paths.builtins / "tag").mkdir(parents=True)
+    (paths.builtins / "tag" / "model.scad").write_text("// tag v1\n", encoding="utf-8")
+    real_replace = os.replace
+
+    def fail_on_tag(source: str | os.PathLike[str], target: str | os.PathLike[str]) -> None:
+        if Path(source) == paths.builtins / "tag":
+            raise PermissionError("EACCES")
+        real_replace(source, target)
+
+    with (
+        patch("scadbuddy.library.catalogue.os.replace", fail_on_tag),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+    assert (paths.builtins / "keychain" / "model.scad").read_text(encoding="utf-8") == (
+        "// keychain v2\n"
+    )
+    assert (paths.builtins / "tag" / "model.scad").read_text(encoding="utf-8") == "// tag v1\n"
+    failures = [record for record in caplog.records if record.exc_info]
+    assert [getattr(record, "slug", None) for record in failures] == ["tag"]
+
+
 def test_a_failed_tombstone_removal_is_logged_and_retried(
     client: TestClient, model: str, paths: DataPaths, caplog: pytest.LogCaptureFixture
 ) -> None:
