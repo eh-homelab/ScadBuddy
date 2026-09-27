@@ -10,7 +10,7 @@ import asyncio
 
 from fastapi import APIRouter, FastAPI, Request, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import InstallsDep, LibrariesDep
 from scadbuddy.core.problems import ApiError, problem_response
@@ -23,12 +23,16 @@ from scadbuddy.library.libraries import (
     LibraryFetchError,
     LibraryNotFoundError,
     LibraryNotInstalledError,
+    LockfileError,
 )
 
 router = APIRouter(tags=["libraries"])
 
 
 class LibraryAdd(BaseModel):
+    # REF_PATTERN refuses `..` with a look-ahead, which pydantic's default engine lacks.
+    model_config = ConfigDict(regex_engine="python-re")
+
     name: str = Field(pattern=NAME_PATTERN, description="The directory `use <NAME/...>` names")
     url: str | None = Field(
         default=None,
@@ -81,8 +85,16 @@ async def add_library(
 def install_library_handlers(app: FastAPI) -> None:
     """A model declaring a library that is not on the volume is a 409 from every
     route that resolves its source -- schema, render, check -- rather than each one
-    catching it, or the 500 an uncaught one would be."""
+    catching it, or the 500 an uncaught one would be. So is one declaring a library
+    whose `libraries.lock` entry is not valid: the model cannot render until that
+    entry is fixed or the library added again, like one that has no pin."""
 
     @app.exception_handler(LibraryNotInstalledError)
     async def _not_installed(request: Request, exc: LibraryNotInstalledError) -> JSONResponse:
         return problem_response(request, status.HTTP_409_CONFLICT, str(exc.args[0]))
+
+    @app.exception_handler(LockfileError)
+    async def _bad_lock(request: Request, exc: LockfileError) -> JSONResponse:
+        return problem_response(
+            request, status.HTTP_409_CONFLICT, str(exc.args[0]), title="Invalid Library Lockfile"
+        )

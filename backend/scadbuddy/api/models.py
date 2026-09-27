@@ -35,7 +35,7 @@ from scadbuddy.library.catalogue import (
     SidecarNotFoundError,
 )
 from scadbuddy.library.history import MAX_SUBJECT, GitError
-from scadbuddy.library.libraries import model_search_path, read_pins, search_path
+from scadbuddy.library.libraries import model_search_path, read_lock, search_path
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -422,9 +422,14 @@ def _first_name(*candidates: str | None) -> str:
 
 def _require_pinned(paths: DataPaths, libraries: list[str]) -> list[str]:
     """Only a pinned library can be declared: the render has nothing to put on
-    OPENSCADPATH for any other (#93). The declaration, de-duplicated."""
-    pinned = read_pins(paths)
-    missing = [name for name in libraries if name not in pinned]
+    OPENSCADPATH for any other (#93). The declaration, de-duplicated.
+
+    Shared by PATCH and a dropped model.json. A library whose lock entry is
+    broken is refused as it would fail every render (LockfileError, #216); one
+    with no entry at all needs adding first.
+    """
+    lock = read_lock(paths)
+    missing = [name for name in libraries if lock.pin(name) is None]
     if missing:
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
@@ -437,7 +442,7 @@ def _require_pinned(paths: DataPaths, libraries: list[str]) -> list[str]:
 def _declared_path(paths: DataPaths, libraries: list[str]) -> tuple[Path, ...]:
     """The OPENSCADPATH for a declaration not yet on disk: :func:`search_path`
     against the lockfile as it is."""
-    return search_path(paths, libraries, read_pins(paths))
+    return search_path(paths, libraries, read_lock(paths))
 
 
 def _require_png(payload: bytes) -> bytes:
