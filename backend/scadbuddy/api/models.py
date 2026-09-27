@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from pathlib import Path
@@ -682,17 +683,46 @@ async def get_schema(
         ) from None
 
 
+#: How a model thumbnail may be cached: kept, but revalidated on every use.
+#:
+#: Not `immutable`, although the catalogue's URL carries a `?v=` key (the model's
+#: version, the thumbnail's source and its covering output): that key is not proven
+#: to change with the bytes. `version` is None wherever git is not available, so
+#: there a replaced thumbnail keeps the key it had; and the model directory and the
+#: outputs are plain files on a volume anyone with access can change. A strong
+#: ETag over the bytes served costs one hash and saves the whole download instead,
+#: without ever serving a stale image.
+THUMBNAIL_CACHE_CONTROL = "no-cache"
+
+
+def _etag_matches(if_none_match: str | None, etag: str) -> bool:
+    """RFC 9110 §13.1.2: `*`, or any listed tag, compared weakly."""
+    if if_none_match is None:
+        return False
+    candidates = [candidate.strip() for candidate in if_none_match.split(",")]
+    return "*" in candidates or etag in (c.removeprefix("W/") for c in candidates)
+
+
 @router.get(
     "/models/{slug}/thumbnail",
     response_class=Response,
-    responses={200: {"content": {"image/png": {}}}},
+    responses={
+        200: {"content": {"image/png": {}}},
+        304: {"description": "The copy named by `If-None-Match` is still current"},
+    },
     summary="Model thumbnail",
     description=(
         "The thumbnail set on the model or, when it has none, the plate image of its "
-        "first generated output. 404 when there is neither."
+        "first generated output. 404 when there is neither. Carries a strong `ETag` "
+        "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
+        "answered 304 with no body."
     ),
 )
-def get_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> Response:
+def get_thumbnail(
+    slug: SlugPath,
+    catalogue: CatalogueDep,
+    if_none_match: Annotated[str | None, Header(alias="If-None-Match")] = None,
+) -> Response:
     require_model_exists(catalogue, slug)
     try:
         png = catalogue.thumbnail(slug)
@@ -700,9 +730,13 @@ def get_thumbnail(slug: SlugPath, catalogue: CatalogueDep) -> Response:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if png is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
-    # Revalidated every time: the image changes under the same URL when one is set,
-    # removed, or first generated.
-    return Response(png, media_type="image/png", headers={"Cache-Control": "no-cache"})
+    # Over the bytes themselves, so it changes exactly when the image does, from
+    # whichever source -- a set, a removal, or the fallback moving to another output.
+    etag = f'"{hashlib.sha256(png).hexdigest()}"'
+    headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
+    if _etag_matches(if_none_match, etag):
+        return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
+    return Response(png, media_type="image/png", headers=headers)
 
 
 @router.put(

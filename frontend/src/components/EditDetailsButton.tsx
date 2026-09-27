@@ -41,7 +41,7 @@ function readmeChange(
   // Untouched is untouched, even when what is stored is itself only whitespace.
   if (text === saved) return 'none'
   if (text.trim() === '') return hasReadme ? 'remove' : 'none'
-  return text !== saved ? 'set' : 'none'
+  return 'set'
 }
 
 const sameTags = (a: string[], b: string[]) =>

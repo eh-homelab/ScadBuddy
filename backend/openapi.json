@@ -6041,7 +6041,7 @@
         ]
       },
       "get": {
-        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither.",
+        "description": "The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.",
         "operationId": "get_thumbnail_api_v1_models__slug__thumbnail_get",
         "parameters": [
           {
@@ -6054,6 +6054,22 @@
               "title": "Slug",
               "type": "string"
             }
+          },
+          {
+            "in": "header",
+            "name": "If-None-Match",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "If-None-Match"
+            }
           }
         ],
         "responses": {
@@ -6062,6 +6078,9 @@
               "image/png": {}
             },
             "description": "Successful Response"
+          },
+          "304": {
+            "description": "The copy named by `If-None-Match` is still current"
           },
           "422": {
             "content": {

@@ -280,7 +280,7 @@ export interface paths {
         };
         /**
          * Model thumbnail
-         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither.
+         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
          */
         get: operations["get_thumbnail_api_v1_models__slug__thumbnail_get"];
         /**
@@ -3489,7 +3489,9 @@ export interface operations {
     get_thumbnail_api_v1_models__slug__thumbnail_get: {
         parameters: {
             query?: never;
-            header?: never;
+            header?: {
+                "If-None-Match"?: string | null;
+            };
             path: {
                 slug: string;
             };
@@ -3505,6 +3507,13 @@ export interface operations {
                 content: {
                     "image/png": unknown;
                 };
+            };
+            /** @description The copy named by `If-None-Match` is still current */
+            304: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

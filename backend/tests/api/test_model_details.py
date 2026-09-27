@@ -165,6 +165,76 @@ def test_removing_a_thumbnail_that_is_not_there_is_a_404(client: TestClient) -> 
     assert "no thumbnail" in response.json()["detail"]
 
 
+# ── thumbnail caching ─────────────────────────────────────────────────────────
+
+
+def _etag(client: TestClient, slug: str = SLUG) -> str:
+    response = client.get(f"/api/v1/models/{slug}/thumbnail")
+    assert response.status_code == 200, response.text
+    etag: str = response.headers["etag"]
+    return etag
+
+
+def test_a_thumbnail_carries_a_strong_etag_and_is_revalidated(client: TestClient) -> None:
+    _create(client)
+    _put_thumbnail(client, PNG_BYTES)
+
+    first = client.get(f"/api/v1/models/{SLUG}/thumbnail")
+    assert first.headers["cache-control"] == "no-cache"
+    etag = first.headers["etag"]
+    assert etag.startswith('"') and not etag.startswith("W/")
+    # Stable: the same bytes, the same tag.
+    assert _etag(client) == etag
+
+
+@pytest.mark.parametrize("if_none_match", ["{etag}", "W/{etag}", '"other", {etag}', "*"])
+def test_a_current_copy_is_answered_304_without_a_body(
+    client: TestClient, if_none_match: str
+) -> None:
+    _create(client)
+    _put_thumbnail(client, PNG_BYTES)
+    etag = _etag(client)
+
+    response = client.get(
+        f"/api/v1/models/{SLUG}/thumbnail",
+        headers={"If-None-Match": if_none_match.format(etag=etag)},
+    )
+
+    assert response.status_code == 304
+    assert response.content == b""
+    assert response.headers["etag"] == etag
+    assert response.headers["cache-control"] == "no-cache"
+
+
+def test_a_stale_copy_gets_the_image(client: TestClient) -> None:
+    _create(client)
+    _put_thumbnail(client, PNG_BYTES)
+    response = client.get(f"/api/v1/models/{SLUG}/thumbnail", headers={"If-None-Match": '"old"'})
+    assert (response.status_code, response.content) == (200, PNG_BYTES)
+
+
+def test_the_etag_follows_every_change_of_image(client: TestClient, paths: DataPaths) -> None:
+    _create(client)
+    first = _generate(client, paths, SLUG, COVER_ONE)
+    _generate(client, paths, SLUG, COVER_TWO)
+    seen = [_etag(client)]  # the first output's plate image
+
+    _put_thumbnail(client, PNG_BYTES)  # a thumbnail of its own
+    seen.append(_etag(client))
+    _put_thumbnail(client, OTHER_PNG)  # replaced
+    seen.append(_etag(client))
+    assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
+    seen.append(_etag(client))  # back to the first output's plate image
+    assert client.delete(f"/api/v1/outputs/{first}").status_code == 204
+    seen.append(_etag(client))  # the next output's
+
+    assert seen[0] == seen[3]  # the same bytes as before, the same tag
+    assert len({seen[0], seen[1], seen[2], seen[4]}) == 4
+    # A copy validated against an older tag is sent the new image, not a 304.
+    stale = client.get(f"/api/v1/models/{SLUG}/thumbnail", headers={"If-None-Match": seen[0]})
+    assert (stale.status_code, stale.content) == (200, COVER_TWO)
+
+
 # ── the plate-image fallback ──────────────────────────────────────────────────
 
 
