@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import re
 
+from scadbuddy.core.paths import BUILTIN_PREFIX
+
 SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]*$"
 #: A template of mine (a bare slug) or a built-in (`builtin:<slug>`).
-MODEL_ID_PATTERN = r"^(builtin:)?[a-z0-9][a-z0-9-]*$"
+MODEL_ID_PATTERN = rf"^({re.escape(BUILTIN_PREFIX)})?[a-z0-9][a-z0-9-]*$"
 
 _SLUG_RE = re.compile(SLUG_PATTERN)
 _SEPARATORS = re.compile(r"[^a-z0-9]+")
@@ -14,7 +16,7 @@ _SEPARATORS = re.compile(r"[^a-z0-9]+")
 #: fails with an OSError instead of a clear refusal.
 MAX_SLUG_LENGTH = 100
 #: A built-in's id is its slug behind `builtin:`, so a legal slug is a legal id.
-MAX_MODEL_ID_LENGTH = len("builtin:") + MAX_SLUG_LENGTH
+MAX_MODEL_ID_LENGTH = len(BUILTIN_PREFIX) + MAX_SLUG_LENGTH
 
 
 class InvalidSlugError(ValueError):
