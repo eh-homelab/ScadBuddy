@@ -165,3 +165,36 @@ async def test_no_fontconfig_file_is_set_before_one_exists(
     monkeypatch.delenv("FONTCONFIG_FILE", raising=False)
     seen = await _fontconfig_seen_by(tmp_path, tmp_path / "empty")
     assert "FONTCONFIG_FILE=<unset>" in seen
+
+
+ECHO_OPENSCADPATH = """#!/bin/sh
+echo "OPENSCADPATH=${OPENSCADPATH:-<unset>}"
+"""
+
+
+async def _openscadpath_seen_by(tmp_path: Path, config: Config) -> str:
+    binary = tmp_path / "echo-openscad"
+    binary.write_text(ECHO_OPENSCADPATH, encoding="utf-8")
+    binary.chmod(0o755)
+    output = await run_openscad([], cwd=tmp_path, config=replace(config, openscad=str(binary)))
+    return "\n".join(output.log_tail)
+
+
+async def test_the_render_sees_only_the_library_path_it_was_given(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#93: the model's own libraries, and not whatever the process inherited."""
+    monkeypatch.setenv("OPENSCADPATH", "/somewhere/else")
+    first, second = tmp_path / "a", tmp_path / "b"
+    config = Config(data_dir=tmp_path / "data", library_path=(first, second))
+
+    assert f"OPENSCADPATH={first}:{second}" in await _openscadpath_seen_by(tmp_path, config)
+
+
+async def test_a_model_with_no_libraries_gets_no_inherited_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENSCADPATH", "/somewhere/else")
+    config = Config(data_dir=tmp_path / "data")
+
+    assert "OPENSCADPATH=<unset>" in await _openscadpath_seen_by(tmp_path, config)

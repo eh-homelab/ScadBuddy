@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -32,6 +33,7 @@ from scadbuddy.library.catalogue import (
     ModelRecord,
 )
 from scadbuddy.library.history import MAX_SUBJECT
+from scadbuddy.library.libraries import model_search_path, read_pins
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -477,6 +479,11 @@ async def check_model_source(
     paths: PathsDep,
 ) -> SourceCheck:
     context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
+    if body.slug and context is not None:
+        # The model's own libraries, as its render will see them (#93).
+        # Off the loop, like every other read of the PVC from an `async def`.
+        library_path = await asyncio.to_thread(model_search_path, paths, body.slug)
+        config = replace(config, library_path=library_path)
     try:
         return await unless_the_client_leaves(
             request, check_source(body.source, config=config, limit=checks, context=context)
@@ -494,9 +501,23 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
 
 
 @router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep) -> ModelRecord:
+def patch_model(
+    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, paths: PathsDep
+) -> ModelRecord:
     require_mine(slug)
     require_model(catalogue, slug)
+    if patch.libraries is not None:
+        # Only a pinned library can be declared: the render has nothing to put on
+        # OPENSCADPATH for any other (#93).
+        pinned = read_pins(paths)
+        missing = [name for name in patch.libraries if name not in pinned]
+        if missing:
+            raise ApiError(
+                status.HTTP_422_UNPROCESSABLE_CONTENT,
+                f"not added yet: {', '.join(missing)}; add them under Libraries first",
+                libraries=missing,
+            )
+        patch.libraries = list(dict.fromkeys(patch.libraries))
     try:
         return catalogue.update(slug, patch)
     except ModelNotFoundError:
@@ -558,9 +579,10 @@ async def put_source(
     # record `write_source` returns carries the new revision anyway.
     require_mine(slug)
     require_model_exists(catalogue, slug)
+    library_path = await asyncio.to_thread(model_search_path, paths, slug)
     checked = await _guard_source(
         body.source,
-        config=config,
+        config=replace(config, library_path=library_path),
         # Either spelling forces, as on `POST /models`.
         force=force or body.force,
         limit=checks,
@@ -577,7 +599,9 @@ async def put_source(
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
     if checked is not None and checked.schema is not None:
         # After the write: `write_source` drops the old cache entry.
-        store_cached_schema(paths.model_schema_cache(slug), checked.schema)
+        store_cached_schema(
+            paths.model_schema_cache(slug), checked.schema, library_path=library_path
+        )
     else:
         # A forced save, or no openscad at all: nothing was derived to store. GET
         # /schema is where the failure surfaces.
@@ -596,7 +620,9 @@ async def get_schema(
     require_model_exists(catalogue, slug)
     source = await resolve_source(slug, None, paths=paths, history=history)
     try:
-        return await cached_schema(source.scad, source.schema_cache, config=config)
+        return await cached_schema(
+            source.scad, source.schema_cache, config=source.configure(config)
+        )
     except FileNotFoundError:
         raise ApiError(
             status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"

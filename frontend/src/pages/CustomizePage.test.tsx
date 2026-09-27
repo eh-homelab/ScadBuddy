@@ -475,6 +475,23 @@ describe('CustomizePage', () => {
     )
   })
 
+  it('re-reads the schema and re-renders once the model libraries are saved (#93)', async () => {
+    const seen = watchRequests()
+    const renders = watchRenders()
+    const { user } = render()
+    await firstRender()
+    const schemaReads = () => seen.filter((path) => path.endsWith('/schema')).length
+    const before = { schema: schemaReads(), renders: renders.length }
+
+    await user.click(screen.getByRole('button', { name: 'Libraries' }))
+    await user.click(await screen.findByRole('checkbox', { name: /BOSL2/ }))
+    await user.click(screen.getByRole('button', { name: 'Save' }))
+
+    await waitFor(() => expect(schemaReads()).toBe(before.schema + 1))
+    await waitFor(() => expect(renders.length).toBe(before.renders + 1), { timeout: 4000 })
+    await firstRender()
+  })
+
   it('reopens from the 3MF alone when the output record is gone', async () => {
     const id = 'd'.repeat(32)
     server.use(
