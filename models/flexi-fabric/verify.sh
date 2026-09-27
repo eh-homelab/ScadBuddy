@@ -59,6 +59,7 @@ CASES+=(
     "overlay-invert-two-tone|colour_mode=\"checker\";two_tone=true;top_color=\"#FFEB3B\";overlay_file=\"sample-overlay.svg\";overlay_invert=true;overlay_scale=60;overlay_rotation=30;overlay_x=10"
     "overlay-hex|pattern=\"hex_scales\";colour_mode=\"rows\";overlay_file=\"sample-overlay.svg\""
     "overlay-triflex-inlay|pattern=\"triflex_triangles\";overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";overlay_detail=\"inlay\""
+    "overlay-png-auto|overlay_file=\"sample-overlay.png\";image_threshold=50"
     "overlay-missing|overlay_file=\"no-such-file.svg\""
     "overlay-refused-parent|overlay_file=\"../flexi-fabric/sample-overlay.svg\""
     "overlay-refused-absolute|overlay_file=\"/etc/hostname\""

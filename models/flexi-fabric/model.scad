@@ -94,11 +94,11 @@ top_color = "#FFFFFF"; // color
 
 /* [Overlay] */
 
-// Picture to lay across the sheet: a file in the model's own directory, e.g. sample-overlay.svg or sample-overlay.png. Empty = off.
-overlay_file = ""; // 80
+// Picture to lay across the sheet: upload an SVG or PNG (or name a file in this model's directory, e.g. sample-overlay.svg). Empty = off.
+overlay_file = ""; // file:svg,png
 
-// File type: an SVG outline, or a PNG/image cut at a brightness threshold
-overlay_type = "svg"; // [svg:SVG outline, image_threshold:Image threshold - PNG]
+// File type: auto picks by extension; an SVG outline, or a PNG cut at a brightness threshold
+overlay_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, image_threshold:Image threshold - PNG]
 
 // How the picture is applied
 overlay_detail = "links"; // [links:Recolour whole links - link-sized pixels, inlay:Exact outline in the top layers]
@@ -441,6 +441,13 @@ if (OVERLAY_REFUSED)
     echo(str("NOTE: overlay_file \"", overlay_file,
              "\" is not a bare file name in the model directory; overlay off"));
 OVERLAY_ON = safe_file(overlay_file);
+
+function ends_with(f, suffix) =
+    len(f) >= len(suffix)
+    && [for (i = [0 : len(suffix) - 1]) f[len(f) - len(suffix) + i]] == [for (c = suffix) c];
+// "auto" reads the extension, so an uploaded PNG needs no second setting.
+OVERLAY_IS_IMAGE = overlay_type == "image_threshold"
+    || (overlay_type == "auto" && (ends_with(overlay_file, ".png") || ends_with(overlay_file, ".PNG")));
 PIXEL = OVERLAY_ON && overlay_detail == "links";
 FINE = OVERLAY_ON && overlay_detail == "inlay";
 
@@ -449,7 +456,7 @@ FINE = OVERLAY_ON && overlay_detail == "inlay";
 // darker than image_threshold are kept. A missing file only warns and gives
 // an empty mask, so the sheet still renders without the picture.
 module overlay_source() {
-    if (overlay_type == "image_threshold")
+    if (OVERLAY_IS_IMAGE)
         difference() {
             projection() surface(file = overlay_file, center = true);
             projection(cut = true)

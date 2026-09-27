@@ -133,8 +133,8 @@ for hexagons.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `overlay_file` | *(empty)* | A bare file name in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = no overlay. A path (`/`, `\`) or a leading dot is refused and turns the overlay off, so the parameter cannot read files outside the model. |
-| `overlay_type` | `svg` | `svg` imports the outline; `image_threshold` reads a PNG through `surface()` and keeps the pixels darker than `image_threshold`. |
+| `overlay_file` | *(empty)* | Upload an SVG or PNG in the customizer (a `// file:svg,png` parameter, #204), or give a bare file name in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = no overlay. A path (`/`, `\`) or a leading dot is refused and turns the overlay off, so the parameter cannot read files outside the model. |
+| `overlay_type` | `auto` | `auto` picks by extension: `.png` goes through `surface()`, anything else is imported as an SVG. `svg` imports the outline; `image_threshold` reads a PNG through `surface()` and keeps the pixels darker than `image_threshold`. |
 | `overlay_detail` | `links` | `links`: every link whose centre falls inside the picture takes `overlay_color` whole, so the picture appears in link-sized pixels. `inlay`: the exact outline, cut into the top `top_layers` of the links it covers. |
 | `overlay_color` | `#212121` | Overlay colour. |
 | `overlay_scale` | `80` | Picture width as % of the sheet width (aspect kept). |
@@ -143,13 +143,16 @@ for hexagons.
 | `image_threshold` | `50` | Brightness cut-off (%) for images. |
 | `overlay_invert` | `false` | Swap picture and background. |
 
-**Getting a picture in.** ScadBuddy's customizer has no file-upload widget yet,
-so the file has to be placed in this model's directory (next to
-`model.scad`) and its name typed into `overlay_file`. Two samples ship with
-the model: `sample-overlay.svg` (a heart) and `sample-overlay.png` (a 96 x 96
-black star on white). A name that does not exist does not break the render:
-OpenSCAD logs `ERROR: Can't open file ...`, still exits 0, and the sheet renders
-without the picture.
+**Getting a picture in.** In ScadBuddy, drop an SVG or PNG on the `overlay_file`
+field: the customizer uploads it (#204) and the render stages it next to
+`model.scad` under a generated bare name, so a PNG is picked up by
+`overlay_type = auto` without changing anything else. Outside ScadBuddy (or to
+use a file shipped with the model), type a bare file name in this model's
+directory. Two samples ship with the model: `sample-overlay.svg` (a heart) and
+`sample-overlay.png` (a 96 x 96 black star on white). A name that does not
+exist does not break the render: OpenSCAD logs `ERROR: Can't open file ...`,
+still exits 0, and the sheet renders without the picture (ScadBuddy reports it
+as a job warning).
 
 **How whole-link recolouring works.** OpenSCAD cannot ask whether a point is
 inside an imported picture, so it is answered with geometry: a 0.02 mm dot at
