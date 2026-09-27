@@ -142,6 +142,9 @@ def test_a_built_ins_diff_never_names_the_mirror(client: TestClient) -> None:
         ("PATCH", "", {"name": "Mine now"}),
         ("DELETE", "", None),
         ("POST", "/versions/{commit}/restore", None),
+        ("DELETE", "/thumbnail", None),
+        ("PUT", "/readme", {"content": "# Mine now\n"}),
+        ("DELETE", "/readme", None),
     ],
 )
 def test_a_built_in_cannot_be_changed(
@@ -156,6 +159,19 @@ def test_a_built_in_cannot_be_changed(
     assert response.status_code == 403, response.text
     assert "built-in" in response.json()["detail"]
     assert client.get(f"/api/v1/models/{BUILTIN}/source").text == SOURCE
+    assert len(_versions(client, BUILTIN)) == 1
+
+
+def test_a_built_ins_thumbnail_cannot_be_replaced(client: TestClient) -> None:
+    before = client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content
+    png = b"\x89PNG\r\n\x1a\n" + b"\0" * 16
+
+    response = client.put(
+        f"/api/v1/models/{BUILTIN}/thumbnail", files={"file": ("t.png", png, "image/png")}
+    )
+
+    assert response.status_code == 403, response.text
+    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == before
     assert len(_versions(client, BUILTIN)) == 1
 
 
@@ -218,30 +234,7 @@ def test_the_id_of_a_longest_legal_slug_is_not_refused_for_length(client: TestCl
     assert client.get(f"/api/v1/models/builtin:{slug}x").status_code == 422
 
 
-# ── #179's details routes against a built-in ──────────────────────────────────
-
-
-@pytest.mark.parametrize(
-    ("method", "suffix", "kwargs"),
-    [
-        ("PUT", "/thumbnail", {"files": {"file": ("t.png", PNG_BYTES, "image/png")}}),
-        ("DELETE", "/thumbnail", {}),
-        ("PUT", "/readme", {"json": {"content": "# Mine now\n"}}),
-        ("DELETE", "/readme", {}),
-    ],
-)
-def test_a_built_ins_thumbnail_and_readme_cannot_be_changed(
-    client: TestClient, paths: DataPaths, method: str, suffix: str, kwargs: dict[str, Any]
-) -> None:
-    """The same 403 as #155's own write routes, before anything is written."""
-    response = client.request(method, f"/api/v1/models/{BUILTIN}{suffix}", **kwargs)
-
-    assert response.status_code == 403, response.text
-    assert response.headers["content-type"] == "application/problem+json"
-    assert "built-in" in response.json()["detail"]
-    assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
-    assert not (paths.model_dir(BUILTIN) / "README.md").exists()
-    assert len(_versions(client, BUILTIN)) == 1
+# ── #179's details against a built-in (its writes are 403, above) ────────────
 
 
 def test_a_built_ins_details_are_readable(client: TestClient, bundled: Path) -> None:

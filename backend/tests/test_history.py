@@ -619,6 +619,23 @@ def test_a_template_of_mine_is_never_touched_by_the_sync(
     assert records == {"builtin:keychain": "builtin", "keychain": "mine"}
 
 
+def test_a_built_in_model_json_never_sets_origin_url(catalogue: Catalogue, tmp_path: Path) -> None:
+    """Only a URL import sets `origin_url` (#179); a built-in keeps the rest of its file,
+    and its mirror stays byte-identical to the image."""
+    image = tmp_path / "image"
+    (image / "keychain").mkdir(parents=True)
+    (image / "keychain" / "model.scad").write_text("cube(10);\n", encoding="utf-8")
+    meta = {"name": "Keychain", "source": "inspired", "origin_url": "javascript:alert(1)"}
+    (image / "keychain" / "model.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    assert catalogue.sync_builtins(image) is not None
+
+    record = catalogue.record("builtin:keychain")
+    assert (record.name, record.source, record.origin_url) == ("Keychain", "inspired", None)
+    # Dropped on read, not rewritten: a rewrite would make every boot re-sync it.
+    assert catalogue.sync_builtins(image) is None
+
+
 def test_a_restore_moves_the_records_revision(catalogue: Catalogue) -> None:
     first = catalogue.create("keychain", "cube(10);\n", ModelMeta(name="Keychain")).version
     catalogue.write_source("keychain", "cube(20);\n")

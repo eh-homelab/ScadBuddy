@@ -245,13 +245,13 @@ class Catalogue:
     def _record(self, slug: str, version: str | None) -> ModelRecord:
         self._require(slug)
         raw = self.read_raw_meta(slug)
-        meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
         if is_builtin(slug):
-            # Only `POST /models/import` sets `origin_url`, and the catalogue renders
-            # it as a link (#179). A built-in's `model.json` is the image's, mirrored
-            # byte for byte -- rewriting it would make every boot's sync see a
-            # difference -- so the field is dropped here, where it is read.
-            meta.origin_url = None
+            # Only `POST /models/import` sets `origin_url`, after fetching it over
+            # https, and the catalogue renders it as a link -- a bundled model.json
+            # never supplies one (#179). Dropped on read: the mirror must stay
+            # byte-identical to the image or it re-syncs on every boot.
+            raw.pop("origin_url", None)
+        meta = ModelMeta.model_validate({"name": slug.removeprefix(BUILTIN_PREFIX), **raw})
         try:
             modified = self.paths.model_source(slug).stat().st_mtime
         except FileNotFoundError:

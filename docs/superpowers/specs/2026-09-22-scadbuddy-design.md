@@ -225,12 +225,8 @@ cache/revisions/<id>/<commit>/    an old model revision exported out of git, der
 It is `null` for anything uploaded or pasted, and for a built-in, and it is not editable:
 `PATCH /models/{slug}` does not take it.
 
-`<id>` is the template's id: its slug for a template of mine, `builtin:<slug>` for a
-built-in. Derived files are keyed by the id, so a built-in's live exactly as long as
-its `_builtin/<slug>/` does, and the orphan sweep needs no special case for them.
-
 The model record the API returns (`ModelRecord`) is `model.json` plus what is
-derived: `slug` (the template's id), `origin` (`builtin` or `mine`), `updated_at`, `version` (the model's current commit),
+derived: `slug`, `origin` (`builtin` or `mine`), `updated_at`, `version` (the model's current commit),
 `has_readme`, `has_thumbnail` and `thumbnail_source` (#179). `thumbnail_source` is
 `model` when `thumbnail.png` is set on the model, `output` when there is none and
 the catalogue shows the plate image of the model's first generated output instead,
@@ -238,6 +234,10 @@ and `null` when there is neither; `has_thumbnail` is true for either source. The
 output fallback is read out of that output's 3MF, never copied into `models/`, and
 which output holds it is resolved once per state of the model's outputs rather
 than on every listing.
+
+`<id>` is the template's id: its slug for a template of mine, `builtin:<slug>` for a
+built-in. Derived files are keyed by the id, so a built-in's live exactly as long as
+its `_builtin/<slug>/` does, and the orphan sweep needs no special case for them.
 
 ### 4.3 Model history: git is the version store (#90)
 
@@ -618,13 +618,13 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/models` | catalogue |
-| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands with the same metadata, thumbnail and README as the bundled one, as a template of mine), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. `origin_url` is never taken from `meta` (only `/models/import` sets it). The README is capped like `PUT /readme`; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
+| POST | `/models` | `multipart/form-data` uploads `.scad` (+ optional thumbnail, README, and a `meta` part: the model's `model.json`, so a dropped `models/<slug>/` directory lands as a built-in would), slug from filename. Non-blank form fields win over `meta`, and a missing, empty or whitespace-only one falls through to it and then to the default: the name is the first non-blank of the form's, the `model.json`'s and the slug; a non-blank description is kept as given. `origin_url` is never taken from `meta` (only `/models/import` sets it). The README is capped like `PUT /readme`; `application/json` takes `{name, source}` pasted, slug from the name; `text/plain` takes the bare source with the name in `X-Model-Name`. `?force=true` (or `force` in the JSON body) saves source that fails the parse check |
 | POST | `/models/import` | body `{url, name?, force?}` → fetches the source on the server, then creates the model exactly as a JSON paste does, recording `origin_url`; the name defaults to the URL's file name. https only, at most 5 redirects (followed by hand and closed unread; each hop checked like the first), public addresses only (every resolved address must be globally routable, re-checked at connect so DNS rebinding cannot reach the cluster), uncompressed and at most 8 MiB on the wire, one 30 s deadline. MakerWorld pages are refused: its files need a signed-in account (#174). Every refusal is a 422, and a non-public address reads the same as one that did not answer |
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
-| GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore and the thumbnail and README writes below answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped |
+| GET/PATCH/DELETE | `/models/{slug}` | metadata. `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore and the thumbnail and README writes answer 403 for one (§4.3) |
 | GET | `/models/{slug}/thumbnail` | the model's own `thumbnail.png`, or else the `Metadata/plate_1.png` of its first (oldest) generated output that has one; 404 when neither exists |
-| PUT/DELETE | `/models/{slug}/thumbnail` | multipart `file` (a PNG) sets or replaces the model's own thumbnail; `DELETE` removes it (404 when it has none of its own). Each is one git commit in the model's history, and each returns the record, which after a `DELETE` can still show the output fallback. 403 for a built-in (#179) |
-| GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history; a write is a 403 for a built-in (#179) |
+| PUT/DELETE | `/models/{slug}/thumbnail` | multipart `file` (a PNG) sets or replaces the model's own thumbnail; `DELETE` removes it (404 when it has none of its own). Each is one git commit in the model's history, and each returns the record, which after a `DELETE` can still show the output fallback (#179) |
+| GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema |
