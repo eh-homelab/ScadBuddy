@@ -97,7 +97,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T
 }
 
-/** `GET /models/{slug}/source` answers text/plain, not JSON. */
+/**
+ * For the routes that answer with a text body rather than JSON: the model's
+ * source (`GET /models/{slug}/source`, text/plain) and its README
+ * (`GET /models/{slug}/readme`, text/markdown).
+ */
 async function requestText(path: string): Promise<string> {
   const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
   if (!response.ok) {
