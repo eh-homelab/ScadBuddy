@@ -482,6 +482,7 @@ export const settings: Settings = {
   filament_presets: [],
   bed_type: null,
   default_plate: null,
+  display_unit: 'mm',
 }
 
 /**

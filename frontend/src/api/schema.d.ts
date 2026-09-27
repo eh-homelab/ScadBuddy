@@ -2830,6 +2830,8 @@ export interface components {
             bed_type?: string | null;
             /** Default Plate */
             default_plate?: string | null;
+            /** Display Unit */
+            display_unit?: ("mm" | "in") | null;
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
@@ -2854,6 +2856,12 @@ export interface components {
             bed_type?: string | null;
             /** Default Plate */
             default_plate?: string | null;
+            /**
+             * Display Unit
+             * @default mm
+             * @enum {string}
+             */
+            display_unit: "mm" | "in";
             /** Filament Presets */
             filament_presets?: components["schemas"]["PresetRef"][];
             /**

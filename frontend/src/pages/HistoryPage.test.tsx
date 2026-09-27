@@ -1,9 +1,10 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { act, screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
 import { server } from '../mocks/server'
+import { setDisplayUnit } from '../lib/units'
 import { renderPage } from '../test/utils'
 import { HistoryPage } from './HistoryPage'
 
@@ -39,6 +40,14 @@ describe('HistoryPage', () => {
     const list = await screen.findByTestId('outputs')
     expect(list.children).toHaveLength(3)
     expect(within(list.children[0] as HTMLElement).getByText('Reagan')).toBeInTheDocument()
+  })
+
+  it('shows each output’s size in the display unit', async () => {
+    render()
+    const nova = await row('Nova')
+    expect(within(nova).getByText(/^[\d.]+ × [\d.]+ × [\d.]+ mm$/)).toBeInTheDocument()
+    act(() => setDisplayUnit('in'))
+    expect(within(nova).getByText(/^\d+\.\d\d × \d+\.\d\d × \d+\.\d\d in$/)).toBeInTheDocument()
   })
 
   it('diffs each output against the model defaults', async () => {

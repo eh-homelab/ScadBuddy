@@ -1,5 +1,6 @@
 import { NavLink, Outlet } from 'react-router'
 import { isEmbedded } from '../lib/embed'
+import { useLoadDisplayUnit } from '../lib/units'
 
 const NAV = [
   { to: '/', label: 'Models', end: true },
@@ -8,6 +9,7 @@ const NAV = [
 ]
 
 export function AppShell({ embedded = isEmbedded() }: { embedded?: boolean }) {
+  useLoadDisplayUnit()
   return (
     <div className="flex h-full min-h-0 flex-col bg-bg text-ink">
       <header

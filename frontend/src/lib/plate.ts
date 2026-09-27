@@ -1,16 +1,16 @@
 import type { PlateFit } from '../api/types'
-import { mm } from './format'
+import { length, type DisplayUnit } from './units'
 
 /**
  * #81 — what `GET /plate/fit` found, as sentences. The judging is the server's: it runs
  * the placement the send runs, so an answer of "fits" here is the send's answer too —
  * prime-tower room and the filament cutter included, not only the axes.
  */
-export function fitMessages(fit: PlateFit): string[] {
+export function fitMessages(fit: PlateFit, unit: DisplayUnit = 'mm'): string[] {
   const target = fit.plate.model ? `the ${fit.plate.name}` : 'the default plate'
   const axes = fit.overshoots.map(
     (over) =>
-      `${over.axis} is ${mm(over.size - over.limit)} mm over ${target} (${mm(over.size)} of ${mm(over.limit)} mm)`,
+      `${over.axis} is ${length(over.size - over.limit, unit)} ${unit} over ${target} (${length(over.size, unit)} of ${length(over.limit, unit)} ${unit})`,
   )
   return fit.problem ? [...axes, fit.problem] : axes
 }

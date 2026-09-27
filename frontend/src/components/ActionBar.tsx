@@ -3,6 +3,7 @@ import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
 import { triggerDownload } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
+import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
 import { PrintPicker } from './PrintPicker'
 import { SendDialog } from './SendDialog'
@@ -47,6 +48,7 @@ export function ActionBar({
   const ready = job?.status === 'done' && !rendering
   const stale = Boolean(output) && output?.id !== undefined && !ready
   const misfit = fit ? fitLabel(fit) : null
+  const unit = useDisplayUnit()
 
   async function generate() {
     if (!job) return
@@ -132,7 +134,7 @@ export function ActionBar({
             onClick={() => setPrintOpen(true)}
             disabled={!output}
             data-testid="print"
-            title={misfit && fit ? fitMessages(fit).join('\n') : undefined}
+            title={misfit && fit ? fitMessages(fit, unit).join('\n') : undefined}
           >
             Print
             {misfit && <span className="text-[12px]">· {misfit}</span>}

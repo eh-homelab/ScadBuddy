@@ -18,6 +18,7 @@ import { Spinner } from '../components/ui/Spinner'
 import { editPath, modelPath, type EditNavigationState } from '../lib/deeplink'
 import { defaultValues, type ParamValues } from '../lib/params'
 import { fitMessages } from '../lib/plate'
+import { useDisplayUnit } from '../lib/units'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { RENDER_DEBOUNCE_MS, useRenderJob } from '../lib/useRenderJob'
@@ -128,7 +129,8 @@ export function CustomizePage() {
     [printerModel, bbox?.size, colours],
   )
   const fit = fitState.data ?? undefined
-  const misfit = fit ? fitMessages(fit) : []
+  const unit = useDisplayUnit()
+  const misfit = fit ? fitMessages(fit, unit) : []
 
   const onChange = useCallback((name: string, value: ParamValue) => {
     setEdits((current) => ({
