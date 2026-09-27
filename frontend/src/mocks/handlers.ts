@@ -159,6 +159,19 @@ function upstreamStateOf(model: ModelSummary): UpstreamState | null {
   return revision === upstream.dismissed ? 'dismissed' : 'update'
 }
 
+/** Where an upstream lives in the models repository (`model_path`). */
+function upstreamPath(id: string): string {
+  return id.startsWith('builtin:') ? `_builtin/${id.slice('builtin:'.length)}` : id
+}
+
+/**
+ * `_advance_base` in `library/catalogue.py`: a fresh upstream at `revision`, where it
+ * lives now, with nothing dismissed. Used by a clean merge and a resolved one alike.
+ */
+function advanceBase(upstream: Upstream, revision: string): Upstream {
+  return { id: upstream.id, path: upstreamPath(upstream.id), base: revision, dismissed: null }
+}
+
 /** A record as the API serves it: a duplicate's carries its `upstream_state`. */
 function view(model: ModelSummary): ModelSummary {
   const upstreamState = upstreamStateOf(model)
@@ -522,7 +535,7 @@ export const handlers = [
       version: version.commit,
       upstream: {
         id,
-        path: id.startsWith('builtin:') ? `_builtin/${id.slice('builtin:'.length)}` : id,
+        path: upstreamPath(id),
         base,
       },
     }
@@ -577,7 +590,7 @@ export const handlers = [
       ...model,
       version: version.commit,
       updated_at: version.date,
-      upstream: { ...upstream, base: revision, dismissed: null },
+      upstream: advanceBase(upstream, revision),
     }
     state.models = state.models.map((m) => (m.slug === slug ? updated : m))
     await delay(120)
@@ -682,7 +695,7 @@ export const handlers = [
     }
     state.sources[slug] = body.source
     if (!check.ok) delete state.schemas[slug]
-    const resolved = mergeBase !== null && upstream ? { ...upstream, base: mergeBase } : null
+    const resolved = mergeBase !== null && upstream ? advanceBase(upstream, mergeBase) : null
     const message =
       body.message || (resolved ? `Merge ${resolved.id} into ${slug}` : `Edit ${slug} source`)
     const version = recordVersion(slug, message, [{ status: 'M', path: 'model.scad' }])

@@ -128,6 +128,31 @@ describe('mock API: upstream updates (#157)', () => {
     expect((await api.getModel(COPY)).upstream_state).toBe('current')
   })
 
+  it('clears dismissed when a conflicted merge is resolved, as a clean one does', async () => {
+    await duplicateWithUpdate({ conflict: true })
+    await api.dismissUpstream(COPY)
+    await api.replaceSource(UPSTREAM, `${theirs}// again\n`)
+    const revision = (await api.listVersions(UPSTREAM))[0]?.commit ?? ''
+
+    const resolved = await api.resolveUpstreamMerge(COPY, 'cube(1);\n', revision)
+    expect(resolved.upstream).toEqual({
+      id: UPSTREAM,
+      path: UPSTREAM,
+      base: revision,
+      dismissed: null,
+    })
+    expect(resolved.upstream_state).toBe('current')
+  })
+
+  it('clears dismissed on a clean merge of a dismissed update', async () => {
+    await duplicateWithUpdate()
+    await api.dismissUpstream(COPY)
+    const revision = (await api.listVersions(UPSTREAM))[0]?.commit
+    const merged = await api.mergeUpstream(COPY)
+    expect(merged.model.upstream).toMatchObject({ base: revision, dismissed: null })
+    expect(merged.model.upstream_state).toBe('current')
+  })
+
   it('dismisses an update until the upstream moves again', async () => {
     await duplicateWithUpdate()
     expect((await api.dismissUpstream(COPY)).upstream_state).toBe('dismissed')
