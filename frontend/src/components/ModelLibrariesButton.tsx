@@ -21,7 +21,9 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
   const [declared, setDeclared] = useState<string[]>([])
   const [open, setOpen] = useState(false)
   const [available, setAvailable] = useState<LibraryEntry[] | null>(null)
-  const [chosen, setChosen] = useState<string[]>([])
+  // null until this dialog has read the model's current declaration: saving from
+  // anything else would overwrite it with a guess.
+  const [chosen, setChosen] = useState<string[] | null>(null)
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -40,10 +42,13 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
   async function show() {
     setOpen(true)
-    setChosen(declared)
+    setChosen(null)
     setError(null)
     try {
-      setAvailable((await api.listLibraries()).filter((entry) => entry.pin))
+      const [model, libraries] = await Promise.all([api.getModel(slug), api.listLibraries()])
+      setDeclared(model.libraries ?? [])
+      setChosen(model.libraries ?? [])
+      setAvailable(libraries.filter((entry) => entry.pin))
     } catch (caught) {
       setError(caught instanceof ApiError ? caught.detail : String(caught))
       setAvailable([])
@@ -58,11 +63,16 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
 
   function toggle(library: string) {
     setChosen((current) =>
-      current.includes(library) ? current.filter((n) => n !== library) : [...current, library],
+      current === null
+        ? current
+        : current.includes(library)
+          ? current.filter((n) => n !== library)
+          : [...current, library],
     )
   }
 
   async function save() {
+    if (chosen === null) return
     setSaving(true)
     setError(null)
     try {
@@ -100,7 +110,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
             <Button
               variant="primary"
               onClick={() => void save()}
-              disabled={saving || available === null || available.length === 0}
+              disabled={saving || chosen === null || available === null || available.length === 0}
             >
               {saving ? <Spinner /> : 'Save'}
             </Button>
@@ -126,7 +136,7 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
                 <label className="flex cursor-pointer items-center gap-2 text-[13px]">
                   <input
                     type="checkbox"
-                    checked={chosen.includes(entry.name)}
+                    checked={chosen?.includes(entry.name) ?? false}
                     onChange={() => toggle(entry.name)}
                   />
                   {entry.name}

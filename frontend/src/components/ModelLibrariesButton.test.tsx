@@ -56,4 +56,26 @@ describe('ModelLibrariesButton', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('not added yet: BOSL2')
     expect(screen.getByRole('dialog')).toBeInTheDocument()
   })
+
+  it('cannot save over a declaration it could not read', async () => {
+    const patches: unknown[] = []
+    server.events.on('request:start', ({ request }) => {
+      if (request.method === 'PATCH') patches.push(request.url)
+    })
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        HttpResponse.json(
+          { title: 'Internal Server Error', status: 500, detail: 'git timed out' },
+          { status: 500, headers: { 'Content-Type': 'application/problem+json' } },
+        ),
+      ),
+    )
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+
+    await user.click(screen.getByRole('button', { name: 'Libraries' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('git timed out')
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(patches).toEqual([])
+  })
 })
