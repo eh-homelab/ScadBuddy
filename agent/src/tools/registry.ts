@@ -1,0 +1,188 @@
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
+import type { BackendClient } from '../api/backend.js'
+import type { paths } from '../api/schema.js'
+import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import type { PendingActionStore } from './pending.js'
+
+// The tool registry, spec §5.1 and D3
+// (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
+// defined once, here, and projected twice — in-process to the harness
+// (`harness.ts`) and over `/mcp` to external agents (`../mcp/server.ts`).
+// Both projections call `runTool`, so the tier check and the approval gate
+// cannot differ between them.
+
+export type Risk = Tier
+
+/** Bambuddy API-key scopes, as `backend/scadbuddy/bambuddy/errors.py` `Scope` names them. */
+export type BambuddyScope = 'Read Status' | 'Manage Library' | 'Manage Queue' | 'Manage Projects'
+
+type HttpMethod = 'get' | 'put' | 'post' | 'delete' | 'patch'
+type MethodsOf<P extends keyof paths> = {
+  [M in HttpMethod]: NonNullable<paths[P][M]> extends never ? never : Uppercase<M>
+}[HttpMethod]
+
+/** `"GET /api/v1/models"`: a backend operation, checked against the generated schema. */
+export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[keyof paths]
+
+/** Long-running tools report here; a no-op when the caller sent no progress token. */
+export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
+
+/** Shared by every call: what `main.ts` (or a test) wires up once. */
+export type ToolServices = {
+  backend: BackendClient
+  pending: PendingActionStore
+  /** How often a render is polled while `render_model` waits. */
+  pollIntervalMs: number
+  /** How long `render_model` waits before handing back the still-running job. */
+  renderWaitMs: number
+}
+
+export type ToolContext = ToolServices & {
+  principal: Principal
+  progress: Progress
+  signal: AbortSignal
+}
+
+export type ToolSpec<S extends z.ZodRawShape> = {
+  name: string
+  description: string
+  input: z.ZodObject<S>
+  risk: Risk
+  /** Bambuddy scopes the backend call needs, so a 401/403 can be explained before it happens. */
+  bambuddyScope?: readonly BambuddyScope[]
+  /** → `readOnlyHint`, for batching only; never used for gating (spec §5.1). Defaults to `risk === 'read'`. */
+  readOnly?: boolean
+  /** The backend operations this tool covers, for the openapi coverage check. */
+  routes: readonly Operation[]
+  /**
+   * `outward` tools stop at the approval gate by default. Only the gate's own
+   * tool (`confirm_action`) opts out, because it IS the approval path.
+   */
+  approval?: 'required' | 'none'
+  /** A human-readable line for the pending action a gated call creates. */
+  summarize?: (args: z.infer<z.ZodObject<S>>) => string
+  handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
+}
+
+/** A registry entry with its argument types erased, so tools of any shape share one list. */
+export type Tool = {
+  readonly name: string
+  readonly description: string
+  readonly shape: z.ZodRawShape
+  readonly risk: Risk
+  readonly bambuddyScope: readonly BambuddyScope[]
+  readonly readOnly: boolean
+  readonly routes: readonly Operation[]
+  readonly gated: boolean
+  readonly annotations: ToolAnnotations
+  summarize(args: unknown): string
+  /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
+  execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
+}
+
+export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
+  const readOnly = spec.readOnly ?? spec.risk === 'read'
+  const gated = spec.risk === 'outward' && spec.approval !== 'none'
+  const bambuddyScope = spec.bambuddyScope ?? []
+  return {
+    name: spec.name,
+    description: spec.description,
+    shape: spec.input.shape,
+    risk: spec.risk,
+    bambuddyScope,
+    readOnly,
+    routes: spec.routes,
+    gated,
+    annotations: {
+      readOnlyHint: readOnly,
+      destructiveHint: spec.risk === 'outward',
+      // Bambuddy is a system outside ScadBuddy.
+      openWorldHint: bambuddyScope.length > 0,
+    },
+    summarize(args) {
+      const parsed = spec.input.parse(args)
+      return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
+    },
+    execute(args, ctx) {
+      return spec.handler(spec.input.parse(args), ctx)
+    },
+  }
+}
+
+export class ToolError extends Error {
+  override name = 'ToolError'
+}
+
+export function errorResult(message: string): CallToolResult {
+  return { isError: true, content: [{ type: 'text', text: message }] }
+}
+
+/**
+ * The one entry point both projections use: tier check, then the approval
+ * gate for outward tools, then the handler. Errors become `isError` results
+ * so the model sees them; they are never thrown into the transport.
+ */
+export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
+  if (!hasTier(ctx.principal, tool.risk)) {
+    return errorResult(
+      `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
+    )
+  }
+  try {
+    if (tool.gated) {
+      const action = ctx.pending.prepare({
+        tool: tool.name,
+        args,
+        summary: tool.summarize(args),
+        principalId: ctx.principal.id,
+      })
+      return json({
+        status: 'pending_approval',
+        pending_action_id: action.id,
+        summary: action.summary,
+        expires_at: action.expiresAt.toISOString(),
+        next:
+          'Outward actions need a human approval in the ScadBuddy UI. That approval flow is not ' +
+          'available yet (#258), so confirm_action refuses for now; nothing was sent.',
+      })
+    }
+    return await tool.execute(args, ctx)
+  } catch (err) {
+    if (err instanceof z.ZodError) return errorResult(`invalid arguments: ${z.prettifyError(err)}`)
+    if (err instanceof ToolError) return errorResult(err.message)
+    if (err instanceof Error && err.name === 'AbortError') return errorResult('the call was cancelled')
+    return errorResult(`${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`)
+  }
+}
+
+// ── result helpers ─────────────────────────────────────────────────────────
+
+export function json(data: unknown): CallToolResult {
+  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+}
+
+export function text(value: string): CallToolResult {
+  return { content: [{ type: 'text', text: value }] }
+}
+
+export function image(bytes: ArrayBuffer, mimeType: string): CallToolResult {
+  return { content: [{ type: 'image', data: Buffer.from(bytes).toString('base64'), mimeType }] }
+}
+
+/** Binary content (a GLB, a 3MF) as an embedded resource, refused above `maxBytes`. */
+export function blob(uri: string, bytes: ArrayBuffer, mimeType: string, maxBytes: number): CallToolResult {
+  if (bytes.byteLength > maxBytes) {
+    throw new ToolError(
+      `${uri} is ${bytes.byteLength} bytes, over the ${maxBytes}-byte limit for inline content`,
+    )
+  }
+  return {
+    content: [
+      {
+        type: 'resource',
+        resource: { uri, mimeType, blob: Buffer.from(bytes).toString('base64') },
+      },
+    ],
+  }
+}

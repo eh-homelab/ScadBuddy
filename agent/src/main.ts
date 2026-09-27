@@ -1,11 +1,16 @@
 import { serve } from '@hono/node-server'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
+import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { FailClosedTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { connectDatabase } from './db.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
+import { nodeClientAddress } from './mcp/http.js'
 import { shutdown } from './shutdown.js'
+import { ALL_TOOLS } from './tools/index.js'
+import { PendingActionStore } from './tools/pending.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -29,6 +34,16 @@ const backend = createBackendClient(config.backendUrl)
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
+  mcp: {
+    tools: ALL_TOOLS,
+    services: { backend, pending: new PendingActionStore(), pollIntervalMs: 1000, renderWaitMs: 10 * 60_000 },
+    // TODO(#255): the Postgres token store and the Settings-backed auth mode.
+    // Until then `bearer` (the default) verifies no token, so /mcp answers
+    // 401 to every request in production: fail closed, not open.
+    tokens: new FailClosedTokenStore(),
+    authSettings: () => DEFAULT_MCP_AUTH,
+    clientAddress: nodeClientAddress,
+  },
 })
 
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {

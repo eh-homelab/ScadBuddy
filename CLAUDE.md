@@ -103,7 +103,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `SCADBUDDY_SECRET_KEY_FILE` (no AI env vars; AI settings live in the database);
   `src/app.ts` is the Hono server (`/healthz`); `src/harness/options.ts` builds every
   query's SDK options (`tools: []`, `settingSources: []`); `src/api/backend.ts` is the
-  `openapi-fetch` client over the generated `src/api/schema.d.ts`. The design is
+  `openapi-fetch` client over the generated `src/api/schema.d.ts`. `src/tools/` is the
+  tool registry (#251): one `defineTool` per tool, projected in-process for the harness
+  and over `/mcp` (`src/mcp/http.ts`, auth in `src/auth/`); every `/api/v1` operation
+  needs a tool or a `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails. The design is
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
@@ -157,8 +160,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
   `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
-  `frontend/pnpm-workspace.yaml` must be copied into the Docker build (it holds
-  `allowBuilds`); `agent/` has none because no dependency has an install script.
+  `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
+  the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
   Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.

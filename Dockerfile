@@ -67,11 +67,11 @@ FROM node:24-bookworm-slim AS agent-build
 WORKDIR /src/agent
 RUN corepack enable
 
-# agent/ has no pnpm-workspace.yaml because none of its dependencies has an
-# install script to approve (a frozen install passes without one). If one ever
-# does, pnpm fails here with ERR_PNPM_IGNORED_BUILDS: add the file with its
-# `allowBuilds` entry and copy it in on this line, as the frontend stage does.
-COPY agent/package.json agent/pnpm-lock.yaml ./
+# agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
+# install script that is declined there); without it the frozen install fails
+# with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
+# stage does.
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
 COPY agent/ ./
@@ -83,7 +83,7 @@ FROM node:24-bookworm-slim AS agent-deps
 
 WORKDIR /src/agent
 RUN corepack enable
-COPY agent/package.json agent/pnpm-lock.yaml ./
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile --prod
 
 FROM node:24-bookworm-slim AS agent

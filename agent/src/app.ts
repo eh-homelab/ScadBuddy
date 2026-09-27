@@ -1,8 +1,9 @@
 import { Hono } from 'hono'
+import { type McpEndpointDeps, mountMcp } from './mcp/http.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
-// direct streaming, which the later /mcp and /api/v1/ai/* routes need. Only
-// /healthz exists in this scaffold.
+// direct streaming. /healthz, and /mcp when `mcp` is given (#251); the
+// /api/v1/ai/* routes come later.
 
 export type Probe = () => Promise<boolean>
 
@@ -10,6 +11,8 @@ export type AppDeps = {
   /** Undefined when SCADBUDDY_DATABASE_URL is unset. */
   database: { ping: Probe } | undefined
   backend: Probe
+  /** The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp route. */
+  mcp?: McpEndpointDeps | undefined
 }
 
 export type Health = {
@@ -44,6 +47,8 @@ export function createApp(deps: AppDeps): Hono {
     }
     return c.json(body)
   })
+
+  if (deps.mcp) mountMcp(app, deps.mcp)
 
   return app
 }
