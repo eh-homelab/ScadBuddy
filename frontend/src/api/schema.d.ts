@@ -402,6 +402,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/models/{slug}/samples/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A sample file the template ships
+         * @description Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.
+         */
+        get: operations["get_sample_content_api_v1_models__slug__samples__name__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/schema": {
         parameters: {
             query?: never;
@@ -2164,6 +2184,8 @@ export interface components {
             name: string;
             /** Options */
             options?: components["schemas"]["Option"][];
+            /** Samples */
+            samples?: string[];
             /** Step */
             step?: number | null;
             /**
@@ -4218,6 +4240,41 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderAccepted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sample_content_api_v1_models__slug__samples__name__get: {
+        parameters: {
+            query?: {
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                slug: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                    "image/svg+xml": unknown;
                 };
             };
             /** @description Validation Error */

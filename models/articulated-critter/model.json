@@ -1,0 +1,6 @@
+{
+  "name": "Articulated Critter",
+  "description": "A print-in-place flexi animal — snake, dragon, lizard, fish or caterpillar — whose head, body segments and tail are joined by hinges that print already assembled, flat and without supports. Eyes, nostrils and an optional name (one letter per body segment) are flush inlays. Body segments alternate between two colours; the head, eyes, pupils and name each have their own. Every hinge gap is measured on the rendered geometry.",
+  "tags": ["toy", "kids", "flexi", "articulated", "print-in-place", "multi-colour"],
+  "source": "inspired by Printables \"Articulated Snake\" (TechnicaL, 45,859 downloads) and \"ARTICULATED poison DRAGON flexible\" (sunset3d, 38,874 downloads)"
+}

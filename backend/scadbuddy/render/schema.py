@@ -24,6 +24,18 @@ GLOBAL_GROUP = "Global"
 #: `surface()`. The upload route accepts exactly these, sniffed from the content.
 FILE_KINDS: tuple[str, ...] = ("svg", "png")
 
+#: What a `file` parameter may hand OpenSCAD: a bare name in the model's directory,
+#: never a path. Uploads are staged under names that match (#204), and a template's
+#: own sample files are offered only when theirs do. No leading dot, so a dotfile is
+#: never one.
+BARE_FILENAME_PATTERN = r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,254}$"
+_BARE_FILENAME = re.compile(BARE_FILENAME_PATTERN)
+
+
+def is_bare_filename(name: str) -> bool:
+    return _BARE_FILENAME.fullmatch(name) is not None and ".." not in name
+
+
 _ANNOTATION_RE = re.compile(
     r"^[^\S\n]*(?P<name>[A-Za-z_]\w*)[^\S\n]*=[^;\n]*;[^\S\n]*//[^\S\n]*"
     r"(?P<kind>color|font|file)\b"
@@ -63,6 +75,10 @@ class Parameter(BaseModel):
     options: list[Option] = Field(default_factory=list)
     #: A `file` parameter's accepted kinds, from `// file:svg,png` (#204).
     accept: list[str] = Field(default_factory=list)
+    #: A `file` parameter's sample files: the bare names of the files in the model's
+    #: own directory whose extension it accepts. Listed when the schema is served,
+    #: never cached, since a sample can change without the source changing.
+    samples: list[str] = Field(default_factory=list)
 
 
 class CustomizerSchema(BaseModel):
