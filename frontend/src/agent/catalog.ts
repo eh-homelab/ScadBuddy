@@ -221,6 +221,12 @@ export const TOOLS = {
     description:
       'Test the stored Bambuddy connection. Refused while the form has unsaved changes, because ' +
       'the test saves the form first and that is for the user to do.',
+    // `read`, though it reaches Bambuddy: AI spec §8.1 tiers by effect, and `outward` is
+    // "send, print, delete, settings or credential writes". This changes nothing:
+    // `POST /settings/test` only runs `GET /printers/` on Bambuddy with the stored settings
+    // (backend/scadbuddy/api/settings.py `test_settings`); the handler skips the
+    // button's save and refuses while the form is dirty, and the stored key never
+    // reaches the browser or the result.
     risk: 'read',
     scope: 'settings',
     input: none,

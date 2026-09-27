@@ -41,6 +41,9 @@ export function ParameterPanel({
   const globalGroup = groups.find((group) => group.name === GLOBAL_GROUP)
   const [active, setActive] = useState(() => tabs[0]?.name ?? GLOBAL_GROUP)
   const [revealed, setRevealed] = useState(reveal)
+  // Adjusting state when a prop changes, during render rather than in an effect, so the
+  // right tab is in the same commit as the change instead of one frame late:
+  // https://react.dev/learn/you-might-not-need-an-effect#adjusting-some-state-when-a-prop-changes
   if (reveal !== revealed) {
     setRevealed(reveal)
     const home = reveal && tabs.find((group) => group.params.some((param) => param.name === reveal.name))
