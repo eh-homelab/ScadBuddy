@@ -304,7 +304,8 @@ def from_plates(
         stage: Stage = "failed"
     elif unsettled is not None:
         stage = unsettled.stage
-    elif all(plate.stage == "cancelled" for plate in plates):
+    elif any(plate.stage == "cancelled" for plate in plates):
+        # A cancelled plate did not print, so the print as a whole did not finish.
         stage = "cancelled"
     else:
         stage = "done"
@@ -352,16 +353,20 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
 
     if route == "slice_queue":
         if len(meta.plates) > 1:
-            # Polled together; `gather` keeps plate order and raises the first failure.
-            return from_plates(
-                list(
-                    await asyncio.gather(
-                        *(
+            # Polled together. A failing read cancels the other plates' reads, and the
+            # caller sees that read's own error rather than an ExceptionGroup.
+            try:
+                async with asyncio.TaskGroup() as group:
+                    tasks = [
+                        group.create_task(
                             _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
-                            for plate in meta.plates
                         )
-                    )
-                ),
+                        for plate in meta.plates
+                    ]
+            except ExceptionGroup as grouped:
+                raise grouped.exceptions[0] from None
+            return from_plates(
+                [task.result() for task in tasks],
                 [plate.plate_id for plate in meta.plates],
                 slice_job_id=meta.slice_job_id,
                 queue_item_id=meta.queue_item_id,

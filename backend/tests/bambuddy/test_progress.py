@@ -350,6 +350,58 @@ async def test_plates_are_polled_together_and_reported_in_plate_order(
 
 
 @respx.mock
+async def test_a_failing_plate_read_cancels_the_others_and_raises_its_own_error(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Plate 1's read fails once plate 2's is in flight; plate 2's is then cancelled
+    rather than left running, and the caller sees the ApiError, not a group."""
+    sliced()
+    second_started = asyncio.Event()
+    second_cancelled = False
+
+    async def first(request: httpx.Request) -> httpx.Response:
+        await second_started.wait()
+        return httpx.Response(500, json={"detail": "the database is locked"})
+
+    async def second(request: httpx.Request) -> httpx.Response:
+        nonlocal second_cancelled
+        second_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            second_cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    respx.get(f"{API}/queue/51").mock(side_effect=first)
+    respx.get(f"{API}/queue/52").mock(side_effect=second)
+    with pytest.raises(ApiError) as raised:
+        await asyncio.wait_for(progress_for(bambuddy, plates_meta()), timeout=5)
+    assert "the database is locked" in raised.value.detail
+    assert second_cancelled
+
+
+@respx.mock
+async def test_a_cancelled_plate_beside_a_finished_one_is_a_cancelled_print(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Reporting "done" would say every plate printed when one never did."""
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "cancelled"})
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "completed"})
+    )
+    progress = await progress_for(bambuddy, plates_meta())
+    assert progress is not None
+    assert progress.settled is True
+    assert progress.stage == "cancelled"
+    assert progress.copies_cancelled == 1
+    assert progress.copies_completed == 1
+
+
+@respx.mock
 async def test_an_earlier_plate_failing_is_the_prints_failure(bambuddy: BambuddyClient) -> None:
     """A failure on the first plate is reported even though the last is fine; a dropped
     entry reads as done, as it does for a single plate."""
