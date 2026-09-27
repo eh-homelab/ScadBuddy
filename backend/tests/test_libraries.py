@@ -434,7 +434,7 @@ def _recording_git(store: LibraryStore, monkeypatch: pytest.MonkeyPatch) -> list
     """Every git call the store makes, each failing as an unreachable fetch would."""
     calls: list[tuple[str, ...]] = []
 
-    def git(*args: str) -> str:
+    def git(*args: str, watch: Path | None = None) -> str:
         calls.append(args)
         raise LibraryFetchError("unreachable")
 
@@ -692,6 +692,47 @@ def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
 
     assert not (paths.models / LOCKFILE_NAME).exists()
     assert list(paths.libraries.iterdir()) == []
+
+
+def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
+    paths: DataPaths, history: ModelHistory, tmp_path: Path
+) -> None:
+    """The cap stops the clone mid-transfer: an oversized repository never gets to
+    write its whole tree to the volume before it is refused."""
+    child_pid = tmp_path / "child.pid"
+    fake_git = tmp_path / "git"
+    # A clone that never finishes: a child keeps appending to the checkout.
+    fake_git.write_text(
+        "#!/bin/sh\n"
+        'for last; do :; done\nmkdir -p "$last"\n'
+        '(while :; do head -c 65536 /dev/zero >> "$last/blob"; sleep 0.01; done) &\n'
+        f"echo $! > {child_pid}\nwait\n",
+        encoding="utf-8",
+    )
+    fake_git.chmod(0o755)
+    store = LibraryStore(
+        paths,
+        history,
+        catalogue=(),
+        git=str(fake_git),
+        timeout=60,
+        max_bytes=1_000_000,
+    )
+
+    started = time.monotonic()
+    with pytest.raises(LibraryTooLargeError, match="over the 1 MB"):
+        store._clone("Big", "https://git.example/o/big.git", "main")
+
+    assert time.monotonic() - started < 30
+    assert list(paths.libraries.iterdir()) == []
+    pid = int(child_pid.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if not _running(pid):
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("the oversized clone's writer is still running")
 
 
 def test_a_clone_within_the_size_cap_is_installed(store: LibraryStore, paths: DataPaths) -> None:

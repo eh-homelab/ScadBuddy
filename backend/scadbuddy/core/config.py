@@ -60,6 +60,11 @@ class Config:
         # Sizes a semaphore, which refuses a negative count; zero refuses every editor.
         if self.lsp_sessions < 0:
             raise ValueError(f"SCADBUDDY_LSP_SESSIONS must be at least 0, not {self.lsp_sessions}")
+        # Zero or less would refuse every library, however small.
+        if self.library_max_bytes < 1:
+            raise ValueError(
+                f"SCADBUDDY_LIBRARY_MAX_BYTES must be at least 1, not {self.library_max_bytes}"
+            )
 
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
