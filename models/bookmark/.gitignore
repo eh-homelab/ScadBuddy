@@ -1,1 +1,4 @@
 .verify/
+# verify.sh stand-ins, removed by its EXIT trap (kept out of git if it is killed)
+_scadbuddy_solid_asset_*
+cat..v2.svg
