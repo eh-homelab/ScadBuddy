@@ -49,7 +49,10 @@ const state = {
   models: [...fixtures.models] as ModelSummary[],
   schemas: { ...fixtures.schemas },
   outputs: [...fixtures.outputs] as Output[],
-  sources: { 'name-keychain': fixtures.keychainSource } as Record<string, string>,
+  sources: {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  } as Record<string, string>,
   settings: { ...fixtures.settings } as Settings,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, MockJob>(),
@@ -78,7 +81,10 @@ export function resetMockState(): void {
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
-  state.sources = { 'name-keychain': fixtures.keychainSource }
+  state.sources = {
+    'name-keychain': fixtures.keychainSource,
+    [fixtures.BUILTIN_SLUG]: fixtures.keychainSource,
+  }
   state.settings = { ...fixtures.settings }
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -194,6 +200,16 @@ function problem(status: number, title: string, detail?: string, extensions: obj
     { type: 'about:blank', title, status, detail, ...extensions },
     { status, headers: { 'Content-Type': 'application/problem+json' } },
   )
+}
+
+/**
+ * `require_mine` in `api/models.py`: a built-in is refused before the model is even
+ * looked up, with the backend's problem (403 is not in its title table, so "Error").
+ */
+function refuseBuiltin(slug: string) {
+  return slug.startsWith('builtin:')
+    ? problem(403, 'Error', `'${slug}' is a built-in template and is read-only`)
+    : undefined
 }
 
 function slugify(value: string): string {
@@ -357,8 +373,11 @@ export const handlers = [
   }),
 
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
-    const model = state.models.find((m) => m.slug === params['slug'])
-    if (!model) return problem(404, 'Model not found')
+    const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const patch = (await request.json()) as Partial<ModelSummary>
     const missing = (patch.libraries ?? []).filter(
       (name) => !state.libraries.some((entry) => entry.name === name && entry.pin),
@@ -386,6 +405,8 @@ export const handlers = [
 
   http.put(`${base}/models/:slug/source`, async ({ params, request }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const model = state.models.find((m) => m.slug === slug)
     if (!model) return problem(404, 'Model not found')
     const body = (await request.json()) as {
@@ -412,6 +433,8 @@ export const handlers = [
   }),
 
   http.delete(`${base}/models/:slug`, ({ params }) => {
+    const refused = refuseBuiltin(String(params['slug']))
+    if (refused) return refused
     if (!state.models.some((m) => m.slug === params['slug'])) {
       return problem(404, 'Not Found', `no model named '${String(params['slug'])}'`)
     }
@@ -452,6 +475,8 @@ export const handlers = [
 
   http.post(`${base}/models/:slug/versions/:commit/restore`, ({ params }) => {
     const slug = String(params['slug'])
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
     const commit = String(params['commit'])
     const entries = state.versions[slug] ?? []
     const target = entries.find((v) => v.commit === commit)

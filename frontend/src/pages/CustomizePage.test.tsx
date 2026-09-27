@@ -4,6 +4,7 @@ import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import type { Job, PipelineChoices, Plate } from '../api/types'
 import {
+  BUILTIN_SLUG,
   pipelineViews,
   printOptions,
   settings as settingsFixture,
@@ -757,5 +758,67 @@ describe('CustomizePage', () => {
 
     await user.clear(screen.getByRole('textbox', { name: 'Name on the tag' }))
     expect(screen.getByText('1 changed from defaults')).toBeInTheDocument()
+  })
+
+  it('offers the write actions on a model of the user\'s own', async () => {
+    render()
+    expect(await screen.findByRole('link', { name: 'Edit source' })).toHaveAttribute(
+      'href',
+      '/m/name-keychain/source',
+    )
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+  })
+
+  it('says so when the model record fails to load, and a retry brings the write actions back', async () => {
+    let fail = true
+    server.use(
+      http.get('/api/v1/models/:slug', () =>
+        fail
+          ? HttpResponse.json({ title: 'Data directory is unreadable', status: 500 }, { status: 500 })
+          : undefined,
+      ),
+    )
+    const { user } = render()
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Could not load this model')
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('builtin-badge')).not.toBeInTheDocument()
+
+    fail = false
+    await user.click(within(alert).getByRole('button', { name: 'Try again' }))
+
+    expect(await screen.findByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Edit source' })).toBeInTheDocument()
+    expect(screen.queryByText(/Could not load this model/)).not.toBeInTheDocument()
+  })
+
+  it('offers no write action on a built-in template, and says why (#184)', async () => {
+    render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    expect(await screen.findByTestId('builtin-badge')).toHaveTextContent(
+      'Built-in template — read-only',
+    )
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Edit source' })).not.toBeInTheDocument()
+  })
+
+  it('still customizes a built-in template, and links its read-only pages encoded (#184)', async () => {
+    render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    await firstRender()
+    expect(screen.getByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
+    expect(await screen.findByRole('link', { name: 'View source' })).toHaveAttribute(
+      'href',
+      '/m/builtin%3Akeychain-template/source',
+    )
+    expect(screen.getByRole('link', { name: 'Versions' })).toHaveAttribute(
+      'href',
+      '/m/builtin%3Akeychain-template/versions',
+    )
+    expect(screen.getByRole('link', { name: /^History/ })).toHaveAttribute(
+      'href',
+      '/m/builtin%3Akeychain-template/history',
+    )
   })
 })

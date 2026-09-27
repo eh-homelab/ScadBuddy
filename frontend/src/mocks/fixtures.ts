@@ -145,6 +145,15 @@ export const gridfinitySchema: CustomizerSchema = {
   ],
 }
 
+/**
+ * #192 — a built-in template (#155): shipped in the image, id `builtin:<slug>`, and
+ * read-only — the write routes answer 403. The colon makes it the fixture that
+ * catches an id put into a URL unencoded.
+ */
+export const BUILTIN_SLUG = 'builtin:keychain-template'
+
+export const builtinSchema: CustomizerSchema = { ...keychainSchema, title: 'Keychain Template' }
+
 export const models: ModelSummary[] = [
   {
     slug: 'name-keychain',
@@ -166,6 +175,16 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'mine',
   },
+  {
+    slug: BUILTIN_SLUG,
+    name: 'Keychain Template',
+    description: 'The built-in keychain, to customize as it is or duplicate.',
+    tags: ['keychain', 'template'],
+    updated_at: '2026-09-01T00:00:00Z',
+    has_thumbnail: false,
+    has_readme: false,
+    origin: 'builtin',
+  },
 ]
 
 /**
@@ -180,9 +199,31 @@ export const versionIds = {
   added: commit('a1b2c3d4e5f6'),
   edited: commit('b7c8d9e0f1a2'),
   raised: commit('c3d4e5f6a7b8'),
+  synced: commit('d9e0f1a2b3c4'),
+  builtinFirst: commit('e5f6a7b8c9d0'),
 }
 
 export const versions: Record<string, ModelVersion[]> = {
+  [BUILTIN_SLUG]: [
+    {
+      commit: versionIds.synced,
+      short: versionIds.synced.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-09-01T00:00:00Z',
+      message: 'Sync built-in templates',
+      files: [{ status: 'M', path: 'model.scad' }],
+      current: true,
+    },
+    {
+      commit: versionIds.builtinFirst,
+      short: versionIds.builtinFirst.slice(0, 7),
+      author: 'ScadBuddy',
+      date: '2026-08-01T00:00:00Z',
+      message: 'Sync built-in templates',
+      files: [{ status: 'A', path: 'model.scad' }],
+      current: false,
+    },
+  ],
   'name-keychain': [
     {
       commit: versionIds.raised,
@@ -251,6 +292,7 @@ index 0000000..1111111
 export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
+  [BUILTIN_SLUG]: builtinSchema,
 }
 
 export const fonts: FontFamily[] = [
