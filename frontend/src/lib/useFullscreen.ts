@@ -37,7 +37,9 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
   const [windowed, setWindowed] = useState(false)
   // A call to the API still in flight. `native` only changes when the browser's event
   // arrives, so without this a second press in the meantime would ask again.
-  const pending = useRef(false)
+  const pending = useRef<'enter' | 'exit' | null>(null)
+  // A request to enter that was asked to leave before it landed.
+  const withdrawn = useRef(false)
 
   // The browser also ends full screen on its own (Escape, the element leaving the
   // page), so the API's state is read back from its event rather than assumed.
@@ -68,40 +70,49 @@ export function useFullscreen(ref: RefObject<HTMLElement | null>): Fullscreen {
   }, [windowed])
 
   useEffect(() => {
-    if (!native && !windowed) return
     const leave = (event: Event) => {
+      // The document, not `native`, which waits for the browser's event; and a request
+      // still in flight counts, since it is about to cover whatever asked.
+      const onScreen = ref.current !== null && document.fullscreenElement === ref.current
+      const entering = pending.current === 'enter'
+      if (!onScreen && !windowed && !entering) return
       event.preventDefault()
-      if (native) document.exitFullscreen().catch(() => undefined)
+      if (entering) withdrawn.current = true
+      if (onScreen) document.exitFullscreen().catch(() => undefined)
       setWindowed(false)
     }
     window.addEventListener(LEAVE, leave)
     return () => window.removeEventListener(LEAVE, leave)
-  }, [native, windowed])
+  }, [ref, windowed])
 
   const toggle = useCallback(() => {
     const element = ref.current
     if (!element || pending.current) return
     if (native) {
-      pending.current = true
+      pending.current = 'exit'
       document
         .exitFullscreen()
         .catch(() => undefined)
         .finally(() => {
-          pending.current = false
+          pending.current = null
         })
     } else if (windowed) {
       setWindowed(false)
     } else if (document.fullscreenEnabled && typeof element.requestFullscreen === 'function') {
-      pending.current = true
+      pending.current = 'enter'
       element
         .requestFullscreen()
+        .then(() => {
+          if (withdrawn.current) document.exitFullscreen().catch(() => undefined)
+        })
         .catch(() => {
           // A refusal the flag did not predict still fills the window rather than
-          // nothing.
-          if (document.fullscreenElement !== element) setWindowed(true)
+          // nothing — unless the request was withdrawn.
+          if (!withdrawn.current && document.fullscreenElement !== element) setWindowed(true)
         })
         .finally(() => {
-          pending.current = false
+          pending.current = null
+          withdrawn.current = false
         })
     } else {
       setWindowed(true)

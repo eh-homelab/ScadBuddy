@@ -180,6 +180,52 @@ describe('useFullscreen', () => {
     expect(result.current.mode).toBeNull()
   })
 
+  it('counts a request still in flight as full screen, and takes it back', async () => {
+    const { element, result } = mount()
+    const api = offerFullscreen(element)
+    let grant = () => {}
+    api.request.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          grant = () => {
+            api.enter()
+            resolve()
+          }
+        }),
+    )
+    act(() => result.current.toggle())
+
+    // Asked before the browser has answered: the answer would cover whatever asked.
+    let left = false
+    act(() => {
+      left = leaveFullscreen()
+    })
+    expect(left).toBe(true)
+
+    await act(async () => grant())
+    expect(api.exit).toHaveBeenCalledOnce()
+    expect(result.current.mode).toBeNull()
+  })
+
+  it('does not fill the window for a refused request it had taken back', async () => {
+    const { element, result } = mount()
+    const api = offerFullscreen(element)
+    let refuse = () => {}
+    api.request.mockImplementation(
+      () =>
+        new Promise<void>((_, reject) => {
+          refuse = () => reject(new TypeError('Permissions check failed'))
+        }),
+    )
+    act(() => result.current.toggle())
+    act(() => {
+      leaveFullscreen()
+    })
+
+    await act(async () => refuse())
+    expect(result.current.mode).toBeNull()
+  })
+
   it('fills the window when the browser refuses full screen', async () => {
     const { element, result } = mount()
     const api = offerFullscreen(element, { refuse: true })
