@@ -8,6 +8,7 @@ import pytest
 
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.fontconfig import conf_path, write_conf
+from scadbuddy.render.diagnostics import MAX_DIAGNOSTICS
 from scadbuddy.render.runner import (
     OpenSCADError,
     RenderTimeoutError,
@@ -327,6 +328,67 @@ def test_the_templates_own_values_pass() -> None:
 def test_build_defines_refuses_a_path_so_the_route_422s() -> None:
     with pytest.raises(ValueError, match="looks like a file path"):
         build_defines(_schema(TEXT_PARAMETER), {"label": "/proc/self/environ"})
+
+
+DIAGNOSTIC_OPENSCAD = """#!/bin/sh
+echo "WARNING: Ignoring unknown variable 'wdith' in file $(pwd -P)/model.scad, line 4"
+i=0
+while [ $i -lt 80 ]; do echo "ECHO: $i"; i=$((i+1)); done
+echo "ERROR: Assertion 'false' failed in file model.scad, line 9"
+exit "${FAKE_EXIT:-0}"
+"""
+
+
+async def test_a_run_parses_every_diagnostic_from_the_whole_log(tmp_path: Path) -> None:
+    """#252: read off the whole log like the missing files, not just the tail."""
+    binary = tmp_path / "diagnostic-openscad"
+    binary.write_text(DIAGNOSTIC_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path.resolve(), config=config)
+
+    assert [(d.severity, d.file, d.line) for d in output.diagnostics] == [
+        ("warning", "model.scad", 4),
+        ("error", "model.scad", 9),
+    ]
+    assert not any("wdith" in line for line in output.log_tail)
+
+
+async def test_a_failed_run_carries_its_diagnostics(tmp_path: Path) -> None:
+    binary = tmp_path / "diagnostic-openscad"
+    # The exit status is baked in: openscad gets an allowlisted environment (#281),
+    # so a FAKE_EXIT set on this process would never reach the script.
+    binary.write_text(DIAGNOSTIC_OPENSCAD.replace('"${FAKE_EXIT:-0}"', "1"), encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    with pytest.raises(OpenSCADError) as raised:
+        await run_openscad([], cwd=tmp_path, config=config)
+
+    assert [d.message for d in raised.value.diagnostics] == [
+        "Ignoring unknown variable 'wdith'",
+        "Assertion 'false' failed",
+    ]
+    assert raised.value.diagnostics_dropped == 0
+
+
+FLOODING_OPENSCAD = """#!/bin/sh
+i=0
+while [ $i -lt 205 ]; do echo "WARNING: number $i in file model.scad, line 1"; i=$((i+1)); done
+"""
+
+
+async def test_a_run_says_how_many_diagnostics_it_left_out(tmp_path: Path) -> None:
+    binary = tmp_path / "flooding-openscad"
+    binary.write_text(FLOODING_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert len(output.diagnostics) == MAX_DIAGNOSTICS
+    assert output.diagnostics_dropped == 205 - MAX_DIAGNOSTICS
 
 
 def test_template_note_reads_note_and_warning_echoes() -> None:

@@ -33,7 +33,7 @@ if docker image inspect "$FONTS_IMAGE" >/dev/null 2>&1; then
 fi
 echo "==> rendering with $IMAGE"
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 # Values of a dropdown annotation: `name = "x"; // [a:Label, b, ...]` -> a b ...
 options() {
@@ -55,10 +55,12 @@ CASES+=(
     "two-tone|colour_mode=\"checker\";two_tone=true;top_layers=2"
     "overlay-svg-links|colour_mode=\"overlay_only\";palette_1=\"#1E88E5\";overlay_file=\"sample-overlay.svg\""
     "overlay-svg-inlay|colour_mode=\"checker\";overlay_file=\"sample-overlay.svg\";overlay_detail=\"inlay\";top_layers=2"
-    "overlay-png-links|overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";image_threshold=50;overlay_scale=90"
+    "overlay-png-links|overlay_file=\"sample-overlay.png\";overlay_type=\"png_threshold\";image_threshold=50;overlay_scale=90"
+    # The value before #318 renamed it; must render exactly as overlay-png-links.
+    "overlay-png-links-legacy-value|overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";image_threshold=50;overlay_scale=90"
     "overlay-invert-two-tone|colour_mode=\"checker\";two_tone=true;top_color=\"#FFEB3B\";overlay_file=\"sample-overlay.svg\";overlay_invert=true;overlay_scale=60;overlay_rotation=30;overlay_x=10"
     "overlay-hex|pattern=\"hex_scales\";colour_mode=\"rows\";overlay_file=\"sample-overlay.svg\""
-    "overlay-triflex-inlay|pattern=\"triflex_triangles\";overlay_file=\"sample-overlay.png\";overlay_type=\"image_threshold\";overlay_detail=\"inlay\""
+    "overlay-triflex-inlay|pattern=\"triflex_triangles\";overlay_file=\"sample-overlay.png\";overlay_type=\"png_threshold\";overlay_detail=\"inlay\""
     "overlay-png-auto|overlay_file=\"sample-overlay.png\";image_threshold=50"
     "overlay-png-auto-mixed-case|overlay_file=\"Sample-Overlay.PnG\";image_threshold=50"
     "overlay-missing|overlay_file=\"no-such-file.svg\""
@@ -516,6 +518,31 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, abs(total - whole) <= 1e-3 * whole,
               "colour parts do not overlap: parts sum to %.2f mm3, whole is %.2f mm3" % (total, whole))
     summary.append("%s: %d links, %d parts, %.1f s" % (name, nlinks, len(named), ms / 1000))
+
+# #318: the PNG choice's value was "image_threshold" until it was renamed
+# "png_threshold"; saved presets and past outputs still hold the old value.
+# The legacy case must render the same colour parts, of the same volume, as
+# its twin with the new value. (Without the fallback the old value is not
+# "auto", so the PNG goes to import() instead and the picture is lost.)
+def part_volumes(name):
+    mats, V, T = load_3mf(os.path.join(OUT, name + ".3mf"))
+    vols = Counter()
+    for t in T:
+        vols[mats[t[3]][1]] += volume(V, [t])
+    return {c: v for c, v in vols.items() if abs(v) > 1e-9}
+
+
+for old, new in [("overlay-png-links-legacy-value", "overlay-png-links")]:
+    if not all(os.path.exists(os.path.join(OUT, n + ".3mf")) for n in (old, new)):
+        continue  # ONLY= skipped one of them
+    print("\n%s vs %s" % (old, new))
+    a, b = part_volumes(old), part_volumes(new)
+    for key in ("overlay_color",):
+        check(old, DEFAULTS[key].upper() in b, "%s renders the %s part %s" % (new, key, DEFAULTS[key].upper()))
+    check(old, set(a) == set(b) and all(abs(a[c] - b[c]) <= 1e-6 * max(1.0, abs(b[c])) for c in b),
+          "the legacy value renders the same parts as the new one (%s vs %s)"
+          % (", ".join("%s %.1f" % kv for kv in sorted(a.items())),
+             ", ".join("%s %.1f" % kv for kv in sorted(b.items()))))
 
 print()
 for s in summary:

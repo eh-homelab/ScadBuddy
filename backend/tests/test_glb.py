@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import trimesh
 
-from scadbuddy.render.glb import bounding_box, write_glb
+from scadbuddy.render.glb import bounding_box, read_glb, write_glb
 from scadbuddy.render.split import ColourPart
 
 
@@ -69,3 +69,17 @@ def test_write_glb_returns_the_z_up_bounding_box(tmp_path: Path) -> None:
 def test_empty_part_list_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="at least one colour part"):
         write_glb([], tmp_path / "preview.glb")
+
+
+def test_a_preview_reads_back_as_the_parts_it_was_written_from(tmp_path: Path) -> None:
+    """Colours, names and Z-up millimetres: what a named view is drawn from (#252)."""
+    out = tmp_path / "preview.glb"
+    write_glb(_parts(), out)
+
+    parts = read_glb(out)
+
+    assert [(part.name, part.colour) for part in sorted(parts, key=lambda p: p.name)] == [
+        ("Color 1", "#FF6AC1"),
+        ("Color 2", "#1F6FEB"),
+    ]
+    assert bounding_box(parts) == bounding_box(_parts())

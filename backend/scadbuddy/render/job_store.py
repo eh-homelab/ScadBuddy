@@ -178,6 +178,11 @@ class JobBackend(Protocol):
         """Is a render of ``slug`` queued or running?"""
         ...
 
+    def latest_finished(self, slug: str) -> Job | None:
+        """The render of ``slug`` that settled last, done or failed, while jobs are
+        kept (``SCADBUDDY_JOB_TTL``); `None` when there is none."""
+        ...
+
     def counts(self) -> QueueCounts: ...
 
     def prune(self, ttl: float, *, now: datetime | None = None) -> list[str]:
@@ -255,6 +260,14 @@ class JobStore:
         return any(
             job.slug == slug and job.state in ("pending", "running") for job in self.list_jobs()
         )
+
+    def latest_finished(self, slug: str) -> Job | None:
+        finished = [
+            job
+            for job in self.list_jobs()
+            if job.slug == slug and job.state in ("done", "failed") and job.finished_at
+        ]
+        return max(finished, key=lambda job: job.finished_at or job.created_at, default=None)
 
     def delete(self, job_id: str) -> None:
         self.paths.job_file(job_id).unlink(missing_ok=True)

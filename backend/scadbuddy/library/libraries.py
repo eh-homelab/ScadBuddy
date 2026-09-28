@@ -50,9 +50,10 @@ import re
 import shutil
 import signal
 import subprocess
+import threading
 import time
 import uuid
-from collections.abc import Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,10 @@ COMMIT_PATTERN = r"^[0-9a-f]{40}([0-9a-f]{24})?$"
 # is large; a stalled one still has to give its executor slot back.
 CLONE_TIMEOUT = 300.0
 STAGING_PREFIX = ".staging-"
+#: Seconds past the clone timeout before the boot sweep treats a staging clone as
+#: abandoned: room for the ``rev-parse`` and move after the clone, and for clocks
+#: that differ between replicas sharing ``/data``.
+STAGING_MAX_AGE_MARGIN = 600.0
 DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -173,6 +178,15 @@ class LibraryTooLargeError(LibraryError):
 
 class LibraryNotFoundError(KeyError):
     """Not in the catalogue, and no URL was given to pin it from."""
+
+
+class LibraryCheckoutNotFoundError(KeyError):
+    """No checkout of that library (at that commit) is on the volume."""
+
+
+def _require_name(name: str) -> None:
+    if not re.fullmatch(NAME_PATTERN, name):
+        raise LibraryError(f"{name!r} is not a usable library name")
 
 
 class LibraryNotInstalledError(LookupError):
@@ -476,22 +490,29 @@ def migrate_lockfile(
 # every SIZE_POLL_INTERVAL, or nine times as long as the last walk took so that
 # walking costs at most about a tenth of the clone's wall time, but never less
 # often than SIZE_POLL_MAX_INTERVAL. A clone can overshoot the cap by what it
-# transfers in one interval before it is killed.
+# transfers in one interval plus one walk before it is killed. A walk stops once it
+# has counted past the cap, but its cost grows with the number of files, so for a
+# repository of very many small files that walk can take seconds; CLONE_TIMEOUT
+# still bounds the whole clone.
 SIZE_POLL_INTERVAL = 0.2
 SIZE_POLL_MAX_INTERVAL = 2.0
 # How long to wait for a killed git to be reaped before giving up on it.
 KILL_WAIT = 5.0
 
 
-def _tree_size(root: Path) -> int:
+def _tree_size(root: Path, limit: int | None = None) -> int:
     """Bytes of every file under ``root``, ``.git`` included: what it takes on the
     volume. Symlinks count as themselves, never what they point at. A file git
-    renames or removes mid-walk (a running clone's temporaries) counts as nothing."""
+    renames or removes mid-walk (a running clone's temporaries) counts as nothing.
+    With ``limit``, it returns as soon as the count passes it, rather than walking
+    the rest of a tree already known to be too large."""
     total = 0
     for directory, _, files in os.walk(root):
         for file in files:
             with contextlib.suppress(FileNotFoundError):
                 total += (Path(directory) / file).lstat().st_size
+            if limit is not None and total > limit:
+                return total
     return total
 
 
@@ -508,6 +529,104 @@ def _same_repository(first: str, second: str) -> bool:
         return urlunsplit(parts._replace(scheme=parts.scheme.lower(), netloc=parts.netloc.lower()))
 
     return bare(first) == bare(second)
+
+
+class CheckoutGate:
+    """Keeps removing a library checkout apart from pinning or rendering one (#253).
+
+    A pin clones (or finds) a checkout and THEN records it in a model; a removal
+    checks that no model records it and THEN deletes it. Interleaved, a removal
+    could delete the checkout a pin has just found but not yet recorded, leaving a
+    model pinned to nothing. So any number of pins may run together, and a removal
+    waits for them all and runs alone.
+
+    A render resolves its ``OPENSCADPATH`` once and then reads those checkouts for
+    as long as OpenSCAD runs, which can outlast the model's own pin. So it holds a
+    lease on them: taken only while no removal runs, and a removal refuses -- it
+    does not wait out a render that may take the whole render timeout -- while one
+    is held on anything it would delete (:meth:`leased`).
+    """
+
+    def __init__(self) -> None:
+        self._condition = asyncio.Condition()
+        self._pins = 0
+        self._removing = False
+        #: lease token -> (holder, the checkout directories it reads). Keyed by a
+        #: token, not the holder: two attempts at one job -- the first still running
+        #: after its store lease lapsed and the job was retried -- each hold their
+        #: own, and the first ending must not release the second's.
+        self._leases: dict[object, tuple[str, tuple[Path, ...]]] = {}
+
+    @contextlib.asynccontextmanager
+    async def pinning(self) -> AsyncIterator[None]:
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing)
+            self._pins += 1
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._pins -= 1
+                self._condition.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def removing(self) -> AsyncIterator[None]:
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing and self._pins == 0)
+            self._removing = True
+        try:
+            yield
+        finally:
+            async with self._condition:
+                self._removing = False
+                self._condition.notify_all()
+
+    @contextlib.asynccontextmanager
+    async def rendering(self, holder: str, checkouts: Sequence[Path]) -> AsyncIterator[None]:
+        """Hold ``checkouts`` for ``holder`` until the block exits. Waits out a
+        removal in progress, so the caller must check afterwards that what it
+        resolved is still there (:func:`require_checkouts`)."""
+        async with self._condition:
+            await self._condition.wait_for(lambda: not self._removing)
+            token = self.hold(holder, checkouts)
+        try:
+            yield
+        finally:
+            # Whatever ends the attempt -- done, failed, cancelled by shutdown.
+            self.release(token)
+
+    def hold(self, holder: str, checkouts: Sequence[Path]) -> object:
+        """The synchronous half of :meth:`rendering`: record a lease as it stands,
+        and return the token that releases it."""
+        token = object()
+        self._leases[token] = (holder, tuple(checkouts))
+        return token
+
+    def release(self, token: object) -> None:
+        self._leases.pop(token, None)
+
+    def leased(self, directory: Path) -> list[str]:
+        """The holders reading ``directory`` -- one checkout, or a library's
+        directory of them -- each once, in the order they took their leases."""
+        return list(
+            dict.fromkeys(
+                holder
+                for holder, checkouts in self._leases.values()
+                if any(path == directory or path.parent == directory for path in checkouts)
+            )
+        )
+
+
+def require_checkouts(checkouts: Sequence[Path]) -> None:
+    """:class:`LibraryNotInstalledError` for any of ``checkouts`` removed since it
+    was resolved -- the message :func:`search_path` gives for one never there."""
+    for directory in checkouts:
+        name = directory.parent.name
+        if not (directory / name).is_dir():
+            raise LibraryNotInstalledError(
+                f"{name!r} is pinned to {directory.name[:7]}, which is not on this volume; "
+                "pin it to this model again"
+            )
 
 
 class LibraryStore:
@@ -540,15 +659,24 @@ class LibraryStore:
     def sweep_staging(self) -> list[str]:
         """Remove the staging clones an install killed mid-clone left behind.
 
-        Only safe while no install can run -- at boot, before the first request --
-        since a live clone is in one of these too.
+        Runs at boot. Another replica sharing ``/data`` may be mid-clone, so only
+        staging older than the clone timeout plus ``STAGING_MAX_AGE_MARGIN`` goes.
         """
         root = self.paths.libraries
         if not root.is_dir():
             return []
+        cutoff = time.time() - self.timeout - STAGING_MAX_AGE_MARGIN
         removed: list[str] = []
         for entry in sorted(root.iterdir()):
             if not entry.name.startswith(STAGING_PREFIX):
+                continue
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception("could not read a staging clone", extra={"entry": entry.name})
                 continue
             # One that cannot go must not keep the rest; as the catalogue's
             # sweeps, log it and move on.
@@ -562,6 +690,54 @@ class LibraryStore:
 
     def entries(self) -> list[CatalogueLibrary]:
         return list(self.catalogue.values())
+
+    def installed(self, name: str | None = None) -> list[tuple[str, str]]:
+        """``(name, commit)`` for every checkout on the volume, or ``name``'s alone.
+        Only complete ones: a staging clone is not a checkout yet."""
+        root = self.paths.libraries
+        if not root.is_dir():
+            return []
+        if name is not None:
+            _require_name(name)
+        found: list[tuple[str, str]] = []
+        for library in sorted(root.iterdir()):
+            if library.name.startswith(STAGING_PREFIX) or not library.is_dir():
+                continue
+            if name is not None and library.name != name:
+                continue
+            if not re.fullmatch(NAME_PATTERN, library.name):
+                continue
+            found.extend(
+                (library.name, checkout.name)
+                for checkout in sorted(library.iterdir())
+                if re.fullmatch(COMMIT_PATTERN, checkout.name)
+                and (checkout / library.name).is_dir()
+            )
+        return found
+
+    def remove(self, name: str, commit: str | None = None) -> list[str]:
+        """Delete ``name``'s checkout at ``commit``, or every checkout of it, from the
+        volume. Returns the commits removed; :class:`LibraryCheckoutNotFoundError`
+        when there was none.
+
+        Knows nothing of which models pin what: the caller checks that first. Each
+        checkout is moved aside before it is deleted, so a render never reads one
+        half gone -- it finds it whole, or finds it missing and says so.
+        """
+        _require_name(name)
+        if commit is not None and not re.fullmatch(COMMIT_PATTERN, commit):
+            raise LibraryError(f"{commit!r} is not a full commit id")
+        commits = [c for _, c in self.installed(name) if commit is None or c == commit]
+        if not commits:
+            raise LibraryCheckoutNotFoundError(name if commit is None else f"{name}@{commit}")
+        library = self.paths.libraries / name
+        for found in commits:
+            doomed = self.paths.libraries / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
+            os.replace(library / found, doomed)
+            shutil.rmtree(doomed, ignore_errors=True)
+        with contextlib.suppress(OSError):
+            library.rmdir()  # only when it emptied
+        return commits
 
     def resolve(self, name: str, *, url: str | None = None, ref: str | None = None) -> ModelLibrary:
         """Clone ``name`` at ``ref`` and return the pin: the commit that resolved to.
@@ -661,7 +837,7 @@ class LibraryStore:
             except LibraryTooLargeError as error:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {error}") from None
             # The last poll can land before the clone's final writes.
-            size = _tree_size(staging)
+            size = _tree_size(staging, self.max_bytes)
             if size > self.max_bytes:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {self._over(size)}")
             commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
@@ -723,7 +899,7 @@ class LibraryStore:
                     raise LibraryFetchError(f"git timed out after {self.timeout:g}s") from error
                 if watch is not None:
                     started = time.monotonic()
-                    size = _tree_size(watch)
+                    size = _tree_size(watch, self.max_bytes)
                     if size > self.max_bytes:
                         self._kill(process)
                         raise LibraryTooLargeError(self._over(size)) from None
@@ -747,9 +923,12 @@ class LibraryStore:
     @staticmethod
     def _kill(process: subprocess.Popen[str]) -> None:
         # The whole group: a clone's git-remote-https child goes too. A git that
-        # is not reaped in time (stuck in the kernel) is left behind rather than
-        # holding up the caller's error.
+        # is not reaped in time (stuck in the kernel) is reaped by a daemon thread
+        # whenever it does die, rather than holding up the caller's error or
+        # staying a zombie.
         with contextlib.suppress(ProcessLookupError):
             os.killpg(process.pid, signal.SIGKILL)
-        with contextlib.suppress(subprocess.TimeoutExpired):
+        try:
             process.communicate(timeout=KILL_WAIT)
+        except subprocess.TimeoutExpired:
+            threading.Thread(target=process.wait, name="git-reaper", daemon=True).start()

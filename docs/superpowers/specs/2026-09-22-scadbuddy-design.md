@@ -254,7 +254,8 @@ jobs/<job-id>.json                render job state (pending/running/done/failed,
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
-assets/<sha256>.json              its original name, kind and size; never pruned
+assets/<sha256>.json              its original name, kind and size; swept once unreferenced
+.assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -548,8 +549,62 @@ string.
   under the same URL; any other name is a 404. Provenance for a sample is its
   name, so a re-render reproduces the output while the revision still ships it.
 - **Provenance.** `params.json` and the 3MF's stamp carry the id, which is the
-  content hash; assets are never pruned, so a re-render and "Customize this
-  version" reproduce the output.
+  content hash; an asset any output names is never swept (below), so a re-render
+  and "Customize this version" reproduce the output.
+- **Limits and the sweep (#296).** Distinct uploads were otherwise kept forever,
+  so every slightly different picture added a blob to the volume for good.
+  - *Caps.* `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` (default 1 000 000 000) and
+    `SCADBUDDY_ASSET_MAX_COUNT` (10 000); 0 is no limit for either. An upload whose
+    content is not already stored and that would take the store past either is a
+    413 problem document (RFC 9457, the same shape as the 8 MiB refusal) whose
+    `detail` names the setting and whose `usage` extension is the store's
+    `{count, bytes, max_count, max_total_bytes}`. Content already stored is
+    never refused, so re-uploading what an output uses keeps working at the cap.
+    The check and the write happen under one lock, so two uploads cannot both take
+    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
+  - *Usage.* `GET /assets/usage` answers the same four numbers; Settings shows
+    them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
+    `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
+    `scadbuddy_assets_max_bytes` (read per scrape), `scadbuddy_assets_rejected_total`
+    and `scadbuddy_assets_swept_total`.
+  - *What keeps an asset.* Any 64-hex string equal to its id in: an output's JSON
+    records (`params.json`, `meta.json`) or, when `params.json` is gone, the raw
+    root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to
+    is stamped (raw rather than through `provenance.read`, which answers "no
+    stamp" for a stamp it cannot parse); a
+    saved preset (`presets/`); a template's `presets.json` or `model.json`, mine or
+    built-in; or a job in the render queue's store, whatever its state (with
+    Postgres, every replica's). The match is on raw text, not on parsed `file`
+    values, so a damaged record still keeps what it names, and a coincidental
+    match only keeps a file longer. An older revision's shipped `presets.json` in
+    the models history is not read: shipped presets name samples, not uploads.
+  - *Last use.* An asset's last use is the later mtime of its two files. An upload
+    (a re-upload included) rewrites them; every `file` value that a render submit,
+    a render's staging or a preset save validates is marked used (`AssetStore.use`,
+    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+    value that is not an upload or a sample, as a render always did.
+  - *The sweep* removes an asset nothing keeps whose last use is older than
+    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s). It runs at
+    boot, after the render queue has opened its store, and then every
+    `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 1 day; 0 turns the sweep off, boot
+    included). Like the tombstone, orphan and library-staging sweeps it is best
+    effort: a failure is logged and never stops the boot. (#271 proposes the same
+    shape for library checkouts; there is no such sweep yet to share code with.)
+  - *Why it is safe against concurrent uploads and renders.* The references are
+    read first, and if any source cannot be read (a store outage, an unreadable
+    record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
+    the set, so what protects it is the last use: every path that creates one
+    marks the asset used under the store's lock, and the sweep re-checks the last
+    use under the same lock immediately before it removes each asset. Either the
+    use wins, and the sweep sees a fresh asset and skips it, or the sweep wins and
+    the use is a not-found: a 422 for that render or preset, never a job that
+    loses its file halfway. A running render was marked used when it staged its
+    files, and its job stays in the store until the TTL prunes it. An upload whose
+    first render has not been submitted yet is protected by the grace alone, which
+    is why the grace has a floor. Removal takes the metadata first, so `get` stops
+    finding the asset before its bytes go. The lock is an `flock` on
+    `data/.assets.lock`, beside the store rather than in it, so it also holds
+    between replicas sharing the volume.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job
@@ -764,6 +819,41 @@ runs. Models that recolour a subtree get the fallback's open parts for the
 affected colour, not wrong geometry, since the outer colour still renders its
 own subtree.
 
+**Concurrency (#282).** The wrapper renders of one job run up to
+`SCADBUDDY_SOLID_CONCURRENCY` at a time rather than one after another: a colour
+costs one whole-model `openscad` run, and dollhouse-kit's window piece has 16 live
+colours (an AMS template can have 28). The default, `0`, derives the bound from the
+CPUs the process may use — its affinity mask, capped by a cgroup CPU limit (a pod's
+`limits.cpu`, rounded up; cgroup v2 `cpu.max`, or v1 `cpu.cfs_quota_us`) — less
+`SCADBUDDY_CHECK_CONCURRENCY`, divided by `SCADBUDDY_RENDER_CONCURRENCY`, since every
+worker can be in this stage at once; at least 1, at most 8. With the 8-CPU limit the
+eh-homelab/clusters deployment runs today, two workers and one check that is 3, so
+the pod's worst case (§9) is 2 × 3 + 1 = 7 processes on 8 CPUs; under a 2-CPU limit
+it is 1, the old sequential loop. Above that floor the derived bound never
+oversubscribes the CPUs: each wrapper render has its own `SCADBUDDY_RENDER_TIMEOUT`,
+so contention that stretched every child would turn closed parts into timed-out
+fallbacks. When no cgroup CPU controller is readable at all, a limit may be going
+unseen, so the process logs a warning once and sizes for the affinity mask; set the
+value explicitly there. The clock
+starts when a colour's process does, not while it waits for a slot, so a 28-colour
+job is not charged for the queue. Set it explicitly to size memory as well; the
+derivation reads only CPUs.
+
+The semantics are unchanged from the sequential loop:
+
+- **Order.** Parts, meshes and warnings come back in colour order, whatever order
+  the renders finish in, and each colour still writes `solid_<n>.3mf`.
+- **Fallback.** An OpenSCAD failure — including a timeout — is still that colour's
+  fallback, and its siblings carry on.
+- **Failure.** Anything else (a 3MF that cannot be read, a cancelled job) fails the
+  job with that colour's own error, not an exception group, and cancels the
+  siblings: their `openscad` processes are killed and colours still waiting for a
+  slot never start. The wrapper is deleted only after every render has stopped.
+  One stage is not interrupted: each solid's 3MF is parsed in a worker thread
+  (off the event loop), and a cancelled task abandons that thread rather than
+  stopping it, so a parse already under way runs to completion — bounded work,
+  unlike an `openscad` run.
+
 ## 7. Bambuddy integration
 
 Settings (stored in `settings.json` on the PVC, editable in the UI):
@@ -823,7 +913,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |
-| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5) |
+| POST | `/models/{slug}/assets` | multipart `file` → `{id, name, kind, size, width, height}` (201); SVG/PNG only, sanitised (§5.5); 413 past the store's caps, with its `usage` |
+| GET | `/assets/usage` | the upload store: `{count, bytes, max_count, max_total_bytes}`, a cap of 0 being none (§5.5) |
 | GET | `/models/{slug}/assets/{id}` / `…/{id}/content` | an upload's metadata / its stored bytes (served with a sandboxing CSP) |
 | PUT | `/models/{slug}/source` | body `{source, force?, message?}` → parse-checks it (unless `force`; `?force=true` works too, as on `POST /models`), replaces it as one revision named by `message`, and re-derives the schema. `?merge_base=<commit>` saves a conflicted upstream merge's resolution: conflict markers are refused (422, `force` or not), and `upstream.base` advances to that revision in the same commit, `Merge <upstream id> into <slug>` by default |
 | GET | `/models/{slug}/upstream` | a duplicate's upstream: `{state, upstream, revision, preview}`. `state` is `current`, `update` (the upstream's current revision is neither `base` nor `dismissed`), `dismissed` or `gone`. On `update`, `preview` is `{ours, base, theirs, merged, clean, taken[], kept[]}`: `merged` is `git merge-file -p --diff3 ours base theirs`, `taken` the other files that follow the upstream (unchanged here since `base`) and `kept` those changed on both sides. 404 for a template that is not a duplicate |
@@ -851,17 +942,22 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | GET | `/fonts/catalogue` | `?q=&category=&limit=` over the Google Fonts catalogue; each row flagged `installed` |
 | POST | `/fonts/install` | body `{family}` → downloads it onto the data volume and refreshes the fontconfig cache |
 | GET | `/healthz` | liveness (openscad present, data dir writable) |
-| GET | `/metrics` | Prometheus metrics (render queue, render stages, HTTP) |
+| GET | `/metrics` | Prometheus metrics (render queue, render stages, upload store, HTTP) |
 
 ## 9. Deployment (eh-homelab/clusters)
 
 - `applications/scadbuddy/`: Deployment (1 replica, `Recreate`), Service
   `scadbuddy:8080`, PVC `scadbuddy-data` 5Gi on `vsphere-csi-sc`,
   `nodeSelector: kubernetes.io/arch: amd64` (image is multi-arch but keep it
-  next to the slicer), requests 250m/512Mi, limits 2/2Gi (Manifold is
-  multi-threaded; OpenSCAD text rendering allocates freely).
-- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` + `SCADBUDDY_CHECK_CONCURRENCY`
-  concurrent `openscad` processes** (default 2 + 1), not the render figure alone. The
+  next to the slicer), requests 1/2Gi, limits 8/16Gi (Manifold is
+  multi-threaded; OpenSCAD text rendering allocates freely). Those are the values in
+  eh-homelab/clusters' `applications/scadbuddy/scadbuddy.yaml` as of #282; the
+  derived `SCADBUDDY_SOLID_CONCURRENCY` (§6.3) follows whatever limit is set there.
+- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` × the solid concurrency +
+  `SCADBUDDY_CHECK_CONCURRENCY` concurrent `openscad` processes**, not the render figure
+  alone: each worker in its closed-parts stage runs up to `SCADBUDDY_SOLID_CONCURRENCY`
+  wrapper renders at once (§6.3; by default the CPUs the checks leave, divided between
+  the workers, so the whole sum stays at one process per CPU). The
   editor's parse check (#92) does not go through the render queue — the queue caps
   itself with N worker tasks, so there is no semaphore to share — and it is reached on
   a 700 ms debounce from every open editor tab. It therefore carries its own declared

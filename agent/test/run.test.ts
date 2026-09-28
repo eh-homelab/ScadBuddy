@@ -76,6 +76,29 @@ describe('buildHarnessOptions', () => {
     expect(options.hooks?.PreToolUse).toHaveLength(1)
   })
 
+  it('passes the session options through (#300)', () => {
+    const store = { append: () => Promise.resolve(), load: () => Promise.resolve(null) }
+    const options = buildHarnessOptions({
+      ...base,
+      sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e',
+      sessionStore: store,
+      cwd: '/var/lib/scadbuddy-agent/work/sessions/0f8fad5b-d9cb-469f-a165-70867728950e',
+      includePartialMessages: true,
+    })
+    expect(options).toMatchObject({
+      sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e',
+      cwd: '/var/lib/scadbuddy-agent/work/sessions/0f8fad5b-d9cb-469f-a165-70867728950e',
+      includePartialMessages: true,
+    })
+    expect(options.sessionStore).toBe(store)
+    expect(options.resume).toBeUndefined()
+    // Without them, the service-wide scratch dir and no mirror, as before.
+    const plain = buildHarnessOptions(base)
+    expect(plain.cwd).toBe('/var/lib/scadbuddy-agent/work')
+    expect(plain.sessionStore).toBeUndefined()
+    expect(plain.includePartialMessages).toBeUndefined()
+  })
+
   it('refuses a plugin that would start a process with the credential env (spec §8.6)', () => {
     expect(() =>
       buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy', 'test/fixtures/plugins/command-hook'] }),

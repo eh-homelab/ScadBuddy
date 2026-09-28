@@ -72,13 +72,21 @@ needs supports.
 | Parameter | Default | What it does |
 |---|---|---|
 | `overlay_file` | *(empty)* | An SVG or PNG to inlay in `overlay_color`. Upload it in the customizer (a `// file:svg,png` parameter, ScadBuddy #204 / PR #231), or give a bare file name in this model's directory (`sample-overlay.svg`, `sample-overlay.png`). Empty = off. A path (`/`, `\`) or a leading dot is refused and turns the overlay off, so the parameter cannot read files outside the model. |
-| `overlay_type` | `auto` | `auto` picks by extension, in any case (`.png`, `.PNG`): a PNG goes through `surface()`, anything else is imported as an SVG. `svg` imports the outline; `image_threshold` reads a PNG and keeps the pixels darker than `image_threshold`. |
+| `overlay_type` | `auto` | `auto` picks by extension, in any case (`.png`, `.PNG`): a PNG goes through `surface()`, anything else is imported as an SVG. `svg` imports the outline; `png_threshold` reads a PNG and keeps the pixels darker than `image_threshold`. The old value `image_threshold` still works (see below). |
 | `overlay_scale` | `60` | Picture width as a percentage of `size` (aspect kept). |
 | `overlay_x`, `overlay_y` | `0` | Move the picture, mm. |
 | `overlay_rotation` | `0` | Rotate the picture, degrees. |
 | `image_threshold` | `50` | Brightness cut-off (%) for PNGs. |
 | `overlay_invert` | `false` | Swap picture and background: the whole pattern area except the picture takes `overlay_color`. |
 | `overlay_clears_pattern` | `true` | Clear the pattern under the picture and 1 mm around it, so the outline stays clean. Off: the pattern stops only where the picture is. |
+
+**`overlay_type` value renamed (#318).** The PNG choice's value is
+`png_threshold`; it was `image_threshold`, the same spelling as the numeric `image_threshold` parameter. The
+model still reads the old value as `png_threshold`, so saved presets and past outputs
+that hold it render exactly as before, with no migration step. The customizer does
+not offer the old value, so a preset that holds it shows no matching dropdown
+choice, and saving that preset again is refused (422, not one of the options) until
+the PNG choice is re-picked.
 
 The picture is clipped to the pattern area and goes on every coaster. Until
 ScadBuddy's file parameters (PR #231) are merged, `overlay_file` shows as a
@@ -137,12 +145,12 @@ one part and one filament. The defaults print in three colours.
 ./verify.sh
 ```
 
-Renders the defaults and 35 variations: every pattern (read from the
+Renders the defaults and 36 variations: every pattern (read from the
 dropdown, so a new one is tested automatically) cycling through the shapes, a
 cork recess on every shape, face-down text, per-coaster monograms with a
 holder and alternating colours, SVG and PNG overlays (including a `.PNG`
-upper-case extension picked up by `auto`, a forced threshold, inverted and
-face down), a missing overlay file, five refused `overlay_file` values
+upper-case extension picked up by `auto`, a forced threshold, the pre-#318 `image_threshold`
+value, inverted and face down), a missing overlay file, five refused `overlay_file` values
 (`../`, absolute, a subdirectory, a dotfile, a backslash), a set too large for
 the plate, twelve small coasters with a holder, a recess reduced and a recess dropped because the
 coaster is too thin, and the finest pattern on the largest coaster. Each 3MF is
@@ -152,7 +160,8 @@ overlaps); the layout's coaster count and columns; z = 0; the bounding box
 equal to the layout the parameters imply and inside the plate; every inlay
 exactly `inlay_depth` deep and flush with the decorated face; the solid volume
 equal to outline × thickness minus the recess; refused overlay names never
-reaching `import()`/`surface()`; no OpenSCAD warnings or errors. `ONLY=<regex>`
+reaching `import()`/`surface()`; no OpenSCAD warnings or errors; the legacy `overlay_type="image_threshold"`
+rendering the same parts, of the same volume, as `png_threshold`. `ONLY=<regex>`
 runs a subset. The 3MF parsing runs on the host with `python3` and the
 standard library only.
 

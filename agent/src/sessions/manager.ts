@@ -1,0 +1,710 @@
+import { randomUUID } from 'node:crypto'
+import {
+  forkSession as sdkForkSession,
+  type McpSdkServerConfigWithInstance,
+  type SDKMessage,
+  type SDKResultMessage,
+} from '@anthropic-ai/claude-agent-sdk'
+import type { Sql } from 'postgres'
+import type { Credential } from '../credentials.js'
+import { redact } from '../secrets.js'
+import type { HarnessPaths } from '../harness/options.js'
+import type { TierResolver } from '../harness/permissions.js'
+import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
+import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import { EventLog, type LoggedEvent } from './eventLog.js'
+import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
+import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
+import { PostgresSessionStore } from './store.js'
+
+// The session manager (#300, spec §6): durable, shared sessions that a human
+// in the browser, an external agent over /mcp, or an internal flow can start,
+// watch, steer, fork, interrupt and hand off.
+//
+//   start     create a session (and optionally send its first turn)
+//   send      add a user turn: one turn at a time per session, owner only
+//   get/list  what a principal may see
+//   fork      branch a session (SDK `forkSession`), parent recorded
+//   interrupt stop the running turn, from any replica, by any watcher
+//   handoff   move ownership explicitly
+//   attach    replay the session's events, then follow them live
+//
+// SEAMS for the tools that are not merged yet:
+//   - #251 (PR #368) registers the `sessions.*` MCP tools on top of these
+//     methods: sessions.list → list, sessions.start → start (origin 'mcp'),
+//     sessions.send → send, sessions.get → get + attach, sessions.fork → fork,
+//     sessions.interrupt → interrupt, sessions.handoff → handoff. Its
+//     `authenticate()` resolves the principal, mapped to an `Owner` here
+//     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
+//     sessions.approve/deny belong to #258 with `waiting_approval`.
+//   - #251's registry also supplies `tierOf` and the in-process MCP servers
+//     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
+//     tools, settle how tool payloads are redacted: tool.call inputs and
+//     tool.result summaries go into the durable, multi-watcher event log,
+//     scrubbed only by sdkEvents.ts `scrubForLog` (the turn's credential,
+//     arguments named like secrets, a size cap). A tool that takes a secret
+//     under another name must declare it to the registry, and scrubForLog must
+//     read that declaration.
+//   - #266's WebSocket gateway maps the panel's client messages onto send
+//     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
+//   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its
+//     LISTEN handler.
+//
+// Concurrency. A turn CLAIMS its session row with one conditional UPDATE
+// (status 'running', a fresh turn_id, a lease), so two sends — on one replica
+// or on two — cannot both win; the loser gets SessionError 'busy' (spec §6:
+// "a send while a turn is running gets a clear error"). The running turn
+// renews the lease every `renewMs`; if its replica dies, the lease runs out
+// after `leaseMs` and the session can be sent to again. The same renewal reads
+// `interrupt_requested`, which is how an interrupt reaches a turn running on
+// another replica.
+//
+// Budget and turns. Each session gets `max_turns` and `budget_usd` from
+// ai_settings at start (keys below; defaults from harness/run.ts). max_turns
+// is the SDK's per-query `maxTurns`; the budget is for the whole session: a
+// turn is given what is left as `maxBudgetUsd`, and a spent session refuses
+// sends.
+
+/** ai_settings keys (non-secret, spec §9). */
+export const SETTING_MODEL = 'model'
+export const SETTING_SESSION_MAX_TURNS = 'session_max_turns'
+export const SETTING_SESSION_BUDGET_USD = 'session_max_budget_usd'
+
+export const DEFAULT_LEASE_MS = 60_000
+export const DEFAULT_RENEW_MS = 1_000
+
+export type SessionErrorCode = 'not_found' | 'forbidden' | 'busy' | 'budget_exhausted' | 'closed' | 'invalid'
+
+const STATUS_OF: Record<SessionErrorCode, 400 | 403 | 404 | 409> = {
+  not_found: 404,
+  forbidden: 403,
+  busy: 409,
+  budget_exhausted: 409,
+  closed: 409,
+  invalid: 400,
+}
+
+/** A refused session operation; `status` is the HTTP status a route would answer with. */
+export class SessionError extends Error {
+  override name = 'SessionError'
+  readonly code: SessionErrorCode
+  readonly status: 400 | 403 | 404 | 409
+  constructor(code: SessionErrorCode, message: string) {
+    super(message)
+    this.code = code
+    this.status = STATUS_OF[code]
+  }
+}
+
+export type SessionRecord = {
+  id: string
+  origin: Origin
+  owner: Owner
+  creator: Pick<Owner, 'kind' | 'id'>
+  status: SessionStatus
+  title: string
+  tags: string[]
+  scope: Record<string, unknown>
+  parentId: string | null
+  maxTurns: number
+  budgetUsd: number
+  costUsd: number
+  turns: number
+  /** A turn holds the claim (on some replica) right now. */
+  turnActive: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export type TurnOutcome =
+  | { kind: 'result'; subtype: SDKResultMessage['subtype']; costUsd: number; turns: number }
+  | { kind: 'interrupted' }
+  | { kind: 'failed'; message: string }
+  /** Another replica took the claim over after this one's lease ran out. */
+  | { kind: 'lost_claim' }
+
+export type Turn = { turnId: string; done: Promise<TurnOutcome> }
+
+export type StartOptions = {
+  origin: Origin
+  title?: string
+  tags?: string[]
+  scope?: Record<string, unknown>
+  /** Sent as the first turn when given. */
+  prompt?: string
+}
+
+export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
+
+/** Reads ai_settings; SettingsStore (credentials.ts) is one. */
+export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
+
+/** Runs one query; `runHarness` in production, a scripted stand-in in unit tests. */
+export type QueryRunner = (run: HarnessRun) => AsyncIterable<SDKMessage>
+
+export type SessionManagerDeps = {
+  sql: Sql
+  paths: HarnessPaths
+  /** The Claude credential for a query; throws when there is none. */
+  credential: () => Promise<Credential>
+  settings?: SettingsReader
+  tierOf?: TierResolver
+  /** #251's registry: the in-process MCP servers a session's queries get. */
+  mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
+  pluginPaths?: string[]
+  run?: QueryRunner
+  leaseMs?: number
+  renewMs?: number
+  /** How often followers on other replicas poll the event log (EventLog). */
+  pollMs?: number
+  stderr?: (line: string) => void
+}
+
+type Row = {
+  id: string
+  origin: Origin
+  owner_kind: Owner['kind']
+  owner_id: string
+  owner_label: string
+  creator_kind: Owner['kind']
+  creator_id: string
+  status: SessionStatus
+  title: string
+  tags: string[]
+  scope: Record<string, unknown>
+  parent_id: string | null
+  max_turns: number
+  budget_usd: number
+  cost_usd: number
+  turns: number
+  turn_active: boolean
+  created_at: Date
+  updated_at: Date
+}
+
+const COLUMNS = `id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id, status, title, tags,
+  scope, parent_id, max_turns, budget_usd, cost_usd, turns,
+  (turn_id IS NOT NULL AND lease_until > now()) AS turn_active, created_at, updated_at`
+
+function record(row: Row): SessionRecord {
+  return {
+    id: row.id,
+    origin: row.origin,
+    owner: { kind: row.owner_kind, id: row.owner_id, label: row.owner_label },
+    creator: { kind: row.creator_kind, id: row.creator_id },
+    status: row.status,
+    title: row.title,
+    tags: row.tags,
+    scope: row.scope,
+    parentId: row.parent_id,
+    maxTurns: row.max_turns,
+    budgetUsd: row.budget_usd,
+    costUsd: row.cost_usd,
+    turns: row.turns,
+    turnActive: row.turn_active,
+    createdAt: row.created_at.toISOString(),
+    updatedAt: row.updated_at.toISOString(),
+  }
+}
+
+/**
+ * Spec §6 visibility: the browser user sees every session (with a "controlled
+ * by …" badge); any other principal sees the sessions it owns or started.
+ */
+export function canSee(principal: Owner, session: Pick<SessionRecord, 'owner' | 'creator'>): boolean {
+  return principal.kind === 'browser' || sameOwner(principal, session.owner) || sameOwner(principal, session.creator)
+}
+
+function positive(value: unknown, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+function describe(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+export const TITLE_MAX = 80
+
+/**
+ * Title for a session started with a prompt and no title: the first line, at
+ * most TITLE_MAX code points. Counted by code point (`[...line]`), not UTF-16
+ * unit, so an emoji at the cut is never split into a lone surrogate.
+ */
+export function titleFrom(prompt: string): string {
+  const points = [...(prompt.trim().split('\n')[0] ?? '')]
+  return points.length > TITLE_MAX ? `${points.slice(0, TITLE_MAX - 1).join('')}…` : points.join('')
+}
+
+/**
+ * The SQL behind `list()`, exported so a test can EXPLAIN it: the owner-or-
+ * creator filter is served by the ai_sessions_owner and ai_sessions_creator
+ * indexes (db/migrations.ts entry 2).
+ */
+export function listQuery(principal: Owner, filter: ListFilter = {}): { text: string; params: (string | number)[] } {
+  const where: string[] = []
+  const params: (string | number)[] = []
+  if (principal.kind !== 'browser') {
+    params.push(principal.kind, principal.id)
+    where.push('((owner_kind = $1 AND owner_id = $2) OR (creator_kind = $1 AND creator_id = $2))')
+  }
+  if (filter.status) {
+    params.push(filter.status)
+    where.push(`status = $${params.length}`)
+  }
+  if (filter.origin) {
+    params.push(filter.origin)
+    where.push(`origin = $${params.length}`)
+  }
+  params.push(Math.min(Math.max(filter.limit ?? 100, 1), 500))
+  const text = `SELECT ${COLUMNS} FROM ai_sessions ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
+       ORDER BY updated_at DESC LIMIT $${params.length}`
+  return { text, params }
+}
+
+/** A turn running in this process. */
+type LocalTurn = {
+  controller: AbortController
+  /**
+   * Set once the SDK has produced the turn's result (or the stream ended):
+   * the turn is finishing on its own, and aborting now would only cut off the
+   * SDK's last transcript appends, so interrupt() leaves it alone and says so.
+   */
+  settling: boolean
+}
+
+export class SessionManager {
+  readonly store: PostgresSessionStore
+  readonly events: EventLog
+  private readonly deps: SessionManagerDeps
+  private readonly run: QueryRunner
+  private readonly leaseMs: number
+  private readonly renewMs: number
+  /** Turns running in THIS process, by session id. */
+  private readonly active = new Map<string, LocalTurn>()
+
+  constructor(deps: SessionManagerDeps) {
+    this.deps = deps
+    this.store = new PostgresSessionStore(deps.sql)
+    this.events = new EventLog(deps.sql, deps.pollMs === undefined ? {} : { pollMs: deps.pollMs })
+    this.run = deps.run ?? runHarness
+    this.leaseMs = deps.leaseMs ?? DEFAULT_LEASE_MS
+    this.renewMs = deps.renewMs ?? DEFAULT_RENEW_MS
+  }
+
+  // -- reads -------------------------------------------------------------------
+
+  private async row(id: string): Promise<SessionRecord | undefined> {
+    // Anything but a canonical UUID would make Postgres throw on the uuid
+    // column; it is simply not a session, so not_found.
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_sessions WHERE id = $1`, [id])
+    return row ? record(row) : undefined
+  }
+
+  /** The session if the principal may see it; otherwise not_found (existence is not revealed). */
+  async get(id: string, principal: Owner): Promise<SessionRecord> {
+    const session = await this.row(id)
+    if (!session || !canSee(principal, session)) throw new SessionError('not_found', `no session ${id}`)
+    return session
+  }
+
+  /** Newest first. */
+  async list(principal: Owner, filter: ListFilter = {}): Promise<SessionRecord[]> {
+    const { text, params } = listQuery(principal, filter)
+    const rows = await this.deps.sql.unsafe<Row[]>(text, params)
+    return rows.map(record)
+  }
+
+  /** The panel's `sessions.snapshot` for a principal (the session picker). */
+  async snapshot(principal: Owner): Promise<ServerEvent> {
+    const sessions = await this.list(principal)
+    return event({
+      type: 'sessions.snapshot',
+      sessions: sessions.map((s) => ({
+        sessionId: s.id,
+        title: s.title,
+        origin: s.origin,
+        owner: s.owner,
+        status: s.status,
+      })),
+    })
+  }
+
+  /**
+   * Replays the session's events after `afterSeq`, then follows them live
+   * until `signal` aborts. Anyone who may see the session may attach
+   * (spec §6: "Watchers are unlimited").
+   */
+  async attach(
+    id: string,
+    principal: Owner,
+    options: { afterSeq?: number; signal?: AbortSignal } = {},
+  ): Promise<AsyncGenerator<LoggedEvent>> {
+    await this.get(id, principal)
+    return this.events.follow(id, options.afterSeq ?? 0, options.signal)
+  }
+
+  // -- writes ------------------------------------------------------------------
+
+  private async limits(): Promise<{ maxTurns: number; budgetUsd: number }> {
+    const [maxTurns, budgetUsd] = await Promise.all([
+      this.deps.settings?.get<number>(SETTING_SESSION_MAX_TURNS),
+      this.deps.settings?.get<number>(SETTING_SESSION_BUDGET_USD),
+    ])
+    return {
+      maxTurns: Math.floor(positive(maxTurns, DEFAULT_MAX_TURNS)),
+      budgetUsd: positive(budgetUsd, DEFAULT_MAX_BUDGET_USD),
+    }
+  }
+
+  private async insert(
+    id: string,
+    principal: Owner,
+    fields: { origin: Origin; title: string; tags: string[]; scope: Record<string, unknown>; parentId: string | null },
+  ): Promise<SessionRecord> {
+    const { maxTurns, budgetUsd } = await this.limits()
+    const sql = this.deps.sql
+    await sql`
+      INSERT INTO ai_sessions (id, origin, owner_kind, owner_id, owner_label, creator_kind, creator_id,
+                               status, title, tags, scope, parent_id, max_turns, budget_usd)
+      VALUES (${id}, ${fields.origin}, ${principal.kind}, ${principal.id}, ${principal.label},
+              ${principal.kind}, ${principal.id}, 'idle', ${fields.title}, ${sql.array(fields.tags)},
+              ${sql.json(fields.scope as never)}, ${fields.parentId}, ${maxTurns}, ${budgetUsd})`
+    const session = await this.row(id)
+    if (!session) throw new Error(`session ${id} vanished after insert`)
+    return session
+  }
+
+  async start(principal: Owner, options: StartOptions): Promise<{ session: SessionRecord; turn?: Turn }> {
+    const prompt = options.prompt?.trim()
+    const id = randomUUID()
+    const title = options.title?.trim() || (prompt ? titleFrom(prompt) : '')
+    const session = await this.insert(id, principal, {
+      origin: options.origin,
+      title,
+      tags: options.tags ?? [],
+      scope: options.scope ?? {},
+      parentId: null,
+    })
+    await this.events.append(id, [
+      event({ type: 'session.started', sessionId: id, origin: session.origin, owner: session.owner, title }),
+      event({ type: 'session.status', sessionId: id, status: 'idle' }),
+    ])
+    if (!prompt) return { session }
+    const turn = await this.send(id, principal, prompt)
+    return { session: await this.get(id, principal), turn }
+  }
+
+  /**
+   * Adds a user turn and starts it. Resolves once the turn has been claimed
+   * and started; `done` settles when it ends. Only the owner may send.
+   */
+  async send(id: string, principal: Owner, text: string): Promise<Turn> {
+    const prompt = text.trim()
+    if (!prompt) throw new SessionError('invalid', 'the message is empty')
+    const before = await this.get(id, principal)
+    const turnId = randomUUID()
+    const [claimed] = await this.deps.sql.unsafe<Row[]>(
+      `UPDATE ai_sessions
+       SET status = 'running', turn_id = $2, lease_until = now() + ($5 * interval '1 millisecond'),
+           interrupt_requested = false, updated_at = now()
+       WHERE id = $1 AND owner_kind = $3 AND owner_id = $4 AND status <> 'done' AND cost_usd < budget_usd
+         AND (turn_id IS NULL OR lease_until <= now())
+       RETURNING ${COLUMNS}`,
+      [id, turnId, principal.kind, principal.id, this.leaseMs],
+    )
+    if (!claimed) throw await this.whyNotClaimed(id, principal, before)
+    const session = record(claimed)
+
+    await this.events.append(id, [
+      event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author: principal }),
+      event({ type: 'session.status', sessionId: id, status: 'running' }),
+    ])
+    const controller = new AbortController()
+    const local: LocalTurn = { controller, settling: false }
+    this.active.set(id, local)
+    const done = this.runTurn(session, turnId, prompt, local)
+      // Never rejects: callers may ignore `done`, and an unhandled rejection
+      // would take the process down. The lease frees the claim if the
+      // release itself failed.
+      .catch((err: unknown): TurnOutcome => ({ kind: 'failed', message: describe(err) }))
+      .finally(() => {
+        if (this.active.get(id) === local) this.active.delete(id)
+      })
+    return { turnId, done }
+  }
+
+  private async whyNotClaimed(id: string, principal: Owner, before: SessionRecord): Promise<SessionError> {
+    const now = (await this.row(id)) ?? before
+    if (!sameOwner(principal, now.owner)) {
+      return new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${now.owner.label}; only its owner can send, so take it over with a handoff first`,
+      )
+    }
+    if (now.status === 'done') return new SessionError('closed', `session ${id} is done`)
+    if (now.costUsd >= now.budgetUsd) {
+      return new SessionError(
+        'budget_exhausted',
+        `session ${id} has spent its budget (${now.costUsd.toFixed(4)} of ${now.budgetUsd} USD); fork it or start a new one`,
+      )
+    }
+    return new SessionError(
+      'busy',
+      `a turn is already running in session ${id}; wait for it to finish or interrupt it`,
+    )
+  }
+
+  private async runTurn(
+    session: SessionRecord,
+    turnId: string,
+    prompt: string,
+    local: LocalTurn,
+  ): Promise<TurnOutcome> {
+    const { controller } = local
+    const id = session.id
+    const sql = this.deps.sql
+    const tierOf = this.deps.tierOf ?? (() => undefined)
+    const mapper = new SdkEventMapper(id, tierOf)
+    let lost = false
+
+    // Lease renewal, and the interrupt flag from other replicas.
+    let renewing: Promise<unknown> = Promise.resolve()
+    const renew = setInterval(() => {
+      renewing = sql<{ interrupt_requested: boolean }[]>`
+        UPDATE ai_sessions SET lease_until = now() + (${this.leaseMs} * interval '1 millisecond')
+        WHERE id = ${id} AND turn_id = ${turnId}
+        RETURNING interrupt_requested`
+        .then((rows) => {
+          if (rows.length === 0) {
+            lost = true
+            controller.abort(new Error('lost the turn claim'))
+          } else if (rows[0]?.interrupt_requested) {
+            controller.abort(new Error('interrupted'))
+          }
+        })
+        .catch(() => {
+          // A database blip: keep running; the lease covers several misses.
+        })
+    }, this.renewMs)
+
+    let result: SDKResultMessage | undefined
+    let failure: string | undefined
+    /** Redacted from everything this turn writes to the durable event log. */
+    let secrets: string[] = []
+    try {
+      // The credential first, and into `secrets` at once: whatever fails
+      // after this point is redacted before it reaches the event log.
+      const credential = await this.deps.credential()
+      secrets = [credential.secret]
+      const [cwd, resume, model] = await Promise.all([
+        ensureSessionDir(this.deps.paths, id),
+        this.store.exists(id),
+        this.deps.settings?.get<string>(SETTING_MODEL),
+      ])
+      const run: HarnessRun = {
+        paths: this.deps.paths,
+        credential,
+        prompt,
+        cwd,
+        sessionStore: this.store,
+        includePartialMessages: true,
+        maxTurns: session.maxTurns,
+        maxBudgetUsd: Math.max(session.budgetUsd - session.costUsd, 0.000001),
+        signal: controller.signal,
+        tierOf,
+        // First turn: the SDK session gets OUR id; later turns resume it.
+        ...(resume ? { resume: id } : { sessionId: id }),
+        ...(typeof model === 'string' && model ? { model } : {}),
+        ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
+        ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
+      }
+      for await (const message of this.run(run)) {
+        if (message.type === 'result') {
+          result = message
+          local.settling = true
+        }
+        const events = mapper.map(message)
+        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
+      }
+    } catch (err) {
+      // For an error result the SDK yields the result and then throws
+      // ("Claude Code returned an error result", test/run.test.ts); the
+      // result is what counts then.
+      if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
+    } finally {
+      local.settling = true
+      clearInterval(renew)
+      await renewing
+    }
+    // The loop has ended only after the SDK's last transcript append (measured:
+    // `last-prompt` and `cost-state` entries arrive after the `result`
+    // message), so releasing the claim here means the next turn, on any
+    // replica, resumes from a complete transcript.
+    if (lost) return { kind: 'lost_claim' }
+    return this.finish(session, turnId, controller.signal.aborted && !result, result, failure, secrets)
+  }
+
+  private async finish(
+    session: SessionRecord,
+    turnId: string,
+    interrupted: boolean,
+    result: SDKResultMessage | undefined,
+    failure: string | undefined,
+    secrets: readonly string[],
+  ): Promise<TurnOutcome> {
+    const id = session.id
+    let status: SessionStatus
+    let outcome: TurnOutcome
+    const tail: ServerEvent[] = []
+    let costUsd = session.costUsd
+    let turns = session.turns
+    if (result) {
+      // `total_cost_usd` of a RESUMED query already includes the earlier
+      // turns: measured on SDK 0.3.283 (0.000105 after turn 1, 0.00021 after
+      // turn 2 of the same session; test/sessions.e2e.test.ts asserts it). The
+      // SDK restores it from the transcript's `cost-state` entry, so if that
+      // restore ever fails the total comes back smaller than what is recorded,
+      // and it is added instead.
+      const total = result.total_cost_usd
+      costUsd = total >= session.costUsd ? total : session.costUsd + total
+      turns = session.turns + result.num_turns
+      status = result.subtype === 'error_during_execution' ? 'failed' : 'idle'
+      tail.push(event({ type: 'session.result', sessionId: id, costUsd, turns }))
+      if (result.subtype !== 'success') {
+        const detail = 'errors' in result && result.errors.length ? `: ${result.errors.join('; ')}` : ''
+        tail.push(event({ type: 'error', sessionId: id, code: result.subtype, message: `the turn stopped (${result.subtype})${detail}` }))
+      }
+      outcome = { kind: 'result', subtype: result.subtype, costUsd, turns }
+    } else if (interrupted) {
+      status = 'idle'
+      tail.push(event({ type: 'error', sessionId: id, code: 'interrupted', message: 'the turn was interrupted' }))
+      outcome = { kind: 'interrupted' }
+    } else {
+      status = 'failed'
+      const message = failure ?? 'the turn ended without a result'
+      tail.push(event({ type: 'error', sessionId: id, code: 'turn_failed', message }))
+      outcome = { kind: 'failed', message }
+    }
+    tail.push(event({ type: 'session.status', sessionId: id, status }))
+
+    const released = await this.deps.sql`
+      UPDATE ai_sessions
+      SET status = ${status}, cost_usd = ${costUsd}, turns = ${turns},
+          turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
+      WHERE id = ${id} AND turn_id = ${turnId}`
+    if (released.count === 0) return { kind: 'lost_claim' }
+    await this.events.append(id, tail.map((e) => scrubForLog(e, secrets)))
+    return outcome
+  }
+
+  /**
+   * Stops the running turn. Any principal that may see the session may
+   * interrupt it (spec §8.6: "interrupt from any watcher"). Resolves false
+   * when no turn is running.
+   */
+  async interrupt(id: string, principal: Owner): Promise<boolean> {
+    const session = await this.get(id, principal)
+    const local = this.active.get(id)
+    if (local) {
+      // Accurate, not optimistic: a turn whose result is already in is
+      // finishing by itself, so this interrupt stops nothing.
+      if (local.settling) return false
+      local.controller.abort(new Error('interrupted'))
+      return true
+    }
+    if (!session.turnActive) return false
+    // Running on another replica: its lease renewal sees the flag.
+    const rows = await this.deps.sql`
+      UPDATE ai_sessions SET interrupt_requested = true
+      WHERE id = ${id} AND turn_id IS NOT NULL AND lease_until > now()`
+    return rows.count > 0
+  }
+
+  /**
+   * Moves ownership to `to`. Explicit only (spec §6): the owner may hand the
+   * session to anyone, and the browser user may take over any session (the
+   * panel's `session.handoff`, #256). Nobody else can move it.
+   */
+  async handoff(id: string, actor: Owner, to: Owner): Promise<SessionRecord> {
+    const session = await this.get(id, actor)
+    const isOwner = sameOwner(actor, session.owner)
+    const takeover = actor.kind === 'browser' && sameOwner(actor, to)
+    if (!isOwner && !takeover) {
+      throw new SessionError(
+        'forbidden',
+        `session ${id} is controlled by ${session.owner.label}; only its owner can hand it off`,
+      )
+    }
+    if (sameOwner(session.owner, to) && session.owner.label === to.label) return session
+    // Conditional on the owner read above, so two concurrent handoffs cannot both apply.
+    const rows = await this.deps.sql`
+      UPDATE ai_sessions SET owner_kind = ${to.kind}, owner_id = ${to.id}, owner_label = ${to.label}, updated_at = now()
+      WHERE id = ${id} AND owner_kind = ${session.owner.kind} AND owner_id = ${session.owner.id}`
+    if (rows.count === 0) throw new SessionError('busy', `session ${id} changed owner meanwhile; try again`)
+    await this.events.append(id, [event({ type: 'session.owner', sessionId: id, owner: to })])
+    return this.get(id, to)
+  }
+
+  /**
+   * Branches a session: the SDK's `forkSession()` copies the transcript into a
+   * new session id through this store (sdk.d.ts: "Fork a session into a new
+   * branch with fresh UUIDs"; "When provided, read/write session data via this
+   * store"). The child is owned by whoever forked it, records its parent, and
+   * starts with the parent's conversation events so attach shows its history.
+   */
+  async fork(
+    id: string,
+    principal: Owner,
+    options: { title?: string; origin?: Origin } = {},
+  ): Promise<SessionRecord> {
+    const parent = await this.get(id, principal)
+    if (!(await this.store.exists(id))) {
+      throw new SessionError('invalid', `session ${id} has no transcript to fork yet; send it a turn first`)
+    }
+    const title = options.title?.trim() || `${parent.title || 'session'} (fork)`
+    const { sessionId: childId } = await sdkForkSession(id, {
+      sessionStore: this.store,
+      dir: sessionWorkDir(this.deps.paths, id),
+      title,
+    })
+    const child = await this.insert(childId, principal, {
+      origin: options.origin ?? parent.origin,
+      title,
+      tags: parent.tags,
+      scope: parent.scope,
+      parentId: parent.id,
+    })
+    // The conversation so far, re-addressed to the child. Lifecycle events
+    // (status, owner, result) are the parent's own and are not copied.
+    const history: ServerEvent[] = []
+    for (let after = 0; ; ) {
+      const page = await this.events.read(id, after)
+      if (page.length === 0) break
+      after = page.at(-1)?.seq ?? after
+      for (const { event: e } of page) {
+        if (
+          e.type === 'user.turn' ||
+          e.type === 'assistant.text.delta' ||
+          e.type === 'assistant.text.done' ||
+          e.type === 'tool.call' ||
+          e.type === 'tool.result'
+        ) {
+          history.push({ ...e, sessionId: childId })
+        }
+      }
+    }
+    await this.events.append(childId, [
+      event({ type: 'session.started', sessionId: childId, origin: child.origin, owner: child.owner, title }),
+      ...history,
+      event({ type: 'session.status', sessionId: childId, status: 'idle' }),
+    ])
+    return child
+  }
+
+  /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
+  abortAll(): void {
+    for (const { controller } of this.active.values()) controller.abort(new Error('shutting down'))
+  }
+}
