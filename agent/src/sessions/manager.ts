@@ -7,13 +7,14 @@ import {
 } from '@anthropic-ai/claude-agent-sdk'
 import type { Sql } from 'postgres'
 import type { Credential } from '../credentials.js'
+import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
-import { ensureSessionDir, sessionWorkDir } from '../harness/stateDirs.js'
+import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
-import { SdkEventMapper } from './sdkEvents.js'
+import { scrubForLog, SdkEventMapper } from './sdkEvents.js'
 import { PostgresSessionStore } from './store.js'
 
 // The session manager (#300, spec §6): durable, shared sessions that a human
@@ -37,7 +38,13 @@ import { PostgresSessionStore } from './store.js'
 //     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
 //     sessions.approve/deny belong to #258 with `waiting_approval`.
 //   - #251's registry also supplies `tierOf` and the in-process MCP servers
-//     (`mcpServers` below).
+//     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
+//     tools, settle how tool payloads are redacted: tool.call inputs and
+//     tool.result summaries go into the durable, multi-watcher event log,
+//     scrubbed only by sdkEvents.ts `scrubForLog` (the turn's credential,
+//     arguments named like secrets, a size cap). A tool that takes a secret
+//     under another name must declare it to the registry, and scrubForLog must
+//     read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
 //   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its
@@ -222,6 +229,17 @@ function titleFrom(prompt: string): string {
   return line.length > 80 ? `${line.slice(0, 79)}…` : line
 }
 
+/** A turn running in this process. */
+type LocalTurn = {
+  controller: AbortController
+  /**
+   * Set once the SDK has produced the turn's result (or the stream ended):
+   * the turn is finishing on its own, and aborting now would only cut off the
+   * SDK's last transcript appends, so interrupt() leaves it alone and says so.
+   */
+  settling: boolean
+}
+
 export class SessionManager {
   readonly store: PostgresSessionStore
   readonly events: EventLog
@@ -230,7 +248,7 @@ export class SessionManager {
   private readonly leaseMs: number
   private readonly renewMs: number
   /** Turns running in THIS process, by session id. */
-  private readonly active = new Map<string, AbortController>()
+  private readonly active = new Map<string, LocalTurn>()
 
   constructor(deps: SessionManagerDeps) {
     this.deps = deps
@@ -244,7 +262,9 @@ export class SessionManager {
   // -- reads -------------------------------------------------------------------
 
   private async row(id: string): Promise<SessionRecord | undefined> {
-    if (!/^[0-9a-f-]{36}$/i.test(id)) return undefined
+    // Anything but a canonical UUID would make Postgres throw on the uuid
+    // column; it is simply not a session, so not_found.
+    if (!isUuid(id)) return undefined
     const [row] = await this.deps.sql.unsafe<Row[]>(`SELECT ${COLUMNS} FROM ai_sessions WHERE id = $1`, [id])
     return row ? record(row) : undefined
   }
@@ -387,14 +407,15 @@ export class SessionManager {
       event({ type: 'session.status', sessionId: id, status: 'running' }),
     ])
     const controller = new AbortController()
-    this.active.set(id, controller)
-    const done = this.runTurn(session, turnId, prompt, controller)
+    const local: LocalTurn = { controller, settling: false }
+    this.active.set(id, local)
+    const done = this.runTurn(session, turnId, prompt, local)
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.
       .catch((err: unknown): TurnOutcome => ({ kind: 'failed', message: describe(err) }))
       .finally(() => {
-        if (this.active.get(id) === controller) this.active.delete(id)
+        if (this.active.get(id) === local) this.active.delete(id)
       })
     return { turnId, done }
   }
@@ -424,8 +445,9 @@ export class SessionManager {
     session: SessionRecord,
     turnId: string,
     prompt: string,
-    controller: AbortController,
+    local: LocalTurn,
   ): Promise<TurnOutcome> {
+    const { controller } = local
     const id = session.id
     const sql = this.deps.sql
     const tierOf = this.deps.tierOf ?? (() => undefined)
@@ -454,6 +476,8 @@ export class SessionManager {
 
     let result: SDKResultMessage | undefined
     let failure: string | undefined
+    /** Redacted from everything this turn writes to the durable event log. */
+    let secrets: string[] = []
     try {
       const [credential, cwd, resume, model] = await Promise.all([
         this.deps.credential(),
@@ -461,6 +485,7 @@ export class SessionManager {
         this.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
       ])
+      secrets = [credential.secret]
       const run: HarnessRun = {
         paths: this.deps.paths,
         credential,
@@ -480,16 +505,20 @@ export class SessionManager {
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
       for await (const message of this.run(run)) {
-        if (message.type === 'result') result = message
+        if (message.type === 'result') {
+          result = message
+          local.settling = true
+        }
         const events = mapper.map(message)
-        if (events.length) await this.events.append(id, events)
+        if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
       }
     } catch (err) {
       // For an error result the SDK yields the result and then throws
       // ("Claude Code returned an error result", test/run.test.ts); the
       // result is what counts then.
-      if (!result && !controller.signal.aborted) failure = describe(err)
+      if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
+      local.settling = true
       clearInterval(renew)
       await renewing
     }
@@ -498,7 +527,7 @@ export class SessionManager {
     // message), so releasing the claim here means the next turn, on any
     // replica, resumes from a complete transcript.
     if (lost) return { kind: 'lost_claim' }
-    return this.finish(session, turnId, controller.signal.aborted && !result, result, failure)
+    return this.finish(session, turnId, controller.signal.aborted && !result, result, failure, secrets)
   }
 
   private async finish(
@@ -507,6 +536,7 @@ export class SessionManager {
     interrupted: boolean,
     result: SDKResultMessage | undefined,
     failure: string | undefined,
+    secrets: readonly string[],
   ): Promise<TurnOutcome> {
     const id = session.id
     let status: SessionStatus
@@ -549,7 +579,7 @@ export class SessionManager {
           turn_id = NULL, lease_until = NULL, interrupt_requested = false, updated_at = now()
       WHERE id = ${id} AND turn_id = ${turnId}`
     if (released.count === 0) return { kind: 'lost_claim' }
-    await this.events.append(id, tail)
+    await this.events.append(id, tail.map((e) => scrubForLog(e, secrets)))
     return outcome
   }
 
@@ -562,7 +592,10 @@ export class SessionManager {
     const session = await this.get(id, principal)
     const local = this.active.get(id)
     if (local) {
-      local.abort(new Error('interrupted'))
+      // Accurate, not optimistic: a turn whose result is already in is
+      // finishing by itself, so this interrupt stops nothing.
+      if (local.settling) return false
+      local.controller.abort(new Error('interrupted'))
       return true
     }
     if (!session.turnActive) return false
@@ -656,6 +689,6 @@ export class SessionManager {
 
   /** Aborts every turn running in this process (shutdown); each releases its claim as interrupted. */
   abortAll(): void {
-    for (const controller of this.active.values()) controller.abort(new Error('shutting down'))
+    for (const { controller } of this.active.values()) controller.abort(new Error('shutting down'))
   }
 }

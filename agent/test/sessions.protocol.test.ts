@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url'
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { describe, expect, it } from 'vitest'
 import { event, type ServerEvent, type ServerEventType } from '../src/sessions/protocol.js'
-import { SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
+import { INPUT_MAX, REDACTED, scrubForLog, SdkEventMapper, SUMMARY_MAX } from '../src/sessions/sdkEvents.js'
 import { expectPanelAccepts, frontendParseServerEvent } from './support/frontendProtocol.js'
 
 const S = '11111111-2222-4333-8444-555555555555'
@@ -83,6 +83,57 @@ describe('SdkEventMapper', () => {
       ['t2', false, 'needs approval'.length],
       ['t3', true, SUMMARY_MAX],
     ])
+  })
+})
+
+describe('scrubForLog', () => {
+  const SECRET = 'sk-ant-api03-scrub-test-0000'
+
+  it('blanks secret-named arguments at any depth and redacts the credential everywhere', () => {
+    const call = event({
+      type: 'tool.call',
+      sessionId: S,
+      id: 't1',
+      name: 'mcp__x__login',
+      input: {
+        user: 'me',
+        password: 'hunter2',
+        nested: { apiKey: 'k1', api_key: 'k2', headers: [{ Authorization: 'Bearer abc' }] },
+        note: `uses ${SECRET}`,
+        author: 'kept',
+      },
+      risk: 'outward',
+    })
+    expect(scrubForLog(call, [SECRET])).toEqual({
+      ...call,
+      input: {
+        user: 'me',
+        password: REDACTED,
+        nested: { apiKey: REDACTED, api_key: REDACTED, headers: [{ Authorization: REDACTED }] },
+        note: 'uses [redacted]',
+        author: 'kept',
+      },
+    })
+    // The event itself is not mutated.
+    expect(call.type === 'tool.call' && call.input.password).toBe('hunter2')
+  })
+
+  it('cuts an oversized input to a preview', () => {
+    const call = event({ type: 'tool.call', sessionId: S, id: 't', name: 'n', input: { blob: 'x'.repeat(INPUT_MAX * 2) }, risk: 'read' })
+    const out = scrubForLog(call, [])
+    if (out.type !== 'tool.call') throw new Error('unreachable')
+    expect(out.input.truncated).toBe(true)
+    expect(String(out.input.preview)).toHaveLength(INPUT_MAX)
+  })
+
+  it('redacts the credential from results, text and errors, and leaves ids alone', () => {
+    const events = [
+      event({ type: 'tool.result', sessionId: S, id: 't', ok: false, summary: `rejected ${SECRET}` }),
+      event({ type: 'assistant.text.delta', sessionId: S, messageId: 'm:0', delta: SECRET }),
+      event({ type: 'error', sessionId: S, message: `bad ${SECRET}` }),
+    ]
+    expect(JSON.stringify(events.map((e) => scrubForLog(e, [SECRET])))).not.toContain(SECRET)
+    expect(scrubForLog(events[0]!, [SECRET])).toMatchObject({ sessionId: S, id: 't', summary: 'rejected [redacted]' })
   })
 })
 

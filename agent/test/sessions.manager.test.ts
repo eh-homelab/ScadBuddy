@@ -144,6 +144,50 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(await (await next.send(session.id, agentA, 'again')).done).toMatchObject({ kind: 'result' })
     })
 
+    it('answers not_found, not a database error, for ids that are not UUIDs', async () => {
+      const paths = await tempPaths()
+      const m = manager({ sql: db.sql, paths, run: scriptedRunner(() => ({ reply: 'x' })).runner })
+      // Both pass a loose /^[0-9a-f-]{36}$/ check but are not UUIDs to Postgres.
+      for (const bad of ['-'.repeat(36), '0f8fad5bd9cb-469f-a165-70867728950e-', 'nope']) {
+        await expect(m.get(bad, browser)).rejects.toMatchObject({ code: 'not_found' })
+        await expect(m.send(bad, browser, 'hi')).rejects.toMatchObject({ code: 'not_found' })
+        await expect(m.interrupt(bad, browser)).rejects.toMatchObject({ code: 'not_found' })
+        await expect(m.attach(bad, browser)).rejects.toMatchObject({ code: 'not_found' })
+      }
+    })
+
+    it('reports an interrupt that comes after the result as not stopping anything', async () => {
+      const paths = await tempPaths()
+      let release!: () => void
+      const hold = new Promise<void>((r) => (release = r))
+      const { runner } = scriptedRunner(() => ({ reply: 'done', holdAfterResult: hold }))
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      const turn = await m.send(session.id, agentA, 'x')
+      await collectUntil(await m.attach(session.id, agentA, { signal: stop.signal }), (e) => e.event.type === 'assistant.text.done')
+      // The result has been yielded; the stream is still open (the SDK's last appends).
+      await new Promise((r) => setTimeout(r, 50))
+      expect(await m.interrupt(session.id, agentA)).toBe(false)
+      release()
+      expect(await turn.done).toMatchObject({ kind: 'result', subtype: 'success' })
+    })
+
+    it('redacts the turn’s credential from everything it logs', async () => {
+      const paths = await tempPaths()
+      const turns: FakeTurn[] = [{ reply: 'your key is sk-ant-test, right?' }, { throws: 'upstream said: bad key sk-ant-test' }]
+      const { runner } = scriptedRunner(() => turns.shift()!)
+      const m = manager({ sql: db.sql, paths, run: runner })
+      const { session } = await m.start(agentA, { origin: 'mcp' })
+      await (await m.send(session.id, agentA, 'hi')).done
+      expect(await (await m.send(session.id, agentA, 'again')).done).toEqual({
+        kind: 'failed',
+        message: 'upstream said: bad key [redacted]',
+      })
+      const logged = JSON.stringify(await m.events.read(session.id))
+      expect(logged).not.toContain('sk-ant-test')
+      expect(logged).toContain('your key is [redacted], right?')
+    })
+
     it('frees a claim whose replica died once its lease runs out', async () => {
       const paths = await tempPaths()
       const { runner } = scriptedRunner(() => ({ reply: 'ok' }))

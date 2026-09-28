@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { claudeConfigDir, scratchDir } from '../src/harness/options.js'
-import { ensureSessionDir, ensureStateDirs, sessionWorkDir, StateDirError } from '../src/harness/stateDirs.js'
+import { ensureSessionDir, ensureStateDirs, isUuid, sessionWorkDir, StateDirError } from '../src/harness/stateDirs.js'
 
 describe('ensureStateDirs', () => {
   let root: string
@@ -49,8 +49,10 @@ describe('ensureStateDirs', () => {
   })
 
   it('refuses anything but a UUID as a session directory name', () => {
-    for (const bad of ['../../etc', '', 'abc', '0f8fad5b-d9cb-469f-a165-70867728950e/..']) {
+    for (const bad of ['../../etc', '', 'abc', '0f8fad5b-d9cb-469f-a165-70867728950e/..', '-'.repeat(36)]) {
+      expect(isUuid(bad)).toBe(false)
       expect(() => sessionWorkDir({ stateDir: root }, bad)).toThrow(StateDirError)
     }
+    expect(isUuid('0F8FAD5B-D9CB-469F-A165-70867728950E')).toBe(true)
   })
 })

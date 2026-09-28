@@ -1,5 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { TierResolver } from '../harness/permissions.js'
+import { redact } from '../secrets.js'
 import { event, type ServerEvent } from './protocol.js'
 
 // Maps the Agent SDK's message stream to panel-protocol events (#300), per the
@@ -33,6 +34,57 @@ import { event, type ServerEvent } from './protocol.js'
 
 /** The longest tool.result summary; the full result stays in the transcript. */
 export const SUMMARY_MAX = 500
+/** The longest tool.call input, as JSON, that is logged whole; longer ones are cut to a preview. */
+export const INPUT_MAX = 4096
+
+/**
+ * Argument names whose values are never logged. Matched against every key at
+ * any depth of a tool.call input.
+ */
+export const SENSITIVE_KEY = /secret|token|passw(or)?d|passphrase|api[-_]?key|authori[sz]ation|credential|cookie|private[-_]?key/i
+
+export const REDACTED = '[redacted]'
+
+/** Deep copy with the secrets redacted from every string and, when `byKey`, sensitive arguments blanked. */
+function scrubValue(value: unknown, secrets: readonly string[], byKey: boolean): unknown {
+  if (typeof value === 'string') return redact(value, secrets)
+  if (Array.isArray(value)) return value.map((v) => scrubValue(v, secrets, byKey))
+  if (typeof value === 'object' && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([k, v]) => [
+        k,
+        byKey && SENSITIVE_KEY.test(k) ? REDACTED : scrubValue(v, secrets, byKey),
+      ]),
+    )
+  }
+  return value
+}
+
+/**
+ * What of an event may go into the durable, multi-watcher event log
+ * (ai_session_events; attach replays it to every watcher, and live watchers
+ * read it too). Tool inputs and results come from the model and from tools,
+ * so once #251/#258 wire in real tools they may carry credentials:
+ *
+ *   - every string, in every event, has the turn's own secrets (the Claude
+ *     credential) replaced by the shared `redact()` (secrets.ts);
+ *   - a tool.call input has the value of any SENSITIVE_KEY argument replaced,
+ *     at any depth, and is cut to a `{ truncated, preview }` object when its
+ *     JSON exceeds INPUT_MAX;
+ *   - tool.result summaries are already capped at SUMMARY_MAX by the mapper.
+ *
+ * The full payloads stay only in the SDK transcript (ai_session_entries),
+ * which is never sent to watchers. Tools that take secrets by another name
+ * must declare them when #251's registry lands (the seam in manager.ts).
+ */
+export function scrubForLog(e: ServerEvent, secrets: readonly string[]): ServerEvent {
+  const scrubbed = scrubValue(e, secrets, false) as ServerEvent
+  if (scrubbed.type !== 'tool.call') return scrubbed
+  const input = scrubValue(scrubbed.input, secrets, true) as Record<string, unknown>
+  const json = JSON.stringify(input)
+  if (json.length <= INPUT_MAX) return { ...scrubbed, input }
+  return { ...scrubbed, input: { truncated: true, preview: `${json.slice(0, INPUT_MAX - 1)}…` } }
+}
 
 type Block = { type: string; [k: string]: unknown }
 

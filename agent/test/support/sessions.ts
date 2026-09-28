@@ -12,7 +12,12 @@ export const agentB: Owner = { kind: 'bearer', id: 'token:b', label: 'Agent B' }
 
 /** What a scripted stand-in for the SDK does for one query. */
 export type FakeTurn =
-  | { reply: string; costUsd?: number }
+  | {
+      reply: string
+      costUsd?: number
+      /** Keeps the stream open after the result until this settles (the SDK's last appends). */
+      holdAfterResult?: Promise<void>
+    }
   /** Waits until the query is aborted, then throws as the SDK does. */
   | { hang: true }
   | { throws: string }
@@ -61,6 +66,7 @@ export function scriptedRunner(next: (run: HarnessRun) => FakeTurn) {
         total_cost_usd: turn.costUsd ?? 0.01,
         session_id,
       } as unknown as SDKMessage
+      await turn.holdAfterResult
     })()
   }
   return { runner, runs }

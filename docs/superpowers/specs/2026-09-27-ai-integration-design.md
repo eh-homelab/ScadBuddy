@@ -372,6 +372,14 @@ tools.
   running gets a clear error. Watchers are unlimited.
 - **Handoff.** Ownership moves between principals explicitly. The browser user can see
   every session, with a "controlled by …" badge.
+- **Event log redaction.** Each session's panel events are stored in `ai_session_events`
+  and replayed to every watcher, so tool payloads are scrubbed before they are stored
+  (`agent/src/sessions/sdkEvents.ts` `scrubForLog`): the turn's credential is redacted
+  from every string, arguments named like secrets are blanked, `tool.call` inputs are
+  cut to a preview above 4 KB, and `tool.result` summaries are capped at 500 characters.
+  Full payloads stay only in the SDK transcript, which watchers never receive. Before
+  #251 and #258 wire in real outward tools, the registry must let a tool declare
+  secret-bearing arguments under other names, and the scrubber must honour them.
 - **Agent-to-agent.** Over `/mcp`: `sessions.list/start/send/get/fork/interrupt/approve/deny/handoff`.
   Approvals of outward actions by another agent are off by default and need a per-token
   grant.

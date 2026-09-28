@@ -16,6 +16,13 @@ export class StateDirError extends Error {
   override name = 'StateDirError'
 }
 
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** A canonical 8-4-4-4-12 hex UUID: every session id (and so directory name) is one. */
+export function isUuid(value: string): boolean {
+  return UUID.test(value)
+}
+
 /**
  * A session's own working directory (#300, spec §6): `work/sessions/<id>`.
  * Deterministic from the session id, so every replica computes the same path
@@ -25,7 +32,7 @@ export class StateDirError extends Error {
  * escape `work/`.
  */
 export function sessionWorkDir(paths: HarnessPaths, sessionId: string): string {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) {
+  if (!isUuid(sessionId)) {
     throw new StateDirError(`not a session id: ${JSON.stringify(sessionId)}`)
   }
   return path.join(scratchDir(paths), 'sessions', sessionId.toLowerCase())
