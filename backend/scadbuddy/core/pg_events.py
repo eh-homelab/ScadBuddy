@@ -67,6 +67,33 @@ already pruned. It is pruned by age and by row count
 (``SCADBUDDY_EVENT_LOG_RETENTION_SECONDS``, ``SCADBUDDY_EVENT_LOG_RETENTION_ROWS``)
 every `PRUNE_INTERVAL`, by every replica; the deletes are idempotent.
 
+Consuming it (a backend WebSocket gateway, #406)
+------------------------------------------------
+A gateway in this process uses the bus it finds in ``AppState.events`` and these
+calls only, all on the event loop:
+
+1. ``subscription = bus.subscribe(kinds=...)`` **first**, so nothing published while
+   it catches up is lost. It is an async iterator of events; ``subscription.dropped``
+   counts what it lost by falling behind.
+2. A reconnecting client's ``Last-Event-ID``: live events carry their
+   :attr:`~.events.BaseEvent.id`, not a ``seq``, so send that id as the frame id and
+   turn it back into a place with ``after = await bus.position(last_id)``. ``None``
+   (unknown or pruned) means resync.
+3. ``page = await bus.replay(after, limit=...)`` until a page comes back empty,
+   passing the last ``LoggedEvent.seq`` each time. ``page.gap`` means rows were
+   pruned past the client's place: resync instead.
+4. Then stream the subscription, skipping the ids the replay already sent (they can
+   be in both).
+5. A ``bus.resync`` event (:class:`~.events.BusResync`), or ``dropped`` growing,
+   means this process missed events: replay from ``position(last_event_id)`` or tell
+   the client to resync. Close the subscription (``async with`` or ``close()``) when
+   the socket goes.
+
+``subscribe`` is the :class:`~.events.EventBus` protocol, so it works on the
+in-process bus too; ``position``/``replay``/``bus.resync`` exist only here, where
+there is a database. The agent service LISTENs on ``scadbuddy_events`` itself, on its
+own connection, and reads the same ``events`` table.
+
 Channels are per database and the log is per schema: two deployments sharing one
 database in different schemas would hear each other's events. Give each its own
 database.

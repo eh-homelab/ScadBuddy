@@ -205,6 +205,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # `RenderQueue.start` releases its store when it fails.
             await _close_quietly(state)
             raise
+
     # After the queue has opened its store: the jobs in it are references too.
     sweeper: asyncio.Task[None] | None = None
     if state.config.asset_sweep_interval > 0:

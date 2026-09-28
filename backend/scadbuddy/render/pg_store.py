@@ -10,7 +10,8 @@ One table, ``render_jobs``, is both the job record and the wait list:
   render or counts one more claim on the identical one already waiting, atomically.
 - **Leases.** A worker heartbeats the job it holds. `reap` requeues a running job
   whose heartbeat is older than the lease (the pod died mid-render), up to the
-  attempt limit; `finish` only lands for the attempt that still holds the job.
+  attempt limit, each in a transaction of its own; `finish` only lands for the
+  attempt that still holds the job.
 - **Wake-ups.** A new or requeued job sends ``NOTIFY scadbuddy_render_queue`` in the
   transaction that queues it, so it is delivered on commit and never for a job that
   was rolled back. Each process holds one LISTEN connection (`PgListener`, shared
@@ -252,52 +253,70 @@ class PostgresJobStore:
         return []
 
     def reap(self, *, lease: float, max_attempts: int) -> Reaped:
+        """One short transaction per stale job, not one for the whole pass: each
+        job's event takes the event log's lock (`EVENT_LOG_LOCK`), which is held to
+        commit, and a pass over many lost workers must not hold every replica's
+        publishing up for all of them."""
         requeued: list[Job] = []
         failed: list[Job] = []
-        with self._pool.connection() as conn, conn.transaction():
-            stale = conn.execute(
-                "SELECT * FROM render_jobs WHERE state = 'running'"
+        with self._pool.connection() as conn:
+            # Candidates only, unlocked: each is locked, and re-checked, in its own
+            # transaction below, so one another replica is reaping (locked, hence
+            # skipped) or one whose worker heartbeated since is left alone.
+            candidates = conn.execute(
+                "SELECT id FROM render_jobs WHERE state = 'running'"
                 " AND heartbeat_at < now() - make_interval(secs => %s)"
-                " FOR UPDATE SKIP LOCKED",
+                " ORDER BY heartbeat_at, id",
                 (lease,),
             ).fetchall()
-            for row in stale:
-                error = LOST_WORKER_ERROR
-                if row["attempts"] < max_attempts:
-                    # Tried, not checked first: an identical render already pending
-                    # (or submitted concurrently) makes the requeue violate the
-                    # pending-key unique index, and a SELECT beforehand would only
-                    # narrow that race, not close it. The savepoint confines the
-                    # violation to this row instead of rolling back the whole pass.
-                    # `claims` is left as it is: every submitter coalesced onto the
-                    # job is still waiting on it, and a supersede from one of them
-                    # must release only that one's claim.
-                    try:
-                        with conn.transaction():
-                            back = conn.execute(
-                                "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                                " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
-                                " diagnostics_dropped = 0 WHERE id = %s RETURNING *",
-                                (row["id"],),
-                            ).fetchone()
-                    except UniqueViolation:
-                        error = TWIN_QUEUED_ERROR
-                    else:
-                        assert back is not None
-                        requeued.append(_job(back))
-                        self._announce(conn, requeued[-1], "job.pending")
+            for candidate in candidates:
+                with conn.transaction():
+                    row = conn.execute(
+                        "SELECT * FROM render_jobs WHERE id = %s AND state = 'running'"
+                        " AND heartbeat_at < now() - make_interval(secs => %s)"
+                        " FOR UPDATE SKIP LOCKED",
+                        (candidate["id"], lease),
+                    ).fetchone()
+                    if row is None:
                         continue
-                dead = conn.execute(
-                    "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
-                    " error = %s WHERE id = %s RETURNING *",
-                    (error, row["id"]),
-                ).fetchone()
-                assert dead is not None
-                failed.append(_job(dead))
-                self._announce(conn, failed[-1], "job.failed")
-            if requeued:
-                _notify(conn)
+                    back = self._requeue(conn, row) if row["attempts"] < max_attempts else None
+                    if isinstance(back, Job):
+                        requeued.append(back)
+                        self._announce(conn, back, "job.pending")
+                        _notify(conn)
+                        continue
+                    dead = conn.execute(
+                        "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
+                        " error = %s WHERE id = %s RETURNING *",
+                        (back or LOST_WORKER_ERROR, row["id"]),
+                    ).fetchone()
+                    assert dead is not None
+                    failed.append(_job(dead))
+                    self._announce(conn, failed[-1], "job.failed")
         return Reaped(requeued=requeued, failed=failed)
+
+    @staticmethod
+    def _requeue(conn: Connection[DictRow], row: DictRow) -> Job | str:
+        """Put a stale job back in the queue; the error to fail it with if it cannot.
+
+        Tried, not checked first: an identical render already pending (or submitted
+        concurrently) makes the requeue violate the pending-key unique index, and a
+        SELECT beforehand would only narrow that race, not close it. The savepoint
+        confines the violation to the requeue. `claims` is left as it is: every
+        submitter coalesced onto the job is still waiting on it, and a supersede from
+        one of them must release only that one's claim."""
+        try:
+            with conn.transaction():
+                back = conn.execute(
+                    "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
+                    " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
+                    " diagnostics_dropped = 0 WHERE id = %s RETURNING *",
+                    (row["id"],),
+                ).fetchone()
+        except UniqueViolation:
+            return TWIN_QUEUED_ERROR
+        assert back is not None
+        return _job(back)
 
     def submit(
         self,
