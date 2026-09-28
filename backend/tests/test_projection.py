@@ -73,7 +73,7 @@ def projection(pg_conninfo: str) -> Iterator[JobProjection]:
         store.close()
 
 
-def test_the_migration_adds_the_projection_and_keeps_the_queue(
+def test_the_migrations_add_the_projection_and_drop_the_queues_lease(
     pg_conninfo: str, projection: JobProjection
 ) -> None:
     with psycopg.connect(pg_conninfo) as conn:
@@ -84,9 +84,18 @@ def test_the_migration_adds_the_projection_and_keeps_the_queue(
                 " WHERE table_name = 'render_jobs' AND table_schema = current_schema()"
             )
         }
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes"
+                " WHERE tablename = 'render_jobs' AND schemaname = current_schema()"
+            )
+        }
         applied = {row[0] for row in conn.execute("SELECT id FROM scadbuddy_migrations")}
     assert {"workflow_id", "kind", "inputs", "pipeline_version", "steps"} <= columns
-    assert "heartbeat_at" in columns
+    assert "heartbeat_at" not in columns
+    assert "render_jobs_running" not in indexes
+    assert "render_jobs_pending_key" in indexes
     assert MIGRATION_ID in applied
 
 
