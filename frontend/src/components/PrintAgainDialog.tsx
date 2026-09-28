@@ -24,7 +24,9 @@ export function PrintAgainDialog({ open, print, onClose }: Props) {
   const [error, setError] = useState<string | null>(null)
   const [result, setResult] = useState<PrintAgain | null>(null)
   const printer =
-    print.outcome.printer_name ?? (print.printer_id !== null ? `printer #${print.printer_id}` : 'its printer')
+    print.outcome.printer_name ??
+    print.printer_name ??
+    (print.printer_id !== null ? `printer #${print.printer_id}` : 'its printer')
 
   function close() {
     setSending(false)

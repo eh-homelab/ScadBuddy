@@ -43,16 +43,18 @@ function clock(seconds: number): string {
 function gallerySlides(print: PrintDetail): Slide[] {
   const { media } = print
   const slides: Slide[] = []
-  const photos = media.finish_photo ? [media.finish_photo, ...media.photos] : media.photos
-  photos.forEach((photo, index) => {
-    const finish = photo.name.startsWith('finish_')
+  // The photo the printer took as the print finished leads; the others follow.
+  if (media.finish_photo) {
     slides.push({
-      key: `photo-${photo.name}`,
+      key: `photo-${media.finish_photo.name}`,
       kind: 'image',
-      src: photo.url,
-      alt: finish ? 'Finish photo' : `Photo ${index + 1}`,
-      caption: finish ? 'Taken by the printer when the print finished' : undefined,
+      src: media.finish_photo.url,
+      alt: 'Finish photo',
+      caption: 'Taken by the printer when the print finished',
     })
+  }
+  media.photos.forEach((photo, index) => {
+    slides.push({ key: `photo-${photo.name}`, kind: 'image', src: photo.url, alt: `Photo ${index + 1}` })
   })
   if (media.timelapse) {
     slides.push({
@@ -415,7 +417,7 @@ function OutcomeSection({ print }: { print: PrintDetail }) {
         <Fact label="Failure" value={outcome.failure_reason} />
         <Fact
           label="Printer"
-          value={outcome.printer_name ?? (outcome.printer_id !== null ? `#${outcome.printer_id}` : null)}
+          value={outcome.printer_name ?? print.printer_name ?? (outcome.printer_id !== null ? `#${outcome.printer_id}` : null)}
         />
         <Fact label="Started" value={formatWhen(print.started_at)} />
         <Fact label="Finished" value={formatWhen(print.completed_at)} />

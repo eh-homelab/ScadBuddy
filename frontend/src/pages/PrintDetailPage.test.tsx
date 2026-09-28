@@ -106,6 +106,24 @@ describe('PrintDetailPage (#311)', () => {
     await screen.findByRole('dialog', {}, { timeout: 3000 })
   })
 
+  it('leads the gallery with the finish photo, then the other photos', async () => {
+    const done = prints.find((print) => print.archive_id === 35)!
+    server.use(
+      http.get('/api/v1/prints/35', () =>
+        HttpResponse.json({
+          ...done,
+          media: { ...done.media, photos: [{ name: 'a1b2c3d4.jpg', url: '/api/v1/prints/35/photos/a1b2c3d4.jpg' }] },
+        }),
+      ),
+    )
+    render(35)
+    const gallery = await section('Gallery')
+    const slides = within(gallery).getAllByRole('group')
+    expect(within(slides[0]!).getByRole('img')).toHaveAttribute('alt', 'Finish photo')
+    expect(within(slides[1]!).getByRole('img')).toHaveAttribute('alt', 'Photo 1')
+    expect(within(gallery).getByText('1 of 4')).toBeInTheDocument()
+  })
+
   it('shows the ScadBuddy render beside the print, for comparison', async () => {
     render(35)
     const render3d = await screen.findByTestId('preview')
