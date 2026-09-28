@@ -30,7 +30,8 @@ export function EditSourcePage() {
   const builtin = model.data?.origin === 'builtin'
   // The preview is worked out afresh, so the source and the revision it merges agree.
   const merge =
-    upstream.data?.state === 'update' && upstream.data.preview && upstream.data.revision
+    // #235: an update or a dismissed one, which still merges.
+    upstream.data?.preview && upstream.data.revision
       ? { merged: upstream.data.preview.merged, base: upstream.data.revision, id: upstream.data.upstream.id }
       : null
   const [source, setSource] = useState<string | null>(null)

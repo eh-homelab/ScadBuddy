@@ -522,6 +522,10 @@ describe('mock API: upstream updates (#157)', () => {
   it('dismisses an update until the upstream moves again', async () => {
     await duplicateWithUpdate()
     expect((await api.dismissUpstream(COPY)).upstream_state).toBe('dismissed')
+    // #235: still previewed, as the merge it would still make.
+    const status = await api.getUpstream(COPY)
+    expect(status.state).toBe('dismissed')
+    expect(status.preview?.merged).toBe(theirs)
     await api.replaceSource(UPSTREAM, `${theirs}// again\n`)
     expect((await api.getModel(COPY)).upstream_state).toBe('update')
   })

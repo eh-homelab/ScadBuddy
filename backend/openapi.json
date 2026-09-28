@@ -6029,7 +6029,7 @@
                 "type": "null"
               }
             ],
-            "description": "The merge a `POST \u2026/upstream/merge` would make; on update only"
+            "description": "The merge a `POST \u2026/upstream/merge` would make; on update or dismissed"
           },
           "revision": {
             "anyOf": [
@@ -8419,7 +8419,7 @@
     },
     "/api/v1/models/{slug}/upstream": {
       "get": {
-        "description": "`state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed) or `gone` (the upstream no longer exists). On `update`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.",
+        "description": "`state` is `current` (this template includes the upstream's current revision), `update` (the upstream has moved), `dismissed` (it has moved, to the revision the user dismissed; still mergeable) or `gone` (the upstream no longer exists). On `update` and `dismissed`, `preview` carries `ours`, `base`, `theirs` and the `git merge-file -p --diff3` result, plus which other files would follow the upstream (`taken`) and which would stay because both sides changed them (`kept`). 404 for a template that is not a duplicate.",
         "operationId": "get_upstream_api_v1_models__slug__upstream_get",
         "parameters": [
           {
@@ -8554,7 +8554,7 @@
     },
     "/api/v1/models/{slug}/upstream/merge": {
       "post": {
-        "description": "Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. 409 too when there is no update to merge.",
+        "description": "Three-way merges the upstream's current `model.scad` into this one's, with `base` as the merge base. Clean: writes it, takes each other file this template has not changed since `base`, sets `base` to the upstream's revision and clears `dismissed`, as one commit `Merge <upstream id> into <slug>`. Conflicted: 409 with the marked-up source as `merged` and the revision to save the resolution against as `merge_base`; nothing is written. A dismissed update merges the same way. 409 is one of three cases, told apart by the problem's fields: a conflict carries `merged` and `merge_base`; no update to merge carries `state` `current` or `gone`; and a template or upstream that kept changing across every attempt to write the merge carries `state` `update` or `dismissed` and is worth retrying.",
         "operationId": "merge_upstream_api_v1_models__slug__upstream_merge_post",
         "parameters": [
           {
@@ -8579,6 +8579,9 @@
               }
             },
             "description": "Successful Response"
+          },
+          "409": {
+            "description": "The merge conflicts (`merged`, `merge_base`, `conflicts`: resolve it in the editor), there is no update to merge (`state` is `current` or `gone`), or the template or its upstream kept changing while the merge was worked out (`state` is `update` or `dismissed`: retry)"
           },
           "422": {
             "content": {
