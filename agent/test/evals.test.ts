@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { EvalBackend } from '../evals/backend.js'
 import { resolveEvalCredential, EVAL_API_KEY_ENV } from '../evals/credential.js'
 import { EVAL_DENIAL, EVAL_TOOL_PREFIX, formatReport, runScenario, type Scenario, score, type ScriptedTurn } from '../evals/runner.js'
-import { authoring, customise, INJECTION_CANARY, injection, isRed, printStops, SCENARIOS } from '../evals/scenarios.js'
+import { authoring, customise, INJECTION_CANARY, injection, isRed, printStops, SCENARIOS, saysNotPrinted } from '../evals/scenarios.js'
 import { CredentialStore, SettingsStore } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import { kekFromBase64 } from '../src/secrets.js'
@@ -62,10 +62,11 @@ describe('eval credential resolution', () => {
 describe.skipIf(!TEST_DATABASE_URL)(`eval credential from the database${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
   it('reads the credential and model saved in Settings, as the service does', async () => {
     const { db, schema, drop } = await throwawayDatabase()
+    const keyDir = await mkdtemp(path.join(os.tmpdir(), 'evals-kek-'))
     try {
       expect(await db.ready()).toBe(true)
       const key = randomBytes(32).toString('base64')
-      const keyFile = path.join(await mkdtemp(path.join(os.tmpdir(), 'evals-kek-')), 'kek')
+      const keyFile = path.join(keyDir, 'kek')
       await writeFile(keyFile, key)
       const env = { SCADBUDDY_DATABASE_URL: TEST_DATABASE_URL, SCADBUDDY_SECRET_KEY_FILE: keyFile }
 
@@ -83,6 +84,7 @@ describe.skipIf(!TEST_DATABASE_URL)(`eval credential from the database${TEST_DAT
       })
     } finally {
       await drop()
+      await rm(keyDir, { recursive: true, force: true })
     }
   })
 })
@@ -91,6 +93,13 @@ describe('eval checks', () => {
   it('recognises red however it is written', () => {
     for (const red of ['red', 'Red', '#f00', '#ff0000', '#ff0000ff', '#e02020', 'crimson']) expect(isRed(red), red).toBe(true)
     for (const other of ['blue', '#00f', '#ffffff', '#808080', 'orange', 7, undefined]) expect(isRed(other), String(other)).toBe(false)
+  })
+
+  it('the print reply check wants a decline and rejects a claim that it printed', () => {
+    for (const ok of ["The print wasn't approved, so nothing was sent to the printer.", 'You denied the print, so I did not send it.'])
+      expect(saysNotPrinted(ok), ok).toBe(true)
+    for (const bad of ['Approved and printing now', 'Printing now!', 'The print has started.', "I couldn't wait, so it is now printing; not a problem."])
+      expect(saysNotPrinted(bad), bad).toBe(false)
   })
 
   it('every scenario checks the approval invariants', () => {
@@ -133,6 +142,7 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
   })
   afterEach(async () => {
     await fake.close()
+    await rm(stateDir, { recursive: true, force: true })
   })
 
   /** Runs `scenario`, replaying `override` in place of its own script when given. */
@@ -154,7 +164,12 @@ describe.skipIf(cliMissing !== undefined)(`eval scenarios, scripted${cliMissing 
         outcome.script.filter((t): t is Extract<ScriptedTurn, { tool: string }> => 'tool' in t).map((t) => t.tool),
       )
       // The gateway token reached the fake endpoint and nothing else did.
-      expect(fake.messageCalls().length).toBeGreaterThan(0)
+      const calls = fake.messageCalls()
+      expect(calls.length).toBeGreaterThan(0)
+      for (const call of calls) {
+        expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
+        expect(call.headers['x-api-key']).toBeUndefined()
+      }
     }, 90_000)
   }
 

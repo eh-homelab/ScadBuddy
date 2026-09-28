@@ -1,4 +1,4 @@
-import { mkdtemp, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -61,12 +61,17 @@ describe.skipIf(skip !== undefined)(`live evals${skip ? ` (skipped: ${skip})` : 
     it(scenario.title, async () => {
       if (!found.ok) return
       const stateDir = await mkdtemp(path.join(os.tmpdir(), `scadbuddy-eval-${scenario.id}-`))
-      await ensureStateDirs({ stateDir })
-      const outcome = await runScenario(scenario, {
-        paths: { stateDir },
-        credential: found.credential,
-        ...(found.model ? { model: found.model } : {}),
-      })
+      let outcome: Awaited<ReturnType<typeof runScenario>>
+      try {
+        await ensureStateDirs({ stateDir })
+        outcome = await runScenario(scenario, {
+          paths: { stateDir },
+          credential: found.credential,
+          ...(found.model ? { model: found.model } : {}),
+        })
+      } finally {
+        await rm(stateDir, { recursive: true, force: true })
+      }
       const checks = score(scenario, outcome)
       const pass = checks.every((c) => c.pass)
       reports.push({
