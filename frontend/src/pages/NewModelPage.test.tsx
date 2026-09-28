@@ -162,6 +162,63 @@ describe('NewModelPage', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent('slug'))
   })
 
+  describe('libraries the source uses (#169)', () => {
+    const BOLTED = 'use <BOSL2/std.scad>\ninclude <parts.scad>\ncuboid([10, 10, 2]);\n'
+
+    function watchCreates(): { libraries?: string[] }[] {
+      const bodies: { libraries?: string[] }[] = []
+      server.use(
+        http.post('*/api/v1/models', async ({ request }) => {
+          bodies.push((await request.clone().json()) as { libraries?: string[] })
+          // Nothing returned: the default handler answers.
+        }),
+      )
+      return bodies
+    }
+
+    it('suggests the curated libraries its use/include lines name, ticked', async () => {
+      const { user } = renderNew()
+      await paste(user, BOLTED)
+
+      const suggestion = await screen.findByRole('checkbox', { name: /BOSL2/ })
+      expect(suggestion).toBeChecked()
+      expect(screen.getByTestId('detected-libraries')).toHaveTextContent('v2.0.761')
+      expect(screen.queryByRole('checkbox', { name: /parts/ })).not.toBeInTheDocument()
+    })
+
+    it('suggests nothing for a source that uses no library', async () => {
+      const { user } = renderNew()
+      await paste(user, keychainSource)
+      await screen.findByText(/^Parses cleanly/)
+
+      expect(screen.queryByTestId('detected-libraries')).not.toBeInTheDocument()
+    })
+
+    it('pins the ticked suggestions when it saves', async () => {
+      const bodies = watchCreates()
+      const { user } = renderNew()
+      await user.type(screen.getByLabelText('Name'), 'Bolted')
+      await paste(user, BOLTED)
+      await screen.findByRole('checkbox', { name: /BOSL2/ })
+
+      await user.click(screen.getByRole('button', { name: 'Save and customize' }))
+      expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+      expect(bodies.map((body) => body.libraries)).toEqual([['BOSL2']])
+    })
+
+    it('leaves out a suggestion that was unticked', async () => {
+      const bodies = watchCreates()
+      const { user } = renderNew()
+      await user.type(screen.getByLabelText('Name'), 'Bolted')
+      await paste(user, BOLTED)
+      await user.click(await screen.findByRole('checkbox', { name: /BOSL2/ }))
+
+      await user.click(screen.getByRole('button', { name: 'Save and customize' }))
+      expect(await screen.findByRole('heading', { name: 'Customizer' })).toBeInTheDocument()
+      expect(bodies.map((body) => body.libraries)).toEqual([[]])
+    })
+  })
+
   it('says a check that timed out timed out, rather than blaming the syntax', async () => {
     server.use(
       http.post('/api/v1/models/check', () =>

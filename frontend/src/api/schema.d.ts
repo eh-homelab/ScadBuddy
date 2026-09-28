@@ -201,7 +201,7 @@ export interface paths {
         put?: never;
         /**
          * Add a model
-         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically.
+         * @description Three request bodies, one code path. `multipart/form-data` uploads a `.scad` file (plus an optional thumbnail, README and `model.json`, the layout of a bundled model's directory); `application/json` posts `{name, source}` pasted straight in; `text/plain` posts the bare source and takes its name from the `X-Model-Name` header. All three derive the slug, parse-check the source and build the customizer schema identically. The JSON and multipart bodies may name curated `libraries`: each is pinned at the catalogue's ref, as `PUT /models/{slug}/libraries/{name}` would, recorded in the model's first revision and on the parse check's library path.
          */
         post: operations["create_model_api_v1_models_post"];
         delete?: never;
@@ -1533,6 +1533,11 @@ export interface components {
              */
             file?: string | null;
             /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, one per field; a pin the model.json carries wins
+             */
+            libraries?: string[] | null;
+            /**
              * Meta
              * @description Optional model.json, at most 64 KiB. A non-blank name, description or tags form field wins over it; a missing or blank one falls through to it
              */
@@ -2571,6 +2576,11 @@ export interface components {
              * @default false
              */
             force: boolean;
+            /**
+             * Libraries
+             * @description Curated libraries to pin at the catalogue's ref, in the model's first revision and before the parse check
+             */
+            libraries?: string[];
             /**
              * Name
              * @description Display name; its slug is derived from it
