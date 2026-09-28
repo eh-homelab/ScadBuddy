@@ -154,8 +154,8 @@ async def test_drop_swept_assets_drops_the_stores_copies(tmp_path: Path, pool: P
     assert remote.content.index.get(asset_key(meta.id)) is None
 
 
-async def test_nothing_to_drop_without_a_store(tmp_path: Path) -> None:
-    state: Any = SimpleNamespace()
+async def test_nothing_to_drop_on_the_local_store(tmp_path: Path) -> None:
+    state: Any = SimpleNamespace(store=SimpleNamespace(remote_assets=None))
     await drop_swept_assets(cast(AppState, state), ["a" * 64], cutoff=datetime.now(UTC))
 
 
