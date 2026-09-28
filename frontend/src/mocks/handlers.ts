@@ -1965,6 +1965,18 @@ export const handlers = [
     } satisfies AssetUsage)
   }),
 
+  // #426 — the blob store's usage, over every kind.
+  http.get(`${base}/store/usage`, () =>
+    HttpResponse.json({
+      backend: 'local',
+      count: 3,
+      bytes: 4096,
+      max_count: 200000,
+      max_total_bytes: 53687091200,
+      by_kind: { piece: 4096 },
+    }),
+  ),
+
   http.get(`${base}/models/:slug/assets/:id`, ({ params }) => {
     const asset = state.assets.get(String(params['id']))
     return asset ? HttpResponse.json(asset.meta) : problem(404, 'Not Found', 'no uploaded file')
@@ -2459,6 +2471,8 @@ export const handlers = [
     const body = (await request.json()) as {
       bambuddy_url?: string | null
       bambuddy_api_key?: string
+      bambuddy_render_api_key?: string
+      store_backend?: Settings['store_backend'] | null
       public_url?: string | null
       library_folder_id?: number | null
       pipeline_id?: number | null
@@ -2475,8 +2489,15 @@ export const handlers = [
         body.bambuddy_api_key === undefined
           ? state.settings.has_api_key
           : body.bambuddy_api_key.length > 0,
+      has_render_api_key:
+        typeof body.bambuddy_render_api_key === 'string'
+          ? body.bambuddy_render_api_key.length > 0
+          : state.settings.has_render_api_key,
+      store_backend: body.store_backend ?? state.settings.store_backend,
     }
+    state.settings.render_key_fallback = state.settings.has_api_key && !state.settings.has_render_api_key
     delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
+    delete (state.settings as { bambuddy_render_api_key?: string }).bambuddy_render_api_key
     await delay(120)
     return HttpResponse.json(state.settings)
   }),

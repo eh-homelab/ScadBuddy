@@ -31,7 +31,10 @@ describe('SettingsPage and the AI availability gate', () => {
     renderPage(<SettingsPage />)
     await seeded()
     expect(screen.queryByRole('region', { name: 'MCP access tokens' })).toBeNull()
-    expect(screen.queryByRole('alert')).toBeNull()
+    // The fixture stores only the full key, so the render key's warning (#426) is the one alert.
+    expect(screen.queryAllByRole('alert').map((alert) => alert.dataset.testid)).toEqual([
+      'render-key-fallback',
+    ])
     expect(list).not.toHaveBeenCalled()
   })
 
