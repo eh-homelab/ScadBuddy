@@ -91,6 +91,8 @@ CASES = [
     ("square-sharp", dict(corner_radius=0, edge_round=0, text="hello world", gap=2,
                           letter_scale=40, magnet="6x2", magnet_clearance=0.1)),
     ("all-spaces", dict(text="   ")),
+    # No magnet: the edge rounding and the deep inlay raise the thickness.
+    ("thin-edge-raised", dict(thickness=3, edge_round=2, letter_depth=2)),
     # The smallest tiles with the widest, furthest-in border: the border is
     # narrowed and moved out so every tile still gets its letter.
     ("small-max-border", dict(tile_size=20, border=True, border_width=5, border_inset=5,
@@ -264,6 +266,9 @@ for name, ov in CASES:
                        ("NOTE: border set to", p["border"] and (I["bw"] < p["border_width"]
                                                              or not near(I["inset"], p["border_inset"], 1e-6)))):
         check((note in I["log"]) == want, "%s %s" % ("logs" if want else "no", note))
+    if T > p["thickness"]:
+        why = "mm magnet" if needs >= p["edge_round"] + inlay + 1 else "for the edge rounding and inlay"
+        check("NOTE: thickness raised" in I["log"] and why in I["log"], "the thickness note says: %s" % why)
     if p["magnet"] != "none":
         top = (SKIN if p["mount"] == "slide_in" else 0) + ph
         check(T - inlay - top >= ROOF - 1e-6,

@@ -425,6 +425,7 @@ if (STACKED && s_gap < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
 
 W = STACKED ? max(ext_x, h_ext_x) : plate_w(COLS, N);
+assert(!STACKED || W <= BED_X, str("a ", size, " mm coaster's holder is wider than the plate"));
 H = STACKED ? ext_y + s_gap + h_ext_y : plate_h(COLS, N);
 function pos(i) = STACKED ? (i == 0 ? [0, H / 2 - ext_y / 2] : [0, -H / 2 + h_ext_y / 2])
                 : [-W / 2 + cell_x / 2 + (i % COLS) * px, H / 2 - cell_y / 2 - floor(i / COLS) * py];

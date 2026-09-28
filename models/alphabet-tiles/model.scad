@@ -316,7 +316,8 @@ function tile_pos(j) = [(j % cols) * (S + G) + S / 2, -floor(j / cols) * (S + G)
 
 if (T > thickness)
     echo(str("NOTE: thickness raised from ", thickness, " to ", T, " mm",
-             has_mag ? str(" to fit the ", magnet, " mm magnet") : " for the edge rounding and inlay"));
+             mag_needs >= edge_round + inlay_d + 1 ? str(" to fit the ", magnet, " mm magnet")
+                                                   : " for the edge rounding and inlay"));
 if (G < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", G, " mm to fit ", n, " tiles on the plate"));
 if (has_border && (bw < border_width || abs(inset - border_inset) > 1e-6))

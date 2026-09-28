@@ -113,7 +113,7 @@ the top 0.6 mm.
 ./verify.sh
 ```
 
-Renders the defaults and thirteen variations in `scadbuddy-verify:local`:
+Renders the defaults and fourteen variations in `scadbuddy-verify:local`:
 
 - every shape with a border and the awkward glyphs `WQg69&`;
 - both magnet sizes and both mounts;
@@ -122,11 +122,15 @@ Renders the defaults and thirteen variations in `scadbuddy-verify:local`:
 - 24 of the biggest tiles with a 15 mm gap, where the gap has to shrink to
   12 mm to fit the bed;
 - the smallest, thinnest tile with the deepest inlay and the biggest magnet;
+- a thin tile with no magnet whose edge rounding and inlay raise the thickness;
 - sharp square tiles with spaces in the text;
 - text that is all spaces;
 - a serif face;
 - the smallest square and heart tiles with the widest, furthest-in border,
   where the border has to narrow.
+
+For each one it checks (besides the list below) that every value the model
+changes is logged with a `NOTE:`, with the right reason, and nothing else is.
 
 For each one it checks:
 

@@ -577,7 +577,8 @@ bound_x = max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]);
 bound_y = max([for (q = corners) q[1]]) - min([for (q = corners) q[1]]);
 assert(bound_x <= bed_w && bound_y <= bed_d,
        str("the critter could be ", bound_x, " x ", bound_y, " mm, more than the ", bed_w, " x ",
-           bed_d, " mm plate: ", name_grew ? "shorten the name, curl it, " : "", "shorten it or make it narrower"));
+           bed_d, " mm plate: ", name_grew ? "shorten the name, curl it, or make it narrower"
+                                          : "shorten it or make it narrower"));
 
 echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 * neck_hw,
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,
