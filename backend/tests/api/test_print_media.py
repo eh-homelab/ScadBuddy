@@ -90,6 +90,40 @@ def test_each_archive_file_is_proxied(client: TestClient, path: str, upstream: s
     assert response.content == b"bytes"
 
 
+@pytest.mark.parametrize(
+    ("path", "upstream"),
+    [("thumbnail", "thumbnail"), ("plates/2/thumbnail", "plate-thumbnail/2")],
+)
+@respx.mock
+def test_each_library_file_image_is_proxied(client: TestClient, path: str, upstream: str) -> None:
+    """#313: the Print dialog shows a library file's images without Bambuddy's key."""
+    configure(client)
+    route = respx.get(f"{API}/library/files/89/{upstream}").mock(
+        return_value=httpx.Response(200, content=b"bytes", headers={"Content-Type": "image/png"})
+    )
+
+    response = client.get(f"/api/v1/print/library/89/{path}")
+
+    assert route.called
+    assert route.calls.last.request.headers["X-API-Key"] == "s3cret"
+    assert response.status_code == 200
+    assert response.content == b"bytes"
+    assert response.headers["content-type"] == "image/png"
+
+
+@pytest.mark.parametrize("path", ["thumbnail", "plates/2/thumbnail"])
+@respx.mock
+def test_a_missing_library_image_is_a_404(client: TestClient, path: str) -> None:
+    configure(client)
+    respx.route(method="GET", path__regex=r"/api/v1/library/files/89/").mock(
+        return_value=httpx.Response(404, json={"detail": "Thumbnail not found"})
+    )
+
+    response = client.get(f"/api/v1/print/library/89/{path}")
+
+    assert response.status_code == 404
+
+
 @respx.mock
 def test_a_seek_past_the_end_comes_back_as_416_with_the_length(client: TestClient) -> None:
     # A media element seeking past the end must learn the real length, not a 502.

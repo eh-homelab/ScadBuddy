@@ -34,7 +34,7 @@ def library_file(
     )
 
 
-def one_colour(file_id: int) -> None:
+def one_color(file_id: int) -> None:
     """The recorded requirements with slot 1 alone, so a run on the rack's differing
     nozzles is not refused as multi-color (#469). Registered before ``run_routes``,
     whose two-filament regex it then wins over."""
@@ -111,7 +111,7 @@ def test_a_folder_of_hundreds_of_files_is_one_read(client: TestClient) -> None:
 @respx.mock
 def test_a_library_file_is_sliced_as_it_stands_and_queued(client: TestClient) -> None:
     configure(client)
-    one_colour(89)
+    one_color(89)
     library_file(89)
     run_routes()
     sliced = slice_routes()
@@ -159,10 +159,11 @@ def test_a_sliced_file_is_a_422_before_anything_is_sliced(client: TestClient) ->
     choices = client.get("/api/v1/print/library/104/choices")
     filaments = client.get("/api/v1/print/library/104/filaments")
 
-    assert run.status_code == 422, run.text
-    assert "sliced already" in run.json()["detail"]
-    assert choices.status_code == 422
-    assert filaments.status_code == 422
+    for response in (run, choices, filaments):
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"] == (
+            "file-104.gcode.3mf is sliced already. Print it from Bambuddy."
+        )
     assert not sliced.called
 
 
@@ -243,9 +244,13 @@ def test_a_remembered_printer_that_is_gone_falls_through(client: TestClient) -> 
     configure(client)
     library_file(89)
     run_routes()
-    client.put("/api/v1/print/library/89/choices", json={"printer_id": 99})
+    put = client.put("/api/v1/print/library/89/choices", json={"printer_id": 99})
 
     choices = client.get("/api/v1/print/library/89/choices")
+
+    assert put.status_code == 200, put.text
+    assert put.json()["printer_id"] == 99
+    assert choices.json()["model_choices"]["printer_id"] == 99
 
     assert choices.status_code == 200, choices.text
     assert choices.json()["printer_id"] == 1
