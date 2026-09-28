@@ -188,8 +188,90 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 [hooks reference](https://code.claude.com/docs/en/hooks), cited in the file. `bin/` is
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
 `assertPluginAllowed()` for every `pluginPaths` entry. ScadBuddy's own plugin passes
-(PR #379, row 8). Fetching, pinning and reviewing user plugins (spec §10) is **not
-built** (open PR #464).
+(PR #379, row 8). Plugin packages add the rules in the next section.
+
+## Plugin packages
+
+Packages (#297) are Claude plugins that ScadBuddy fetches from a git URL or a marketplace
+entry. They are someone else's code from the network, so they get more checks than the
+harness's own rules above. The code is in
+[`agent/src/plugins/packages/`](../../agent/src/plugins/packages/), and
+[operating.md](operating.md#9-plugin-packages-297) describes the flow.
+
+**Approval (spec §8.2).** Installing is an outward settings write. An install or re-pin
+only fetches, vets and stores the pin with its review. Nothing loads until the admin
+approves that exact `commit_sha` and `content_hash` through
+`POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
+`CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
+until the admin approves the new one after seeing its file diff. The routes use the
+same UI guard as credential writes, with the same limitation (Known limitations, 1).
+
+**Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
+and file SHA-256 (`hashTree()`, `hash.ts`). The cached copy is hashed again before every
+load. If it does not match, it is deleted and fetched again at the pinned commit, and the
+package loads only if the new files hash to the pin (`materialise()`, `install.ts`). The
+package is also vetted again at every load, so rules that have tightened since approval
+still apply. A process that writes the cache between the check and Claude Code's read is
+not caught; such a process already controls the pod.
+
+**Fetching** (`git.ts`):
+
+- The source URL must be https, or http to a loopback address. It may not carry
+  credentials, a query or `$` (`normaliseGitUrl()`, `source.ts`). It must pass the
+  egress check (`assertEndpointAllowed()`: no link-local or cloud-metadata address)
+  before git runs.
+- git gets an environment of its own: no database URL, no key path, no credential.
+  `GIT_ALLOW_PROTOCOL` is `https:http`, and no system or global config is read.
+  `http.followRedirects=false`, `core.hooksPath=/dev/null`, `transfer.fsckObjects` and
+  `GIT_TERMINAL_PROMPT=0` are set. The fetch is shallow, takes no tags or submodules,
+  and has a time limit.
+- Refs and paths are held to an alphabet that cannot start with `-` or contain `..`.
+- A symlink or submodule anywhere in the plugin's directory is refused, from `git
+  ls-tree`, before any file is used. `hashTree()` refuses any non-regular file again.
+  A package may have at most 2000 files and 20 MB.
+- Like the gateway check, this is point-in-time: git resolves the name again itself.
+
+**Vetting** (`vetPackage()`, `vet.ts`, on top of `pluginProblems()`). The whole package
+is refused, with every problem listed, if it has any of the following:
+
+- **Dynamic context injection** (`` !`cmd` `` or a ```` ```! ```` block) in any Markdown
+  file. These run a shell "before the skill content is sent to Claude"
+  ([skills](https://code.claude.com/docs/en/skills)). Measured on CLI 2.1.283, the
+  harness already denies it ("Permission to use Bash has been denied", even with
+  `allowed-tools: Bash(...)`; `test/pluginPackages.e2e.test.ts`).
+- **Frontmatter** `hooks`, `mcpServers` or `permissionMode`, so every hook and server is
+  in the vetted files and in the review.
+- **Tools outside the allowlist.** `allowed-tools` and a subagent's `tools` may name MCP
+  tools only (`mcp__…`). The tier seam decides each MCP tool's tier, and an unknown
+  plugin tool is `outward`. Built-ins such as `Bash(...)` or `Write` are refused.
+- **MCP servers** that are not `type: "http"`, that have a `headersHelper` (a command;
+  [MCP](https://code.claude.com/docs/en/mcp)), or that contain a `$` anywhere. `${...}`
+  resolves in an http server's `url` and `headers`
+  ([plugins reference](https://code.claude.com/docs/en/plugins-reference), "Where each
+  variable resolves"), which could send the credential to the plugin's server.
+- **Hooks.** `mcp_tool` hooks are refused: the
+  [hooks reference](https://code.claude.com/docs/en/hooks) ("MCP tool hook fields")
+  does not say their call is permission-checked. `http` hooks may not use `$` or
+  `allowedEnvVars` ("HTTP hook fields"). `pluginProblems()` already refuses command
+  hooks. There is deliberately no switch to allow one, because it would inherit the
+  credential env (above).
+- **Manifest fields** that a headless run cannot honour: `dependencies`, `userConfig`,
+  `channels`, `settings` or a root `settings.json` (their `agent` key replaces the main
+  agent), and `workflows` (JavaScript).
+- **A name** that is not 2–32 lower-case letters, digits and single hyphens, or that is
+  reserved. The name namespaces the skills (`/<name>:<skill>`).
+
+Every URL a package declares (MCP servers, http hooks) goes through the egress check at
+install and again at every load. A marketplace entry must have a git source: a relative
+path, `github`, `url` or `git-subdir`. `archive`, `npm` and `command` sources are
+refused, because they have no commit to pin or they run a command. An entry that
+declares components of its own is refused too
+([marketplaces](https://code.claude.com/docs/en/plugin-marketplaces)).
+
+Not done yet:
+
+- per-part enabling. The review shows each part, but a package is enabled as a whole.
+- tier maps for a package's own MCP tools. They stay `outward`.
 
 ## Event-log scrubbing (#377)
 
@@ -237,8 +319,9 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Plugins are vetted, never loaded in production.** No plugin path is passed in
-   `main.ts` today.
+7. **Plugins are vetted, never loaded in production.** `main.ts` passes no plugin path
+   and builds no `SessionManager` yet. Installed plugin packages load only once the
+   manager is wired (#471).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
 

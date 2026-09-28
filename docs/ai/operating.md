@@ -282,6 +282,10 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
   "HTTP routes").
 
+- `ai_plugin_packages`: installed Claude plugin packages (#297,
+  `20260928T0750Z_plugin_packages.sql`): the source, the pinned commit, the content
+  hash, the review, the approval and the enabled flag. See §9.
+
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).
 
@@ -293,3 +297,60 @@ Every harness query gets `maxTurns` (default 25) and `maxBudgetUsd` (default 1 U
 them "placeholders until Settings stores per-session caps". Sessions read their caps
 from `ai_settings` when they start, and spend the budget across the whole session (PR
 #377 body, "Budget and turns").
+
+## 9. Plugin packages (#297)
+
+A plugin package is a Claude plugin (skills, subagents, hooks, `.mcp.json`) fetched from
+a git repository, or from an entry of a marketplace repository, at a pinned commit. The
+Agent SDK loads plugins by local path only: "To use a plugin distributed through a
+marketplace or remote repository, download it first and provide the local directory
+path" ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)).
+
+- **Postgres is the record.** `ai_plugin_packages` holds the pin (commit SHA and content
+  hash) and everything the admin reviewed
+  ([`agent/src/plugins/packages/store.ts`](../../agent/src/plugins/packages/store.ts)).
+- **Disk is a cache.** Packages are materialised under `<state dir>/plugins/<name>/<commit>-<hash prefix>`
+  (`pluginCacheDir()` in [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)).
+  Before each load, every file is hashed and compared with the pin. A missing, partial
+  or altered copy is deleted and fetched again at the pinned commit. If the new files do
+  not hash to the pin, the package is not loaded (`materialise()` in
+  [`agent/src/plugins/packages/install.ts`](../../agent/src/plugins/packages/install.ts)).
+  The cache can be the same `emptyDir` as the rest of the state directory.
+- **git in the image.** The `agent` stage installs `git` and `ca-certificates`
+  ([`Dockerfile`](../../Dockerfile)). git runs with an environment built by
+  [`agent/src/plugins/packages/git.ts`](../../agent/src/plugins/packages/git.ts), so it
+  never sees the service's own environment. It passes through only the proxy and CA
+  variables (`HTTPS_PROXY`, `HTTP_PROXY`, `NO_PROXY`, their lower-case forms,
+  `GIT_SSL_CAINFO`, `SSL_CERT_FILE` and `SSL_CERT_DIR`).
+- **Egress.** The pod needs outbound HTTPS to each git host it installs from. Fetches,
+  and every URL a package declares, go through the same egress check as the gateway
+  (see [security.md](security.md#plugin-packages)).
+
+### The routes
+
+These routes sit under `/api/v1/ai/plugin-packages` and use the same UI guard as the
+other Settings writes
+([`agent/src/routes/pluginPackages.ts`](../../agent/src/routes/pluginPackages.ts)):
+
+| Route | What it does |
+|---|---|
+| `POST /` with `{ "source": { "kind": "git", "url", "ref"?, "path"? } }` or `{ "kind": "marketplace", "url", "ref"?, "entry" }` | Fetches, pins the commit, vets, and stores the package **unapproved and disabled** (201). A refused package gets 422 with every problem. |
+| `GET /`, `GET /:name` | The pin, the review (skills as `<name>:<skill>`, commands, agents, hooks, MCP servers, files), and any pending re-pin with its file diff. |
+| `POST /:name/approve` with `{ "commit_sha", "content_hash" }` | Approves exactly the pin the review showed. A mismatch is a 409. |
+| `PATCH /:name` with `{ "enabled" }` | Enables an approved pin only; the table enforces this with a `CHECK` too. |
+| `POST /:name/repin` with `{ "ref"? }` | Fetches the new commit into a *pending* pin. The current pin keeps loading until the pending one is approved. |
+| `DELETE /:name/pending`, `DELETE /:name` | Drop the pending re-pin; uninstall and evict the cache. |
+
+Plugins are never updated automatically (issue #297). At most two fetches run at a
+time, and one per package; another request gets 429.
+
+### Status
+
+The session manager reads the enabled packages at the start of each turn
+(`packagePlugins` in `SessionManagerDeps`,
+[`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)). A package that
+cannot be loaded is reported in the session as a `plugin_unavailable` error, and the
+turn goes ahead without it. `main.ts` builds the store and the installer, but no
+`SessionManager` yet (#471), so no production turn loads packages until that lands.
+The Settings UI for the review and the approval is not built.
+

@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import {
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
@@ -18,6 +19,7 @@ import {
   runHarness,
 } from '../harness/run.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
+import type { PackagesForRun } from '../plugins/packages/install.js'
 import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -167,6 +169,13 @@ export type SessionManagerDeps = {
    * released when the turn ends.
    */
   remotePlugins?: () => Promise<PluginsForRun>
+  /**
+   * The enabled plugin packages for a turn (#297), each materialised from its
+   * pin and verified: in production
+   * `loadPackagesForRun(packageStore, installer)`. Read once per turn; a
+   * package that cannot be loaded is reported in the session and left out.
+   */
+  packagePlugins?: () => Promise<PackagesForRun>
   run?: QueryRunner
   leaseMs?: number
   renewMs?: number
@@ -533,8 +542,23 @@ export class SessionManager {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
+      const packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+      for (const problem of packages?.problems ?? []) {
+        this.deps.stderr?.(`${problem}\n`)
+        await unavailable(problem)
+      }
+      const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
       pluginCheck = async (message: SDKMessage) => {
         if (message.type !== 'system' || message.subtype !== 'init') return
+        // The SDK skips a plugin it cannot load; the init message lists what it did load
+        // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
+        const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
+        const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+        for (const dir of packages?.paths ?? []) {
+          if (!loaded.has(path.resolve(dir))) {
+            await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+          }
+        }
         for (const plugin of remotePlugins) {
           const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
           if (status !== 'connected') {
@@ -564,7 +588,7 @@ export class SessionManager {
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
         ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
-        ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }

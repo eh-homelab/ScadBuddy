@@ -144,6 +144,45 @@ function checkManifestRefs(
   }
 }
 
+/** The plugin's hook configs and MCP maps, each with where it was declared (for plugin packages' extra vetting). */
+export type DeclaredConfigs = {
+  manifest: Record<string, Json>
+  hooks: { where: string; config: Json }[]
+  mcp: { where: string; map: Json }[]
+  problems: string[]
+}
+
+/**
+ * Reads what `pluginProblems` checks, for callers that check more
+ * (src/plugins/packages/vet.ts). Bundles are skipped here: pluginProblems
+ * refuses them.
+ */
+export function declaredConfigs(pluginPath: string): DeclaredConfigs {
+  const root = path.resolve(pluginPath)
+  const problems: string[] = []
+  const manifest = readJson(root, '.claude-plugin/plugin.json', problems, false)
+  const m = isRecord(manifest) ? manifest : {}
+  const hooks: DeclaredConfigs['hooks'] = []
+  const mcp: DeclaredConfigs['mcp'] = []
+  const collect = (value: Json, field: string, into: (config: Json, where: string) => void) => {
+    for (const entry of eachDeclared(value)) {
+      if (typeof entry === 'string') {
+        if (/^https?:\/\//.test(entry) || /\.(mcpb|dxt)$/i.test(entry)) continue
+        into(readJson(root, entry, problems, true), entry)
+      } else {
+        into(entry, `plugin.json ${field}`)
+      }
+    }
+  }
+  const hooksFile = readJson(root, 'hooks/hooks.json', problems, false)
+  if (hooksFile !== undefined) hooks.push({ where: 'hooks/hooks.json', config: hooksFile })
+  collect(m.hooks, 'hooks', (config, where) => hooks.push({ where, config }))
+  const mcpFile = readJson(root, '.mcp.json', problems, false)
+  if (mcpFile !== undefined) mcp.push({ where: '.mcp.json', map: mcpFile })
+  collect(m.mcpServers, 'mcpServers', (map, where) => mcp.push({ where, map }))
+  return { manifest: m, hooks, mcp, problems }
+}
+
 /** Every reason `pluginPath` may not be loaded; empty when it may. */
 export function pluginProblems(pluginPath: string): string[] {
   const root = path.resolve(pluginPath)

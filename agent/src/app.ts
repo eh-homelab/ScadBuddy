@@ -5,9 +5,12 @@ import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import type { PluginForwarder } from './plugins/forwarder.js'
+import type { PackageInstaller } from './plugins/packages/install.js'
+import type { PackageRepo } from './plugins/packages/store.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
+import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
 import { registerPluginRoutes } from './routes/plugins.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
@@ -15,6 +18,7 @@ import type { KekStatus } from './secrets.js'
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
 // routes/credentials.ts), the plugin registry routes (#297, routes/plugins.ts),
+// the plugin package routes (#297, routes/pluginPackages.ts),
 // and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
@@ -33,6 +37,10 @@ export type AppDeps = {
   testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
   /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
   pluginForwarder?: PluginForwarder
+  /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
+  pluginPackages?: PackageRepo | undefined
+  /** Fetches and caches plugin packages; undefined disables installing. */
+  packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
@@ -187,6 +195,14 @@ export function createApp(deps: AppDeps): AgentApp {
               truncated: false,
             })),
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+  })
+
+  registerPluginPackageRoutes(app, {
+    packages: deps.pluginPackages,
+    installer: deps.packageInstaller,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   if (deps.mcp) {

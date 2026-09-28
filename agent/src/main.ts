@@ -8,11 +8,14 @@ import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
-import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { PluginForwarder } from './plugins/forwarder.js'
+import { GitFetcher } from './plugins/packages/git.js'
+import { PackageInstaller } from './plugins/packages/install.js'
+import { PackageStore } from './plugins/packages/store.js'
 import { PluginStore } from './plugins/registry.js'
 import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
@@ -89,6 +92,13 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
+// files under <state dir>/plugins are a cache, rebuilt from the pin and
+// verified against its content hash before each load (plugins/packages/).
+// A harness run gets them from `loadPackagesForRun(pluginPackages, packageInstaller)`
+// once a SessionManager is built here (#471).
+const pluginPackages = database ? new PackageStore(database.sql) : undefined
+const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
 
 const app = createApp({
   database,
@@ -97,6 +107,8 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  pluginPackages,
+  packageInstaller,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
