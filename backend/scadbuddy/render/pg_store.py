@@ -18,7 +18,9 @@ One table, ``render_jobs``, is both the job record and the wait list:
   that connection was down.
 
 Schema changes go in `MIGRATIONS`, append-only, applied at `open` under an advisory
-lock so two starting pods cannot race each other.
+lock so two starting pods cannot race each other. They include the tables of the
+stores that share this pool through `PostgresJobStore.connection` -- the
+default-render previews' ``model_previews``.
 """
 
 from __future__ import annotations
@@ -28,6 +30,7 @@ import logging
 import random
 import shutil
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -98,6 +101,20 @@ MIGRATIONS: tuple[str, ...] = (
         ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
+    """,
+    # 3: default-render previews (#454; `library.previews.PostgresPreviewStore`). One
+    # row per model id, the record and its image together: a rendered row always has
+    # its PNG and a failed one never does, so the two cannot disagree.
+    """
+    CREATE TABLE model_previews (
+        model_id    text PRIMARY KEY,
+        source_key  text NOT NULL,
+        ok          boolean NOT NULL,
+        error       text,
+        png         bytea,
+        rendered_at timestamptz NOT NULL,
+        CONSTRAINT model_previews_image_iff_ok CHECK (ok = (png IS NOT NULL))
+    );
     """,
 )
 
@@ -187,6 +204,11 @@ class PostgresJobStore:
 
     def close(self) -> None:
         self._pool.close()
+
+    def connection(self) -> AbstractContextManager[Connection[DictRow]]:
+        """A pooled connection (autocommit, dict rows) for the other stores that keep
+        their tables in this database. Usable once `open` has migrated it."""
+        return self._pool.connection()
 
     def listener(
         self,

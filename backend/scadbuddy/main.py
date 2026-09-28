@@ -129,18 +129,8 @@ async def _asset_sweeper(state: AppState) -> None:
         await _sweep_duplicate_staging_logged(state)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    state: AppState = getattr(app.state, STATE_ATTR)
-    state.paths.ensure()
-    # Before the built-in sync: an existing models directory becomes revision 1,
-    # so what a newer image changes in a built-in is a commit on top of it rather
-    # than an unversioned overwrite.
-    await asyncio.to_thread(state.history.ensure_repo)
-    # Before anything shells out to openscad or fc-list: it is what points
-    # fontconfig at the fonts on the data volume.
-    state.fonts.prepare()
-    state.openscad_version = await probe_openscad_version(state.config)
+async def _prepare_catalogue(state: AppState) -> None:
+    """The boot's passes over the catalogue, run before the render queue starts."""
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
@@ -159,6 +149,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # And their previews, which may be rows in the database rather than files.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_orphan_previews)
+    except Exception:
+        logger.exception("could not sweep orphaned previews")
     # Pins from before they moved into each model (#93): once, then the shared
     # lockfile is gone. It logs what it cannot record, so it never stops the boot.
     try:
@@ -179,9 +174,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.assets.rebuild_usage)
     except OSError:
         logger.exception("could not recount the upload store")
-    # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
-    # spawns its workers, so a restart never leaves a job stuck "running".
-    await state.queue.start()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    state.paths.ensure()
+    # Before the built-in sync: an existing models directory becomes revision 1,
+    # so what a newer image changes in a built-in is a commit on top of it rather
+    # than an unversioned overwrite.
+    await asyncio.to_thread(state.history.ensure_repo)
+    # Before anything shells out to openscad or fc-list: it is what points
+    # fontconfig at the fonts on the data volume.
+    state.fonts.prepare()
+    state.openscad_version = await probe_openscad_version(state.config)
+    # Before the first catalogue listing: that reads the previews, which live in the
+    # database when there is one. Closed again if the boot fails before the queue
+    # has started and taken it over.
+    await state.queue.open_store()
+    try:
+        await _prepare_catalogue(state)
+        # RenderQueue.start() fails unfinished jobs and prunes expired ones before
+        # it spawns its workers, so a restart never leaves a job stuck "running".
+        await state.queue.start()
+    except BaseException:
+        await state.queue.close_store()
+        raise
     if state.settings.preview_renders:
         state.previews.start()
         # Every model without a thumbnail gets its default render, one at a time and

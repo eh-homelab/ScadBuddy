@@ -71,13 +71,13 @@ async def render_preview(
     """The plate image of ``slug`` rendered at its default parameters.
 
     The same pipeline as a render job up to its cover image, and no further: no
-    closed solids, no 3MF, no output. Its scratch space is its own, under the
-    previews directory, and gone when this returns.
+    closed solids, no 3MF, no output. Its scratch space is its own, under
+    ``cache/preview-work/``, and gone when this returns.
     """
     source = await resolve_source(slug, None, paths=paths, history=history)
     config = source.configure(config)
     schema = await cached_schema(source.scad, source.schema_cache, config=config)
-    work = paths.previews / f".work-{uuid.uuid4().hex}"
+    work = paths.preview_work / uuid.uuid4().hex
     work.mkdir(parents=True)
     try:
         raw = work / RAW_RENDER_NAME
@@ -224,8 +224,8 @@ class PreviewScheduler:
                 )
             )
             return True
-        # Re-checked under the store's lock, so a thumbnail set or a delete landing
-        # while this finishes cannot leave a record behind without its image.
+        # Re-checked under the model's preview lock, so a thumbnail set or a delete
+        # landing while this finishes is never undone by it.
         await asyncio.to_thread(
             lambda: self.store.write(slug, key, png, wanted=lambda: self._still_wanted(slug, key))
         )
@@ -245,7 +245,7 @@ class PreviewScheduler:
         if self.catalogue.has_output_cover(slug):
             self.store.drop(slug)
             return None
-        key = source_key(self.store.paths, slug)
+        key = source_key(self.catalogue.paths, slug)
         if key is None or self.store.current(slug, key):
             return None
         return key
@@ -261,5 +261,5 @@ class PreviewScheduler:
             self.catalogue.exists(slug)
             and not self.catalogue.thumbnail_path(slug).is_file()
             and not self.catalogue.has_output_cover(slug)
-            and source_key(self.store.paths, slug) == key
+            and source_key(self.catalogue.paths, slug) == key
         )

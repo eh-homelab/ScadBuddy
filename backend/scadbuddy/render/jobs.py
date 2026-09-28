@@ -798,6 +798,15 @@ class RenderQueue:
         """The cover rasteriser's pool, for background work that draws plate images."""
         return self._thumbnails
 
+    async def open_store(self) -> None:
+        """Open -- and migrate -- the store ahead of `start`, for boot steps that read
+        what other stores keep in its database. `start` opens it too, harmlessly."""
+        await asyncio.to_thread(self.store.open)
+
+    async def close_store(self) -> None:
+        """Undo `open_store` when the boot fails before `start`."""
+        await asyncio.to_thread(self.store.close)
+
     async def start(self) -> None:
         self.paths.ensure()
         await asyncio.to_thread(self.store.open)

@@ -28,7 +28,11 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.library.previews import PreviewStore
+from scadbuddy.library.previews import (
+    MemoryPreviewStore,
+    PostgresPreviewStore,
+    PreviewStore,
+)
 from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
@@ -127,12 +131,19 @@ def build_state(settings: Settings) -> AppState:
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
-    store: JobBackend = (
-        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
-        if settings.database_url
-        else JobStore(paths)
-    )
+    # Nothing connects here: the pool opens in `RenderQueue.open_store`, from the
+    # lifespan.
+    # The previews share it; without a database they are kept in this process only,
+    # and a restart renders them again.
+    store: JobBackend
+    preview_store: PreviewStore
+    if settings.database_url:
+        pg = PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
+        store = pg
+        preview_store = PostgresPreviewStore(pg.connection)
+    else:
+        store = JobStore(paths)
+        preview_store = MemoryPreviewStore()
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
     assets = AssetStore(
@@ -141,16 +152,15 @@ def build_state(settings: Settings) -> AppState:
         max_count=config.asset_max_count,
     )
     # The outputs feed the catalogue's fallback thumbnail (#179), and the previews
-    # stand in behind them.
-    preview_store = PreviewStore(paths)
-    # Off, the catalogue serves no preview at all -- including ones rendered while it
-    # was on, which stay on disk until their model goes (the sweeps work by path).
+    # stand in behind them. Off, the catalogue serves no preview at all -- including
+    # ones rendered while it was on, which stay stored until their model goes.
     catalogue = Catalogue(
         paths,
         history,
         outputs,
-        preview_store if settings.preview_renders else None,
+        preview_store,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        serve_previews=settings.preview_renders,
     )
     history.on_commit = announce_commits(events, catalogue)
     queue = RenderQueue(

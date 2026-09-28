@@ -253,7 +253,7 @@ outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
-cache/previews/<id>.png|.json     the default-render preview and what it was rendered from (§6.2.2)
+cache/preview-work/<uuid>/        a default-render preview's scratch space while it renders (§6.2.2)
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
 assets/<sha256>.json              its original name, kind and size; swept once unreferenced
 .assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
@@ -823,10 +823,17 @@ source declares them -- is rendered in the background, and that render's
   not a job: never a `render_jobs` row or job file, never listed, never counted by
   admission (`SCADBUDDY_RENDER_QUEUE_MAX`) or the queue metrics, never a `job.*`
   event, and never makes a model's delete wait.
-- **Storage.** `cache/previews/<id>.png`, beside a `<id>.json` recording the source
-  key it was rendered from. It is never in the model's directory, so never
-  committed, and never among the outputs, so never in a print flow. The orphan
-  sweep and a reused slug's cleanup remove it like the schema cache.
+- **Storage (#454).** With `SCADBUDDY_DATABASE_URL`, a `model_previews` row per
+  model id (`builtin:` ids included): the source key it was rendered from, whether
+  it rendered, the error if not, and the PNG as `bytea`, on the render queue's
+  pool and created by its migrations (3). A rendered row always has its image and
+  a failed one never does (a CHECK constraint), so the record and the image cannot
+  disagree. Without a database the same record lives in the process's memory, and
+  a restart renders the previews again. Either way it is never in the model's
+  directory, so never committed, and never among the outputs, so never in a print
+  flow. A delete, a reused slug's cleanup and the boot's orphan sweep drop it. The
+  files #293 wrote under `cache/previews/` are ignored, not migrated: the previews
+  regenerate on their own.
 - **Precedence.** Own thumbnail, then the first output's plate, then the preview,
   then none. Setting a thumbnail drops the preview at once. A model that has an
   output drops it on its next change, and gets it back if the output is deleted.
@@ -835,16 +842,16 @@ source declares them -- is rendered in the background, and that render's
   metadata edit re-renders nothing. A model is rendered only when its key differs
   from the recorded one. Requests are debounced (2 s) and coalesced per model, so
   a burst of changes is one render. A render whose model changed, was deleted, or
-  gained a thumbnail or an output while it ran is discarded. That check and the write run under one store-wide lock that a drop also takes, so a thumbnail set mid-write never leaves a record without its image; and a record whose image is missing anyway counts as no record, so it is rendered again.
+  gained a thumbnail or an output while it ran is discarded. That check and the write run in one transaction under a per-model advisory lock (`pg_advisory_xact_lock`) that a drop also takes, so a thumbnail set or a delete landing mid-write is never undone by it, on any replica.
 - **Failure.** A render that fails or times out leaves no image and is logged. Its
   key is recorded as failed, so the same source is never retried, at boot
   included. The next source edit tries again.
 - **Built-ins and existing models.** Built-ins get previews too; they are derived
-  files, so a read-only template is untouched. At boot, every model is passed to
-  the scheduler once. A preview already current is left alone, so only the first
-  boot after an upgrade renders anything, and it renders one model at a time
+  state, so a read-only template is untouched. At boot, every model is passed to
+  the scheduler once. A preview already current is left alone, so with a database
+  only the first boot after an upgrade renders anything (without one, every boot), and it renders one model at a time
   behind requested renders, with a pause (1 s) after each.
-- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay on disk until their model goes, and the orphan sweep removes them by path either way.
+- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay stored until their model goes; a delete, a reused slug and the orphan sweep still drop them.
 - **Frontend.** Only the new `preview` value (the Edit details dialog says a render
   of the default settings stands in) and `thumbnail_preview_id` in the image's
   cache key. There is no "rendering…" placeholder: the card shows no image until

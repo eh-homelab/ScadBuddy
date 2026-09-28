@@ -4,6 +4,9 @@ no image of its own and no generated output.
 The render itself is stubbed -- `render_preview` is the render pipeline up to its
 plate image, which the render tests already cover -- so these pin when a preview is
 made, kept, replaced and dropped, and that it never touches the model's history.
+
+Each runs twice: with the in-memory store (no database), and with the app on
+Postgres (`requires_postgres`), where the previews are rows in ``model_previews``.
 """
 
 from __future__ import annotations
@@ -62,9 +65,18 @@ class StubRender:
         return PREVIEW + source.encode()
 
 
+@pytest.fixture(params=["memory", pytest.param("postgres", marks=pytest.mark.requires_postgres)])
+def backend(request: pytest.FixtureRequest) -> str:
+    backend: str = request.param
+    return backend
+
+
 @pytest.fixture
-def settings(settings: Settings) -> Settings:
-    return settings.model_copy(update={"preview_renders": True})
+def settings(settings: Settings, backend: str, request: pytest.FixtureRequest) -> Settings:
+    update: dict[str, Any] = {"preview_renders": True}
+    if backend == "postgres":
+        update["database_url"] = request.getfixturevalue("pg_conninfo")
+    return settings.model_copy(update=update)
 
 
 @pytest.fixture
@@ -182,7 +194,7 @@ def test_a_duplicate_gets_a_preview_of_its_own(
 
     assert sorted(slug for slug, _ in stub.calls) == ["copy", SLUG]
     assert _model(client, "copy")["thumbnail_source"] == "preview"
-    assert paths.model_preview("copy").is_file()
+    assert state.previews.store.image("copy") is not None
 
 
 def test_a_model_can_be_deleted_while_its_preview_is_pending(
@@ -195,8 +207,7 @@ def test_a_model_can_be_deleted_while_its_preview_is_pending(
     assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
     stub.released.set()
     settle(client, state)
-    assert not paths.model_preview(SLUG).exists()
-    assert not paths.model_preview_record(SLUG).exists()
+    assert state.previews.store.record(SLUG) is None
 
 
 # ── precedence ────────────────────────────────────────────────────────────────
@@ -207,36 +218,19 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
 ) -> None:
     _create(client)
     settle(client, state)
-    assert paths.model_preview(SLUG).is_file()
+    assert state.previews.store.image(SLUG) is not None
 
     own = client.put(
         f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
     )
     assert own.json()["thumbnail_source"] == "model"
     # Dropped with the write, not later: there is nothing left for it to stand in for.
-    assert not paths.model_preview(SLUG).exists()
+    assert state.previews.store.record(SLUG) is None
     settle(client, state)
     assert len(stub.calls) == 1
 
     assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
     settle(client, state)
-    assert len(stub.calls) == 2
-    assert _model(client)["thumbnail_source"] == "preview"
-
-
-def test_a_record_left_without_its_image_is_rendered_again(
-    client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
-) -> None:
-    """The torn state a drop racing a write could once leave: an ok record for the
-    current source with no image. It must not be trusted as current forever."""
-    _create(client)
-    settle(client, state)
-    paths.model_preview(SLUG).unlink()
-    assert _model(client)["thumbnail_source"] is None
-
-    state.previews.request(SLUG)
-    settle(client, state)
-
     assert len(stub.calls) == 2
     assert _model(client)["thumbnail_source"] == "preview"
 
@@ -254,7 +248,7 @@ def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     assert model["thumbnail_preview_id"] is None
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == PNG_BYTES + b"plate"
     # Nothing left for it to stand in for.
-    assert not paths.model_preview(SLUG).exists()
+    assert state.previews.store.record(SLUG) is None
 
     assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
     settle(client, state)
@@ -355,7 +349,7 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
 
     assert _model(client)["thumbnail_source"] is None
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").status_code == 404
-    assert not paths.model_preview(SLUG).exists()
+    assert state.previews.store.image(SLUG) is None
     assert "the default render for a preview failed" in caplog.text
 
     # Asked again with nothing changed: no second attempt.
@@ -399,7 +393,7 @@ def test_a_preview_is_never_committed_or_left_in_the_model_directory(
     versions = client.get(f"/api/v1/models/{SLUG}/versions").json()
     settle(client, state)
 
-    assert paths.model_preview(SLUG).is_file()
+    assert state.previews.store.image(SLUG) is not None
     assert client.get(f"/api/v1/models/{SLUG}/versions").json() == versions
     assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == [
         "model.json",
@@ -438,7 +432,7 @@ def _boot(settings: Settings, stub: StubRender) -> tuple[FastAPI, AppState]:
 
 
 def test_boot_renders_each_model_without_a_thumbnail_once(
-    settings: Settings, seed_dir: Path, paths: DataPaths
+    settings: Settings, seed_dir: Path, paths: DataPaths, backend: str
 ) -> None:
     _seed(seed_dir, "bare", thumbnail=False)
     _seed(seed_dir, "pictured", thumbnail=True)
@@ -458,11 +452,12 @@ def test_boot_renders_each_model_without_a_thumbnail_once(
     assert pictured["thumbnail_source"] == "model"
     assert mine["thumbnail_source"] == "preview"
 
-    # A second boot finds every preview current and renders nothing.
+    # On Postgres a second boot finds every preview current and renders nothing. In
+    # memory they went with the process, so it renders them again.
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
         settle(client, booted)
-    assert len(stub.calls) == 2
+    assert len(stub.calls) == (2 if backend == "postgres" else 4)
 
 
 def test_previews_can_be_turned_off(settings: Settings, paths: DataPaths) -> None:
@@ -475,20 +470,21 @@ def test_previews_can_be_turned_off(settings: Settings, paths: DataPaths) -> Non
 
 
 def test_turning_previews_off_hides_the_ones_already_rendered(
-    settings: Settings, paths: DataPaths
+    settings: Settings, paths: DataPaths, backend: str
 ) -> None:
     """Off means no preview is served, not merely that none is made: one rendered
-    while previews were on stays on disk, but the catalogue no longer reads it."""
+    while previews were on stays stored, but the catalogue no longer reads it."""
     stub = StubRender(paths)
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
         _create(client)
         settle(client, booted)
         assert _model(client)["thumbnail_source"] == "preview"
-    assert paths.model_preview(SLUG).is_file()
 
-    app, _ = _boot(settings.model_copy(update={"preview_renders": False}), stub)
+    app, off = _boot(settings.model_copy(update={"preview_renders": False}), stub)
     with TestClient(app) as client:
+        if backend == "postgres":
+            assert off.previews.store.image(SLUG) is not None
         model = _model(client)
         listed = client.get("/api/v1/models").json()
         served = client.get(f"/api/v1/models/{SLUG}/thumbnail")
