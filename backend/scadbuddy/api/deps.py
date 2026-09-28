@@ -112,9 +112,9 @@ class AppState:
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
     #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
-    #: replica. Held for the
-    #: fetch only -- the parse check after it takes `checks` like any create -- and
-    #: an import that finds it full is refused at once, not queued.
+    #: replica. Held for the fetch only -- the parse check after it takes `checks`
+    #: like any create -- and an import that finds it full is refused at once, not
+    #: queued.
     imports: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
     )
