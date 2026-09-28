@@ -99,6 +99,14 @@ class Settings(BaseSettings):
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
     # ingress, which the server cannot infer from a request behind a proxy.
     public_url: str | None = None
+    # SCADBUDDY_ALLOWED_ORIGINS: comma-separated origins the UI is ALSO served under,
+    # besides the public URL's — the LAN hostname when the public URL is an SSO
+    # proxy, say. A browser's `Origin` on the realtime socket must be one of them
+    # (`api/realtime.py`, #266); with only the public URL, whichever other hostname
+    # the same deployment answers on shows "Live updates unavailable". Not a stored
+    # setting: like the agent's SCADBUDDY_AGENT_TRUSTED_PROXIES, it decides which
+    # pages may reach the server, so it belongs to the deployment.
+    allowed_origins: str = ""
     # SCADBUDDY_DEFAULT_PLATE: the printer model ("H2C", "A1 mini") whose plate the
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
@@ -150,6 +158,11 @@ class Settings(BaseSettings):
     # pinned is the one serving — see docs in README.md, "Deploying".
     revision: str = "unknown"
     version: str = "dev"
+
+    @property
+    def allowed_origin_list(self) -> list[str]:
+        """`SCADBUDDY_ALLOWED_ORIGINS` split on commas, blanks dropped."""
+        return [item.strip() for item in self.allowed_origins.split(",") if item.strip()]
 
     def to_config(self) -> Config:
         return Config(
