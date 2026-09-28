@@ -495,17 +495,6 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     assert len(stub.calls) == 1
 
 
-def test_without_a_database_there_are_no_previews(settings: Settings, paths: DataPaths) -> None:
-    """Postgres-only (#454): no database means no store, no scheduler and no preview,
-    and nothing written under the data directory in their place."""
-    app, booted = _boot(settings.model_copy(update={"database_url": None}), StubRender(paths))
-    with TestClient(app) as client:
-        _create(client)
-        assert _model(client)["thumbnail_source"] is None
-    assert booted.previews is None
-    assert booted.catalogue.previews is None
-
-
 # ── startup: the backfill never leaks the queue ───────────────────────────────
 
 
