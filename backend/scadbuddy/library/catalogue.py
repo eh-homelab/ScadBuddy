@@ -24,6 +24,7 @@ from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
+    LEGACY_PRESETS_NAME,
     MODEL_META_NAME,
     SOURCE_NAME,
     DataPaths,
@@ -37,6 +38,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.presets import TemplatePreset, TemplatePresets
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -211,6 +213,16 @@ class ModelPatch(BaseModel):
     name: str | None = None
     description: str | None = None
     tags: list[str] | None = None
+    #: The template's own presets (#326), replacing the list whole. Names unique
+    #: ignoring case, explicit ids unique; the route writes every key down.
+    presets: list[TemplatePreset] | None = None
+
+    @field_validator("presets")
+    @classmethod
+    def _presets_are_distinct(
+        cls, presets: list[TemplatePreset] | None
+    ) -> list[TemplatePreset] | None:
+        return None if presets is None else TemplatePresets(presets=presets).presets
 
     @field_validator("name")
     @classmethod
@@ -700,6 +712,12 @@ class Catalogue:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw)
+            if patch.presets is not None:
+                # The list written is the template's presets whole: a legacy file left
+                # beside it would add its entries back (they are read below model.json),
+                # so `[]` could never clear them. A client edits the merged list it
+                # read, so what it keeps of the legacy file is in the list it wrote.
+                (self.paths.model_dir(slug) / LEGACY_PRESETS_NAME).unlink(missing_ok=True)
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)

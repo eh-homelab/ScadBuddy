@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
+from scadbuddy.core.events import EventBus, JobEvent, JobKind, JobProgress, emit
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -599,9 +599,12 @@ async def render_job(
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
     checkouts: CheckoutGate | None = None,
+    on_stage: Callable[[RenderStage], None] | None = None,
     fetcher: CheckoutFetcher | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
+        if on_stage is not None:
+            on_stage(name)
         return metrics.stage(name) if metrics is not None else nullcontext()
 
     # Resolved again rather than carried on the job: the model can be edited
@@ -809,6 +812,9 @@ class RenderQueue:
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
                 checkouts=checkouts,
+                on_stage=lambda stage: emit(
+                    self.events, JobProgress(job_id=job.id, slug=job.slug, stage=stage)
+                ),
                 fetcher=fetcher,
             )
         )

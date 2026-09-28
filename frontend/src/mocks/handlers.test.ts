@@ -1,9 +1,18 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ApiError, api } from '../api/client'
-import type { ModelSummary } from '../api/types'
+import type { ModelPatch, ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_PREVIEW_ID, BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
-import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
+import {
+  MAX_PRESET_DESCRIPTION,
+  MAX_PRESET_ID,
+  MAX_PRESET_TAG,
+  MAX_PRESET_TAGS,
+  MAX_PRESET_NAME,
+  MAX_PRESETS,
+  resetMockState,
+  setMockPresets,
+} from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -669,13 +678,13 @@ describe('mock API: duplicating a preset', () => {
   beforeEach(() => resetMockState())
 
   it('copies a shipped preset to a saved one with its values', async () => {
-    const copy = await api.duplicatePreset('name-keychain', 'template-0', { name: 'Tiny copy' })
+    const copy = await api.duplicatePreset('name-keychain', 'template-tiny', { name: 'Tiny copy' })
     expect(copy).toMatchObject({ origin: 'mine', params: { text_size: 10, keyring_hole: false } })
   })
 
   it('refuses a taken name, and a preset whose values the template no longer takes', async () => {
     await expect(
-      api.duplicatePreset('name-keychain', 'template-0', { name: 'mum' }),
+      api.duplicatePreset('name-keychain', 'template-tiny', { name: 'mum' }),
     ).rejects.toMatchObject({ status: 409 })
     // "Old engraving" names engrave_depth, which the schema has dropped.
     await expect(
@@ -683,3 +692,116 @@ describe('mock API: duplicating a preset', () => {
     ).rejects.toMatchObject({ status: 422 })
   })
 })
+
+describe('mock API: a template of mine defines its presets in its metadata (#326)', () => {
+  beforeEach(() => resetMockState())
+
+  it('replaces the template presets and keeps the saved ones', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [{ id: 'wide', name: 'Wide', params: { text_size: 20 } }, { name: 'Bag tag' }],
+    })
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-wide',
+      'template-bag-tag',
+    ])
+    expect(presets.filter((p) => p.origin === 'mine').map((p) => p.name)).toEqual([
+      'Mum',
+      'Old engraving',
+    ])
+  })
+
+  it('refuses an unknown parameter and a repeated name', async () => {
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: 'X', params: { nope: 1 } }] }),
+    ).rejects.toMatchObject({ status: 422 })
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: 'X' }, { name: 'x' }] }),
+    ).rejects.toMatchObject({ status: 422 })
+  })
+
+  it('refuses a name a saved preset already has (409), and writes nothing', async () => {
+    const before = await api.listPresets('name-keychain')
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: 'mum' }] }),
+    ).rejects.toMatchObject({ status: 409 })
+    expect(await api.listPresets('name-keychain')).toEqual(before)
+  })
+
+  it('keys presets without an id as the server does: suffixed on a clash, by position without a slug', async () => {
+    await api.updateModel('name-keychain', {
+      presets: [
+        { name: 'Bag tag' },
+        { id: 'bag-tag-2', name: 'Other' },
+        { name: 'Bag  Tag!' },
+        { name: '🎄' },
+      ],
+    })
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-bag-tag',
+      'template-bag-tag-2',
+      'template-bag-tag-3',
+      'template-preset-4',
+    ])
+  })
+
+  it('refuses what the server refuses: a stale dropdown value, a wrong type, a repeated id, too many', async () => {
+    const refused = (presets: ModelPatch['presets']) =>
+      expect(api.updateModel('name-keychain', { presets })).rejects.toMatchObject({ status: 422 })
+    await refused([{ name: 'X', params: { hole_side: 'bottom' } }])
+    await refused([{ name: 'X', params: { text_size: 'big' } }])
+    await refused([
+      { id: 'same', name: 'One' },
+      { id: 'same', name: 'Two' },
+    ])
+    await refused(Array.from({ length: MAX_PRESETS + 1 }, (_, n) => ({ name: `Preset ${n}` })))
+    await refused([{ id: 'Not A Slug', name: 'X' }])
+    await refused([{ id: 'a'.repeat(MAX_PRESET_ID + 1), name: 'X' }])
+    await refused([{ name: 'X', description: 'd'.repeat(MAX_PRESET_DESCRIPTION + 1) }])
+    await refused([{ name: 'X', tags: Array.from({ length: MAX_PRESET_TAGS + 1 }, (_, n) => `t${n}`) }])
+    await refused([{ name: 'X', tags: ['t'.repeat(MAX_PRESET_TAG + 1)] }])
+    await refused([{ name: '   ' }])
+    await refused([{ name: 'x'.repeat(MAX_PRESET_NAME + 1) }])
+    // Over-long before blank, as the server checks them: 81 spaces is a length problem.
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: ' '.repeat(MAX_PRESET_NAME + 1) }] }),
+    ).rejects.toMatchObject({
+      detail: 'the request did not match the expected shape',
+      problem: { errors: [expect.objectContaining({ msg: expect.stringContaining('at most') })] },
+    })
+    // The list's shape before any value: a repeated name after an unknown parameter is
+    // still the name the server reports.
+    await expect(
+      api.updateModel('name-keychain', {
+        presets: [{ name: 'A', params: { nope: 1 } }, { name: 'B' }, { name: 'b' }],
+      }),
+    ).rejects.toMatchObject({
+      detail: 'the request did not match the expected shape',
+      problem: { errors: [expect.objectContaining({ msg: expect.stringContaining('two presets are named') })] },
+    })
+    // Nothing was written by any of them.
+    const presets = await api.listPresets('name-keychain')
+    expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
+      'template-tiny',
+    ])
+  })
+})
+
+describe('mock API: metadata PATCH on a model that is not there', () => {
+  beforeEach(() => resetMockState())
+
+  it('is a 404 before the presets\u2019 values are looked at, and writes nothing', async () => {
+    await expect(
+      api.updateModel('no-such-model', { presets: [{ name: 'X', params: { nope: 1 } }] }),
+    ).rejects.toMatchObject({ status: 404 })
+    await expect(api.listPresets('no-such-model')).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('refuses a malformed list (422) before the route can answer 404 or 403', async () => {
+    const twice = { presets: [{ name: 'X' }, { name: 'x' }] }
+    await expect(api.updateModel('no-such-model', twice)).rejects.toMatchObject({ status: 422 })
+    await expect(api.updateModel(BUILTIN_SLUG, twice)).rejects.toMatchObject({ status: 422 })
+  })
+})
+
