@@ -34,8 +34,9 @@ Lifecycle
   picked up.
 - With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
   (``render/pg_store.py`` migration 3) and a Postgres session advisory lock makes
-  sure one replica follows each print (:class:`WatchLock`). Without it, the log is
-  in memory: a restart forgets the prints in flight.
+  sure one replica follows each print (:class:`WatchLock`). There is no other store
+  (#401 makes the database required): without it, a print is followed from the send
+  that started it, and a restart forgets it.
 - A failed read publishes ``print.progress`` once per distinct failure, so the UI
   re-reads the progress route and shows the scope-aware problem it answers
   (``bambuddy/errors.py``). Events carry ids, never content (``core/events.py``).
@@ -94,25 +95,6 @@ class PrintLog(Protocol):
     async def since(self, cutoff: datetime) -> list[str]: ...
 
     async def aclose(self) -> None: ...
-
-
-class MemoryPrintLog:
-    """No database: this process's own prints, gone at a restart."""
-
-    def __init__(self, at: dict[str, datetime] | None = None) -> None:
-        self._at: dict[str, datetime] = dict(at or {})
-
-    async def record(self, output_id: str, at: datetime) -> None:
-        self._at[output_id] = at
-
-    async def printed_at(self, output_id: str) -> datetime | None:
-        return self._at.get(output_id)
-
-    async def since(self, cutoff: datetime) -> list[str]:
-        return [output_id for output_id, at in self._at.items() if at >= cutoff]
-
-    async def aclose(self) -> None:
-        return None
 
 
 class _PgSession:
@@ -262,7 +244,7 @@ class PrintWatcher:
         self.observer = observer
         self.read = read
         self.events = events
-        self.prints = prints or MemoryPrintLog()
+        self.prints = prints
         self.lock = lock or LocalWatchLock()
         self.min_interval = min_interval
         self.max_interval = max_interval
@@ -283,7 +265,8 @@ class PrintWatcher:
     async def started(self, output_id: str) -> None:
         """A send or run started a print of ``output_id``: record it, and follow it."""
         try:
-            await self.prints.record(output_id, self.now())
+            if self.prints is not None:
+                await self.prints.record(output_id, self.now())
         except Exception:
             # The print was sent; this process follows it, but a restart would not.
             logger.exception("could not record a started print", extra={"output_id": output_id})
@@ -317,6 +300,8 @@ class PrintWatcher:
 
     async def resume(self) -> None:
         """Follow every output printed within ``max_age`` that nobody follows."""
+        if self.prints is None:
+            return
         try:
             recent = await self.prints.since(self.now() - self.max_age)
         except Exception:
@@ -338,13 +323,17 @@ class PrintWatcher:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await self.lock.aclose()
-        await self.prints.aclose()
+        if self.prints is not None:
+            await self.prints.aclose()
 
-    async def _wait(self, output_id: str, seconds: float) -> None:
+    async def _wait(self, output_id: str, seconds: float) -> bool:
+        """Wait ``seconds``, or less if poked; True if it was poked."""
         poke = self._pokes[output_id]
         with contextlib.suppress(TimeoutError):
             await asyncio.wait_for(poke.wait(), seconds)
+        poked = poke.is_set()
         poke.clear()
+        return poked
 
     async def _follow(self, output_id: str) -> None:
         try:
@@ -367,11 +356,14 @@ class PrintWatcher:
     async def _loop(self, output_id: str) -> None:
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
+        # With no log, the print's age counts from the watch (or the last new print).
+        began = self.now()
         while True:
             # Waits first: the send or run that started the print answered with its
             # own state, and the UI reads once when it subscribes.
-            await self._wait(output_id, interval)
-            printed_at = await self.prints.printed_at(output_id)
+            if await self._wait(output_id, interval):
+                began = self.now()
+            printed_at = began if self.prints is None else await self.prints.printed_at(output_id)
             if printed_at is None or self.now() - printed_at > self.max_age:
                 return
             try:

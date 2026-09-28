@@ -7,7 +7,7 @@ import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import psycopg
@@ -16,13 +16,7 @@ import respx
 
 from scadbuddy.bambuddy.client import BambuddyClient, BambuddyConfig
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
-from scadbuddy.bambuddy.watcher import (
-    LocalWatchLock,
-    MemoryPrintLog,
-    PgPrintLog,
-    PgWatchLock,
-    PrintWatcher,
-)
+from scadbuddy.bambuddy.watcher import LocalWatchLock, PgPrintLog, PgWatchLock, PrintWatcher
 from scadbuddy.core.events import Event, InProcessEventBus, PrintEvent
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -79,6 +73,25 @@ class Script:
         return answer
 
 
+class MemoryPrintLog:
+    """The ``PrintLog`` in a dict, standing in for ``print_watches``."""
+
+    def __init__(self, at: dict[str, datetime] | None = None) -> None:
+        self._at: dict[str, datetime] = dict(at or {})
+
+    async def record(self, output_id: str, at: datetime) -> None:
+        self._at[output_id] = at
+
+    async def printed_at(self, output_id: str) -> datetime | None:
+        return self._at.get(output_id)
+
+    async def since(self, cutoff: datetime) -> list[str]:
+        return [output_id for output_id, at in self._at.items() if at >= cutoff]
+
+    async def aclose(self) -> None:
+        return None
+
+
 @pytest.fixture
 def paths(tmp_path: Path) -> DataPaths:
     data = DataPaths(tmp_path)
@@ -90,7 +103,7 @@ def watcher_for(
     paths: DataPaths,
     read: Callable[[OutputMeta], Awaitable[PrintProgress | None]],
     *,
-    prints: MemoryPrintLog | None = None,
+    prints: MemoryPrintLog | Literal["none"] | None = None,
     **options: Any,
 ) -> tuple[PrintWatcher, list[Event]]:
     """A watcher whose log says ``OUTPUT`` was printed just now, unless given one."""
@@ -102,7 +115,7 @@ def watcher_for(
         observer=ProgressObserver(bus),
         read=read,
         events=bus,
-        prints=prints if prints is not None else MemoryPrintLog({OUTPUT: NOW}),
+        prints=None if prints == "none" else prints or MemoryPrintLog({OUTPUT: NOW}),
         now=lambda: NOW,
         **{**FAST, **options},
     )
@@ -304,6 +317,26 @@ def test_a_print_started_while_its_last_watch_ends_is_followed(paths: DataPaths)
     lock, read = asyncio.run(scenario())
     assert lock.acquired == 2
     assert read.reads >= 2
+
+
+def test_without_a_database_a_started_print_is_followed_until_it_settles(
+    paths: DataPaths,
+) -> None:
+    async def scenario() -> tuple[Script, set[str]]:
+        write_output(paths)
+        read = Script(progress("running"), progress("done", settled=True))
+        watcher, _ = watcher_for(paths, read, prints="none")
+        await watcher.start()
+        resumed = set(watcher.watching)
+        await watcher.started(OUTPUT)
+        await until_idle(watcher)
+        await watcher.aclose()
+        return read, resumed
+
+    read, resumed = asyncio.run(scenario())
+    # Nothing to resume from, and the started print is read until it settles.
+    assert resumed == set()
+    assert read.reads == 2
 
 
 def test_started_records_the_print_and_follows_it(paths: DataPaths) -> None:
