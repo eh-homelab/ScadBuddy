@@ -31,6 +31,7 @@ from scadbuddy.api.deps import (
     STATE_ATTR,
     AppState,
     get_libraries,
+    get_presets,
 )
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
@@ -42,6 +43,7 @@ from scadbuddy.library.libraries import (
     LibraryStore,
     ModelLibrary,
 )
+from scadbuddy.library.presets import PresetStore
 from scadbuddy.main import sweep_library_checkouts
 from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream
@@ -574,11 +576,20 @@ def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
     assert (checkout / "BOSL2").is_dir()
 
 
+@pytest.mark.requires_postgres
 def test_a_preset_save_fetches_a_checkout_that_is_gone(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    pg_conninfo: str,
 ) -> None:
     """Create, update and duplicate check the values against the schema, which reads
     the pins: each fetches a missing checkout again, as a render does."""
+    # Saved presets are rows in Postgres (#332).
+    presets_store = PresetStore(paths, pg_conninfo)
+    presets_store.open()
+    libraries_app.dependency_overrides[get_presets] = lambda: presets_store
     _, commits = upstream
     create_model(lib_client)
     pin(lib_client, "BOSL2")
@@ -598,6 +609,7 @@ def test_a_preset_save_fetches_a_checkout_that_is_gone(
     duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
     assert duplicated.status_code == 201, duplicated.text
     assert (checkout / "BOSL2").is_dir()
+    presets_store.close()
 
 
 def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
