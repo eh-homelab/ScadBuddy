@@ -626,14 +626,32 @@ class Catalogue:
         ``model.json`` that is not JSON counts when its text mentions the name at
         all.
         """
-        users: list[str] = []
+        return [slug for slug, _ in self._library_entries(name, commit)]
+
+    def library_pins(self, name: str) -> list[tuple[str, ModelLibrary | None]]:
+        """Each of :meth:`library_users` with the pin its live ``model.json`` records
+        for ``name`` -- ``None`` where that entry cannot be read as one (a hand edit,
+        or a ``model.json`` that is not JSON), so every model a removal would name
+        is listed here too."""
+        pins: list[tuple[str, ModelLibrary | None]] = []
+        for slug, entry in self._library_entries(name):
+            pin: ModelLibrary | None = None
+            with contextlib.suppress(ValidationError):
+                pin = ModelLibrary.model_validate(entry)
+            pins.append((slug, pin))
+        return pins
+
+    def _library_entries(self, name: str, commit: str | None = None) -> list[tuple[str, Any]]:
+        """:meth:`library_users` with the entry that made each one a user, reading
+        each ``model.json`` once: ``None`` for one that is not JSON."""
+        found: list[tuple[str, Any]] = []
         for slug in self.slugs():
             try:
                 raw = self.read_raw_meta(slug)
             except InvalidModelMetaError:
                 with contextlib.suppress(OSError):
                     if name in self.paths.model_meta(slug).read_text(errors="replace"):
-                        users.append(slug)
+                        found.append((slug, None))
                 continue
             entries = raw.get("libraries")
             if not isinstance(entries, list):
@@ -643,27 +661,9 @@ class Catalogue:
                     continue
                 pinned = entry.get("commit") if isinstance(entry, dict) else None
                 if commit is None or not isinstance(pinned, str) or pinned == commit:
-                    users.append(slug)
+                    found.append((slug, entry))
                     break
-        return users
-
-    def library_pins(self, name: str) -> list[tuple[str, ModelLibrary | None]]:
-        """Each of :meth:`library_users` with the pin its live ``model.json`` records
-        for ``name`` -- ``None`` where that entry cannot be read as one (a hand edit,
-        or a ``model.json`` that is not JSON), so every model a removal would name
-        is listed here too."""
-        pins: list[tuple[str, ModelLibrary | None]] = []
-        for slug in self.library_users(name):
-            pin: ModelLibrary | None = None
-            with contextlib.suppress(InvalidModelMetaError, OSError):
-                entries = self.read_raw_meta(slug).get("libraries")
-                for entry in entries if isinstance(entries, list) else []:
-                    if entry_name(entry) == name:
-                        with contextlib.suppress(ValidationError):
-                            pin = ModelLibrary.model_validate(entry)
-                        break
-            pins.append((slug, pin))
-        return pins
+        return found
 
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top

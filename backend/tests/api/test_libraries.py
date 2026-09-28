@@ -1263,7 +1263,7 @@ def test_a_librarys_users_are_the_models_that_pin_it_now(
 ) -> None:
     url, commits = upstream
     other, other_commits = make_library_upstream(tmp_path / "other", {"v1": "sphere(1);\n"})
-    for slug in (SLUG, "gadget", "plain", "elsewhere", "broken"):
+    for slug in (SLUG, "gadget", "plain", "elsewhere", "broken", "garbled"):
         create_model(lib_client, slug)
     pin(lib_client, "BOSL2")
     pin(lib_client, "BOSL2", "gadget", ref="v1")
@@ -1274,6 +1274,7 @@ def test_a_librarys_users_are_the_models_that_pin_it_now(
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     meta["libraries"][0]["commit"] = "HEAD"
     meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    paths.model_meta("garbled").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
 
     users = lib_client.get("/api/v1/libraries/BOSL2/users")
     others = lib_client.get("/api/v1/libraries/Other/users")
@@ -1284,6 +1285,8 @@ def test_a_librarys_users_are_the_models_that_pin_it_now(
         # A hand-edited entry is still a user, as a removal would count it.
         {"slug": "broken", "url": None, "ref": None, "commit": None},
         {"slug": "gadget", "url": url, "ref": "v2", "commit": commits["v2"]},
+        # So is a model.json that is not JSON but names the library.
+        {"slug": "garbled", "url": None, "ref": None, "commit": None},
         {"slug": SLUG, "url": url, "ref": "v1", "commit": commits["v1"]},
     ]
     assert others.json() == [
