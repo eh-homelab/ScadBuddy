@@ -1,6 +1,6 @@
-"""Template media (#274) with no Postgres configured: until #401 makes
-``SCADBUDDY_DATABASE_URL`` required, the list is only the legacy ``thumbnail.png``
-(or a built-in's bundled one), and every media write answers 503."""
+"""Template media (#274) with no rows yet: the list is the legacy ``thumbnail.png``,
+or a built-in's bundled media. (The no-database mode these tests once covered is
+gone: #467 requires ``SCADBUDDY_DATABASE_URL``.)"""
 
 from __future__ import annotations
 
@@ -50,25 +50,6 @@ def test_a_built_ins_bundled_media_is_listed(client: TestClient) -> None:
 
     assert item["id"] == "front"
     assert client.get(f"/api/v1/models/{BUILTIN}/media/front").content == PNG_BYTES
-
-
-def test_every_media_write_is_unavailable(client: TestClient, model: str, paths: DataPaths) -> None:
-    paths.model_dir(model).joinpath("thumbnail.png").write_bytes(PNG_BYTES)
-    base = f"/api/v1/models/{model}/media"
-
-    writes = [
-        client.post(base, files={"file": ("a.png", PNG_BYTES, "image/png")}),
-        client.patch(f"{base}/thumbnail", json={"caption": "x"}),
-        client.put(f"{base}/order", json={"ids": ["thumbnail"]}),
-        client.delete(f"{base}/thumbnail"),
-    ]
-
-    for response in writes:
-        assert response.status_code == 503, response.text
-        assert "SCADBUDDY_DATABASE_URL" in response.json()["detail"]
-    assert [item["id"] for item in client.get(f"/api/v1/models/{model}").json()["media"]] == [
-        "thumbnail"
-    ]
 
 
 def test_the_thumbnail_routes_still_work(client: TestClient, model: str) -> None:
