@@ -23,10 +23,11 @@ multi-colour rules, connecting Bambuddy and each feature.
   toggles, text limits, and `// color` / `// font` pickers.
 - **Presets**: save named parameter sets per template — built-ins too — and start
   from one, changing only what differs this time (a name, a colour, a size). A
-  preset keeps only the values that differ from the defaults. A template can ship
-  its own read-only presets in a `presets.json` beside `model.scad`
-  (`{"presets": [{"name": "…", "params": {…}}]}`); **Duplicate** copies one of
-  those, or any saved preset, to an editable preset of your own.
+  preset keeps only the values that differ from the defaults. A template defines its
+  own read-only presets in the `presets` list of its `model.json`
+  (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
+  same one when it is renamed or moved); **Duplicate** copies one of those, or any
+  saved preset, to an editable preset of your own.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -413,7 +414,8 @@ what makes the running image knowable.
   `frontend/public/mockServiceWorker.js` is committed and checked against
   msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.
