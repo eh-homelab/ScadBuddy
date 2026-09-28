@@ -251,6 +251,26 @@ describe('CustomizePage', () => {
     }
   })
 
+  it('says the download window was closed when it goes before the file is ready (#612)', async () => {
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    // Closed by the time the 3MF has been fetched.
+    const open = vi.spyOn(window, 'open').mockReturnValue({ closed: true, document: null, close: () => {} } as unknown as Window)
+    try {
+      const { user } = render()
+      await firstRender()
+      await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+      await user.click(screen.getByTestId('generate'))
+      await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+      await user.click(screen.getByRole('button', { name: 'Download 3MF' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(/download window was closed/)
+    } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
   it('sends a generated output and links to the Bambuddy queue', async () => {
     const { user } = render()
     await firstRender()

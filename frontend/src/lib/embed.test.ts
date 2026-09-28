@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { DownloadBlockedError, downloadBlob, isEmbedded, openExternal } from './embed'
+import { DownloadBlockedError, DownloadWindowClosedError, downloadBlob, isEmbedded, openExternal } from './embed'
 
 describe('isEmbedded', () => {
   it('is false at the top level', () => {
@@ -68,6 +68,39 @@ describe('downloadBlob', () => {
     await expect(saving).rejects.toThrow(/pop-ups/)
     expect(load).not.toHaveBeenCalled()
     expect(clicked).toBeUndefined()
+  })
+
+  it('refuses rather than fall back to the frame when the popup is closed mid-fetch', async () => {
+    // A closed window's `document` is null (WHATWG); the frame's own anchor would be
+    // dropped silently (#612).
+    const popup = { closed: false, document: document.implementation.createHTMLDocument('popup'), close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
+    const create = vi.mocked(URL.createObjectURL)
+    let release: (blob: Blob) => void = () => {}
+    const saving = downloadBlob(() => new Promise<Blob>((resolve) => (release = resolve)), 'a.3mf', true)
+    Object.assign(popup, { closed: true, document: null })
+    release(new Blob(['x']))
+    await expect(saving).rejects.toBeInstanceOf(DownloadWindowClosedError)
+    await expect(saving).rejects.toBeInstanceOf(DownloadBlockedError)
+    expect(clicked).toBeUndefined()
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('revokes the object URL when saving fails after it was made', async () => {
+    const revoke = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => {})
+    const broken = {
+      closed: false,
+      document: {
+        createElement: () => {
+          throw new Error('no document')
+        },
+      },
+      close: vi.fn(),
+    }
+    vi.spyOn(window, 'open').mockReturnValue(broken as unknown as Window)
+    await expect(downloadBlob(async () => new Blob(['x']), 'a.3mf', true)).rejects.toThrow('no document')
+    expect(revoke).toHaveBeenCalledWith('blob:y')
+    expect(broken.close).toHaveBeenCalled()
   })
 
   it('closes the popup when the file cannot be loaded', async () => {
