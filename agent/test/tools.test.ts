@@ -164,6 +164,34 @@ describe('render_model', () => {
     expect(firstText(done)).toMatchObject({ status: 'done', output: { id: '0123456789abcdef0123456789abcdef' } })
     expect(saved).toEqual({ job_id: 'j', name: 'v1' })
   })
+
+  it('reports a cancelled render as a tool error with its log, settling immediately rather than waiting out renderWaitMs', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/models/box/schema`, () => HttpResponse.json(SCHEMA)),
+      http.post(`${BACKEND}/api/v1/models/box/render`, () => HttpResponse.json({ job_id: 'j', status_url: '' }, { status: 202 })),
+      http.get(`${BACKEND}/api/v1/jobs/j`, () =>
+        HttpResponse.json({
+          id: 'j',
+          slug: 'box',
+          created_at: '',
+          status: 'cancelled',
+          error: 'cancelled: every request for it was withdrawn',
+          log_tail: ['cancelled: every request for it was withdrawn'],
+        }),
+      ),
+    )
+    const started = Date.now()
+    // A generous renderWaitMs: settling on `cancelled` must return well before it
+    // elapses, the way it already does for `failed` -- not poll until the deadline.
+    const result = await runTool(tool('render_model'), { slug: 'box' }, ctx({ renderWaitMs: 5000 }))
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toMatchObject({
+      status: 'cancelled',
+      error: 'cancelled: every request for it was withdrawn',
+      log_tail: ['cancelled: every request for it was withdrawn'],
+    })
+  })
 })
 
 describe('uploads', () => {
