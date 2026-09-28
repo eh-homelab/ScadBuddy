@@ -944,7 +944,10 @@ async def _failed_render(paths: DataPaths, render_3mf: object, **patches: object
             stack.enter_context(mock.patch.object(jobs, name, value))
         raised = stack.enter_context(pytest.raises(OpenSCADError))
         await jobs.render_job(
-            _job("j", params={"text_color": "not-a-colour"}), config=CONFIG, paths=paths
+            _job("j", params={"text_color": "not-a-colour"}),
+            config=CONFIG,
+            paths=paths,
+            assets=AssetStore(paths.assets),
         )
     return raised.value
 
