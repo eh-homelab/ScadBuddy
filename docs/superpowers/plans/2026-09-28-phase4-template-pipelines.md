@@ -22,7 +22,7 @@ Outputs ride on the job (`Job.outputs`), and Generate saves each one with its BO
 
 **Spec:** `docs/superpowers/specs/2026-09-27-template-pipelines-design.md`: §3.4 (`TemplatePipeline.run` steps 1–2), §3.6, §5, §8.2–8.4, §9, §10, §11 item 4, §12. Take §3.4/§3.6 from the amended text (PR #577). Epic **#427** (the brief said #426, which is the store epic; see "Disagreements").
 
-**Base:** `main` after phase 1 (#424), phase 1's PR4 (#546), phase 2 (#425) and phase 3 (#426) have merged. The phase 1 names below were checked at `wt-service` 69306836. PR4 (#546) is assumed to deliver exactly these, and this plan relies on each:
+**Base:** `main` after phase 1 (#424), phase 1's PR4 (#546), phase 2 (#425) and phase 3 (#426) have merged. Phase 3's plan is `docs/superpowers/plans/2026-09-28-phase3-blob-store.md` (PR #590); the phase 3 names below are not assumed from it but read from phase 3's implementation, the Tasks 1–9 chain at f9223552 (the store the phase 3 PRs carry). The phase 1 names below were checked at `wt-service` 69306836. PR4 (#546) is assumed to deliver exactly these, and this plan relies on each:
 - the legacy queue removed; `AppState.queue` renamed `AppState.render: RenderService`, and `QueueDep` renamed `RenderDep = Annotated[RenderService, Depends(get_render)]`;
 - `RenderService.client: Client` **non-optional** (so this plan's new `RenderService` methods carry no `assert self.client is not None`; the `assert`s at 69306836 go with PR4);
 - a Temporal-backed `tests/api/conftest.py` `client` fixture with an in-process worker (`temporal_worker_inprocess=True`, the fake 3MF openscad `tests.conftest.fake_3mf_openscad`), replacing today's `temporal_address=""` fixture; `tests/api/test_temporal_path.py` shows the shape.
@@ -30,7 +30,18 @@ Outputs ride on the job (`Job.outputs`), and Generate saves each one with its BO
 These names are fixed from those phases:
 - Phase 1: `TemplatePipeline`, `RenderPiece`, `PieceRequest`, `PieceResult`, `PieceOutcome`, `Projection`, `Failure`, `piece_key`, `RETRY`, `PROJECT_RETRY`, `SHORT`, `_openscad_timeout`, `_waiter_recheck`, `_failure_of` (`workflows/pipelines.py`, `workflows/models.py`); `RenderActivities`, `WorkerDeps`, `_heartbeating`, `_failure`, `PIECE_NAME`, `_read_piece` (`workflows/activities.py`); `render_worker(client, task_queue, activities, *, build_id, max_concurrent_activities, graceful_shutdown_timeout)`; `build_worker_deps` (`worker.py`); `JobProjection` (`render/projection.py`); `RenderService` (`render/submit.py`: `submit`, `reconcile_once`, `_start`, `_memo`, `_reconcile_forever`, `store`, `config`, `client`, `task_queue`); `tests/support/temporal.py` `temporal_client()`; `tests/conftest.py` `fake_3mf_openscad(directory) -> str` (one blue 10 × 10 × 2 box per 3MF; its `.param` has one parameter, `width`).
 - Phase 2: `render/inputs.py` (`normalize_inputs`, `legacy_inputs`, `InputsError`); `UiDeclaration`, `ModelMeta.ui`, `ModelMeta.ui_error`, `ModelRecord.ui_error` (`library/catalogue.py`); `OutputStore.create(job, *, name, public_url, inputs)`, `OutputStore.inputs`, `CreateOutputRequest.inputs`, `OutputDetail.inputs`; `RenderService.submit(slug, params, *, model_version, supersedes, inputs)`; `frontend/src/lib/saveOutput.ts`; `frontend/src/lib/inputs.ts`; `models/dollhouse-kit/ui/pieces.js` (`housePieces`, `clampHouse`, `pieceParams`, `DEFAULT_HOUSE`, `LIMITS`); `inputs.house`.
-- Phase 3: `BlobStore.fetch(key) -> bool`, `BlobStore.publish(key, *, scope: BlobScope)`, `BlobScope(slug, title, folder: "work" | "output", project_id)` and `template_title(model_dir, fallback)` (`store/content.py`), `materialize_result(blobs, result)` (`store/cache.py`), `_scope(req, prepared)` (`workflows/activities.py`).
+- Phase 3 (#426, plan PR #590; read at f9223552):
+  - `store/__init__.py`: the `BlobStore` protocol keeps phase 1's sync `dir_for`, `exists`, `remove`, `keys`, `touched_at` (nothing is renamed; `exists` reads the index on the bambuddy backend, so call it from a thread) and adds async `fetch(key) -> bool`, `checkout(key) -> str | None`, `checkout_fresh(key) -> str | None`, `publish(key, *, scope: BlobScope) -> None`, `indexed_sha(key) -> str | None`, `publish_fresh(key, *, scope: BlobScope, expected: str | None) -> None`, and `PieceStateLostError`. Phase 1's `sweep_blobs` stays there for the local backend.
+  - `store/local.py`: phase 1's `LocalBlobStore(root)`, whose phase 3 methods keep phase 1's behaviour (`fetch` is `exists`; `publish`/`publish_fresh` do nothing), and `LocalContentBackend`. This plan's tests build `LocalBlobStore` directly, so `fetch`/`publish` calls in them are no-ops on the shared directory.
+  - `store/refs.py`: phase 1's `BlobRefs` (`add`, `drop_holder`, `referenced`).
+  - `store/content_models.py`: `BlobScope(slug=None, title=None, folder: "work" | "output" = "work", project_id=None)`, `BlobKind`, `BlobRef`, `BlobStat`; `BlobScope` is also importable from `store/content.py`, which is where this plan imports it.
+  - `store/content.py`: `template_title(model_dir, fallback)`, `ContentStore`, `sweep_content(content, refs, *, grace)` (the swept kinds are `piece` and `snapshot`; an output blob is a `piece`-kind blob, refed on `done` by Task 4 Step 7).
+  - `store/cache.py`: `CachedBlobStore` (the bambuddy backend's per-worker cache: `publish` swaps against the directory's marker, `publish_fresh` against `expected`) and `materialize_result(blobs, result)`.
+  - `store/fonts.py`: `model_dir(scad, file)` (the template directory from a piece's source path), `wanted_families`, `FontMirror`; `store/snapshots.py`: `SnapshotStore`; `store/assets.py`: `RemoteAssets`.
+  - `store/factory.py`: `StoreBundle` and `build_store`. `AppState.store` is the bundle and `AppState.blobs` is `state.store.blobs`, set in the lifespan.
+  - `workflows/activities.py`: `WorkerDeps` gains `snapshots`, `fonts_mirror`, `remote_assets` (all default None, so this plan's `WorkerDeps(...)` test constructions need not pass them); `_scope(req, prepared)`; the stages continue a piece with `_checkout` → `publish_fresh`.
+  - `workflows/pipelines.py`: `TRANSFER`, `HEARTBEAT`, `CACHED_TIMEOUT`, `FINISH_TIMEOUT`, `PREPARE_TIMEOUT`, `_main_timeout()`, `_solids_timeout()` beside phase 1's `SHORT` and `_openscad_timeout()`; `_waiter_recheck` sums every stage's bound, so a stage this plan adds to `RenderPiece` goes into that sum too.
+  - `worker.py`: `build_worker_deps(settings)` returns `(WorkerDeps, StoreBundle)`; `worker_deps_from_state(state)` takes the store's parts from `state.store`.
 
 ## Global Constraints
 
@@ -131,6 +142,8 @@ Suggested PRs:
 - the exception type and message on a restricted call or import;
 - whether a traceback through `exec`'d source compiled with a file name carries its line.
 
+A third is this plan's own: Task 10's `verify_pipeline` starts a local dev server with `temporalio.testing.WorkflowEnvironment` and runs `TemplatePipeline` on it with the pydantic data converter. The base spec's rule is "measure, don't guess", so the shape of that API in 1.33.0 is measured here, before any task relies on it (Step 2's `test_the_testing_api_verify_pipeline_uses`), not discovered in Task 10.
+
 This task writes the two functions everything else uses, pins those facts in tests, and records them in the spec.
 
 **Files:**
@@ -185,14 +198,18 @@ class ExecProbe:
 
 from __future__ import annotations
 
+import inspect
+import shutil
 import uuid
 
 import pytest
+from temporalio.contrib.pydantic import pydantic_data_converter
+from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
 
 from scadbuddy.workflows.sandbox import PipelineContractError, load_pipeline_module, pipeline_error
 from tests.support.pipeline_probe import ExecProbe
-from tests.support.temporal import temporal_client
+from tests.support.temporal import TEST_TEMPORAL_DEV_SERVER, temporal_client
 
 pytestmark = pytest.mark.requires_temporal
 
@@ -246,6 +263,33 @@ def test_an_error_with_no_pipeline_frame_names_only_the_file() -> None:
     assert pipeline_error(ValueError("x"), "pipeline/pipeline.py") == (
         "pipeline/pipeline.py: ValueError: x"
     )
+
+
+async def test_the_testing_api_verify_pipeline_uses() -> None:
+    """Task 10's `verify_pipeline` in 1.33.0: `start_local` takes an existing dev-server
+    binary and a data converter, returns an environment whose client carries that
+    converter and runs a workflow, and is shut down with `shutdown()`."""
+    params = inspect.signature(WorkflowEnvironment.start_local).parameters
+    assert {"dev_server_existing_path", "data_converter"} <= set(params)
+    binary = TEST_TEMPORAL_DEV_SERVER or shutil.which("temporal")
+    if binary is None:
+        pytest.skip("no temporal CLI to start a local dev server with")
+    env = await WorkflowEnvironment.start_local(
+        dev_server_existing_path=binary, data_converter=pydantic_data_converter
+    )
+    try:
+        assert env.client.data_converter is pydantic_data_converter
+        queue = f"probe-{uuid.uuid4().hex[:8]}"
+        async with Worker(env.client, task_queue=queue, workflows=[ExecProbe]):
+            result = await env.client.execute_workflow(
+                ExecProbe.run,
+                "async def run(ctx, inputs):\n    return 1\n",
+                id=f"probe-{uuid.uuid4().hex}",
+                task_queue=queue,
+            )
+        assert result == "ok|1"
+    finally:
+        await env.shutdown()
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -304,9 +348,9 @@ If `ruff check` reports `S102` on the `exec` line, add `# noqa: S102` to it; `ex
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `cd backend && uv run --frozen pytest tests/test_pipeline_sandbox.py -q`
-Expected: `7 passed`.
+Expected: `8 passed`.
 
-If `test_a_restricted_call_at_module_level_names_its_line` fails because `open` is not restricted in 1.33.0, change the source to `import datetime\ndatetime.date.today()\n…`, keeping the call on line 2, and note the change in Step 6. If `test_a_restricted_call_is_catchable_and_names_its_line` returns a result that does not start with `…RestrictedWorkflowAccessError`, stop: §3.4's error mapping has no footing, and the controller must decide.
+If `test_a_restricted_call_at_module_level_names_its_line` fails because `open` is not restricted in 1.33.0, change the source to `import datetime\ndatetime.date.today()\n…`, keeping the call on line 2, and note the change in Step 6. If `test_a_restricted_call_is_catchable_and_names_its_line` returns a result that does not start with `…RestrictedWorkflowAccessError`, stop: §3.4's error mapping has no footing, and the controller must decide. If `test_the_testing_api_verify_pipeline_uses` fails, stop too and report what 1.33.0 offers instead: Task 10 is written against exactly this shape (`env = await WorkflowEnvironment.start_local(dev_server_existing_path=…, data_converter=…)`, `env.client`, `await env.shutdown()`), which is also how phase 1's `tests/support/temporal.py` starts its dev server.
 
 - [ ] **Step 6: Record the measurement in the spec**
 
@@ -1038,8 +1082,7 @@ async def test_a_packed_output_writes_every_plate_bom_and_files(tmp_path: Path) 
     assert out.bom[0].count == 2
 
 
-@pytest.mark.parametrize("name", ["../x", "model.3mf", ".hidden", "a/b"])
-async def test_an_output_file_name_that_could_escape_is_refused(tmp_path: Path, name: str) -> None:
+async def _write_file_named(tmp_path: Path, name: str) -> ApplicationError:
     deps, _ = _deps(tmp_path)
     part = await _render(deps, "model.scad", {"width": 12})
     req = OutputRequest(job_id="j1", index=0, slug="demo", layout=Layout(own=part.piece_key),
@@ -1047,6 +1090,23 @@ async def test_an_output_file_name_that_could_escape_is_refused(tmp_path: Path, 
     with pytest.raises(ApplicationError) as raised:
         await ActivityEnvironment().run(PipelineActivities(deps).write_output, req)
     assert raised.value.type == "OutputError" and raised.value.non_retryable
+    return raised.value
+
+
+@pytest.mark.parametrize("name", ["../x", ".hidden", "a/b", "/etc/passwd"])
+async def test_an_output_file_name_that_could_escape_is_refused(tmp_path: Path, name: str) -> None:
+    error = await _write_file_named(tmp_path, name)
+    assert "use letters, digits" in error.message
+
+
+@pytest.mark.parametrize("name", ["model.3mf", "preview.glb", "layout.json", "piece.json"])
+async def test_an_output_file_name_the_output_itself_uses_is_refused(
+    tmp_path: Path, name: str
+) -> None:
+    """A safe name, but one of the output directory's own files: `files/` sits beside
+    them, and a template file must never be mistaken for (or shadow) one."""
+    error = await _write_file_named(tmp_path, name)
+    assert "is reserved" in error.message
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -1376,8 +1436,10 @@ async def build_output(req: OutputRequest, deps: WorkerDeps, *, model_dir: Path)
         update={"image_revision": deps.revision, "openscad_version": deps.openscad_version}
     )
     for name in req.files:
-        if not re.match(FILE_NAME_PATTERN, name) or name in _RESERVED:
+        if not re.match(FILE_NAME_PATTERN, name):
             raise _refuse(f"output file name {name!r}: use letters, digits, '.', '_' or '-'")
+        if name in _RESERVED:
+            raise _refuse(f"output file name {name!r} is reserved for the output's own files")
     key = output_key(req.job_id, req.index)
     if req.layout.own is not None:
         await blobs.fetch(req.layout.own)
@@ -1532,14 +1594,16 @@ Imports: `hashlib`, `dataclasses.replace`, `cached_schema` (from where `render/j
 
 (This goes after the existing detail loop.)
 
-Phase 3's `_scope(req, prepared)` names the store folder from `Path(prepared.scad).parent`, which is now `parts/` for `parts/roof.scad`. Point it at the template root:
+Phase 3's `_scope(req, prepared)` names the store folder from `Path(prepared.scad).parent`, which is now `parts/` for `parts/roof.scad`. Point it at the template root with phase 3's `model_dir(scad, file)` (`store/fonts.py`, the helper `prepare` already uses to find the template's font names):
 
 ```python
 def _scope(req: PieceRequest, prepared: PrepareResult) -> BlobScope:
     """Where the piece's blob goes: its template's folder, named by `model.json`."""
-    root = Path(prepared.scad).parents[len(Path(req.file).parts) - 1]
+    root = model_dir(Path(prepared.scad), req.file)
     return BlobScope(slug=req.slug, title=template_title(root, req.slug))
 ```
+
+(`model_dir` is already imported into `workflows/activities.py` by phase 3; add it to the `scadbuddy.store.fonts` import if not.)
 
 `test_a_piece_renders_another_file_of_the_template` pins it (`_scope(...).title == "Demo"`, the `name` in the test template's `model.json`).
 
@@ -4008,7 +4072,7 @@ git commit -m "feat(models): dollhouse-kit generates a whole house through its p
 - Modify: `models/dollhouse-kit/verify.sh`, `.github/workflows/ci.yml` (`models` job), `plugins/scadbuddy/skills/authoring/SKILL.md`, `CLAUDE.md`
 
 **Interfaces:**
-- Consumes: `RenderActivities`, `PipelineActivities`, `WorkerDeps`, `TemplatePipeline`, `RenderPiece` (Tasks 1–5); `install_fake_openscad` (Task 3, for the test only).
+- Consumes: `RenderActivities`, `PipelineActivities`, `WorkerDeps`, `TemplatePipeline`, `RenderPiece` (Tasks 1–5); `install_fake_openscad` (Task 3, for the test only); the `WorkflowEnvironment.start_local` shape Task 1 measured (`test_the_testing_api_verify_pipeline_uses`).
 - Produces: `python -m scadbuddy.workflows.verify_pipeline <template_dir> --inputs <file.json>`. The inputs file holds a JSON list of inputs objects. The command exits 0 when every case ends `done` with each output's 3MF a readable zip, and 1 otherwise, printing one line per case. `async def verify(template: Path, cases: list[dict], *, config: Config) -> list[str]` returns the failures.
 
 - [ ] **Step 1: Write the failing test**
@@ -4097,7 +4161,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.render.job_models import Job
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.client import pydantic_data_converter
+from scadbuddy.workflows.client import pydantic_data_converter  # re-exported from temporalio.contrib.pydantic
 from scadbuddy.workflows.models import Projection
 from scadbuddy.workflows.pipeline_activities import PipelineActivities
 from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
@@ -4128,9 +4192,11 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
             raise SystemExit(
                 "no temporal CLI: set SCADBUDDY_TEST_TEMPORAL_DEV_SERVER or put temporal on PATH"
             )
-        async with await WorkflowEnvironment.start_local(
+        # The form Task 1 measured against 1.33.0 (`test_the_testing_api_verify_pipeline_uses`).
+        env = await WorkflowEnvironment.start_local(
             dev_server_existing_path=binary, data_converter=pydantic_data_converter
-        ) as env:
+        )
+        try:
             async with Worker(env.client, task_queue="verify", workflows=[TemplatePipeline, RenderPiece], activities=acts):
                 for number, inputs in enumerate(cases, start=1):
                     job = Job(id=uuid.uuid4().hex, slug=slug, params=inputs.get("params", {}), inputs=inputs,
@@ -4146,6 +4212,8 @@ async def verify(template: Path, cases: list[dict[str, Any]], *, config: Config)
                             zipfile.ZipFile(paths.root / output.result.model_3mf).testzip()
                         except (OSError, zipfile.BadZipFile) as error:
                             failures.append(f"case {number}: {output.name}: {error}")
+        finally:
+            await env.shutdown()
     return failures
 
 
@@ -4166,7 +4234,7 @@ if __name__ == "__main__":
     sys.exit(main())
 ```
 
-`Config()`'s default `openscad` is the binary on `PATH`, which is right in the `test` image. The test passes the fake. Check that `render.all()` returns bound methods, so that `a != render.project` compares correctly, and that `verify`'s KeyError message carries `pipeline/pipeline.py:3`. If `WorkflowEnvironment` is not an async context manager in 1.33.0, use `env = await WorkflowEnvironment.start_local(...)` with `try/finally: await env.shutdown()`, as `tests/support/temporal.py` does. The pipelines wait on real openscad activities, not timers, so time skipping would buy nothing; the Dockerfile's `test` stage already sets `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` to its pinned CLI.
+`Config()`'s default `openscad` is the binary on `PATH`, which is right in the `test` image. The test passes the fake. Check that `render.all()` returns bound methods, so that `a != render.project` compares correctly, and that `verify`'s KeyError message carries `pipeline/pipeline.py:3`. The dev-server calls are the shape Task 1 pinned in `test_the_testing_api_verify_pipeline_uses`; nothing about them is left to find out here. The pipelines wait on real openscad activities, not timers, so time skipping would buy nothing; the Dockerfile's `test` stage already sets `SCADBUDDY_TEST_TEMPORAL_DEV_SERVER` to its pinned CLI.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -4408,3 +4476,16 @@ Re-review: `.superpowers/sdd/2026-09-28-phase1-render-on-temporal/plan-phase4-re
 - **N5 fixed.** `probe_openscad_version` moves to `render/runner.py` beside `run_openscad`; `api/deps.py`, `main.py` and `worker.py` import it from there; `worker.py` keeps `api.deps` under `TYPE_CHECKING` only.
 - **N6 fixed.** `clamp_house` maps `None` and `""` to 0 before `float`, as `clampHouse` does (`Number(null)`/`Number("")` are 0, so both clamp to the minimum), while a missing key or a non-number takes the default. A test case per value: `None`→1, `""`→1, `"3"`→3, `"x"`→2.
 - R1–R3 (re-review 2) fixed: the probe's imports named; the M9 line points at N2; the duplicate path's coverage stated precisely.
+
+## Revision 3 (merge-gate review of cfb84654)
+
+- **Reserved names have their own test.** `test_an_output_file_name_that_could_escape_is_refused` now lists only names that could leave `files/` (`../x`, `.hidden`, `a/b`, `/etc/passwd`). The new `test_an_output_file_name_the_output_itself_uses_is_refused` covers the names the output directory already uses (`model.3mf`, `preview.glb`, `layout.json`, `piece.json`). `build_output` refuses the two cases with different messages ("use letters, digits…" and "is reserved…"), and each test asserts its own.
+- **temporalio's testing API is measured in Task 1.** `verify_pipeline`'s use of `WorkflowEnvironment.start_local(dev_server_existing_path=…, data_converter=…)`, `env.client` and `env.shutdown()` is pinned against 1.33.0 by `test_the_testing_api_verify_pipeline_uses`, in Task 1's measurement pass, before any task relies on it (the base spec's "measure, don't guess"). Task 1 now expects `8 passed` and stops if the shape differs. Task 10 uses exactly that form (`try/finally: await env.shutdown()`, as `tests/support/temporal.py` does), and its "if it is not an async context manager" hedge is gone.
+- **The Base section names phase 3's plan (PR #590) and its real interfaces.** It lists module paths and names as phase 3 built them (read at f9223552), not as this plan assumed them:
+  - `exists` is kept, not renamed to `fetch`;
+  - `BlobScope` lives in `store/content_models.py` and is re-exported by `content.py`;
+  - `LocalBlobStore`, `BlobRefs` and `sweep_blobs` are phase 1's;
+  - it adds `checkout`/`publish_fresh`, `model_dir`, `StoreBundle`/`AppState.store`, the new timeouts, and `build_worker_deps` returning `(WorkerDeps, StoreBundle)`.
+
+  Task 3's `_scope` fix now uses phase 3's `model_dir(scad, file)` rather than repeating its expression.
+
