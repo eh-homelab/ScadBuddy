@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { activeDialog } from '../agent/dom'
 import { useLatest } from '../agent/useAgentHandlers'
 import {
   clearFilters,
@@ -57,12 +58,29 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
     setText(query.q)
   }, [query.q])
 
+  // The debounce only ever changes `q`, so any other field changing means the query was
+  // set from somewhere else — Clear filters, back/forward, a card's tag chip. A search
+  // still pending then belongs to a query that no longer exists: firing it later would
+  // re-apply what was just cleared. It is dropped and the box shows the query as it is.
+  // (A change made here carries the pending text in `q` first; see `commit`.)
+  const others = [query.origin, query.sort, query.view, ...query.tags].join('\u0000')
+  const seenOthers = useRef(others)
+  useEffect(() => {
+    if (others === seenOthers.current) return
+    seenOthers.current = others
+    clearTimeout(timer.current)
+    sent.current = latest.current.q
+    setText(latest.current.q)
+  }, [others, latest])
+
   useEffect(() => () => clearTimeout(timer.current), [])
 
   useEffect(() => {
     function onKey(event: KeyboardEvent) {
       if (event.key !== '/' || event.metaKey || event.ctrlKey || event.altKey) return
       if (event.defaultPrevented || isTyping(event.target)) return
+      // Nothing behind an open modal is reachable, the shortcut included.
+      if (activeDialog()) return
       event.preventDefault()
       input.current?.focus()
     }
@@ -79,11 +97,20 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
     }, SEARCH_DEBOUNCE_MS)
   }
 
+  /** A filter change made here: it takes whatever is typed with it, pending or not, so
+   * the search is neither lost nor re-applied by the debounce afterwards. */
+  function commit(next: CatalogueQuery) {
+    clearTimeout(timer.current)
+    sent.current = next.q
+    setText(next.q)
+    onChange(next)
+  }
+
   function toggleTag(tag: string) {
     const tags = query.tags.includes(tag)
       ? query.tags.filter((t) => t !== tag)
       : [...query.tags, tag]
-    onChange({ ...query, tags })
+    commit({ ...query, q: text, tags })
   }
 
   const filtered = query.q.trim() !== '' || query.tags.length > 0 || query.origin !== 'all'
@@ -110,7 +137,7 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
               key={option.value}
               type="button"
               aria-pressed={query.origin === option.value}
-              onClick={() => onChange({ ...query, origin: option.value })}
+              onClick={() => commit({ ...query, q: text, origin: option.value })}
               className={`h-6 rounded-[4px] px-2.5 text-[12px] transition-colors ${
                 query.origin === option.value
                   ? 'bg-surface-3 text-ink'
@@ -126,7 +153,7 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
           <select
             value={query.sort}
             onChange={(event) =>
-              onChange({ ...query, sort: event.target.value as CatalogueSort })
+              commit({ ...query, q: text, sort: event.target.value as CatalogueSort })
             }
             className="sb-field h-8 w-auto cursor-pointer"
           >
@@ -166,7 +193,7 @@ export function CatalogueFilters({ query, onChange, tags, shown, total }: Props)
           <Button
             size="sm"
             variant="ghost"
-            onClick={() => onChange(clearFilters(query))}
+            onClick={() => commit(clearFilters(query))}
           >
             Clear filters
           </Button>
