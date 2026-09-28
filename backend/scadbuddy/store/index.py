@@ -116,20 +116,26 @@ class BlobIndex:
         with self._pool.connection() as conn:
             conn.execute("UPDATE store_blobs SET touched_at = now() WHERE key = %s", (key,))
 
-    def delete(self, key: str) -> BlobStat | None:
+    def delete(self, key: str, *, backend: str | None = None) -> BlobStat | None:
+        """Drop ``key``'s row; with ``backend``, only a row on that backend."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                f"DELETE FROM store_blobs WHERE key = %s RETURNING {_COLUMNS}", (key,)
+                f"DELETE FROM store_blobs WHERE key = %s"
+                f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
+                (key, backend, backend),
             ).fetchone()
         return _stat(row) if row is not None else None
 
-    def delete_if_stale(self, key: str, cutoff: datetime) -> BlobStat | None:
+    def delete_if_stale(
+        self, key: str, cutoff: datetime, *, backend: str | None = None
+    ) -> BlobStat | None:
         """Atomic against a concurrent `touch`: a blob claimed after the sweep's snapshot
-        has a fresh `touched_at` and is not matched."""
+        has a fresh `touched_at` and is not matched. With ``backend``, only a row on it."""
         with self._pool.connection() as conn:
             row = conn.execute(
-                f"DELETE FROM store_blobs WHERE key = %s AND touched_at <= %s RETURNING {_COLUMNS}",
-                (key, cutoff),
+                f"DELETE FROM store_blobs WHERE key = %s AND touched_at <= %s"
+                f" AND (%s::text IS NULL OR backend = %s) RETURNING {_COLUMNS}",
+                (key, cutoff, backend, backend),
             ).fetchone()
         return _stat(row) if row is not None else None
 

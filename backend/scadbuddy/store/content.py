@@ -153,7 +153,8 @@ class ContentStore:
 
     async def _release_replaced(self, key: str, previous: BlobRef) -> None:
         if previous.backend != self.name:
-            # The key moved to this backend; the old object is the other one's to sweep.
+            # The key now names this backend's object, so no row names the old one: it
+            # is left untracked on the other backend rather than deleted from here.
             logger.warning(
                 "left a replaced blob on another backend",
                 extra={"key": key, "backend": previous.backend},
@@ -215,6 +216,7 @@ class ContentStore:
         return stat
 
     async def forget(self, key: str) -> None:
+        """Drop ``key``'s index row, whichever backend it names; the object stays."""
         await asyncio.to_thread(self.index.delete, key)
 
     async def touch(self, key: str) -> None:
@@ -223,12 +225,13 @@ class ContentStore:
         await asyncio.to_thread(self.index.touch, key)
 
     async def delete(self, key: str) -> None:
-        stat = await asyncio.to_thread(self.index.delete, key)
+        """Remove ``key`` and its object. A row on another backend is left for it."""
+        stat = await asyncio.to_thread(self.index.delete, key, backend=self.name)
         if stat is not None:
             await self._release(stat.ref)
 
     async def delete_if_stale(self, key: str, cutoff: datetime) -> bool:
-        stat = await asyncio.to_thread(self.index.delete_if_stale, key, cutoff)
+        stat = await asyncio.to_thread(self.index.delete_if_stale, key, cutoff, backend=self.name)
         if stat is None:
             return False
         await self._release(stat.ref)
