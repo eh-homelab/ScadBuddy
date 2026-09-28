@@ -9,6 +9,11 @@ from typing import Annotated
 
 from fastapi import Depends, Path, Request
 
+from scadbuddy.analyzers.decisions import (
+    DecisionStore,
+    FileDecisionStore,
+    PostgresDecisionStore,
+)
 from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
@@ -63,6 +68,9 @@ class AppState:
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
     metrics: Metrics
+    #: Print-analyzer decisions (#284): Postgres beside the render queue when a
+    #: database is configured, a JSON file on the data volume otherwise.
+    decisions: DecisionStore
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -123,6 +131,11 @@ def build_state(settings: Settings) -> AppState:
         if settings.database_url
         else JobStore(paths)
     )
+    decisions: DecisionStore = (
+        PostgresDecisionStore(settings.database_url)
+        if settings.database_url
+        else FileDecisionStore(paths.analyzers)
+    )
     outputs = OutputStore(paths)
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(paths, history, outputs)
@@ -146,6 +159,7 @@ def build_state(settings: Settings) -> AppState:
             config, paths, store=store, history=history, metrics=metrics, events=events
         ),
         metrics=metrics,
+        decisions=decisions,
         events=events,
         print_progress=ProgressObserver(events),
         checks=asyncio.Semaphore(config.check_concurrency),
@@ -230,6 +244,10 @@ def get_print_progress(state: StateDep) -> ProgressObserver:
     return state.print_progress
 
 
+def get_decisions(state: StateDep) -> DecisionStore:
+    return state.decisions
+
+
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -250,6 +268,7 @@ LibrariesDep = Annotated[LibraryStore, Depends(get_libraries)]
 QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
+DecisionsDep = Annotated[DecisionStore, Depends(get_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 

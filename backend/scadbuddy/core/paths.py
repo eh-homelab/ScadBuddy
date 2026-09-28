@@ -82,6 +82,12 @@ class DataPaths:
         template's revision (which outputs are stamped with, and duplicates track)."""
         return self.root / "presets"
 
+    @property
+    def analyzers(self) -> Path:
+        """Print-analyzer decisions when there is no database (#284). Not under
+        ``models/``: a decision is not a change to a template's source."""
+        return self.root / "analyzers"
+
     def model_presets(self, slug: str) -> Path:
         return self.presets / f"{slug}.json"
 

@@ -471,6 +471,19 @@ async def describe_pipelines(
     )
 
 
+async def pipeline_view(
+    client: BambuddyClient, pipeline_id: int, printers: list[Printer]
+) -> PipelineView:
+    """One pipeline as the picker shows it, for the print analyzers (#284).
+
+    The same reads :func:`describe_pipelines` makes, and the same friendly 409 as a run
+    when Bambuddy no longer has the pipeline.
+    """
+    pipeline = await _pipeline_or_conflict(client, pipeline_id)
+    preset_names = (await _catalogue(client)).names()
+    return _view(pipeline, printers, preset_names)
+
+
 async def create_pipeline(client: BambuddyClient, request: PipelineCreate) -> PipelineView:
     """Pass-through create, then re-read the printers so the new row's target resolves.
 

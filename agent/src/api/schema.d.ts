@@ -4,6 +4,149 @@
  */
 
 export interface paths {
+    "/api/v1/analyzers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every analyzer, with its sources
+         * @description The bundled analyzers: id, severity, category, the inputs each needs, the fixes
+         *     it can offer, and the sources it cites (URL and quoted line).
+         */
+        get: operations["list_analyzers_api_v1_analyzers_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/analyzers/decisions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Recorded decisions
+         * @description Every decision, or those at one scope kind (and key), or about one rule.
+         *     Broadest scope first, then oldest first.
+         */
+        get: operations["list_decisions_api_v1_analyzers_decisions_get"];
+        put?: never;
+        /**
+         * Ignore or suppress a diagnostic at a scope
+         * @description Replaces an earlier decision about the same rule and instance at the same scope.
+         *
+         *     ScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec
+         *     §8.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.
+         */
+        post: operations["post_decision_api_v1_analyzers_decisions_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/analyzers/decisions/{decision_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Remove a decision */
+        delete: operations["delete_decision_api_v1_analyzers_decisions__decision_id__delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/analyzers/fixes/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply a previewed fix
+         * @description Accept the fix at ``scope``: its diff joins this print's effective diff, and
+         *     every later print that falls in the same scope, until the diff changes.
+         *
+         *     Refused, in this order: a diff that differs from the previewed ``fingerprint``
+         *     (409, ``analyzer-fix-stale``); a change whose target is still unverified (409,
+         *     ``analyzer-fix-unverified``, naming the §3.2 items in ``to_verify``); an outward
+         *     change without ``confirm: true`` (428, ``confirmation-required``); a scope this
+         *     print does not fall in (422).
+         */
+        post: operations["post_apply_api_v1_analyzers_fixes_apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/analyzers/fixes/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Preview a fix
+         * @description The fix's whole diff, where each line lands, whether it can be applied yet, and
+         *     the fingerprint an apply confirms against. Changes nothing.
+         */
+        post: operations["post_preview_api_v1_analyzers_fixes_preview_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/analyzers/run": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Run the analyzers
+         * @description Judge an output or a configuration against the print request it would go out
+         *     with (the #84 base: pipeline, printer, filament plan, plate, options).
+         *
+         *     Reads only: nothing is uploaded, sliced or queued. An input that cannot be read
+         *     (no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is
+         *     listed in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.
+         *
+         *     ``detail=simple`` returns the headline and the open findings with their sources and
+         *     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
+         *     ignored and ``hidden`` findings with the decision behind each.
+         */
+        post: operations["post_run_api_v1_analyzers_run_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/fonts": {
         parameters: {
             query?: never;
@@ -1332,6 +1475,193 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        /**
+         * AcceptedChange
+         * @description One line of the effective diff: base + every accepted fix that still holds.
+         */
+        AcceptedChange: {
+            change: components["schemas"]["SettingChange"];
+            /** Diagnostic Id */
+            diagnostic_id: string;
+            /** Diagnostic Key */
+            diagnostic_key: string;
+            /** Fix Id */
+            fix_id: string;
+            scope: components["schemas"]["ScopeRef"];
+        };
+        /** AnalysisReport */
+        AnalysisReport: {
+            /** Accepted Changes */
+            accepted_changes?: components["schemas"]["AcceptedChange"][];
+            base: components["schemas"]["BaseProfile"];
+            /**
+             * Detail
+             * @enum {string}
+             */
+            detail: "simple" | "advanced";
+            /** Diagnostics */
+            diagnostics: components["schemas"]["AnalyzerDiagnostic"][];
+            /** Inputs */
+            inputs: components["schemas"]["InputStatus"][];
+            /** Output Id */
+            output_id: string | null;
+            /** Scopes */
+            scopes: components["schemas"]["ScopeRef"][];
+            /** Skipped */
+            skipped?: components["schemas"]["SkippedAnalyzer"][];
+            /** Slug */
+            slug: string;
+            summary: components["schemas"]["AnalysisSummary"];
+        };
+        /**
+         * AnalysisRequest
+         * @description The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84).
+         *
+         *     Every field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`;
+         *     ``pipeline_id`` omitted is the model's default, then the global one.
+         */
+        AnalysisRequest: {
+            /** Bed Type */
+            bed_type?: string | null;
+            /** Copies */
+            copies?: number | null;
+            filament_plan?: components["schemas"]["FilamentPlan"] | null;
+            options?: components["schemas"]["PrintOptions"];
+            /** Pipeline Id */
+            pipeline_id?: number | null;
+            /**
+             * Plate Id
+             * @default 1
+             */
+            plate_id: number;
+            /** Printer Id */
+            printer_id?: number | null;
+        };
+        /** AnalysisRun */
+        AnalysisRun: {
+            /**
+             * Detail
+             * @default simple
+             * @enum {string}
+             */
+            detail: "simple" | "advanced";
+            request?: components["schemas"]["AnalysisRequest"];
+            target: components["schemas"]["AnalysisTarget"];
+        };
+        /**
+         * AnalysisSummary
+         * @description The simple mode's one line, and the counts behind it. Only open diagnostics
+         *     count; ``hidden``, suppressed, ignored and accepted ones do not.
+         */
+        AnalysisSummary: {
+            /** Errors */
+            errors: number;
+            /** Headline */
+            headline: string;
+            /** Suggestions */
+            suggestions: number;
+            /** Warnings */
+            warnings: number;
+        };
+        /**
+         * AnalysisTarget
+         * @description An output, or a configuration: a template and one parameter set.
+         *
+         *     A configuration is judged on the newest output rendered with exactly those
+         *     parameters when there is one; without one, the analyzers that need a render are
+         *     skipped and say so.
+         */
+        AnalysisTarget: {
+            /** Output Id */
+            output_id?: string | null;
+            /** Params */
+            params?: {
+                [key: string]: boolean | number | string;
+            } | null;
+            /** Slug */
+            slug?: string | null;
+        };
+        /** AnalyzerDiagnostic */
+        AnalyzerDiagnostic: {
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "geometry" | "material" | "profile" | "plate" | "ams" | "history" | "analyzer";
+            decision?: components["schemas"]["AppliedDecision"] | null;
+            /** Evidence */
+            evidence?: components["schemas"]["Evidence"][];
+            /** Fixes */
+            fixes?: components["schemas"]["Fix"][];
+            /** Id */
+            id: string;
+            /** Key */
+            key: string;
+            location?: components["schemas"]["DiagnosticLocation"] | null;
+            /** Message */
+            message: string;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "error" | "warning" | "info" | "hidden";
+            /** Sources */
+            sources: components["schemas"]["Source"][];
+            /**
+             * Status
+             * @default open
+             * @enum {string}
+             */
+            status: "open" | "accepted" | "ignored" | "suppressed";
+            /** Title */
+            title: string;
+            /** Why */
+            why?: string | null;
+        };
+        /**
+         * AnalyzerInfo
+         * @description One catalogue row: the rule, where it is defined and what it cites.
+         */
+        AnalyzerInfo: {
+            /**
+             * Category
+             * @enum {string}
+             */
+            category: "geometry" | "material" | "profile" | "plate" | "ams" | "history" | "analyzer";
+            /** Description */
+            description: string;
+            /** Fix Ids */
+            fix_ids: string[];
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Needs */
+            needs: ("output" | "geometry" | "plate" | "pipeline" | "printer" | "filaments" | "inventory" | "eligibility")[];
+            /** Scope */
+            scope: string;
+            /**
+             * Severity
+             * @enum {string}
+             */
+            severity: "error" | "warning" | "info" | "hidden";
+            /** Sources */
+            sources: components["schemas"]["Source"][];
+            /** Title */
+            title: string;
+        };
+        /**
+         * AppliedDecision
+         * @description The decision that decided a diagnostic's status, and whether it still holds.
+         */
+        AppliedDecision: {
+            decision: components["schemas"]["Decision"];
+            /**
+             * Stale
+             * @default false
+             */
+            stale: boolean;
+        };
         /** AssetMeta */
         AssetMeta: {
             /** Height */
@@ -1373,6 +1703,26 @@ export interface components {
             pipelines?: components["schemas"]["Pipeline"][];
             /** Printers */
             printers?: components["schemas"]["Printer"][];
+        };
+        /**
+         * BaseProfile
+         * @description What the diffs are against: the pipeline's presets, bed type and plan (#84).
+         */
+        BaseProfile: {
+            /** Bed Type */
+            bed_type?: string | null;
+            /** Copies */
+            copies: number;
+            filament_plan?: components["schemas"]["FilamentPlan"] | null;
+            pipeline?: components["schemas"]["PipelineView"] | null;
+            /** Plate Id */
+            plate_id: number;
+            /** Plate Model */
+            plate_model?: string | null;
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printer Model */
+            printer_model?: string | null;
         };
         /**
          * BedTypeChoice
@@ -1569,6 +1919,66 @@ export interface components {
             title?: string | null;
         };
         /**
+         * Decision
+         * @description What a person decided about a diagnostic, at one scope.
+         */
+        Decision: {
+            /** Changes */
+            changes?: components["schemas"]["SettingChange"][];
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at?: string;
+            /** Diagnostic Id */
+            diagnostic_id: string;
+            /**
+             * Enforced
+             * @default false
+             */
+            enforced: boolean;
+            /** Fingerprint */
+            fingerprint?: string | null;
+            /** Fix Id */
+            fix_id?: string | null;
+            /** Id */
+            id: string;
+            /** Instance */
+            instance?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "accept" | "ignore" | "suppress";
+            /** Reason */
+            reason?: string | null;
+            scope: components["schemas"]["ScopeRef"];
+        };
+        /**
+         * DecisionCreate
+         * @description Ignore or suppress a diagnostic at a scope. Accepting goes through a fix's
+         *     apply, which is where its diff is confirmed.
+         */
+        DecisionCreate: {
+            /** Diagnostic Id */
+            diagnostic_id: string;
+            /**
+             * Enforced
+             * @default false
+             */
+            enforced: boolean;
+            /** Instance */
+            instance?: string | null;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "ignore" | "suppress";
+            /** Reason */
+            reason?: string | null;
+            scope: components["schemas"]["ScopeRef"];
+        };
+        /**
          * Diagnostic
          * @description One OpenSCAD message, with the line it points at when it names one.
          */
@@ -1584,6 +1994,33 @@ export interface components {
              * @enum {string}
              */
             severity: "error" | "warning" | "trace";
+        };
+        /**
+         * DiagnosticLocation
+         * @description Where the problem is, as precisely as the input allows.
+         */
+        DiagnosticLocation: {
+            bbox?: components["schemas"]["BoundingBox"] | null;
+            /** Colour */
+            colour?: string | null;
+            /** Edges */
+            edges?: components["schemas"]["MeshEdge"][];
+            /**
+             * Edges Truncated
+             * @default false
+             */
+            edges_truncated: boolean;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "mesh" | "plate" | "filament_slot" | "pipeline" | "profile_setting" | "analyzer";
+            /** Part */
+            part?: number | null;
+            /** Setting */
+            setting?: string | null;
+            /** Slot Id */
+            slot_id?: number | null;
         };
         /** DuplicateRequest */
         DuplicateRequest: {
@@ -1675,6 +2112,20 @@ export interface components {
             /** Target Printer Name */
             target_printer_name?: string | null;
         };
+        /**
+         * Evidence
+         * @description One measured or read fact a diagnostic rests on.
+         */
+        Evidence: {
+            /** Label */
+            label: string;
+            /** Origin */
+            origin: string;
+            /** Unit */
+            unit?: string | null;
+            /** Value */
+            value: string | number | boolean | null;
+        };
         /** FeatureEstimate */
         FeatureEstimate: {
             bbox: components["schemas"]["BoundingBox"];
@@ -1747,6 +2198,68 @@ export interface components {
             message: string;
             /** Slot Id */
             slot_id?: number | null;
+        };
+        /** Fix */
+        Fix: {
+            /** Changes */
+            changes: components["schemas"]["SettingChange"][];
+            /** Description */
+            description: string;
+            /** Id */
+            id: string;
+            /** Title */
+            title: string;
+        };
+        /** FixApply */
+        FixApply: {
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
+            /** Diagnostic Key */
+            diagnostic_key: string;
+            /** Fingerprint */
+            fingerprint: string;
+            /** Fix Id */
+            fix_id: string;
+            /** Reason */
+            reason?: string | null;
+            request?: components["schemas"]["AnalysisRequest"];
+            scope?: components["schemas"]["ScopeRef"] | null;
+            target: components["schemas"]["AnalysisTarget"];
+        };
+        /** FixPreview */
+        FixPreview: {
+            /** Applicable */
+            applicable: boolean;
+            /** Blockers */
+            blockers: string[];
+            /** Diagnostic Id */
+            diagnostic_id: string;
+            /** Diagnostic Key */
+            diagnostic_key: string;
+            /** Fingerprint */
+            fingerprint: string;
+            fix: components["schemas"]["Fix"];
+            /** Outward */
+            outward: boolean;
+            /**
+             * Route Note
+             * @default Accepting a settings diff sends this print by slicing and queueing rather than running the pipeline, because a pipeline run carries no per-print settings (AI spec §11, print-flow spec §2).
+             */
+            route_note: string;
+            /** Summary */
+            summary: string;
+        };
+        /** FixRequest */
+        FixRequest: {
+            /** Diagnostic Key */
+            diagnostic_key: string;
+            /** Fix Id */
+            fix_id: string;
+            request?: components["schemas"]["AnalysisRequest"];
+            target: components["schemas"]["AnalysisTarget"];
         };
         /**
          * Folder
@@ -1875,6 +2388,18 @@ export interface components {
             status: "ok" | "degraded";
             /** Version */
             version: string;
+        };
+        /** InputStatus */
+        InputStatus: {
+            /** Available */
+            available: boolean;
+            /**
+             * Name
+             * @enum {string}
+             */
+            name: "output" | "geometry" | "plate" | "pipeline" | "printer" | "filaments" | "inventory" | "eligibility";
+            /** Reason */
+            reason?: string | null;
         };
         /** InstallRequest */
         InstallRequest: {
@@ -3157,6 +3682,27 @@ export interface components {
             /** Version */
             version?: string | null;
         };
+        /**
+         * ScopeRef
+         * @description A scope and the key that names one instance of it.
+         *
+         *     Keys: ``""`` for global; ``pla`` or ``pla/silk`` for a material; ``id:<printer id>``
+         *     or ``model:<printer model>`` for a printer; the slug for a template;
+         *     ``<slug>@<model version>`` for a template version; ``<slug>#<params hash>`` for a
+         *     configuration; the output id for a print.
+         */
+        ScopeRef: {
+            /**
+             * Key
+             * @default
+             */
+            key: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "global" | "material" | "printer" | "template" | "template_version" | "configuration" | "print";
+        };
         /** SendRequest */
         SendRequest: {
             /** Copies */
@@ -3189,6 +3735,42 @@ export interface components {
             pipeline_run_id?: number | null;
             /** Queue Item Id */
             queue_item_id?: number | null;
+        };
+        /**
+         * SettingChange
+         * @description One line of a fix's diff: a setting, its base value and the proposed one.
+         */
+        SettingChange: {
+            /** Base */
+            base?: string | number | boolean | null;
+            /**
+             * Base Known
+             * @default false
+             */
+            base_known: boolean;
+            /** Base Note */
+            base_note?: string | null;
+            /** Outward */
+            outward: boolean;
+            /** Proposed */
+            proposed: string | number | boolean | null;
+            /** Setting */
+            setting: string;
+            /** Slot Id */
+            slot_id?: number | null;
+            /** Sources */
+            sources: components["schemas"]["Source"][];
+            /**
+             * Target
+             * @enum {string}
+             */
+            target: "print_options" | "print_request" | "filament_overrides" | "derived_process_preset" | "project_settings_3mf";
+            /** To Verify */
+            to_verify?: string | null;
+            /** Unit */
+            unit?: string | null;
+            /** Verified */
+            verified: boolean;
         };
         /**
          * SettingsPatch
@@ -3273,6 +3855,15 @@ export interface components {
             /** Url */
             url: string;
         };
+        /** SkippedAnalyzer */
+        SkippedAnalyzer: {
+            /** Id */
+            id: string;
+            /** Missing */
+            missing: components["schemas"]["InputStatus"][];
+            /** Title */
+            title: string;
+        };
         /**
          * SlotChoice
          * @description One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)
@@ -3297,6 +3888,25 @@ export interface components {
             slot_id: number;
             /** Used Grams */
             used_grams?: number | null;
+        };
+        /**
+         * Source
+         * @description A citation: where a rule or a value comes from, and the line that says so.
+         */
+        Source: {
+            /**
+             * Accessed
+             * Format: date
+             */
+            accessed: string;
+            /** Quote */
+            quote: string;
+            /** Supports */
+            supports?: string[];
+            /** Title */
+            title: string;
+            /** Url */
+            url: string;
         };
         /** SourceCheck */
         SourceCheck: {
@@ -3507,6 +4117,220 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_analyzers_api_v1_analyzers_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalyzerInfo"][];
+                };
+            };
+        };
+    };
+    list_decisions_api_v1_analyzers_decisions_get: {
+        parameters: {
+            query?: {
+                scope?: ("global" | "material" | "printer" | "template" | "template_version" | "configuration" | "print") | null;
+                scope_key?: string | null;
+                diagnostic_id?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Decision"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_decision_api_v1_analyzers_decisions_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Decision"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    delete_decision_api_v1_analyzers_decisions__decision_id__delete: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                decision_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_apply_api_v1_analyzers_fixes_apply_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FixApply"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Decision"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_preview_api_v1_analyzers_fixes_preview_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["FixRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["FixPreview"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    post_run_api_v1_analyzers_run_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AnalysisRun"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AnalysisReport"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_fonts_api_v1_fonts_get: {
         parameters: {
             query?: never;

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from scadbuddy import __version__
 from scadbuddy.api import (
+    analyzers,
     assets,
     fonts,
     health,
@@ -54,6 +55,7 @@ def _api_router() -> APIRouter:
     router.include_router(assets.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
+    router.include_router(analyzers.router)
     router.include_router(settings.router)
     router.include_router(fonts.router)
     router.include_router(plates.router)
@@ -144,6 +146,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await state.queue.aclose()
+        await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
 
 

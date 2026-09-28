@@ -8,6 +8,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
+from scadbuddy.analyzers.decisions import FileDecisionStore, PostgresDecisionStore
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.pg_store import PostgresJobStore
@@ -38,3 +39,26 @@ def test_the_app_queues_renders_in_postgres(
 def test_without_a_database_url_the_queue_uses_files(settings: Settings) -> None:
     app = create_app(settings)
     assert not isinstance(app.state.scadbuddy.queue.store, PostgresJobStore)
+
+
+@pytest.mark.requires_postgres
+def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo: str) -> None:
+    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/analyzers/decisions",
+            json={"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}},
+        )
+        assert created.status_code == 201, created.text
+        listed = client.get("/api/v1/analyzers/decisions").json()
+
+    assert isinstance(app.state.scadbuddy.decisions, PostgresDecisionStore)
+    assert [row["id"] for row in listed] == [created.json()["id"]]
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()
+    assert row is not None and row[0] == "ignore"
+
+
+def test_without_a_database_url_decisions_use_a_file(settings: Settings) -> None:
+    app = create_app(settings)
+    assert isinstance(app.state.scadbuddy.decisions, FileDecisionStore)

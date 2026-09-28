@@ -90,6 +90,22 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled ON render_jobs (finished_at)
         WHERE state IN ('done', 'failed');
     """,
+    # 2: print-analyzer decisions (#284; `scadbuddy.analyzers.decisions`). One row per
+    # rule, instance ('' for every instance) and scope; `body` is the whole decision.
+    """
+    CREATE TABLE analyzer_decisions (
+        id            text PRIMARY KEY,
+        diagnostic_id text NOT NULL,
+        instance      text NOT NULL DEFAULT '',
+        scope_kind    text NOT NULL,
+        scope_key     text NOT NULL DEFAULT '',
+        kind          text NOT NULL CHECK (kind IN ('accept', 'ignore', 'suppress')),
+        body          jsonb NOT NULL,
+        created_at    timestamptz NOT NULL
+    );
+    CREATE UNIQUE INDEX analyzer_decisions_target
+        ON analyzer_decisions (scope_kind, scope_key, diagnostic_id, instance);
+    """,
 )
 
 JOB_COLUMNS = (

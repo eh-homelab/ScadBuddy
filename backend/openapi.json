@@ -1,6 +1,531 @@
 {
   "components": {
     "schemas": {
+      "AcceptedChange": {
+        "description": "One line of the effective diff: base + every accepted fix that still holds.",
+        "properties": {
+          "change": {
+            "$ref": "#/components/schemas/SettingChange"
+          },
+          "diagnostic_id": {
+            "title": "Diagnostic Id",
+            "type": "string"
+          },
+          "diagnostic_key": {
+            "title": "Diagnostic Key",
+            "type": "string"
+          },
+          "fix_id": {
+            "title": "Fix Id",
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeRef"
+          }
+        },
+        "required": [
+          "diagnostic_id",
+          "diagnostic_key",
+          "fix_id",
+          "scope",
+          "change"
+        ],
+        "title": "AcceptedChange",
+        "type": "object"
+      },
+      "AnalysisReport": {
+        "properties": {
+          "accepted_changes": {
+            "items": {
+              "$ref": "#/components/schemas/AcceptedChange"
+            },
+            "title": "Accepted Changes",
+            "type": "array"
+          },
+          "base": {
+            "$ref": "#/components/schemas/BaseProfile"
+          },
+          "detail": {
+            "enum": [
+              "simple",
+              "advanced"
+            ],
+            "title": "Detail",
+            "type": "string"
+          },
+          "diagnostics": {
+            "items": {
+              "$ref": "#/components/schemas/AnalyzerDiagnostic"
+            },
+            "title": "Diagnostics",
+            "type": "array"
+          },
+          "inputs": {
+            "items": {
+              "$ref": "#/components/schemas/InputStatus"
+            },
+            "title": "Inputs",
+            "type": "array"
+          },
+          "output_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Id"
+          },
+          "scopes": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeRef"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedAnalyzer"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "slug": {
+            "title": "Slug",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AnalysisSummary"
+          }
+        },
+        "required": [
+          "output_id",
+          "slug",
+          "detail",
+          "summary",
+          "diagnostics",
+          "inputs",
+          "scopes",
+          "base"
+        ],
+        "title": "AnalysisReport",
+        "type": "object"
+      },
+      "AnalysisRequest": {
+        "description": "The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84).\n\nEvery field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`;\n``pipeline_id`` omitted is the model's default, then the global one.",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "maxLength": 64,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "copies": {
+            "anyOf": [
+              {
+                "maximum": 1000.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Copies"
+          },
+          "filament_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilamentPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "options": {
+            "$ref": "#/components/schemas/PrintOptions"
+          },
+          "pipeline_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pipeline Id"
+          },
+          "plate_id": {
+            "default": 1,
+            "minimum": 1.0,
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          }
+        },
+        "title": "AnalysisRequest",
+        "type": "object"
+      },
+      "AnalysisRun": {
+        "properties": {
+          "detail": {
+            "default": "simple",
+            "enum": [
+              "simple",
+              "advanced"
+            ],
+            "title": "Detail",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/AnalysisRequest"
+          },
+          "target": {
+            "$ref": "#/components/schemas/AnalysisTarget"
+          }
+        },
+        "required": [
+          "target"
+        ],
+        "title": "AnalysisRun",
+        "type": "object"
+      },
+      "AnalysisSummary": {
+        "description": "The simple mode's one line, and the counts behind it. Only open diagnostics\ncount; ``hidden``, suppressed, ignored and accepted ones do not.",
+        "properties": {
+          "errors": {
+            "title": "Errors",
+            "type": "integer"
+          },
+          "headline": {
+            "title": "Headline",
+            "type": "string"
+          },
+          "suggestions": {
+            "title": "Suggestions",
+            "type": "integer"
+          },
+          "warnings": {
+            "title": "Warnings",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "headline",
+          "errors",
+          "warnings",
+          "suggestions"
+        ],
+        "title": "AnalysisSummary",
+        "type": "object"
+      },
+      "AnalysisTarget": {
+        "description": "An output, or a configuration: a template and one parameter set.\n\nA configuration is judged on the newest output rendered with exactly those\nparameters when there is one; without one, the analyzers that need a render are\nskipped and say so.",
+        "properties": {
+          "output_id": {
+            "anyOf": [
+              {
+                "pattern": "^[0-9a-f]{32}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Output Id"
+          },
+          "params": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "anyOf": [
+                    {
+                      "type": "boolean"
+                    },
+                    {
+                      "type": "integer"
+                    },
+                    {
+                      "type": "number"
+                    },
+                    {
+                      "type": "string"
+                    }
+                  ]
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Params"
+          },
+          "slug": {
+            "anyOf": [
+              {
+                "maxLength": 108,
+                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slug"
+          }
+        },
+        "title": "AnalysisTarget",
+        "type": "object"
+      },
+      "AnalyzerDiagnostic": {
+        "properties": {
+          "category": {
+            "enum": [
+              "geometry",
+              "material",
+              "profile",
+              "plate",
+              "ams",
+              "history",
+              "analyzer"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/AppliedDecision"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/Evidence"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "fixes": {
+            "items": {
+              "$ref": "#/components/schemas/Fix"
+            },
+            "title": "Fixes",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "key": {
+            "title": "Key",
+            "type": "string"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DiagnosticLocation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "info",
+              "hidden"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "status": {
+            "default": "open",
+            "enum": [
+              "open",
+              "accepted",
+              "ignored",
+              "suppressed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "why": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Why"
+          }
+        },
+        "required": [
+          "id",
+          "key",
+          "title",
+          "severity",
+          "category",
+          "message",
+          "sources"
+        ],
+        "title": "AnalyzerDiagnostic",
+        "type": "object"
+      },
+      "AnalyzerInfo": {
+        "description": "One catalogue row: the rule, where it is defined and what it cites.",
+        "properties": {
+          "category": {
+            "enum": [
+              "geometry",
+              "material",
+              "profile",
+              "plate",
+              "ams",
+              "history",
+              "analyzer"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "fix_ids": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Fix Ids",
+            "type": "array"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "needs": {
+            "items": {
+              "enum": [
+                "output",
+                "geometry",
+                "plate",
+                "pipeline",
+                "printer",
+                "filaments",
+                "inventory",
+                "eligibility"
+              ],
+              "type": "string"
+            },
+            "title": "Needs",
+            "type": "array"
+          },
+          "scope": {
+            "title": "Scope",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "error",
+              "warning",
+              "info",
+              "hidden"
+            ],
+            "title": "Severity",
+            "type": "string"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "title",
+          "severity",
+          "category",
+          "description",
+          "scope",
+          "needs",
+          "fix_ids",
+          "sources"
+        ],
+        "title": "AnalyzerInfo",
+        "type": "object"
+      },
+      "AppliedDecision": {
+        "description": "The decision that decided a diagnostic's status, and whether it still holds.",
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/Decision"
+          },
+          "stale": {
+            "default": false,
+            "title": "Stale",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "decision"
+        ],
+        "title": "AppliedDecision",
+        "type": "object"
+      },
       "AssetMeta": {
         "properties": {
           "height": {
@@ -109,6 +634,89 @@
           }
         },
         "title": "BambuddyTargets",
+        "type": "object"
+      },
+      "BaseProfile": {
+        "description": "What the diffs are against: the pipeline's presets, bed type and plan (#84).",
+        "properties": {
+          "bed_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Bed Type"
+          },
+          "copies": {
+            "title": "Copies",
+            "type": "integer"
+          },
+          "filament_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilamentPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pipeline": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PipelineView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plate_id": {
+            "title": "Plate Id",
+            "type": "integer"
+          },
+          "plate_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Plate Model"
+          },
+          "printer_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Id"
+          },
+          "printer_model": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Printer Model"
+          }
+        },
+        "required": [
+          "plate_id",
+          "copies"
+        ],
+        "title": "BaseProfile",
         "type": "object"
       },
       "BedTypeChoice": {
@@ -604,6 +1212,157 @@
         "title": "CustomizerSchema",
         "type": "object"
       },
+      "Decision": {
+        "description": "What a person decided about a diagnostic, at one scope.",
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SettingChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "diagnostic_id": {
+            "title": "Diagnostic Id",
+            "type": "string"
+          },
+          "enforced": {
+            "default": false,
+            "title": "Enforced",
+            "type": "boolean"
+          },
+          "fingerprint": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fingerprint"
+          },
+          "fix_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Fix Id"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "kind": {
+            "enum": [
+              "accept",
+              "ignore",
+              "suppress"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeRef"
+          }
+        },
+        "required": [
+          "id",
+          "diagnostic_id",
+          "kind",
+          "scope"
+        ],
+        "title": "Decision",
+        "type": "object"
+      },
+      "DecisionCreate": {
+        "description": "Ignore or suppress a diagnostic at a scope. Accepting goes through a fix's\napply, which is where its diff is confirmed.",
+        "properties": {
+          "diagnostic_id": {
+            "pattern": "^SB[0-9]{4}$",
+            "title": "Diagnostic Id",
+            "type": "string"
+          },
+          "enforced": {
+            "default": false,
+            "title": "Enforced",
+            "type": "boolean"
+          },
+          "instance": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Instance"
+          },
+          "kind": {
+            "enum": [
+              "ignore",
+              "suppress"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ScopeRef"
+          }
+        },
+        "required": [
+          "diagnostic_id",
+          "kind",
+          "scope"
+        ],
+        "title": "DecisionCreate",
+        "type": "object"
+      },
       "Diagnostic": {
         "description": "One OpenSCAD message, with the line it points at when it names one.",
         "properties": {
@@ -648,6 +1407,94 @@
           "message"
         ],
         "title": "Diagnostic",
+        "type": "object"
+      },
+      "DiagnosticLocation": {
+        "description": "Where the problem is, as precisely as the input allows.",
+        "properties": {
+          "bbox": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/BoundingBox"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "colour": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Colour"
+          },
+          "edges": {
+            "items": {
+              "$ref": "#/components/schemas/MeshEdge"
+            },
+            "title": "Edges",
+            "type": "array"
+          },
+          "edges_truncated": {
+            "default": false,
+            "title": "Edges Truncated",
+            "type": "boolean"
+          },
+          "kind": {
+            "enum": [
+              "mesh",
+              "plate",
+              "filament_slot",
+              "pipeline",
+              "profile_setting",
+              "analyzer"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "part": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part"
+          },
+          "setting": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Setting"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "DiagnosticLocation",
         "type": "object"
       },
       "DuplicateRequest": {
@@ -893,6 +1740,57 @@
         "title": "EligibilityReport",
         "type": "object"
       },
+      "Evidence": {
+        "description": "One measured or read fact a diagnostic rests on.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "origin": {
+            "title": "Origin",
+            "type": "string"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "label",
+          "value",
+          "origin"
+        ],
+        "title": "Evidence",
+        "type": "object"
+      },
       "FeatureEstimate": {
         "properties": {
           "bbox": {
@@ -1062,6 +1960,180 @@
           "message"
         ],
         "title": "FilamentWarning",
+        "type": "object"
+      },
+      "Fix": {
+        "properties": {
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SettingChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "description",
+          "changes"
+        ],
+        "title": "Fix",
+        "type": "object"
+      },
+      "FixApply": {
+        "properties": {
+          "confirm": {
+            "default": false,
+            "title": "Confirm",
+            "type": "boolean"
+          },
+          "diagnostic_key": {
+            "maxLength": 100,
+            "title": "Diagnostic Key",
+            "type": "string"
+          },
+          "fingerprint": {
+            "maxLength": 64,
+            "minLength": 64,
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "fix_id": {
+            "maxLength": 100,
+            "title": "Fix Id",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "request": {
+            "$ref": "#/components/schemas/AnalysisRequest"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScopeRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/AnalysisTarget"
+          }
+        },
+        "required": [
+          "target",
+          "diagnostic_key",
+          "fix_id",
+          "fingerprint"
+        ],
+        "title": "FixApply",
+        "type": "object"
+      },
+      "FixPreview": {
+        "properties": {
+          "applicable": {
+            "title": "Applicable",
+            "type": "boolean"
+          },
+          "blockers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Blockers",
+            "type": "array"
+          },
+          "diagnostic_id": {
+            "title": "Diagnostic Id",
+            "type": "string"
+          },
+          "diagnostic_key": {
+            "title": "Diagnostic Key",
+            "type": "string"
+          },
+          "fingerprint": {
+            "title": "Fingerprint",
+            "type": "string"
+          },
+          "fix": {
+            "$ref": "#/components/schemas/Fix"
+          },
+          "outward": {
+            "title": "Outward",
+            "type": "boolean"
+          },
+          "route_note": {
+            "default": "Accepting a settings diff sends this print by slicing and queueing rather than running the pipeline, because a pipeline run carries no per-print settings (AI spec \u00a711, print-flow spec \u00a72).",
+            "title": "Route Note",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "diagnostic_id",
+          "diagnostic_key",
+          "fix",
+          "fingerprint",
+          "outward",
+          "applicable",
+          "blockers",
+          "summary"
+        ],
+        "title": "FixPreview",
+        "type": "object"
+      },
+      "FixRequest": {
+        "properties": {
+          "diagnostic_key": {
+            "maxLength": 100,
+            "title": "Diagnostic Key",
+            "type": "string"
+          },
+          "fix_id": {
+            "maxLength": 100,
+            "title": "Fix Id",
+            "type": "string"
+          },
+          "request": {
+            "$ref": "#/components/schemas/AnalysisRequest"
+          },
+          "target": {
+            "$ref": "#/components/schemas/AnalysisTarget"
+          }
+        },
+        "required": [
+          "target",
+          "diagnostic_key",
+          "fix_id"
+        ],
+        "title": "FixRequest",
         "type": "object"
       },
       "Folder": {
@@ -1380,6 +2452,45 @@
           "version"
         ],
         "title": "Health",
+        "type": "object"
+      },
+      "InputStatus": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "name": {
+            "enum": [
+              "output",
+              "geometry",
+              "plate",
+              "pipeline",
+              "printer",
+              "filaments",
+              "inventory",
+              "eligibility"
+            ],
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          }
+        },
+        "required": [
+          "name",
+          "available"
+        ],
+        "title": "InputStatus",
         "type": "object"
       },
       "InstallRequest": {
@@ -5011,6 +6122,35 @@
         "title": "RenderRequest",
         "type": "object"
       },
+      "ScopeRef": {
+        "description": "A scope and the key that names one instance of it.\n\nKeys: ``\"\"`` for global; ``pla`` or ``pla/silk`` for a material; ``id:<printer id>``\nor ``model:<printer model>`` for a printer; the slug for a template;\n``<slug>@<model version>`` for a template version; ``<slug>#<params hash>`` for a\nconfiguration; the output id for a print.",
+        "properties": {
+          "key": {
+            "default": "",
+            "maxLength": 200,
+            "title": "Key",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "global",
+              "material",
+              "printer",
+              "template",
+              "template_version",
+              "configuration",
+              "print"
+            ],
+            "title": "Kind",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "ScopeRef",
+        "type": "object"
+      },
       "SendRequest": {
         "properties": {
           "copies": {
@@ -5114,6 +6254,140 @@
           "filename"
         ],
         "title": "SendResult",
+        "type": "object"
+      },
+      "SettingChange": {
+        "description": "One line of a fix's diff: a setting, its base value and the proposed one.",
+        "properties": {
+          "base": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base"
+          },
+          "base_known": {
+            "default": false,
+            "title": "Base Known",
+            "type": "boolean"
+          },
+          "base_note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Note"
+          },
+          "outward": {
+            "title": "Outward",
+            "type": "boolean"
+          },
+          "proposed": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "type": "number"
+              },
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposed"
+          },
+          "setting": {
+            "title": "Setting",
+            "type": "string"
+          },
+          "slot_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Slot Id"
+          },
+          "sources": {
+            "items": {
+              "$ref": "#/components/schemas/Source"
+            },
+            "title": "Sources",
+            "type": "array"
+          },
+          "target": {
+            "enum": [
+              "print_options",
+              "print_request",
+              "filament_overrides",
+              "derived_process_preset",
+              "project_settings_3mf"
+            ],
+            "title": "Target",
+            "type": "string"
+          },
+          "to_verify": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "To Verify"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "verified": {
+            "title": "Verified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "target",
+          "setting",
+          "proposed",
+          "sources",
+          "verified",
+          "outward"
+        ],
+        "title": "SettingChange",
         "type": "object"
       },
       "SettingsPatch": {
@@ -5429,6 +6703,32 @@
         "title": "SidebarLink",
         "type": "object"
       },
+      "SkippedAnalyzer": {
+        "properties": {
+          "id": {
+            "title": "Id",
+            "type": "string"
+          },
+          "missing": {
+            "items": {
+              "$ref": "#/components/schemas/InputStatus"
+            },
+            "title": "Missing",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "missing"
+        ],
+        "title": "SkippedAnalyzer",
+        "type": "object"
+      },
       "SlotChoice": {
         "description": "One plate slot's spool, both Bambuddy ids: what the print picker submits (#87)\nand what it remembers per model (#78).",
         "properties": {
@@ -5493,6 +6793,43 @@
           "slot_id"
         ],
         "title": "SlotNeed",
+        "type": "object"
+      },
+      "Source": {
+        "description": "A citation: where a rule or a value comes from, and the line that says so.",
+        "properties": {
+          "accessed": {
+            "format": "date",
+            "title": "Accessed",
+            "type": "string"
+          },
+          "quote": {
+            "title": "Quote",
+            "type": "string"
+          },
+          "supports": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Supports",
+            "type": "array"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "title",
+          "quote",
+          "accessed"
+        ],
+        "title": "Source",
         "type": "object"
       },
       "SourceCheck": {
@@ -6001,6 +7338,331 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/analyzers": {
+      "get": {
+        "description": "The bundled analyzers: id, severity, category, the inputs each needs, the fixes\nit can offer, and the sources it cites (URL and quoted line).",
+        "operationId": "list_analyzers_api_v1_analyzers_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AnalyzerInfo"
+                  },
+                  "title": "Response List Analyzers Api V1 Analyzers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Every analyzer, with its sources",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
+    "/api/v1/analyzers/decisions": {
+      "get": {
+        "description": "Every decision, or those at one scope kind (and key), or about one rule.\nBroadest scope first, then oldest first.",
+        "operationId": "list_decisions_api_v1_analyzers_decisions_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "scope",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "global",
+                    "material",
+                    "printer",
+                    "template",
+                    "template_version",
+                    "configuration",
+                    "print"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope"
+            }
+          },
+          {
+            "in": "query",
+            "name": "scope_key",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Scope Key"
+            }
+          },
+          {
+            "in": "query",
+            "name": "diagnostic_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "pattern": "^SB[0-9]{4}$",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Diagnostic Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/Decision"
+                  },
+                  "title": "Response List Decisions Api V1 Analyzers Decisions Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Recorded decisions",
+        "tags": [
+          "analyzers"
+        ]
+      },
+      "post": {
+        "description": "Replaces an earlier decision about the same rule and instance at the same scope.\n\nScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec\n\u00a78.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.",
+        "operationId": "post_decision_api_v1_analyzers_decisions_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Decision"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ignore or suppress a diagnostic at a scope",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
+    "/api/v1/analyzers/decisions/{decision_id}": {
+      "delete": {
+        "operationId": "delete_decision_api_v1_analyzers_decisions__decision_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "decision_id",
+            "required": true,
+            "schema": {
+              "pattern": "^[0-9a-f]{32}$",
+              "title": "Decision Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Remove a decision",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
+    "/api/v1/analyzers/fixes/apply": {
+      "post": {
+        "description": "Accept the fix at ``scope``: its diff joins this print's effective diff, and\nevery later print that falls in the same scope, until the diff changes.\n\nRefused, in this order: a diff that differs from the previewed ``fingerprint``\n(409, ``analyzer-fix-stale``); a change whose target is still unverified (409,\n``analyzer-fix-unverified``, naming the \u00a73.2 items in ``to_verify``); an outward\nchange without ``confirm: true`` (428, ``confirmation-required``); a scope this\nprint does not fall in (422).",
+        "operationId": "post_apply_api_v1_analyzers_fixes_apply_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FixApply"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Decision"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Apply a previewed fix",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
+    "/api/v1/analyzers/fixes/preview": {
+      "post": {
+        "description": "The fix's whole diff, where each line lands, whether it can be applied yet, and\nthe fingerprint an apply confirms against. Changes nothing.",
+        "operationId": "post_preview_api_v1_analyzers_fixes_preview_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FixRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FixPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Preview a fix",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
+    "/api/v1/analyzers/run": {
+      "post": {
+        "description": "Judge an output or a configuration against the print request it would go out\nwith (the #84 base: pipeline, printer, filament plan, plate, options).\n\nReads only: nothing is uploaded, sliced or queued. An input that cannot be read\n(no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is\nlisted in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.\n\n``detail=simple`` returns the headline and the open findings with their sources and\nfixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,\nignored and ``hidden`` findings with the decision behind each.",
+        "operationId": "post_run_api_v1_analyzers_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalysisRun"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Run the analyzers",
+        "tags": [
+          "analyzers"
+        ]
+      }
+    },
     "/api/v1/fonts": {
       "get": {
         "operationId": "get_fonts_api_v1_fonts_get",
