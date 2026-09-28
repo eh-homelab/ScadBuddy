@@ -132,11 +132,11 @@ def test_the_catalogue_ranks_its_own_image_over_the_preview(paths: DataPaths) ->
 
     origin = catalogue.thumbnail_source(SLUG)
     assert (origin.source, origin.preview_id) == ("preview", "a" * PREVIEW_ID_LENGTH)
-    assert catalogue.thumbnail(SLUG) == b"preview"
+    assert catalogue.thumbnail(SLUG) == (b"preview", "image/png")
 
     catalogue.write_thumbnail(SLUG, b"own")
     assert catalogue.thumbnail_source(SLUG).source == "model"
-    assert catalogue.thumbnail(SLUG) == b"own"
+    assert catalogue.thumbnail(SLUG) == (b"own", "image/png")
     assert store.image(SLUG) is None
 
 

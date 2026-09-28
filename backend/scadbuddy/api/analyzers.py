@@ -57,9 +57,11 @@ from scadbuddy.api.deps import (
     OptionalDecisionsDep,
     OutputsDep,
     SettingsStoreDep,
+    UploadsDep,
 )
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.outputs import require_output
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.events import AnalyzerDecisionEvent, EventBus, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue
@@ -247,8 +249,19 @@ async def _context(
     outputs: OutputStore,
     catalogue: Catalogue,
     store: SettingsStore,
+    uploads: BambuddyUploadStore,
 ) -> AnalysisContext:
     slug, params, meta = await asyncio.to_thread(_subject, target, outputs, catalogue)
+    library_file_id: int | None = None
+    if meta is not None:
+        # Any copy will do: every one is this output's 3MF, and the filament read only
+        # needs the plate's slots. Without a database the analyzers still run, with the
+        # inventory reported unavailable (#461).
+        try:
+            copies = await uploads.for_output(meta.id)
+        except DatabaseRequiredError:
+            copies = []
+        library_file_id = copies[-1].id if copies else None
     return await gather_context(
         outputs=outputs,
         settings=store.load(),
@@ -256,6 +269,7 @@ async def _context(
         params=params,
         request=request,
         meta=meta,
+        library_file_id=library_file_id,
     )
 
 
@@ -347,6 +361,7 @@ def list_analyzers() -> list[AnalyzerInfo]:
 async def post_run(
     body: AnalysisRun,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
     decisions: OptionalDecisionsDep,
@@ -366,7 +381,7 @@ async def post_run(
     Without a database, or with one that cannot be reached, the analyzers still run;
     ``decisions_available`` is false and ``decisions_reason`` says why.
     """
-    context = await _context(body.target, body.request, outputs, catalogue, store)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     if decisions is None:
         return build_report(context, [], detail=body.detail, decisions_unavailable=NO_DATABASE)
     try:
@@ -389,13 +404,14 @@ async def post_run(
 async def post_preview(
     body: FixRequest,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
 ) -> FixPreview:
     """The fix's whole diff, where each line would land, whether it can be applied yet,
     and the fingerprint an apply confirms against (diff, scope, subject and base).
     Changes nothing."""
-    context = await _context(body.target, body.request, outputs, catalogue, store)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
@@ -416,6 +432,7 @@ async def post_preview(
 async def post_apply(
     body: FixApply,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
     decisions: DecisionsDep,
@@ -434,7 +451,7 @@ async def post_apply(
     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
-    context = await _context(body.target, body.request, outputs, catalogue, store)
+    context = await _context(body.target, body.request, outputs, catalogue, store, uploads)
     diagnostic, fix = _find_fix(context, body)
     scope = _fix_scope(context, diagnostic, body.scope)
     if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:

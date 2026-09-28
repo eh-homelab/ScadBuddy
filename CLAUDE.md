@@ -22,7 +22,7 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. Tests marked `requires_postgres` (the render queue's Postgres store) skip
+PATH. Tests marked `requires_postgres` (the render queue's Postgres store and template media's `template_media`) skip
 unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
 CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
@@ -144,6 +144,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.
+  - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
+    `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
+    plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
+    forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
+    redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
+    follows both with the header). Claude Code renames tool-name characters outside
+    `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
+    colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

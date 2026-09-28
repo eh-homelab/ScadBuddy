@@ -24,7 +24,7 @@ function renderPicker(
     <PrintPicker
       open
       slug="name-keychain"
-      output={{ ...output, library_file_id: undefined, pipeline_run_id: undefined }}
+      output={{ ...output, library_files: [], pipeline_run_id: undefined }}
       onClose={vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
@@ -904,8 +904,8 @@ describe('PrintPicker · Plates of a 3MF', () => {
   })
 
   it("drops the previous output's plates while the next output's load", async () => {
-    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
-    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
+    const first = { ...output, id: 'a'.repeat(32), library_files: [] }
+    const second = { ...output, id: 'b'.repeat(32), library_files: [] }
     server.use(
       http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
         if (params.id === second.id) await delay('infinite')

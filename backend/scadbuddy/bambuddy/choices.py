@@ -19,6 +19,7 @@ from scadbuddy.bambuddy.hardware import (
 from scadbuddy.bambuddy.models import PresetRef, Printer, PrinterStatus
 from scadbuddy.bambuddy.pipelines import BED_TYPES, filament_options_for_output
 from scadbuddy.bambuddy.resolver import _SOURCE_ORDER, DEFAULT_BED, TIERS, Tier
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
@@ -94,6 +95,7 @@ def filament_presets_by_size(catalogue: _Catalogue) -> dict[str, list[FilamentPr
 async def choices_for_output(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     *,
@@ -146,7 +148,7 @@ async def choices_for_output(
         or DEFAULT_BED
     )
     filaments = await filament_options_for_output(
-        client, store, meta, settings, printer_id=printer_id
+        client, store, uploads, meta, settings, printer_id=printer_id
     )
     return ChoicesView(
         printer_id=printer_id,
