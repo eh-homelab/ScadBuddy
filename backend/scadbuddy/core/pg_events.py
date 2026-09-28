@@ -60,7 +60,7 @@ connect sends none: nothing could have been missed by subscribers that did not e
 
 The replay log
 --------------
-``events`` (migration 3 in `pg_store.MIGRATIONS`) keeps each published event under a
+``events`` (migration 4 in `pg_store.MIGRATIONS`) keeps each published event under a
 monotonically increasing ``seq``. :meth:`replay` reads the events after a ``seq``,
 oldest first, with a limit, and says whether rows the caller has not seen were
 already pruned. It is pruned by age and by row count

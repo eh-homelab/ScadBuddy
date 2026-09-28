@@ -468,6 +468,36 @@ async def test_a_done_render_s_diagnostics_are_kept_with_the_job(
     assert stored.result is not None and stored.result.diagnostics == [WARNING]
 
 
+async def test_a_failed_render_s_warnings_are_kept_with_the_job(
+    make_queue: QueueFactory,
+) -> None:
+    """#408: a failed render has no result, so its warnings -- say the picture it
+    could not open, the likely reason it drew nothing -- live on the record too."""
+    missing = "OpenSCAD could not open pic.svg"
+
+    async def fail(job: Job) -> tuple[JobResult, list[str]]:
+        raise OpenSCADError("the render produced no geometry", [], warnings=[missing])
+
+    queue = await make_queue(fail)
+    job = await queue.submit("demo", {"n": 1})
+    await queue.join()
+
+    stored = queue.store.read(job.id)
+    assert stored.state == "failed"
+    assert stored.warnings == [missing]
+
+
+async def test_a_done_render_s_warnings_are_kept_with_the_job(make_queue: QueueFactory) -> None:
+    async def render(job: Job) -> tuple[JobResult, list[str]]:
+        return _result().model_copy(update={"warnings": ["a warning"]}), []
+
+    queue = await make_queue(render)
+    job = await queue.submit("demo", {"n": 1})
+    await queue.join()
+
+    assert queue.store.read(job.id).warnings == ["a warning"]
+
+
 def test_the_latest_settled_render_is_the_one_that_finished_last(
     make_store: StoreFactory,
 ) -> None:

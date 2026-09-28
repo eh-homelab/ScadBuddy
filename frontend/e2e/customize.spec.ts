@@ -255,6 +255,16 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('render-notes')).toHaveCount(0)
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
   })
+
+  test('shows a failed render the file it could not open (#408)', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+
+    await page.getByRole('textbox', { name: 'Name on the tag' }).fill('nosvg')
+    await expect(page.getByTestId('render-log')).toContainText('Current top level object is empty')
+    const warnings = page.getByRole('region', { name: 'Render warnings' })
+    await expect(warnings).toHaveText(/From ScadBuddy\s*OpenSCAD could not open pic\.svg/)
+  })
 })
 
 test.describe('font picker', () => {
