@@ -4,7 +4,7 @@ import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
-import { downloadBlob } from '../lib/embed'
+import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
@@ -133,8 +133,8 @@ export function ActionBar({
         if (!response.ok) throw new Error(`HTTP ${response.status}`)
         return await response.blob()
       }, `${slug}-${output.id}.3mf`)
-    } catch {
-      setError('Download failed.')
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : 'Download failed.')
     } finally {
       setDownloading(false)
     }

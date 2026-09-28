@@ -23,6 +23,28 @@ test.describe('downloads', () => {
   })
 
   test('downloads the 3MF inside Bambuddy’s sandboxed frame', async ({ page, baseURL }) => {
+    const frame = await framed(page, baseURL)
+    await generate(frame)
+
+    const popup = page.context().waitForEvent('page')
+    await frame.getByRole('button', { name: 'Download 3MF' }).click()
+    const download = await (await popup).waitForEvent('download')
+    expect(download.suggestedFilename()).toMatch(/^name-keychain-[0-9a-f]+\.3mf$/)
+  })
+
+  test('says to allow pop-ups when the frame’s popup is blocked', async ({ page, baseURL }) => {
+    const frame = await framed(page, baseURL)
+    await generate(frame)
+    // A popup blocker: window.open answers null.
+    const app = page.frames().find((candidate) => candidate.url().includes('/m/name-keychain'))
+    if (!app) throw new Error('the ScadBuddy frame is not loaded')
+    await app.evaluate('window.open = () => null')
+
+    await frame.getByRole('button', { name: 'Download 3MF' }).click()
+    await expect(frame.getByRole('alert')).toContainText('Allow pop-ups')
+  })
+
+  async function framed(page: Page, baseURL: string | undefined): Promise<FrameLocator> {
     const host = new URL('/mockServiceWorker.js', baseURL)
     host.hostname = host.hostname === 'localhost' ? '127.0.0.1' : 'localhost'
     await page.goto(host.href)
@@ -31,12 +53,6 @@ test.describe('downloads', () => {
         sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-popups-to-escape-sandbox"
         style="position: fixed; inset: 0; width: 100%; height: 100%; border: 0"></iframe>`,
     )
-    const frame = page.frameLocator('iframe')
-    await generate(frame)
-
-    const popup = page.context().waitForEvent('page')
-    await frame.getByRole('button', { name: 'Download 3MF' }).click()
-    const download = await (await popup).waitForEvent('download')
-    expect(download.suggestedFilename()).toMatch(/^name-keychain-[0-9a-f]+\.3mf$/)
-  })
+    return page.frameLocator('iframe')
+  }
 })

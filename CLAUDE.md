@@ -238,6 +238,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `allow-popups-to-escape-sandbox` and is same-origin via `allow-same-origin`, so it can
   use the frame's blob URL), fetches the file as a blob, and clicks the download anchor
   in the popup. The popup is opened before the fetch, while the click still permits it.
+  A blocked popup is an error the user sees (`DownloadBlockedError`: allow pop-ups),
+  never a fallback to the frame's own anchor, which would fail silently.
   `e2e/downloads.spec.ts` checks this in a replica of the frame.
 - Deep links to Bambuddy use `window.open(..., '_blank')` when embedded.
 - Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the

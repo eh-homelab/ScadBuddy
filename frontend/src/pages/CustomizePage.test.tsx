@@ -232,6 +232,25 @@ describe('CustomizePage', () => {
     expect(screen.getByRole('button', { name: 'Send to Bambuddy' })).toBeEnabled()
   })
 
+  it('says to allow pop-ups when the download popup is blocked inside Bambuddy (#612)', async () => {
+    const top = window.top
+    Object.defineProperty(window, 'top', { value: {}, configurable: true })
+    const open = vi.spyOn(window, 'open').mockReturnValue(null)
+    try {
+      const { user } = render()
+      await firstRender()
+      await waitFor(() => expect(screen.getByTestId('generate')).toBeEnabled())
+      await user.click(screen.getByTestId('generate'))
+      await waitFor(() => expect(screen.getByText(/^Saved /)).toBeInTheDocument())
+
+      await user.click(screen.getByRole('button', { name: 'Download 3MF' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent(/Allow pop-ups/)
+    } finally {
+      open.mockRestore()
+      Object.defineProperty(window, 'top', { value: top, configurable: true })
+    }
+  })
+
   it('sends a generated output and links to the Bambuddy queue', async () => {
     const { user } = render()
     await firstRender()
