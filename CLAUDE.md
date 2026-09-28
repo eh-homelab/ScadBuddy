@@ -131,9 +131,19 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `render_worker`, `make_current`, `drained`), `models.py` (what crosses the history).
   `render_key` coalesces identical *jobs*; `piece_key` dedupes identical *openscad
   renders* across jobs. Never swap them.
-- `backend/scadbuddy/store/` — the blob store: the directory-shaped `BlobStore`
-  Protocol, `LocalBlobStore` (a piece in `data/blobs/<piece_key>/`), `BlobRefs` (the
-  `blob_refs` table that keeps a blob alive) and `sweep_blobs` (the grace-period sweep).
+- `backend/scadbuddy/store/` — the blob store (spec 2026-09-27 §6):
+  - phase 1's directory-shaped `BlobStore` Protocol, `LocalBlobStore` (a piece in
+    `data/blobs/<piece_key>/`), `BlobRefs` (the `blob_refs` table that keeps a blob
+    alive) and `sweep_blobs` (the grace-period sweep);
+  - §6.2's byte `ContentStore` (`content.py`) over a backend: `local.py`, or
+    `bambuddy.py` (`<inbox>/<Template>/Work/`; deletes only in `Work/`). Its index is
+    `store_blobs` (`index.py`);
+  - the per-process cache (`cache.py`: `fetch`/`publish`, CAS on the sha);
+  - `snapshots.py`, `fonts.py`, `assets.py`;
+  - `factory.py`, which reads `store_backend` (a stored setting) at start.
+
+  `python -m scadbuddy.store.verify_bambuddy` re-measures §6.3; it has not yet been
+  run against a live Bambuddy (`tests/bambuddy/recordings/README.md`).
 - `backend/scadbuddy/worker.py` — `python -m scadbuddy.worker`: the render worker,
   `/healthz` and `/metrics` on 9090; makes its build current at start and drains its
   pinned workflows on SIGTERM. `run_inprocess_worker` is the API's

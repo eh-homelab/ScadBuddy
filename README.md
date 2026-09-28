@@ -356,6 +356,59 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   `eh-homelab/clusters` (clusters#1454). `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` (the
   API hosting the worker) is for dev and tests only.
 
+### Blob store and render workers (#426)
+
+Everything a render reads or writes (rendered pieces, template snapshots, uploaded SVGs
+and PNGs, downloaded fonts) lives in the blob store. Settings → **Blob store** picks
+where. The choice is read at start, so it takes effect only when the API and the
+workers restart.
+
+- **`local`** (the default): this server's volume, phase 1's topology. There is **one**
+  render worker, and it shares the API's `/data` volume, as described under "Render
+  worker (#424)" above.
+- **`bambuddy`**: Bambuddy's library. Files go to `<Library folder>/<Template>/Work/`,
+  and ScadBuddy deletes only inside a `Work/` folder. To switch:
+  1. Set Bambuddy's URL and a **Library folder** (the store's inbox) in Settings.
+  2. In Bambuddy, create a key with *Manage Library* only, and paste it into Settings as
+     **Render key**.
+  3. Choose **Bambuddy library** under **Blob store**, and restart the API and the
+     workers.
+
+  The workers then need no shared volume:
+  - give each one an `emptyDir` at `/data`, which holds its piece cache, bounded by
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` and evicted least recently used every
+    `SCADBUDDY_ASSET_SWEEP_INTERVAL`;
+  - scale the Deployment freely.
+
+  `/healthz` on the API and on each worker (port 9090) carries a `store` object:
+  - `multi_worker: true` says more than one replica is safe;
+  - `backend` differs from `configured_backend` until the restart;
+  - `render_key_fallback: true` means no render key is stored, so the workers hold the
+    full Bambuddy key and template code can print. The Settings page shows the same
+    warning.
+
+  If a `bambuddy` store cannot start (no URL or folder), see "Recovering an unready
+  blob store" below.
+
+**Environment:**
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SCADBUDDY_STORE_BACKEND` | `local` | Seeds the stored **Blob store** setting. A value saved in Settings wins. |
+| `SCADBUDDY_BAMBUDDY_RENDER_API_KEY` | none | Seeds the stored **Render key**. It is stored like `SCADBUDDY_BAMBUDDY_API_KEY` and never returned by the API. |
+| `SCADBUDDY_STORE_MAX_TOTAL_BYTES` | 50 GiB | Past this, a new blob is refused (a re-put of one already stored never is). `0` is no limit. |
+| `SCADBUDDY_STORE_MAX_COUNT` | 200000 | The same, counted in blobs. |
+| `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB | Each process's local piece cache on the `bambuddy` store. |
+
+The caps are checked, not reserved, so concurrent puts can overshoot them by one blob
+each. **GET `/api/v1/store/usage`** and the Settings page's **Store** section show the
+count and size against them.
+
+**Metrics:**
+- `scadbuddy_store_*`: `operations_total{op,outcome}`, `blobs`, `bytes{kind}`,
+  `max_blobs`, `max_bytes` and `render_key_fallback`;
+- `scadbuddy_worker_cache_*`: `total{result}` (hit or miss) and `bytes`, per process.
+
 ### Recovering an unready blob store
 
 With `store_backend` set to `bambuddy`, the API and the render worker refuse to start

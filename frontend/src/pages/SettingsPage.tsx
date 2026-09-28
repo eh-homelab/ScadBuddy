@@ -567,8 +567,8 @@ export function SettingsPage() {
                 </dd>
               </dl>
               <p className="mt-1.5 text-[12px] text-muted">
-                Where is the store this process uses; it moves to the Blob store choice above at
-                its next restart, so the two can differ until then.
+                The Where row is the store this process uses; it moves to the Blob store choice
+                above at its next restart, so the two can differ until then.
               </p>
               <p className="mt-1.5 text-[12px] text-muted">
                 Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded
