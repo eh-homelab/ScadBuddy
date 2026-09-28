@@ -873,7 +873,8 @@ export const handlers = [
       upstream: model.upstream,
       revision:
         upstreamState === 'gone' ? null : (state.versions[model.upstream.id]?.[0]?.commit ?? null),
-      preview: upstreamState === 'update' ? planMerge(slug, model) : null,
+      preview:
+        upstreamState === 'update' || upstreamState === 'dismissed' ? planMerge(slug, model) : null,
     }
     return HttpResponse.json(status)
   }),

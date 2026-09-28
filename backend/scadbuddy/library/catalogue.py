@@ -7,6 +7,7 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -58,6 +59,13 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
+#: A duplicate's staging folder under ``cache/`` (#156, #212).
+DUPLICATE_STAGING_PREFIX = "duplicate-"
+#: Seconds before the boot sweep treats a duplicate's staging as abandoned. A copy
+#: takes seconds, so anything this old is a crash, not another replica's live copy
+#: on a shared ``/data``.
+DUPLICATE_STAGING_MAX_AGE = 3600
+
 #: How many times a merge is worked out again when the template or its upstream
 #: moves between planning and writing it, before it is refused.
 MERGE_ATTEMPTS = 3
@@ -542,7 +550,7 @@ class Catalogue:
                 # no commit; either way there is no revision to copy or to record.
                 raise GitError(f"could not read the current revision of {upstream_id!r}")
         self.paths.cache.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
+        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix=DUPLICATE_STAGING_PREFIX))
         staged = staging / slug
         target = self.paths.model_dir(slug)
         try:
@@ -600,6 +608,14 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
+        # And any an earlier duplicate crashed out of, once it is old enough not to
+        # be another replica's copy in flight: a single replica that crashed and
+        # restarted inside the hour clears it here rather than never. Best-effort:
+        # the duplicate is committed, so a failure here is logged, not reported.
+        try:
+            self.sweep_duplicate_staging()
+        except OSError:
+            logger.exception("could not sweep duplicate staging")
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
@@ -749,8 +765,7 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._replace_source(slug, source)
-            self._commit(message or f"Edit {slug} source", slug)
+            self._write_edit(slug, source, message or f"Edit {slug} source")
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -763,6 +778,35 @@ class Catalogue:
 
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
+
+    def _write_edit(self, slug: str, source: str, message: str) -> None:
+        """A plain edit: written under the history's write lock, with its commit (#370),
+        so it cannot land between another write's check and its write -- a merge's
+        ``still_applies``, say -- nor be overwritten by one before it is committed.
+
+        Failures as :meth:`_commit`: a failed commit after the write is logged, not
+        raised. When the lock itself cannot be had, the edit is written without it
+        and only its revision is lost, as it always was.
+        """
+        if self.history is None or not self.history.available:
+            self._replace_source(slug, source)
+            return
+        started = written = False
+
+        def write() -> None:
+            nonlocal started, written
+            started = True
+            self._replace_source(slug, source)
+            written = True
+
+        try:
+            self.history.commit(message, slug, prepare=write)
+        except (GitError, OSError):
+            if started and not written:
+                raise
+            if not started:
+                self._replace_source(slug, source)
+            logger.exception("could not record a revision", extra={"revision_message": message})
 
     def _replace_source(self, slug: str, source: str) -> None:
         """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
@@ -817,7 +861,7 @@ class Catalogue:
     def upstream_status(self, slug: str) -> UpstreamStatus:
         upstream, revision, state = self._upstream_now(slug)
         preview = None
-        if state == "update" and revision is not None:
+        if state in ("update", "dismissed") and revision is not None:
             preview = plan_merge(
                 self._require_history(), slug, self.paths.model_dir(slug), upstream, revision
             ).preview
@@ -966,6 +1010,33 @@ class Catalogue:
         for tombstone in sorted(root.iterdir()):
             if _remove_tree(tombstone):
                 removed.append(tombstone.name)
+        return removed
+
+    def sweep_duplicate_staging(self) -> list[str]:
+        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
+
+        Runs at boot and after each duplicate. Another replica sharing ``/data`` may
+        be mid-copy, so only staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        One that cannot be read or removed is logged and the rest still go.
+        """
+        root = self.paths.cache
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - DUPLICATE_STAGING_MAX_AGE
+        removed: list[str] = []
+        for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception(
+                    "could not read a duplicate's staging", extra={"entry": entry.name}
+                )
+                continue
+            if _remove_tree(entry):
+                removed.append(entry.name)
         return removed
 
     def sweep_orphans(self) -> list[str]:

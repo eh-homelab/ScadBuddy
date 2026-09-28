@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import time
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -13,7 +16,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.catalogue import Catalogue, ModelMeta
+from scadbuddy.library.catalogue import (
+    DUPLICATE_STAGING_MAX_AGE,
+    DUPLICATE_STAGING_PREFIX,
+    Catalogue,
+    ModelMeta,
+)
 from scadbuddy.library.history import GitTimeoutError, ModelHistory
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -165,7 +173,7 @@ def test_derived_state_is_not_copied(client: TestClient, paths: DataPaths) -> No
     assert not (paths.model_revisions / "my-keychain").exists()
     assert client.get("/api/v1/models/my-keychain/outputs").json() == []
     assert (paths.outputs / BUILTIN / "deadbeef").is_dir()
-    assert not any(path.name.startswith("duplicate-") for path in paths.cache.iterdir())
+    assert not any(path.name.startswith(DUPLICATE_STAGING_PREFIX) for path in paths.cache.iterdir())
 
 
 def test_a_name_is_refused_as_on_create(client: TestClient, model: str) -> None:
@@ -205,7 +213,7 @@ def test_a_duplicate_is_the_revision_it_records_as_base(
 
 
 def _no_staging_left(paths: DataPaths) -> bool:
-    return not any(path.name.startswith("duplicate-") for path in paths.cache.iterdir())
+    return not any(path.name.startswith(DUPLICATE_STAGING_PREFIX) for path in paths.cache.iterdir())
 
 
 def _interrupt_first_claim(monkeypatch: pytest.MonkeyPatch, interloper: Any) -> None:
@@ -301,6 +309,108 @@ def test_a_git_failure_reading_the_upstream_is_a_problem_and_leaves_nothing(
     # The slug is still free.
     monkeypatch.undo()
     _duplicate(client, BUILTIN, "Copy")
+
+
+def test_a_copy_deleted_right_after_its_commit_is_a_404_naming_the_copy(
+    client: TestClient, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The upstream is still there: the 404 names the copy that went, not it (#215)."""
+    commit = Catalogue._commit
+
+    def commit_then_delete(self: Catalogue, message: str, *slugs: str) -> str | None:
+        revision = commit(self, message, *slugs)
+        if message.startswith("Duplicate "):
+            shutil.rmtree(paths.model_dir("copy"))
+        return revision
+
+    monkeypatch.setattr(Catalogue, "_commit", commit_then_delete)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 404, response.text
+    assert response.json()["detail"] == "no model named 'copy'"
+    assert client.get(f"/api/v1/models/{BUILTIN}").status_code == 200
+
+
+def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataPaths) -> None:
+    """A duplicate killed mid-copy leaves its staging folder; the next boot clears it,
+    and leaves the rest of the cache alone (#212)."""
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}dead" / "copy"
+    staged.mkdir(parents=True)
+    (staged / "model.scad").write_text(SOURCE, encoding="utf-8")
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(staged.parent, (old, old))
+    kept = paths.cache / "keep-me"
+    kept.mkdir()
+
+    with TestClient(app):
+        pass
+
+    assert _no_staging_left(paths)
+    assert kept.is_dir()
+
+
+def test_a_duplicate_sweeps_staging_an_earlier_one_crashed_out_of(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """A single replica that crashed and restarted inside the hour still gets it
+    cleared, by the next duplicate once it is old enough."""
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}dead" / "copy"
+    staged.mkdir(parents=True)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(staged.parent, (old, old))
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+    assert _no_staging_left(paths)
+
+
+def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The copy is committed; tidying up after it is best-effort."""
+
+    def sweep(self: Catalogue) -> list[str]:
+        raise PermissionError("cache unreadable")
+
+    monkeypatch.setattr(Catalogue, "sweep_duplicate_staging", sweep)
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+
+
+def test_a_staging_the_sweep_cannot_read_does_not_keep_the_rest(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue = Catalogue(paths)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    for name in ("a", "b"):
+        staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
+        staged.mkdir(parents=True)
+        os.utime(staged, (old, old))
+    real_stat = Path.stat
+
+    def stat(self: Path, *args: Any, **kwargs: Any) -> os.stat_result:
+        if self.name == f"{DUPLICATE_STAGING_PREFIX}a":
+            raise PermissionError("unreadable")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+    assert catalogue.sweep_duplicate_staging() == [f"{DUPLICATE_STAGING_PREFIX}b"]
+
+
+def test_the_boot_leaves_a_fresh_duplicate_staging_alone(app: FastAPI, paths: DataPaths) -> None:
+    """Another replica sharing /data may be mid-copy into it."""
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}live" / "copy"
+    staged.mkdir(parents=True)
+
+    with TestClient(app):
+        pass
+
+    assert staged.is_dir()
 
 
 def test_a_git_failure_reading_the_base_fails_the_duplicate(
