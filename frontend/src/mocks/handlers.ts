@@ -2185,6 +2185,14 @@ export const handlers = [
       suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
         slots.some((slot) => slot.slot_id === choice.slot_id),
       ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
