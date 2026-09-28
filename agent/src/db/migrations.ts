@@ -26,9 +26,9 @@ import type { Sql } from 'postgres'
 //     sealed by src/secrets.ts). Tokens that are only ever compared (MCP bearer
 //     tokens, #251) are stored hashed instead, per spec §8.1.
 //
-// Entry 2 is #300's sessions, entry 3 #297's plugin registry. #251's
-// `ai_mcp_tokens` (PR #368) goes after whatever is last on main when it merges
-// (entry 4 now): whichever of the two merges second renumbers its entry.
+// Entry 2 is #300's sessions, entry 3 #297's plugin registry. Open PRs that
+// add an entry (#471's `ai_approvals`, #251's `ai_mcp_tokens`) append after
+// whatever is last on main when they merge: whichever merges second renumbers.
 
 /** `pg_advisory_xact_lock` key ("SCADAGNT" in ASCII); distinct from the backend's "SCADBDDY". */
 export const MIGRATION_LOCK = 0x5343_4144_4147_4e54n

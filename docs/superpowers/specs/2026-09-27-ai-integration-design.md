@@ -110,6 +110,31 @@ dependency of `agent/`.
   tools in the first turn. The permission seam applies to them as to in-process tools: a
   `read` tool runs, an unlisted one is denied as needing approval and never reaches the
   server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  - **Tool-name normalisation.** Claude Code names an MCP tool
+    `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    `files_list` therefore collide on one name, and a name with a space or a dot cannot be
+    matched literally. The registry now tiers only names in that alphabet, maps disabled
+    names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
+    `harnessToolName`, `agent/src/plugins/forwarder.ts`). This is measured end to end in
+    `agent/test/plugins.e2e.test.ts`: `files.delete` is disabled as
+    `mcp__my-memory__files_delete`, the colliding pair is never offered, and a call to
+    the colliding name never reaches the server.
+  - **Redirects and OAuth discovery.** Claude Code's own MCP client follows 30x redirects
+    and a `WWW-Authenticate` `resource_metadata` URL, and sends the configured header
+    there too. The probe showed a 307 to another origin receiving every request with the
+    header, and `resource_metadata="http://169.254.169.254/…"` receiving a GET with it.
+    Claude Code is therefore never given a plugin's URL or secret. A loopback forwarder
+    in the agent (`agent/src/plugins/forwarder.ts`):
+    - connects to the egress-checked address;
+    - refuses redirects;
+    - turns a 401 into a 502;
+    - adds the header itself.
+
+    The e2e test measures that a redirecting plugin is not `connected` and that the
+    redirect target and metadata URL are never contacted. That supersedes the `${VAR}`
+    header mechanism above.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]

@@ -343,15 +343,29 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   credential's environment.
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
-  no files) and managed through `/api/v1/ai/plugins` (below). Each enabled
-  plugin is given to every harness run as a Streamable HTTP MCP server named
-  after the plugin, so its tools reach the model as `mcp__<name>__<tool>`.
-  Rules (`agent/src/plugins/registry.ts`):
+  no files) and managed through `/api/v1/ai/plugins` (below). The session
+  manager takes enabled plugins for each turn (`remotePlugins`), as
+  Streamable HTTP MCP servers named after the plugin, so their tools reach
+  the model as `mcp__<name>__<tool>`. **Not live yet:** `main.ts` builds no
+  `SessionManager` on this branch (#471 adds one); until that wiring passes
+  `forwardForRun(loadEnabledPlugins(…))`, only the connection test reaches a
+  plugin. Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
     host resolves to is loopback. Link-local and cloud metadata hosts are
-    refused, as for gateway base URLs. It is checked at save, at test, and
-    again each time a run loads the plugin. No query string, no credentials in
-    the URL, no `$`.
+    refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
+    for gateway base URLs. It is checked at save, at test, and again each
+    time a run loads the plugin. No query string, no credentials in the URL,
+    no `$`.
+  - **Claude Code never gets the plugin's URL or secret.** Each run registers
+    its plugins with a loopback forwarder in the agent
+    (`agent/src/plugins/forwarder.ts`) and hands Claude Code
+    `http://127.0.0.1:<port>/p/<random token>`. The forwarder connects to the
+    address the check passed (no second DNS lookup; TLS still verified
+    against the hostname), follows no redirect, turns a 401 into a failure
+    instead of starting OAuth discovery, and adds the auth header itself.
+    This matters because Claude Code's own MCP client follows redirects and
+    `WWW-Authenticate` `resource_metadata` URLs with the configured header.
+    An egress NetworkPolicy on the pod is still the real boundary.
   - An optional auth header (name in the clear, value sealed with the same
     key-encryption key as the Claude credential and bound to the plugin's
     name, URL and header name). Changing the URL or the header name needs the
@@ -362,15 +376,22 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     `disabled_tools` removes tools from the model's view entirely. MCP
     annotations such as `readOnlyHint` are only shown as a suggestion by the
     test; they never change a tier.
-  - New plugins start disabled. Run the test, review the tools, then enable.
+  - Claude Code renames every character outside `[A-Za-z0-9_-]` in a tool
+    name to `_` (`files.list` becomes `mcp__<name>__files_list`). So only
+    tools already named in that alphabet can take a tier; others stay
+    `outward` (or disable them, by their real name). When two tools end up
+    with the same name, both are hidden from the model, and the test marks
+    them `collision`.
+  - New plugins start disabled (`enabled: true` on create is refused). Run
+    the test, review the tools, then enable.
 
   | Route | |
   |---|---|
   | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
-  | `POST /api/v1/ai/plugins` | register: `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `enabled`, `tool_tiers`, `disabled_tools` |
-  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`; `secret: null` removes the header |
+  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `tool_tiers`, `disabled_tools` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
   | `DELETE /api/v1/ai/plugins/{name}` | remove |
-  | `POST /api/v1/ai/plugins/{name}/test` | connect, one `tools/list` (10 s timeout, no redirects), and report each tool with its tier |
+  | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
 
   Writes and the test go through the same guard as credential writes (next
   bullet). A generic example against a loopback peer (a shell in the pod, or
