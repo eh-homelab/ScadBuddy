@@ -488,6 +488,50 @@ def test_a_merge_the_template_keeps_moving_under_is_refused(
     assert upstream is not None and upstream.base == base
 
 
+def test_an_edit_racing_a_merges_write_waits_for_it(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#370: a plain edit arriving after a merge's staleness check but before its
+    write must not land in between, where the merge would overwrite it."""
+    catalogue = _racing(paths)
+    history = catalogue.history
+    assert history is not None
+    edited = SOURCE.replace("hole = 3;", "hole = 5;")
+    replace = Catalogue._replace_source
+    edit_written = threading.Event()
+
+    def watched_replace(self: Catalogue, slug: str, source: str) -> None:
+        replace(self, slug, source)
+        if source == edited:
+            edit_written.set()
+
+    monkeypatch.setattr(Catalogue, "_replace_source", watched_replace)
+    still_applies = MergePlan.still_applies
+    edit = threading.Thread(target=lambda: catalogue.write_source("copy", edited))
+
+    # The merge holds the write lock from here to its commit. An edit written
+    # without it lands now, and the merge's write then clobbers it; one written
+    # under it cannot land before the merge's commit, so this wait times out.
+    def check_then_edit(self: MergePlan, directory: Path) -> bool:
+        applies = still_applies(self, directory)
+        edit.start()
+        edit_written.wait(timeout=1)
+        return applies
+
+    monkeypatch.setattr(MergePlan, "still_applies", check_then_edit)
+
+    _, plan = catalogue.merge_upstream("copy")
+    edit.join()
+
+    assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edited
+    assert history.show("HEAD", "copy/model.scad").decode() == edited
+    assert [revision.message for revision in history.log("copy")][:2] == [
+        "Edit copy source",
+        "Merge keychain into copy",
+    ]
+    assert plan.preview.merged != edited
+
+
 # ── #179's details through an upstream merge ─────────────────────────────────
 
 
