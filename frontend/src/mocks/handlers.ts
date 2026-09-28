@@ -2169,12 +2169,13 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
-    // #480 — like the server, a later plate uses only some of the slots (here plate N
-    // uses slot N), and `all_plates` answers with the union of every plate's slots.
-    const plateId = Number(search.get('plate_id') ?? 1)
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read.
+    const plateId = Math.max(1, Number(search.get('plate_id') ?? 1))
     const every = fixtures.filamentOptions.slots ?? []
     const slots =
-      search.get('all_plates') === 'true' || plateId <= 1
+      search.get('all_plates') === 'true'
         ? every
         : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({

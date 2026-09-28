@@ -37,6 +37,7 @@ changes what a reading means:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Sequence
 from typing import Literal
@@ -549,7 +550,8 @@ async def gather_plate_options(
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
     The spools, assignments and printer are the same for every plate, so they are read
-    once; only each plate's slots are read per plate (#480)."""
+    once; only each plate's slots are read per plate (#480), concurrently. A failed
+    read raises the first failing plate's error, as reading them in turn would."""
     spools = await client.spools()
     assignments = await client.spool_assignments()
 
@@ -559,18 +561,28 @@ async def gather_plate_options(
         printer = await client.printer(printer_id)
         slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
+    answers = await asyncio.gather(
+        *(
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            for plate in plate_ids
+        ),
+        return_exceptions=True,
+    )
+    per_plate: list[list[SlotNeed]] = []
+    for answer in answers:
+        if isinstance(answer, BaseException):
+            raise answer
+        per_plate.append(answer)
     return [
         build_options(
             library_file_id=library_file_id,
             spools=spools,
             assignments=assignments,
-            requirements=await _requirements(
-                client, library_file_id, plate, fallback_colours, own_colours
-            ),
+            requirements=requirements,
             printer=printer,
             slot_materials=slot_materials,
         )
-        for plate in plate_ids
+        for requirements in per_plate
     ]
 
 

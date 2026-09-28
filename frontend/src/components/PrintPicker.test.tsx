@@ -859,6 +859,31 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(bodies[0]).toMatchObject({ all_plates: true, plate_id: 1 })
   })
 
+  it('reads every plate for all plates, not plate 1 alone', async () => {
+    // #480: the default mock gives plate N only slot N and `all_plates` the union, so a
+    // read that dropped `all_plates` would come back with slot 1 alone.
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const reads = watch('GET', '/filaments')
+    const { user } = renderPicker()
+    await loaded()
+    const plates = await screen.findByTestId('plate-choice')
+
+    await user.click(within(plates).getByRole('radio', { name: /Plate 2/ }))
+    await waitFor(() => expect(screen.queryByTestId('filament-slot-1')).not.toBeInTheDocument())
+    await user.click(within(plates).getByRole('radio', { name: 'All plates' }))
+
+    expect(await screen.findByTestId('filament-slot-1')).toBeInTheDocument()
+    expect(screen.getByTestId('filament-slot-2')).toBeInTheDocument()
+    expect(reads.urls.at(-1)).toContain('all_plates=true')
+  })
+
   it('offers a row for a slot only a later plate uses when printing all plates', async () => {
     // Final review 1 / spec §2 step 1: plate 1 uses only slot 1, so the choices read
     // carries one row; "All plates" reads every plate's slots and slot 2 gets a spool.
