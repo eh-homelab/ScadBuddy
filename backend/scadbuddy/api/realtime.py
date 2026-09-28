@@ -34,11 +34,13 @@ Resume after a reconnect is the same move: the client resubscribes and re-reads 
 
 Security
 --------
-- ``Origin`` must be the configured public URL's origin or a loopback origin. An
-  allowlist, not "Origin equals Host": under DNS rebinding the attacker's page sends
-  its own name in both (the same reasoning as ``agent/src/http/origins.ts``). A frame
-  with no ``Origin`` is not from a browser page and is as trusted as a REST call;
-  the backend has no auth today (spec §4.3).
+- ``Origin`` must be the configured public URL's origin, one of
+  ``SCADBUDDY_ALLOWED_ORIGINS`` (the other hostnames the same deployment answers on,
+  e.g. the LAN host beside an SSO proxy), or a loopback origin. An allowlist, not
+  "Origin equals Host": under DNS rebinding the attacker's page sends its own name
+  in both (the same reasoning as ``agent/src/http/origins.ts``). A frame with no
+  ``Origin`` is not from a browser page and is as trusted as a REST call; the
+  backend has no auth today (spec §4.3).
 - Topics are authorised as their REST routes are: everything the UI can GET, it may
   follow.
 - Per-connection caps on topics and on inbound frame rate, and a cap on open sockets
@@ -53,7 +55,7 @@ import json
 import logging
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from typing import Any, assert_never
 from urllib.parse import urlsplit
 
@@ -180,7 +182,9 @@ def _origin(value: str) -> str | None:
     return f"{parts.scheme}://{host}" + (f":{port}" if port and port != default else "")
 
 
-def origin_allowed(origin: str | None, public_url: str | None) -> bool:
+def origin_allowed(
+    origin: str | None, public_url: str | None, allowed_origins: Iterable[str] = ()
+) -> bool:
     if origin is None:
         return True
     normalised = _origin(origin)
@@ -188,7 +192,10 @@ def origin_allowed(origin: str | None, public_url: str | None) -> bool:
         return False
     if urlsplit(normalised).hostname in LOOPBACK_HOSTS:
         return True
-    return public_url is not None and normalised == _origin(public_url)
+    candidates = [public_url, *allowed_origins]
+    return any(
+        candidate is not None and normalised == _origin(candidate) for candidate in candidates
+    )
 
 
 class RateLimit:
@@ -300,8 +307,14 @@ async def _read(websocket: WebSocket, topics: set[str], send: Send) -> None:
 async def realtime(websocket: WebSocket, state: StateDep) -> None:
     origin = websocket.headers.get("origin")
     public_url = await asyncio.to_thread(lambda: state.settings_store.load().public_url)
-    if not origin_allowed(origin, public_url):
-        logger.warning("refused a realtime socket from origin %r", origin)
+    if not origin_allowed(origin, public_url, state.settings.allowed_origin_list):
+        logger.warning(
+            "refused a realtime socket from origin %r: not the public URL's origin (%r) "
+            "and not in SCADBUDDY_ALLOWED_ORIGINS (%r)",
+            origin,
+            public_url,
+            state.settings.allowed_origins,
+        )
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
     # No await between the check and the acquire, so nothing can take the permit in

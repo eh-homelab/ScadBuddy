@@ -178,6 +178,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       await expect(prepare({ ...principalC, id: 'token:d' })).rejects.toThrow('too many actions')
     })
 
+    it('an evicted action leaves no pending approval behind, and an action outlives a restart', async () => {
+      const first = await prepare(principalA, { output_id: '0'.repeat(32) })
+      const kept = await prepare(principalA, { output_id: '1'.repeat(32) })
+      for (let i = 2; i < 4; i++) await prepare(principalA, { output_id: `${i}`.repeat(32) })
+      // The UI no longer offers the evicted one, and it cannot be decided or confirmed.
+      expect((await approvals.list(browser, { pending: true })).map((a) => a.id)).not.toContain(first.id)
+      await expect(approvals.decide(browser, first.id, true)).rejects.toBeDefined()
+      const evicted = await actions.claim(first.id, principalA, { output_id: '0'.repeat(32) })
+      expect(evicted.status === 'refused' && evicted.reason).toContain('cancelled')
+      // Nothing is held in memory: a new store on the same table (a restarted
+      // process) confirms what the old one prepared.
+      await approvals.decide(browser, kept.id, true)
+      const restarted = new ApprovalActions(approvals, { perPrincipal: 3, total: 5 })
+      expect(await restarted.claim(kept.id, principalA, { output_id: '1'.repeat(32) })).toMatchObject({
+        status: 'approved',
+      })
+    })
+
     it('holds both bounds under concurrent prepares (one transaction under an advisory lock)', async () => {
       const pendingOf = async (id?: string) => {
         const [row] = await db.sql<{ n: number }[]>`

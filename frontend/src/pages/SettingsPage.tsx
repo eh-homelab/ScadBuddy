@@ -7,8 +7,12 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import type { McpAuthMode } from '../api/mcpTokens'
+import { McpAuthSection } from '../components/McpAuthSection'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -67,6 +71,7 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
+  const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -542,7 +547,12 @@ export function SettingsPage() {
         {/* Applied at once, not part of the saved form (#251). The agent service serves
             these routes, so the section shows only where the assistant would: hidden in
             a production build until the service is deployed and routed. */}
-        {ai.available && <McpTokensSection />}
+        {ai.available && (
+          <>
+            <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
+            <McpTokensSection authMode={mcpAuthMode} />
+          </>
+        )}
 
         {ai.available && (
           <section className="mt-4 rounded-[6px] border border-line bg-surface">
@@ -622,6 +632,18 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Applied as you go, not by Save changes: each action is its own request. */}
+        {ai.available && (
+          <div className="mt-8">
+            <h2 className="text-[15px] font-semibold tracking-tight">Assistant plugins</h2>
+            <p className="mt-0.5 text-[13px] text-muted">
+              What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            </p>
+            <PluginPackagesPanel />
+            <RemotePluginsPanel />
+          </div>
+        )}
       </div>
     </div>
   )

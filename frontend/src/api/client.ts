@@ -57,7 +57,13 @@ import type {
   UrlImport,
   VersionDiff,
 } from './types'
-import type { McpTokenCreate, McpTokenList, MintedMcpToken } from './mcpTokens'
+import type {
+  McpAuthSetting,
+  McpAuthUpdate,
+  McpTokenCreate,
+  McpTokenList,
+  MintedMcpToken,
+} from './mcpTokens'
 
 export const API_BASE = '/api/v1'
 
@@ -99,7 +105,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -125,41 +131,140 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  * (`GET /models/{slug}/readme`, text/markdown).
  */
 async function requestText(path: string): Promise<string> {
-  const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
+  const response = await send(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
   if (!response.ok) {
     throw new ApiError(await readProblem(response))
   }
   return await response.text()
 }
 
-async function readProblem(response: Response): Promise<Problem> {
-  try {
-    const body = (await response.json()) as Partial<Problem>
-    // Spread first so the standard members win, but the extensions survive.
-    return {
-      ...body,
-      title: body.title ?? response.statusText,
-      status: body.status ?? response.status,
-      detail: body.detail,
-    }
-  } catch {
-    return { title: response.statusText || 'Request failed', status: response.status }
+/**
+ * The `type` of a problem the client wrote itself because ScadBuddy's server never
+ * described the failure: a proxy's own error page in front of it (Envoy's 504 at 15 s,
+ * Cloudflare's 524 at ~100 s), or no answer at all (#470).
+ */
+export const UNANSWERED = 'urn:scadbuddy:unanswered'
+/** The `type` of the problem for a request the offline browser could not send. */
+export const OFFLINE = 'urn:scadbuddy:offline'
+/**
+ * The backend's problem for a Bambuddy call that timed out, dropped or answered an
+ * error (`bambuddy/errors.py` `UNAVAILABLE_PROBLEM`): the call may have been the
+ * enqueue, and Bambuddy may have done it.
+ */
+export const BAMBUDDY_UNAVAILABLE = 'https://scadbuddy.dev/problems/bambuddy-unavailable'
+
+/**
+ * The failure no problem body explained, said by its status. The detail is what the
+ * person reads; the status stays on the problem, and in the sentence, for a bug report.
+ * Over HTTP/2 there is no status text, so the title falls back to the code.
+ */
+function unansweredProblem(status: number, statusText: string): Problem {
+  const code = `HTTP ${status}`
+  const detail =
+    status === 504 || status === 524 || status === 408
+      ? `The server took too long to answer (${code}).`
+      : status === 502 || status === 503
+        ? `The server is not answering right now (${code}).`
+        : status === 413
+          ? `That is too large for the server to accept (${code}).`
+          : status >= 500
+            ? `The server hit an error it did not describe (${code}).`
+            : `The server refused the request without saying why (${code}).`
+  return { type: UNANSWERED, title: statusText || code, status, detail }
+}
+
+/** A body is a problem when it says something: a `title` or a `detail`. */
+function parsedProblem(body: unknown, status: number, statusText: string): Problem {
+  if (typeof body !== 'object' || body === null) return unansweredProblem(status, statusText)
+  const problem = body as Partial<Problem>
+  if (problem.title === undefined && problem.detail === undefined) {
+    return unansweredProblem(status, statusText)
   }
+  // Spread first so the standard members win, but the extensions survive.
+  return {
+    ...problem,
+    title: problem.title ?? (statusText || `HTTP ${status}`),
+    status: problem.status ?? status,
+    detail: problem.detail,
+  }
+}
+
+async function readProblem(response: Response): Promise<Problem> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return unansweredProblem(response.status, response.statusText)
+  }
+  return parsedProblem(body, response.status, response.statusText)
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
 function xhrProblem(xhr: XMLHttpRequest): Problem {
+  let body: unknown
   try {
-    const body = JSON.parse(xhr.responseText) as Partial<Problem>
-    return {
-      ...body,
-      title: body.title ?? xhr.statusText,
-      status: body.status ?? xhr.status,
-      detail: body.detail,
-    }
+    body = JSON.parse(xhr.responseText)
   } catch {
-    return { title: xhr.statusText || 'Request failed', status: xhr.status }
+    return unansweredProblem(xhr.status, xhr.statusText)
   }
+  return parsedProblem(body, xhr.status, xhr.statusText)
+}
+
+/** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
+async function send(url: string, init?: RequestInit): Promise<Response> {
+  // Read before sending: a connection that goes offline while a long request waits
+  // may already have delivered it, so that is "no answer", not "could not send".
+  const offline = navigator.onLine === false
+  try {
+    return await fetch(url, init)
+  } catch (cause) {
+    if (init?.signal?.aborted) throw cause
+    throw new ApiError(
+      offline
+        ? {
+            type: OFFLINE,
+            title: 'Offline',
+            status: 0,
+            detail: 'This browser is offline, so ScadBuddy could not reach its server.',
+          }
+        : {
+            type: UNANSWERED,
+            title: 'No answer',
+            status: 0,
+            detail:
+              'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+          },
+    )
+  }
+}
+
+/**
+ * Whether a failed request may still have done its work: the server's own answer never
+ * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped; or
+ * the backend's own call to Bambuddy got no answer, which may have been the enqueue.
+ * Any other problem the backend wrote, a 503 (nothing upstream took it) and an offline
+ * browser all mean it did not. For a request with a physical effect (a print), retrying
+ * one of these blind can do it twice. A failed print run (#470) says so itself: its
+ * `may_have_queued` is whether it had tried to queue, which `runPrint` carries over.
+ */
+export function mayHaveRun(error: unknown): boolean {
+  if (!(error instanceof ApiError)) return false
+  if (typeof error.problem.may_have_queued === 'boolean') return error.problem.may_have_queued
+  if (error.problem.type === BAMBUDDY_UNAVAILABLE) return bambuddyUnanswered(error.problem)
+  if (error.problem.type !== UNANSWERED) return false
+  return [0, 502, 504, 524].includes(error.status)
+}
+
+/**
+ * A `bambuddy-unavailable` problem is either a timeout or a dropped connection
+ * (`errors.py` `map_transport`: 504 or 502, no `bambuddy_status`), or a status Bambuddy
+ * answered (`map_response`'s fallback: 502 with `bambuddy_status`). An answer is a "no",
+ * unless it is a proxy's in front of Bambuddy that gave up waiting.
+ */
+function bambuddyUnanswered(problem: Problem): boolean {
+  const answered = problem.bambuddy_status
+  if (typeof answered === 'number') return [502, 504, 524].includes(answered)
+  return problem.status === 502 || problem.status === 504
 }
 
 const seg = encodeURIComponent
@@ -181,16 +286,14 @@ export function newRequestId(): string {
 }
 
 /**
- * The request never got ScadBuddy's own answer: the connection dropped (fetch's
- * `TypeError`), or a proxy in front answered 502/503/504 with a page of its own. The
- * backend's problems always carry a `detail`.
+ * The request never got ScadBuddy's own answer: the connection dropped (`send`'s
+ * status 0), or a proxy in front answered 502/503/504/524 with a page of its own.
  */
 function unanswered(caught: unknown): boolean {
-  if (caught instanceof TypeError) return true
   return (
     caught instanceof ApiError &&
-    caught.problem.detail === undefined &&
-    [502, 503, 504].includes(caught.status)
+    caught.problem.type === UNANSWERED &&
+    [0, 502, 503, 504, 524].includes(caught.status)
   )
 }
 
@@ -205,10 +308,6 @@ async function reattach<T>(attempt: () => Promise<T>): Promise<T> {
     }
   }
 }
-
-/** Appended to a failed run that had already tried to queue (#470). */
-export const MAY_HAVE_QUEUED =
-  "The print may still have been queued: check Bambuddy's queue before printing again."
 
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
@@ -421,8 +520,17 @@ export const api = {
         }
         reject(new ApiError(xhrProblem(xhr)))
       }
+      // Like a dropped `fetch` (`send`): the server never answered, so the upload may
+      // have landed, and `mayHaveRun` says so.
       xhr.onerror = () =>
-        reject(new ApiError({ title: 'The upload failed', status: 0, detail: 'The upload failed' }))
+        reject(
+          new ApiError({
+            type: UNANSWERED,
+            title: 'The upload failed',
+            status: 0,
+            detail: 'The upload failed',
+          }),
+        )
       xhr.onabort = () =>
         reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
       xhr.send(body)
@@ -643,11 +751,10 @@ export const api = {
         type: error?.type,
         title: error?.title ?? 'Print failed',
         status: error?.status ?? 500,
-        // The run had already tried to queue (a queue call that timed out, a later
-        // plate failing after an earlier one was queued, or a run lost while queueing):
-        // another Print is a new print, so say where to look first. The flag alone
-        // decides; the backend's detail never carries this advice itself.
-        detail: run.may_have_queued ? `${detail} ${MAY_HAVE_QUEUED}` : detail,
+        detail,
+        // Whether the run had already tried to queue (a queue call that timed out, a
+        // later plate failing after an earlier one was queued, or a run lost while
+        // queueing): `mayHaveRun` reads it, so the dialog says to check the queue.
         may_have_queued: run.may_have_queued,
       })
     }
@@ -788,4 +895,10 @@ export const api = {
 
   revokeMcpToken: (id: string) =>
     request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+
+  /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
+  getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
+
+  setMcpAuth: (body: McpAuthUpdate) =>
+    request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 }
