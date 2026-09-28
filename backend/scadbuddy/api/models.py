@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -29,6 +30,7 @@ from scadbuddy.api.deps import (
     ChecksDep,
     ConfigDep,
     EventsDep,
+    FetcherDep,
     HistoryDep,
     InstallsDep,
     LibrariesDep,
@@ -37,7 +39,7 @@ from scadbuddy.api.deps import (
     QueueDep,
     SlugPath,
 )
-from scadbuddy.api.library_pins import pinned_at_create
+from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
@@ -63,10 +65,12 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.library.libraries import (
     NAME_PATTERN,
+    CheckoutFetcher,
     LibraryDeclarationError,
     ModelLibrary,
     model_search_path,
     parse_declaration,
+    resolve_search_path,
     search_path,
 )
 from scadbuddy.library.scad import (
@@ -291,6 +295,21 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
     )
 
 
+def _refuse_binary(source: str) -> None:
+    if "\x00" in source:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
+        )
+
+
+def _require_new(catalogue: Catalogue, slug: str) -> None:
+    """A 409 when ``slug`` is taken. Checked by `_create`, and by a create that names
+    libraries before it clones them (#436): a create bound to fail spends no clone."""
+    if catalogue.exists(slug):
+        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+
+
 async def _guard_source(
     source: str,
     *,
@@ -308,11 +327,7 @@ async def _guard_source(
     `decode_source` already rejects binary, and pasted text must not be the way a
     binary blob gets into the models repository, where it breaks the diff route.
     """
-    if "\x00" in source:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
-        )
+    _refuse_binary(source)
     if force:
         return None
     checked = await inspect_source(source, config=config, limit=limit, context=context)
@@ -358,6 +373,7 @@ async def create_model(
     config: ConfigDep,
     checks: ChecksDep,
     events: EventsDep,
+    fetcher: FetcherDep,
     libraries: LibrariesDep,
     installs: InstallsDep,
     checkouts: CheckoutsDep,
@@ -400,8 +416,28 @@ async def create_model(
     if content_type == "application/json":
         try:
             pasted = PastedSource.model_validate(await request.json())
-        except (*_BAD_JSON, ValidationError) as error:
+        except ValidationError as error:
+            details = error.errors()
+            bad_names = [
+                str(detail["input"])
+                for detail in details
+                if detail["loc"][:1] == ("libraries",)
+                and detail["type"] == "string_pattern_mismatch"
+            ]
+            if len(bad_names) == len(details):
+                # A malformed library name reads as the multipart form's does (#437).
+                require_library_names(bad_names)
+            problem = _malformed_body(error)
+            if bad_names:
+                # Other errors too: all of them, with the names listed as #437 lists them.
+                problem.extensions["libraries"] = list(dict.fromkeys(bad_names))
+            raise problem from None
+        except _BAD_JSON as error:
             raise _malformed_body(error) from None
+        # Everything that can fail without the network, before any library is cloned.
+        pasted_slug = _slug_from_name(pasted.name)
+        _require_new(catalogue, pasted_slug)
+        _refuse_binary(pasted.source)
         async with pinned_at_create(
             pasted.libraries,
             ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
@@ -414,7 +450,7 @@ async def create_model(
                 config,
                 checks,
                 events,
-                slug=_slug_from_name(pasted.name),
+                slug=pasted_slug,
                 source=pasted.source,
                 meta=pasted_meta,
                 # Either spelling forces, as the design and the OpenAPI both promise.
@@ -460,6 +496,8 @@ async def create_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the upload needs a filename that yields a slug: {exc}",
         ) from None
+    # Before the parts are read, and so before any library is cloned (#436).
+    _require_new(catalogue, slug)
 
     try:
         source = decode_source(await file.read())
@@ -520,6 +558,7 @@ async def create_model(
             force=force,
             thumbnail=thumbnail_bytes,
             readme=readme_text,
+            fetcher=fetcher,
         )
 
 
@@ -645,13 +684,14 @@ async def _create(
     force: bool,
     thumbnail: bytes | None = None,
     readme: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> ModelRecord:
     """The one path every create takes, whatever carried the source in."""
-    if catalogue.exists(slug):
-        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+    _require_new(catalogue, slug)
     # The pins a dropped model.json carries (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create. A
-    # pin whose checkout is not on this volume is the 409 every render would be.
+    # pin whose checkout is not on this volume is fetched again (#169), and one
+    # that cannot be is the 409 every render would be.
     # One entry per name: the first, as `use <NAME/...>` can only mean one.
     pins: list[ModelLibrary] = []
     for library in meta.libraries:
@@ -661,7 +701,9 @@ async def _create(
     library_path: tuple[Path, ...] = ()
     if pins:
         # A directory check per pin: off the event loop.
-        library_path = await asyncio.to_thread(search_path, catalogue.paths, pins)
+        library_path = await resolve_search_path(
+            fetcher, partial(search_path, catalogue.paths, pins)
+        )
     checked = await _guard_source(
         source, config=replace(config, library_path=library_path), force=force, limit=limit
     )
@@ -752,12 +794,15 @@ async def check_model_source(
     checks: ChecksDep,
     catalogue: CatalogueDep,
     paths: PathsDep,
+    fetcher: FetcherDep,
 ) -> SourceCheck:
     context = paths.model_dir(body.slug) if body.slug and catalogue.exists(body.slug) else None
     if body.slug and context is not None:
         # The model's own libraries, as its render will see them (#93).
         # Off the loop, like every other read of the PVC from an `async def`.
-        library_path = await asyncio.to_thread(model_search_path, paths, body.slug)
+        library_path = await resolve_search_path(
+            fetcher, partial(model_search_path, paths, body.slug)
+        )
         config = replace(config, library_path=library_path)
     try:
         return await unless_the_client_leaves(
@@ -921,6 +966,7 @@ async def put_source(
     config: ConfigDep,
     checks: ChecksDep,
     events: EventsDep,
+    fetcher: FetcherDep,
     force: Annotated[bool, Query(description="Save even when the parse check fails")] = False,
     merge_base: Annotated[
         str | None,
@@ -940,7 +986,7 @@ async def put_source(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             "the source still has conflict markers; resolve every conflict first",
         )
-    library_path = await asyncio.to_thread(model_search_path, paths, slug)
+    library_path = await resolve_search_path(fetcher, partial(model_search_path, paths, slug))
     checked = await _guard_source(
         body.source,
         config=replace(config, library_path=library_path),
@@ -996,9 +1042,10 @@ async def get_schema(
     history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> CustomizerSchema:
     require_model_exists(catalogue, slug)
-    source = await resolve_source(slug, None, paths=paths, history=history)
+    source = await resolve_source(slug, None, paths=paths, history=history, fetcher=fetcher)
     try:
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)

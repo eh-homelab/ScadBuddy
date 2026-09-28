@@ -9,7 +9,7 @@
   },
   "homepage": "https://github.com/eh-homelab/ScadBuddy/tree/main/plugins/scadbuddy",
   "repository": "https://github.com/eh-homelab/ScadBuddy",
-  "license": "MIT",
+  "license": "Apache-2.0",
   "keywords": ["openscad", "3d-printing", "bambuddy", "bambu-lab", "customizer", "mcp"],
   "userConfig": {
     "scadbuddy_url": {

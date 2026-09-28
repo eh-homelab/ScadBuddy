@@ -314,6 +314,21 @@ module tile_border() {
 
 function tile_pos(j) = [(j % cols) * (S + G) + S / 2, -floor(j / cols) * (S + G) - S / 2];
 
+if (T > thickness)
+    echo(str("NOTE: thickness raised from ", thickness, " to ", T, " mm",
+             mag_needs >= edge_round + inlay_d + 1 ? str(" to fit the ", magnet, " mm magnet")
+                                                   : " for the edge rounding and inlay"));
+if (G < gap)
+    echo(str("NOTE: gap reduced from ", gap, " to ", G, " mm to fit ", n, " tiles on the plate"));
+// Two reasons the border moves: the letter needs room (narrowed or moved
+// out), or the edge rounding needs the border kept off it (moved in).
+border_squeezed = has_border && (bw < border_width || inset < inset_req - 1e-6);
+if (border_squeezed)
+    echo(str("NOTE: border set to ", bw, " mm wide, ", round(inset * 100) / 100,
+             " mm from the edge, to leave room for the letter"));
+else if (has_border && inset > border_inset + 1e-6)
+    echo(str("NOTE: border moved in to ", round(inset * 100) / 100,
+             " mm from the edge, clear of the ", er, " mm edge rounding"));
 assert(room() >= 0.35 * base_r, str("no room for a letter: ", room(), " mm"));
 echo(str("SB_TILES n=", n, " cols=", cols, " rows=", rows, " gap=", G, " thickness=", T, " inset=", inset,
          " border_width=", bw, " margin=", margin, " room=", room(), " heart_k=", heart_k));

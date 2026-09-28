@@ -3,6 +3,7 @@ import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
+import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import type { PluginForwarder } from './plugins/forwarder.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
@@ -12,9 +13,9 @@ import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
-// direct streaming, which the later /mcp and /api/v1/ai/* routes need.
-// /healthz, the Claude credential routes (#255, routes/credentials.ts) and the
-// plugin registry routes (#297, routes/plugins.ts).
+// direct streaming. /healthz, the Claude credential routes (#255,
+// routes/credentials.ts), the plugin registry routes (#297, routes/plugins.ts),
+// and /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -44,15 +45,22 @@ export type AppDeps = {
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
+  /**
+   * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
+   * route. It uses the same `origins` policy and `remoteAddress` as the
+   * credential routes, so there is one allowlist (src/http/origins.ts).
+   */
+  mcp?: McpEndpointDeps | undefined
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
 
 /**
  * `ai` is `enabled` only when every prerequisite holds; otherwise it names the
- * first one missing, in the order an operator has to fix them. The backend's
- * health report reads it to decide whether the UI shows AI (#261), and the CI
- * smoke test asserts the no-database string, so keep those strings stable.
+ * first one missing, in the order an operator has to fix them. Today only the
+ * CI smoke test reads it (.github/workflows/ci.yml asserts the no-database
+ * string); nothing in the backend or frontend does yet. Keep the strings stable
+ * for that test and for the UI gate #261 plans to build on them.
  */
 export type AiStatus =
   | 'enabled'
@@ -120,8 +128,12 @@ async function aiStatus(deps: AppDeps, dbOk: boolean | undefined): Promise<Pick<
   return { ai: 'enabled', credential }
 }
 
-export function createApp(deps: AppDeps): Hono {
+/** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep. */
+export type AgentApp = Hono & { close: () => Promise<void> }
+
+export function createApp(deps: AppDeps): AgentApp {
   const app = new Hono()
+  let mcp: McpHandle | undefined
 
   // Liveness: always 200 while the process serves HTTP. A missing or
   // unreachable database or backend is REPORTED, not failed on, so a Postgres
@@ -177,5 +189,30 @@ export function createApp(deps: AppDeps): Hono {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
   })
 
-  return app
+  if (deps.mcp) {
+    const database = deps.database
+    if (database) {
+      // /mcp serves only once the agent's migrations have applied (db.ts
+      // `ready()`), so its database-backed stores never see a half-made schema.
+      app.use('/mcp', async (c, next) => {
+        if (!(await database.ready())) {
+          return c.json({ error: 'AI unavailable: database migrations have not applied' }, 503)
+        }
+        await next()
+      })
+      mcp = mountMcp(app, deps.mcp, { origins: deps.origins, remoteAddress: deps.remoteAddress })
+    } else {
+      // Spec §9, "No database": AI features are disabled. /mcp answers why
+      // instead of 404, so an MCP client's error names the fix.
+      app.all('/mcp', (c) =>
+        c.json({ error: 'AI disabled: no database (SCADBUDDY_DATABASE_URL is not set)' }, 503),
+      )
+    }
+  }
+
+  return Object.assign(app, {
+    close: async () => {
+      await mcp?.close()
+    },
+  })
 }
