@@ -150,3 +150,19 @@ async def test_one_archive_is_found_with_its_output(links: PrintLinkStore) -> No
     assert found is not None
     assert (found.output_id, found.archive_id, found.plate_id) == (OUTPUT, 18, 2)
     assert await links.linked(99) is None
+
+
+async def test_a_filtered_page_keeps_each_archive_with_the_output_that_saw_it_first(
+    links: PrintLinkStore,
+) -> None:
+    # #609 review: the owner is chosen before the output filter, as `linked` does, so
+    # a filter never hands an archive to a later output.
+    await links.record(OUTPUT, link(35))
+    await links.record(OTHER, link(35))
+    await links.record(OTHER, link(36))
+
+    assert [row.archive_id for row in await links.page(limit=10, output_ids=[OTHER])] == [36]
+    [owned] = await links.page(limit=10, output_ids=[OUTPUT])
+    assert (owned.archive_id, owned.output_id) == (35, OUTPUT)
+    found = await links.linked(35)
+    assert found is not None and found.output_id == OUTPUT

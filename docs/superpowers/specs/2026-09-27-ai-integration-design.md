@@ -414,6 +414,18 @@ A test asserts both lists are identical, apart from browser-only tools. A CI che
 when an operation in `backend/openapi.json` has neither a tool nor an explicit allowlist
 entry.
 
+As wired (#255, `agent/src/tools/harness.ts`): every session's queries get the harness
+projection, bound to the session owner's principal, and a `tierOf` that maps
+`mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
+outward call that the seam approved runs at once, because the harness projection tells
+`runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+arguments with its own bundled zod 4.4.3, which refused any call that left out a
+`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
+therefore offers such top-level fields as optional, with the same default in the JSON
+Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
+`sdkShape`; `agent/test/harnessWiring.test.ts`).
+
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
 choice the way the print dialog opens, then slices and queues behind a single approval.
@@ -666,6 +678,17 @@ including `disabled`. Where it is enforced:
 The mode is a database setting, changed in Settings, and changing it counts as a
 settings write, so it needs approval.
 
+As built (#255): two `ai_settings` keys, `mcp_auth_mode` (`"bearer"` or `"disabled"`;
+unset means `bearer`) and `mcp_anonymous_cap` (`"read"`, `"write"` or `"outward"`; unset
+means `outward`). `oidc` is on while the OIDC configuration (`mcp_oidc`, #262) is
+enabled, and then wins over `mcp_auth_mode`, even over `"disabled"`; a stored `"oidc"`
+without it reads as `bearer`. They are read on every `/mcp` request, so a change
+applies on every replica without a restart. An unknown value fails closed, to `bearer`
+or a `read` cap, and a failed read serves `bearer` with no verifiable token. The agent
+logs a warning while the mode is `disabled`, once per change of the settings (the
+banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettings`.
+There is no Settings route for them yet, so no approval applies yet either.
+
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
 - **`disabled`.** No credential, but still HTTPS only (§8.4). Calls run as `anonymous`
@@ -799,6 +822,10 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
+  As built (#526): the harness does not load it yet. Every query runs with `tools: []`
+  (§4.4), which leaves no `Skill` or `Agent` tool, so its skills and subagents would be
+  listed but unusable; exposing them needs those tools and a tier for them (§8.1)
+  first (`agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has

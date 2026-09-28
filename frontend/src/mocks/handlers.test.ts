@@ -984,6 +984,14 @@ describe('the prints mock', () => {
     expect(await ids(`?limit=2&cursor=${first.next}`)).toEqual({ ids: [36, 35], next: null })
   })
 
+  it("matches q against Bambuddy's print name too, as the backend does", async () => {
+    expect((await ids('?q=gift')).ids).toEqual([36])
+  })
+
+  it('dates a deleted print by when ScadBuddy first saw it, as the backend does', async () => {
+    expect((await ids('?from=2026-09-25&to=2026-09-25')).ids).toEqual([38])
+  })
+
   it('serves a detail with and without a timelapse, and 404s an unlinked archive', async () => {
     const done = (await (await fetch('/api/v1/prints/35')).json()) as {
       media: { timelapse: unknown; finish_photo: { name: string } | null }
