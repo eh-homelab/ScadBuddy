@@ -65,7 +65,6 @@ def output(
     *,
     size: tuple[float, float, float] = (10, 10, 10),
     colours: list[str] | None = None,
-    library_file_id: int | None = None,
     model_version: str | None = "a" * 40,
 ) -> OutputMeta:
     return OutputMeta(
@@ -76,7 +75,6 @@ def output(
         created_at=datetime(2026, 9, 28, tzinfo=UTC),
         bbox_mm=BoundingBox(min=(0, 0, 0), max=size, size=size),
         colors=colours or ["#FF0000"],
-        library_file_id=library_file_id,
     )
 
 

@@ -10,7 +10,14 @@ import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
-import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
+import {
+  DEFAULT_MAX_BUDGET_USD,
+  DEFAULT_MAX_TURNS,
+  harnessTierOf,
+  type HarnessRun,
+  runHarness,
+} from '../harness/run.js'
+import type { PluginsForRun } from '../plugins/forwarder.js'
 import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
@@ -169,6 +176,14 @@ export type SessionManagerDeps = {
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
+  /**
+   * The registered, enabled remote MCP plugins for a turn (#297), registered
+   * with the loopback forwarder: in production
+   * `forwardForRun(await loadEnabledPlugins(store, kek), forwarder)`. Read once
+   * per turn, so enabling or changing a plugin applies from the next turn on;
+   * released when the turn ends.
+   */
+  remotePlugins?: () => Promise<PluginsForRun>
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -557,7 +572,10 @@ export class SessionManager {
     const id = session.id
     const sql = this.deps.sql
     const tierOf = this.deps.tierOf ?? (() => undefined)
-    const mapper = new SdkEventMapper(id, tierOf)
+    // Widened with the plugins' tiers once they are loaded below, so the
+    // panel shows a plugin tool at the tier the permission seam applies.
+    let eventTierOf: TierResolver = tierOf
+    const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
 
     // Lease renewal, and the interrupt flag from other replicas.
@@ -584,11 +602,40 @@ export class SessionManager {
     let failure: string | undefined
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
+    let forwarded: PluginsForRun | undefined
+    let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
     try {
       // The credential first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log.
       const credential = await this.deps.credential()
       secrets = [credential.secret]
+      forwarded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+      const remotePlugins = forwarded?.plugins ?? []
+      // Plugin header values (and their bare tokens) are redacted from the
+      // event log like the credential. Claude Code never holds them (the
+      // forwarder adds them), but a plugin could echo one in a tool result.
+      secrets.push(...(forwarded?.secrets ?? []))
+      eventTierOf = harnessTierOf({ remotePlugins, tierOf })
+      // A plugin left out of this turn is said so in the session, not only in the log.
+      const unavailable = (message: string) =>
+        this.events.append(id, [
+          scrubForLog(event({ type: 'error', sessionId: id, code: 'plugin_unavailable', message }), secrets),
+        ])
+      for (const problem of forwarded?.problems ?? []) {
+        this.deps.stderr?.(`${problem}\n`)
+        await unavailable(problem)
+      }
+      pluginCheck = async (message: SDKMessage) => {
+        if (message.type !== 'system' || message.subtype !== 'init') return
+        for (const plugin of remotePlugins) {
+          const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
+          if (status !== 'connected') {
+            await unavailable(
+              `plugin ${plugin.name} is not available in this turn: its MCP server is ${status ?? 'missing'}`,
+            )
+          }
+        }
+      }
       const [cwd, resume, model] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
@@ -617,6 +664,7 @@ export class SessionManager {
         ...(typeof model === 'string' && model ? { model } : {}),
         ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
         ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
       for await (const message of this.run(run)) {
@@ -624,6 +672,7 @@ export class SessionManager {
           result = message
           local.settling = true
         }
+        await pluginCheck?.(message)
         const events = mapper.map(message)
         if (events.length) await this.events.append(id, events.map((e) => scrubForLog(e, secrets)))
       }
@@ -633,6 +682,7 @@ export class SessionManager {
       // result is what counts then.
       if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
+      forwarded?.release()
       local.settling = true
       clearInterval(renew)
       await renewing

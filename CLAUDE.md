@@ -144,6 +144,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.
+  - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
+    `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
+    plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
+    forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
+    redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
+    follows both with the header). Claude Code renames tool-name characters outside
+    `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
+    colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
@@ -180,9 +188,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-23@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.23). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
   digest and `OPENSCAD_VERSION` in the same commit.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv

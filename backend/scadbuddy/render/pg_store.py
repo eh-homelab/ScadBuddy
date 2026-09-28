@@ -295,6 +295,12 @@ class PostgresJobStore:
         their tables in this database. Usable once `open` has migrated it."""
         return self._pool.connection()
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The process's one pool, shared with the other Postgres stores
+        (`bambuddy.uploads.BambuddyUploadStore`). Opened and migrated by `open`."""
+        return self._pool
+
     def listener(
         self,
         *,

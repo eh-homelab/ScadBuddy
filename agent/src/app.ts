@@ -5,15 +5,20 @@ import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
+import type { PluginForwarder } from './plugins/forwarder.js'
+import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
+import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
+import { registerPluginRoutes } from './routes/plugins.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), and
-// /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
+// plugin registry routes (#297, routes/plugins.ts), and /mcp when `mcp` is
+// given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -25,6 +30,12 @@ export type AppDeps = {
   kek: KekStatus
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
+  /** The plugin registry (#297); undefined when there is no database. */
+  plugins?: PluginRepo | undefined
+  /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
+  testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
+  /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
+  pluginForwarder?: PluginForwarder
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
@@ -159,6 +170,28 @@ export function createApp(deps: AppDeps): AgentApp {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+  })
+
+  registerPluginRoutes(app, {
+    plugins: deps.plugins,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    kek: deps.kek,
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+    testPlugin:
+      deps.testPlugin ??
+      ((plugin, address) =>
+        deps.pluginForwarder
+          ? testPlugin(plugin, address, deps.pluginForwarder)
+          : Promise.resolve({
+              ok: false,
+              detail: 'the plugin forwarder is not running',
+              duration_ms: 0,
+              server: null,
+              tools: [],
+              truncated: false,
+            })),
+    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
   })
 
   registerApprovalRoutes(app, {
