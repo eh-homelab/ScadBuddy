@@ -6,7 +6,8 @@
  * spec any more: the previous version was, and it disagreed with the running backend
  * in a dozen places (`api_key_set` vs `has_api_key`, `job_id` vs `id`, a `{x,y,z}`
  * bounding box that is really `{min,max,size}`, a thumbnail PUT that is multipart).
- * Regenerate after any backend change and `tsc` will point at whatever broke.
+ * `schema.d.ts` is not committed (#492): typecheck, test and build regenerate it
+ * first, so after a backend change `tsc` points at whatever broke.
  */
 import type { components } from './schema'
 
@@ -25,6 +26,8 @@ export type Asset = Schemas['AssetMeta']
 export type AssetUsage = Schemas['AssetUsage']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #274 — one image or video of a template, in its order; the first is the cover. */
+export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
 
@@ -55,6 +58,7 @@ export type PartInfo = Schemas['PartInfo']
 export type RenderAccepted = Schemas['RenderAccepted']
 
 export type Output = Schemas['OutputDetail']
+export type LibraryCopy = Schemas['LibraryCopy']
 export type EditTarget = Schemas['EditTarget']
 
 /** Named parameter sets per template: shipped with it (`template`) or saved (`mine`). */

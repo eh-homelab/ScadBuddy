@@ -146,12 +146,22 @@ def seed_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str) -> Settings:
+def settings(
+    request: pytest.FixtureRequest, data_dir: Path, seed_dir: Path, fake_openscad: str
+) -> Settings:
+    """A test marked ``requires_postgres`` gets a database of its own (a throwaway
+    schema): an output's Bambuddy upload records live only there (#455)."""
+    database_url = (
+        request.getfixturevalue("pg_conninfo")
+        if request.node.get_closest_marker("requires_postgres")
+        else None
+    )
     return Settings(
         openscad=fake_openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
+        database_url=database_url,
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,

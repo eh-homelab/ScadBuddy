@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated
@@ -23,38 +22,28 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import require_valid_params, schema_of
 from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import file_assets
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
-    ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
     Job,
     JobNotFoundError,
     JobState,
-    ModelSource,
     PartInfo,
     PlateInfo,
     QueueFullError,
     RenderQueue,
-    resolve_source,
 )
-from scadbuddy.render.runner import (
-    ParameterValueError,
-    UnknownParameterError,
-    build_defines,
-    cached_schema,
-)
-from scadbuddy.render.schema import CustomizerSchema, ParamValue
+from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import (
     MAX_VIEW_SIZE,
     MIN_VIEW_SIZE,
@@ -186,61 +175,6 @@ def require_job(queue: RenderQueue, job_id: str) -> Job:
         return queue.store.read(job_id)
     except JobNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no job with id {job_id!r}") from None
-
-
-async def schema_of(
-    slug: str,
-    requested: str | None,
-    *,
-    paths: DataPaths,
-    history: ModelHistory,
-    config: Config,
-    version: str | None = None,
-    fetcher: CheckoutFetcher | None = None,
-) -> tuple[ModelSource, CustomizerSchema]:
-    """The source a render of ``slug`` at ``requested`` reads, and its schema.
-
-    The schema parameters are validated against has to be the schema of the revision
-    being rendered, not the one the model is currently at. `resolve_source` also hands
-    back which revision that is, so the job can be stamped without asking git again.
-    ``version`` is what the client asked for, for the 404's message.
-    """
-    try:
-        source = await resolve_source(
-            slug, requested, paths=paths, history=history, fetcher=fetcher
-        )
-        schema = await cached_schema(
-            source.scad, source.schema_cache, config=source.configure(config)
-        )
-    except RevisionNotFoundError:
-        raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {version}") from None
-    except GitError as error:
-        raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
-    except FileNotFoundError:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "openscad is not available to build the schema"
-        ) from None
-    return source, schema
-
-
-def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
-    """422 unless every one of ``params`` is a parameter of ``schema``, of its type,
-    inside its customizer range and, for a select, one of its options (#432)."""
-    unknown = sorted(set(params) - {p.name for p in schema.parameters})
-    if unknown:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"unknown parameters: {', '.join(unknown)}",
-            parameters=unknown,
-        )
-    try:
-        build_defines(schema, params)
-    except UnknownParameterError as error:  # pragma: no cover - covered by the check above
-        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    except ParameterValueError as error:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), parameters=[error.parameter]
-        ) from None
 
 
 @router.post(

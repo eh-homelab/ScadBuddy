@@ -17,12 +17,12 @@ from scadbuddy.api.deps import (
     PresetsDep,
     SlugPath,
 )
-from scadbuddy.api.jobs import require_valid_params, schema_of
 from scadbuddy.api.models import require_model_exists
+from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
@@ -37,11 +37,15 @@ from scadbuddy.library.presets import (
     PresetNotFoundError,
     TooManyPresetsError,
 )
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
 
-PresetIdPath = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,64}$")]
+#: A saved preset's 32 hex digits, or ``template-`` plus a template preset's key.
+PresetIdPath = Annotated[
+    str, Path(pattern=rf"^[a-z0-9-]{{1,{len(TEMPLATE_ID_PREFIX) + MAX_SLUG_LENGTH}}}$")
+]
 
 
 async def _require_valid(
@@ -56,18 +60,15 @@ async def _require_valid(
 ) -> None:
     """422 unless ``params`` would render the template as it is now -- the same check
     a render makes, so a preset saved here never fails the render it is applied to."""
-    source, schema = await schema_of(
-        slug, None, paths=paths, history=history, config=config, fetcher=fetcher
+    await require_valid_presets(
+        slug,
+        [params],
+        paths=paths,
+        history=history,
+        config=config,
+        assets=assets,
+        fetcher=fetcher,
     )
-    require_valid_params(schema, params)
-    # A `file` value names an upload or a sample, as a render requires (#204); and
-    # checking it marks the upload used, so the sweep cannot take it from under the
-    # preset being saved (#296).
-    if any(parameter.type == "file" for parameter in schema.parameters):
-        try:
-            await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
-        except ValueError as error:
-            raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
 def _unreadable(error: InvalidPresetsFileError) -> ApiError:
