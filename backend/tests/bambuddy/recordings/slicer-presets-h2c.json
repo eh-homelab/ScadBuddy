@@ -1,0 +1,4788 @@
+{
+  "cloud": {
+    "printer": [
+      {
+        "id": "GM041",
+        "name": "Bambu Lab H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "GM042",
+        "name": "Bambu Lab H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "GM043",
+        "name": "Bambu Lab H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "GM044",
+        "name": "Bambu Lab H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      }
+    ],
+    "process": [
+      {
+        "id": "GP243",
+        "name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GP244",
+        "name": "0.08mm High Quality @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP245",
+        "name": "0.10mm Standard @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GP246",
+        "name": "0.12mm Balanced Quality @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GP247",
+        "name": "0.12mm High Quality @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP248",
+        "name": "0.16mm High Quality @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP249",
+        "name": "0.16mm Standard @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP250",
+        "name": "0.18mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GP251",
+        "name": "0.20mm High Quality @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP252",
+        "name": "0.20mm Standard @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP255",
+        "name": "0.24mm Standard @BBL H2C",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GP163",
+        "name": "0.24mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GP254",
+        "name": "0.24mm Balanced Strength @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GP253",
+        "name": "0.24mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GP256",
+        "name": "0.30mm Standard @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GP257",
+        "name": "0.32mm Balanced Strength @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GP164",
+        "name": "0.32mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GP258",
+        "name": "0.40mm Standard @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      }
+    ],
+    "filament": [
+      {
+        "id": "GFSB00_22",
+        "name": "Bambu ABS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB00_23",
+        "name": "Bambu ABS @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB00_34",
+        "name": "Bambu ABS @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB00_35",
+        "name": "Bambu ABS @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB50_09",
+        "name": "Bambu ABS-GF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ABS-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB50_08",
+        "name": "Bambu ABS-GF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS06_08",
+        "name": "Bambu Support for ABS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS06_07",
+        "name": "Bambu Support for ABS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS06_14",
+        "name": "Bambu Support for ABS @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB99_17",
+        "name": "Generic ABS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB99_18",
+        "name": "Generic ABS @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB99_16",
+        "name": "Generic ABS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB01_23",
+        "name": "Bambu ASA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB01_24",
+        "name": "Bambu ASA @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB01_37",
+        "name": "Bambu ASA @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB01_38",
+        "name": "Bambu ASA @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB02_09",
+        "name": "Bambu ASA-Aero @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ASA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB02_08",
+        "name": "Bambu ASA-Aero @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB51_15",
+        "name": "Bambu ASA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ASA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB51_14",
+        "name": "Bambu ASA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB98_18",
+        "name": "Generic ASA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB98_16",
+        "name": "Generic ASA @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSB98_17",
+        "name": "Generic ASA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS97_09",
+        "name": "Generic BVOH @BBL H2C",
+        "source": "cloud",
+        "filament_type": "BVOH",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS97_08",
+        "name": "Generic BVOH @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "BVOH",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSR99_09",
+        "name": "Generic EVA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "EVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSR99_08",
+        "name": "Generic EVA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "EVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS98_16",
+        "name": "Generic HIPS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS98_17",
+        "name": "Generic HIPS @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS98_15",
+        "name": "Generic HIPS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN03_08",
+        "name": "Bambu PA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN03_07",
+        "name": "Bambu PA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN05_09",
+        "name": "Bambu PA6-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN05_08",
+        "name": "Bambu PA6-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN05_18",
+        "name": "Bambu PA6-CF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN08_09",
+        "name": "Bambu PA6-GF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN08_08",
+        "name": "Bambu PA6-GF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN04_07",
+        "name": "Bambu PAHT-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN04_06",
+        "name": "Bambu PAHT-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN04_20",
+        "name": "Bambu PAHT-CF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS03_09",
+        "name": "Bambu Support For PA/PET @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS03_08",
+        "name": "Bambu Support For PA/PET @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS01_08",
+        "name": "Bambu Support G @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS01_07",
+        "name": "Bambu Support G @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN99_07",
+        "name": "Generic PA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN99_06",
+        "name": "Generic PA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN98_08",
+        "name": "Generic PA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN98_07",
+        "name": "Generic PA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC00_34",
+        "name": "Bambu PC @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC00_33",
+        "name": "Bambu PC @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC00_40",
+        "name": "Bambu PC @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC00_41",
+        "name": "Bambu PC @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC01_33",
+        "name": "Bambu PC FR @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC01_32",
+        "name": "Bambu PC FR @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC01_31",
+        "name": "Bambu PC FR @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC99_22",
+        "name": "Generic PC @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC99_20",
+        "name": "Generic PC @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSC99_21",
+        "name": "Generic PC @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG97_09",
+        "name": "Generic PCTG @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PCTG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG97_08",
+        "name": "Generic PCTG @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PCTG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP99_09",
+        "name": "Generic PE @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PE",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP99_08",
+        "name": "Generic PE @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PE",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP98_09",
+        "name": "Generic PE-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PE-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP98_08",
+        "name": "Generic PE-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PE-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFST01_09",
+        "name": "Bambu PET-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PET-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFST01_08",
+        "name": "Bambu PET-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PET-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG00_25",
+        "name": "Bambu PETG Basic @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG00_24",
+        "name": "Bambu PETG Basic @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG00_23",
+        "name": "Bambu PETG Basic @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG00_44",
+        "name": "Bambu PETG Basic @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG03_13",
+        "name": "Bambu PETG Matte @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG03_10",
+        "name": "Bambu PETG Matte @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG03_11",
+        "name": "Bambu PETG Matte @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG03_12",
+        "name": "Bambu PETG Matte @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG02_25",
+        "name": "Bambu PETG HF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG02_24",
+        "name": "Bambu PETG HF @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG02_33",
+        "name": "Bambu PETG HF @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG02_34",
+        "name": "Bambu PETG HF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG01_23",
+        "name": "Bambu PETG Translucent @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG01_24",
+        "name": "Bambu PETG Translucent @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG01_22",
+        "name": "Bambu PETG Translucent @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG01_40",
+        "name": "Bambu PETG Translucent @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG50_18",
+        "name": "Bambu PETG-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG50_19",
+        "name": "Bambu PETG-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG50_30",
+        "name": "Bambu PETG-CF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG99_19",
+        "name": "Generic PETG @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG99_20",
+        "name": "Generic PETG @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG99_18",
+        "name": "Generic PETG @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG96_18",
+        "name": "Generic PETG HF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG96_19",
+        "name": "Generic PETG HF @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG96_17",
+        "name": "Generic PETG HF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG98_09",
+        "name": "Generic PETG-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSG98_08",
+        "name": "Generic PETG-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSR98_09",
+        "name": "Generic PHA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PHA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSR98_08",
+        "name": "Generic PHA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PHA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA11_12",
+        "name": "Bambu PLA Aero @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA11_11",
+        "name": "Bambu PLA Aero @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA00_22",
+        "name": "Bambu PLA Basic @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA00_23",
+        "name": "Bambu PLA Basic @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA00_31",
+        "name": "Bambu PLA Basic @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA00_32",
+        "name": "Bambu PLA Basic @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA13_24",
+        "name": "Bambu PLA Dynamic @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA13_25",
+        "name": "Bambu PLA Dynamic @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA13_23",
+        "name": "Bambu PLA Dynamic @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA15_24",
+        "name": "Bambu PLA Galaxy @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA15_25",
+        "name": "Bambu PLA Galaxy @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA15_23",
+        "name": "Bambu PLA Galaxy @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA12_24",
+        "name": "Bambu PLA Glow @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA12_23",
+        "name": "Bambu PLA Glow @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA18_16",
+        "name": "Bambu PLA Lite @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA18_17",
+        "name": "Bambu PLA Lite @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA18_15",
+        "name": "Bambu PLA Lite @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA18_44",
+        "name": "Bambu PLA Lite @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA07_12",
+        "name": "Bambu PLA Marble @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA07_11",
+        "name": "Bambu PLA Marble @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA01_22",
+        "name": "Bambu PLA Matte @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA01_23",
+        "name": "Bambu PLA Matte @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA01_31",
+        "name": "Bambu PLA Matte @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA01_32",
+        "name": "Bambu PLA Matte @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA02_21",
+        "name": "Bambu PLA Metal @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA02_19",
+        "name": "Bambu PLA Metal @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA02_20",
+        "name": "Bambu PLA Metal @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA19_10",
+        "name": "Bambu PLA Pure @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA19_09",
+        "name": "Bambu PLA Pure @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA19_42",
+        "name": "Bambu PLA Pure @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA19_43",
+        "name": "Bambu PLA Pure @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA05_23",
+        "name": "Bambu PLA Silk @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA05_21",
+        "name": "Bambu PLA Silk @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA05_22",
+        "name": "Bambu PLA Silk @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA06_19",
+        "name": "Bambu PLA Silk+ @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA06_20",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA06_18",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA06_40",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA08_12",
+        "name": "Bambu PLA Sparkle @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA08_11",
+        "name": "Bambu PLA Sparkle @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA09_21",
+        "name": "Bambu PLA Tough @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA09_22",
+        "name": "Bambu PLA Tough @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA09_20",
+        "name": "Bambu PLA Tough @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA10_24",
+        "name": "Bambu PLA Tough+ @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA10_21",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA10_22",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA10_23",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA17_29",
+        "name": "Bambu PLA Translucent @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA17_30",
+        "name": "Bambu PLA Translucent @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA17_43",
+        "name": "Bambu PLA Translucent @BBL H2C 0.6 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA17_44",
+        "name": "Bambu PLA Translucent @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA16_15",
+        "name": "Bambu PLA Wood @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA16_14",
+        "name": "Bambu PLA Wood @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA50_17",
+        "name": "Bambu PLA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA50_18",
+        "name": "Bambu PLA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSA50_26",
+        "name": "Bambu PLA-CF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS02_22",
+        "name": "Bambu Support For PLA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS02_20",
+        "name": "Bambu Support For PLA @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS02_21",
+        "name": "Bambu Support For PLA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS02_34",
+        "name": "Bambu Support For PLA @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS05_18",
+        "name": "Bambu Support For PLA/PETG @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS05_19",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS05_17",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS05_31",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS00_18",
+        "name": "Bambu Support W @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS00_19",
+        "name": "Bambu Support W @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS00_17",
+        "name": "Bambu Support W @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL99_21",
+        "name": "Generic PLA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL99_22",
+        "name": "Generic PLA @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL99_20",
+        "name": "Generic PLA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL95_20",
+        "name": "Generic PLA High Speed @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL95_21",
+        "name": "Generic PLA High Speed @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL95_19",
+        "name": "Generic PLA High Speed @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL96_09",
+        "name": "Generic PLA Silk @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL96_08",
+        "name": "Generic PLA Silk @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL98_09",
+        "name": "Generic PLA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSL98_08",
+        "name": "Generic PLA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP97_10",
+        "name": "Generic PP @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PP",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP97_09",
+        "name": "Generic PP @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PP",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP96_08",
+        "name": "Generic PP-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PP-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP96_07",
+        "name": "Generic PP-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PP-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP95_07",
+        "name": "Generic PP-GF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PP-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSP95_06",
+        "name": "Generic PP-GF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PP-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN06_08",
+        "name": "Bambu PPA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN06_07",
+        "name": "Bambu PPA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN97_08",
+        "name": "Generic PPA-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN97_07",
+        "name": "Generic PPA-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN96_08",
+        "name": "Generic PPA-GF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSN96_07",
+        "name": "Generic PPA-GF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFST02_04",
+        "name": "Bambu PPS-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFST02_03",
+        "name": "Bambu PPS-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFST97_04",
+        "name": "Generic PPS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFST97_03",
+        "name": "Generic PPS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFST98_04",
+        "name": "Generic PPS-CF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFST98_03",
+        "name": "Generic PPS-CF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS04_18",
+        "name": "Bambu PVA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS04_17",
+        "name": "Bambu PVA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS04_28",
+        "name": "Bambu PVA @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS99_18",
+        "name": "Generic PVA @BBL H2C",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS99_16",
+        "name": "Generic PVA @BBL H2C 0.2 nozzle",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "GFSS99_17",
+        "name": "Generic PVA @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU04_05",
+        "name": "Bambu TPU 85A @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU03_09",
+        "name": "Bambu TPU 90A @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU03_08",
+        "name": "Bambu TPU 90A @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU01_09",
+        "name": "Bambu TPU 95A @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU01_08",
+        "name": "Bambu TPU 95A @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU00_14",
+        "name": "Bambu TPU 95A HF @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU00_13",
+        "name": "Bambu TPU 95A HF @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU00_26",
+        "name": "Bambu TPU 95A HF @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU02_10",
+        "name": "Bambu TPU for AMS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU02_09",
+        "name": "Bambu TPU for AMS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU02_25",
+        "name": "Bambu TPU for AMS @BBL H2C 0.8 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU99_09",
+        "name": "Generic TPU @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU99_08",
+        "name": "Generic TPU @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU98_11",
+        "name": "Generic TPU for AMS @BBL H2C",
+        "source": "cloud",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "GFSU98_10",
+        "name": "Generic TPU for AMS @BBL H2C 0.4 nozzle",
+        "source": "cloud",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      }
+    ]
+  },
+  "standard": {
+    "printer": [
+      {
+        "id": "Bambu Lab H2C",
+        "name": "Bambu Lab H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab H2C 0.2 nozzle",
+        "name": "Bambu Lab H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab H2C 0.4 nozzle",
+        "name": "Bambu Lab H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab H2C 0.6 nozzle",
+        "name": "Bambu Lab H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      },
+      {
+        "id": "Bambu Lab H2C 0.8 nozzle",
+        "name": "Bambu Lab H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": null
+      }
+    ],
+    "process": [
+      {
+        "id": "0.08mm High Quality @BBL H2C",
+        "name": "0.08mm High Quality @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.08mm High Quality @BBL H2C 0.2 nozzle",
+        "name": "0.08mm High Quality @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "0.10mm Standard @BBL H2C 0.2 nozzle",
+        "name": "0.10mm Standard @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "0.12mm Balanced Quality @BBL H2C 0.2 nozzle",
+        "name": "0.12mm Balanced Quality @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "0.12mm High Quality @BBL H2C",
+        "name": "0.12mm High Quality @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.16mm High Quality @BBL H2C",
+        "name": "0.16mm High Quality @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.16mm Standard @BBL H2C",
+        "name": "0.16mm Standard @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.18mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "name": "0.18mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "0.20mm High Quality @BBL H2C",
+        "name": "0.20mm High Quality @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.20mm Standard @BBL H2C",
+        "name": "0.20mm Standard @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.24mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "name": "0.24mm Balanced Quality @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "0.24mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "name": "0.24mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "0.24mm Balanced Strength @BBL H2C 0.6 nozzle",
+        "name": "0.24mm Balanced Strength @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "0.24mm Standard @BBL H2C",
+        "name": "0.24mm Standard @BBL H2C",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "0.30mm Standard @BBL H2C 0.6 nozzle",
+        "name": "0.30mm Standard @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "0.32mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "name": "0.32mm Balanced Quality @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "0.32mm Balanced Strength @BBL H2C 0.8 nozzle",
+        "name": "0.32mm Balanced Strength @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "0.40mm Standard @BBL H2C 0.8 nozzle",
+        "name": "0.40mm Standard @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": null,
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      }
+    ],
+    "filament": [
+      {
+        "id": "Bambu ABS @BBL H2C",
+        "name": "Bambu ABS @BBL H2C",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS @BBL H2C 0.2 nozzle",
+        "name": "Bambu ABS @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS @BBL H2C 0.6 nozzle",
+        "name": "Bambu ABS @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS @BBL H2C 0.8 nozzle",
+        "name": "Bambu ABS @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS-GF @BBL H2C",
+        "name": "Bambu ABS-GF @BBL H2C",
+        "source": "standard",
+        "filament_type": "ABS-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ABS-GF @BBL H2C 0.4 nozzle",
+        "name": "Bambu ABS-GF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ABS-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA @BBL H2C",
+        "name": "Bambu ASA @BBL H2C",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA @BBL H2C 0.2 nozzle",
+        "name": "Bambu ASA @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA @BBL H2C 0.6 nozzle",
+        "name": "Bambu ASA @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA @BBL H2C 0.8 nozzle",
+        "name": "Bambu ASA @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA-Aero @BBL H2C",
+        "name": "Bambu ASA-Aero @BBL H2C",
+        "source": "standard",
+        "filament_type": "ASA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA-Aero @BBL H2C 0.4 nozzle",
+        "name": "Bambu ASA-Aero @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ASA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA-CF @BBL H2C",
+        "name": "Bambu ASA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "ASA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu ASA-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu ASA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ASA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA-CF @BBL H2C",
+        "name": "Bambu PA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA6-CF @BBL H2C",
+        "name": "Bambu PA6-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA6-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PA6-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA6-CF @BBL H2C 0.8 nozzle",
+        "name": "Bambu PA6-CF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PA6-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA6-GF @BBL H2C",
+        "name": "Bambu PA6-GF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PA6-GF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PA6-GF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PAHT-CF @BBL H2C",
+        "name": "Bambu PAHT-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PAHT-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PAHT-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PAHT-CF @BBL H2C 0.8 nozzle",
+        "name": "Bambu PAHT-CF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC @BBL H2C",
+        "name": "Bambu PC @BBL H2C",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC @BBL H2C 0.2 nozzle",
+        "name": "Bambu PC @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC @BBL H2C 0.6 nozzle",
+        "name": "Bambu PC @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC @BBL H2C 0.8 nozzle",
+        "name": "Bambu PC @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC FR @BBL H2C",
+        "name": "Bambu PC FR @BBL H2C",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC FR @BBL H2C 0.2 nozzle",
+        "name": "Bambu PC FR @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PC FR @BBL H2C 0.4 nozzle",
+        "name": "Bambu PC FR @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PET-CF @BBL H2C",
+        "name": "Bambu PET-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PET-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PET-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PET-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PET-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Basic @BBL H2C",
+        "name": "Bambu PETG Basic @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Basic @BBL H2C 0.2 nozzle",
+        "name": "Bambu PETG Basic @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Basic @BBL H2C 0.4 nozzle",
+        "name": "Bambu PETG Basic @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Basic @BBL H2C 0.8 nozzle",
+        "name": "Bambu PETG Basic @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG HF @BBL H2C",
+        "name": "Bambu PETG HF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG HF @BBL H2C 0.2 nozzle",
+        "name": "Bambu PETG HF @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG HF @BBL H2C 0.6 nozzle",
+        "name": "Bambu PETG HF @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG HF @BBL H2C 0.8 nozzle",
+        "name": "Bambu PETG HF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Matte @BBL H2C",
+        "name": "Bambu PETG Matte @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Matte @BBL H2C 0.2 nozzle",
+        "name": "Bambu PETG Matte @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Matte @BBL H2C 0.4 nozzle",
+        "name": "Bambu PETG Matte @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Matte @BBL H2C 0.8 nozzle",
+        "name": "Bambu PETG Matte @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Translucent @BBL H2C",
+        "name": "Bambu PETG Translucent @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Translucent @BBL H2C 0.2 nozzle",
+        "name": "Bambu PETG Translucent @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Translucent @BBL H2C 0.4 nozzle",
+        "name": "Bambu PETG Translucent @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG Translucent @BBL H2C 0.8 nozzle",
+        "name": "Bambu PETG Translucent @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG-CF @BBL H2C",
+        "name": "Bambu PETG-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PETG-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PETG-CF @BBL H2C 0.8 nozzle",
+        "name": "Bambu PETG-CF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Aero @BBL H2C",
+        "name": "Bambu PLA Aero @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Aero @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Aero @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA-AERO",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Basic @BBL H2C",
+        "name": "Bambu PLA Basic @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Basic @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Basic @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Basic @BBL H2C 0.6 nozzle",
+        "name": "Bambu PLA Basic @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Basic @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Basic @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Dynamic @BBL H2C",
+        "name": "Bambu PLA Dynamic @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Dynamic @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Dynamic @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Dynamic @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Dynamic @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Galaxy @BBL H2C",
+        "name": "Bambu PLA Galaxy @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Galaxy @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Galaxy @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Galaxy @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Galaxy @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Glow @BBL H2C",
+        "name": "Bambu PLA Glow @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Glow @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Glow @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Lite @BBL H2C",
+        "name": "Bambu PLA Lite @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Lite @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Lite @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Lite @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Lite @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Lite @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Lite @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Marble @BBL H2C",
+        "name": "Bambu PLA Marble @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Marble @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Marble @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Matte @BBL H2C",
+        "name": "Bambu PLA Matte @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Matte @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Matte @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Matte @BBL H2C 0.6 nozzle",
+        "name": "Bambu PLA Matte @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Matte @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Matte @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Metal @BBL H2C",
+        "name": "Bambu PLA Metal @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Metal @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Metal @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Metal @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Metal @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Pure @BBL H2C",
+        "name": "Bambu PLA Pure @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Pure @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Pure @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Pure @BBL H2C 0.6 nozzle",
+        "name": "Bambu PLA Pure @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Pure @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Pure @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk @BBL H2C",
+        "name": "Bambu PLA Silk @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Silk @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Silk @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk+ @BBL H2C",
+        "name": "Bambu PLA Silk+ @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk+ @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk+ @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Silk+ @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Silk+ @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Sparkle @BBL H2C",
+        "name": "Bambu PLA Sparkle @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Sparkle @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Sparkle @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough @BBL H2C",
+        "name": "Bambu PLA Tough @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Tough @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Tough @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough+ @BBL H2C",
+        "name": "Bambu PLA Tough+ @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough+ @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough+ @BBL H2C 0.6 nozzle",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Tough+ @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Tough+ @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Translucent @BBL H2C",
+        "name": "Bambu PLA Translucent @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Translucent @BBL H2C 0.2 nozzle",
+        "name": "Bambu PLA Translucent @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Translucent @BBL H2C 0.6 nozzle",
+        "name": "Bambu PLA Translucent @BBL H2C 0.6 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Translucent @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA Translucent @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Wood @BBL H2C",
+        "name": "Bambu PLA Wood @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA Wood @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA Wood @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA-CF @BBL H2C",
+        "name": "Bambu PLA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PLA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PLA-CF @BBL H2C 0.8 nozzle",
+        "name": "Bambu PLA-CF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PPA-CF @BBL H2C",
+        "name": "Bambu PPA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PPA-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PPA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PPS-CF @BBL H2C",
+        "name": "Bambu PPS-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PPS-CF @BBL H2C 0.4 nozzle",
+        "name": "Bambu PPS-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PVA @BBL H2C",
+        "name": "Bambu PVA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PVA @BBL H2C 0.4 nozzle",
+        "name": "Bambu PVA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu PVA @BBL H2C 0.8 nozzle",
+        "name": "Bambu PVA @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support for ABS @BBL H2C",
+        "name": "Bambu Support for ABS @BBL H2C",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support for ABS @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support for ABS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support for ABS @BBL H2C 0.8 nozzle",
+        "name": "Bambu Support for ABS @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PA/PET @BBL H2C",
+        "name": "Bambu Support For PA/PET @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PA/PET @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support For PA/PET @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA @BBL H2C",
+        "name": "Bambu Support For PLA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA @BBL H2C 0.2 nozzle",
+        "name": "Bambu Support For PLA @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support For PLA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA @BBL H2C 0.8 nozzle",
+        "name": "Bambu Support For PLA @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA/PETG @BBL H2C",
+        "name": "Bambu Support For PLA/PETG @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA/PETG @BBL H2C 0.2 nozzle",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA/PETG @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support For PLA/PETG @BBL H2C 0.8 nozzle",
+        "name": "Bambu Support For PLA/PETG @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support G @BBL H2C",
+        "name": "Bambu Support G @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support G @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support G @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support W @BBL H2C",
+        "name": "Bambu Support W @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support W @BBL H2C 0.2 nozzle",
+        "name": "Bambu Support W @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu Support W @BBL H2C 0.4 nozzle",
+        "name": "Bambu Support W @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 85A @BBL H2C",
+        "name": "Bambu TPU 85A @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 90A @BBL H2C",
+        "name": "Bambu TPU 90A @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 90A @BBL H2C 0.4 nozzle",
+        "name": "Bambu TPU 90A @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 95A @BBL H2C",
+        "name": "Bambu TPU 95A @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 95A @BBL H2C 0.4 nozzle",
+        "name": "Bambu TPU 95A @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 95A HF @BBL H2C",
+        "name": "Bambu TPU 95A HF @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 95A HF @BBL H2C 0.4 nozzle",
+        "name": "Bambu TPU 95A HF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU 95A HF @BBL H2C 0.8 nozzle",
+        "name": "Bambu TPU 95A HF @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU for AMS @BBL H2C",
+        "name": "Bambu TPU for AMS @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU for AMS @BBL H2C 0.4 nozzle",
+        "name": "Bambu TPU for AMS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Bambu TPU for AMS @BBL H2C 0.8 nozzle",
+        "name": "Bambu TPU for AMS @BBL H2C 0.8 nozzle",
+        "source": "standard",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ABS @BBL H2C",
+        "name": "Generic ABS @BBL H2C",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ABS @BBL H2C 0.2 nozzle",
+        "name": "Generic ABS @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ABS @BBL H2C 0.4 nozzle",
+        "name": "Generic ABS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ABS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ASA @BBL H2C",
+        "name": "Generic ASA @BBL H2C",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ASA @BBL H2C 0.2 nozzle",
+        "name": "Generic ASA @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic ASA @BBL H2C 0.4 nozzle",
+        "name": "Generic ASA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "ASA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic BVOH @BBL H2C",
+        "name": "Generic BVOH @BBL H2C",
+        "source": "standard",
+        "filament_type": "BVOH",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic BVOH @BBL H2C 0.4 nozzle",
+        "name": "Generic BVOH @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "BVOH",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic EVA @BBL H2C",
+        "name": "Generic EVA @BBL H2C",
+        "source": "standard",
+        "filament_type": "EVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic EVA @BBL H2C 0.4 nozzle",
+        "name": "Generic EVA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "EVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic HIPS @BBL H2C",
+        "name": "Generic HIPS @BBL H2C",
+        "source": "standard",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic HIPS @BBL H2C 0.2 nozzle",
+        "name": "Generic HIPS @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic HIPS @BBL H2C 0.4 nozzle",
+        "name": "Generic HIPS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "HIPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PA @BBL H2C",
+        "name": "Generic PA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PA @BBL H2C 0.4 nozzle",
+        "name": "Generic PA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PA-CF @BBL H2C",
+        "name": "Generic PA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PA-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PC @BBL H2C",
+        "name": "Generic PC @BBL H2C",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PC @BBL H2C 0.2 nozzle",
+        "name": "Generic PC @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PC @BBL H2C 0.4 nozzle",
+        "name": "Generic PC @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PC",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PCTG @BBL H2C",
+        "name": "Generic PCTG @BBL H2C",
+        "source": "standard",
+        "filament_type": "PCTG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PCTG @BBL H2C 0.4 nozzle",
+        "name": "Generic PCTG @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PCTG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PE @BBL H2C",
+        "name": "Generic PE @BBL H2C",
+        "source": "standard",
+        "filament_type": "PE",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PE @BBL H2C 0.4 nozzle",
+        "name": "Generic PE @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PE",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PE-CF @BBL H2C",
+        "name": "Generic PE-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PE-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PE-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PE-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PE-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG @BBL H2C",
+        "name": "Generic PETG @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG @BBL H2C 0.2 nozzle",
+        "name": "Generic PETG @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG @BBL H2C 0.4 nozzle",
+        "name": "Generic PETG @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG HF @BBL H2C",
+        "name": "Generic PETG HF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG HF @BBL H2C 0.2 nozzle",
+        "name": "Generic PETG HF @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG HF @BBL H2C 0.4 nozzle",
+        "name": "Generic PETG HF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG-CF @BBL H2C",
+        "name": "Generic PETG-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PETG-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PETG-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PETG-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PHA @BBL H2C",
+        "name": "Generic PHA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PHA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PHA @BBL H2C 0.4 nozzle",
+        "name": "Generic PHA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PHA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA @BBL H2C",
+        "name": "Generic PLA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA @BBL H2C 0.2 nozzle",
+        "name": "Generic PLA @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA @BBL H2C 0.4 nozzle",
+        "name": "Generic PLA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA High Speed @BBL H2C",
+        "name": "Generic PLA High Speed @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA High Speed @BBL H2C 0.2 nozzle",
+        "name": "Generic PLA High Speed @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA High Speed @BBL H2C 0.4 nozzle",
+        "name": "Generic PLA High Speed @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA Silk @BBL H2C",
+        "name": "Generic PLA Silk @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA Silk @BBL H2C 0.4 nozzle",
+        "name": "Generic PLA Silk @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA-CF @BBL H2C",
+        "name": "Generic PLA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PLA-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PLA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PLA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP @BBL H2C",
+        "name": "Generic PP @BBL H2C",
+        "source": "standard",
+        "filament_type": "PP",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP @BBL H2C 0.4 nozzle",
+        "name": "Generic PP @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PP",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP-CF @BBL H2C",
+        "name": "Generic PP-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PP-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PP-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PP-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP-GF @BBL H2C",
+        "name": "Generic PP-GF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PP-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PP-GF @BBL H2C 0.4 nozzle",
+        "name": "Generic PP-GF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PP-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPA-CF @BBL H2C",
+        "name": "Generic PPA-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPA-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PPA-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPA-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPA-GF @BBL H2C",
+        "name": "Generic PPA-GF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPA-GF @BBL H2C 0.4 nozzle",
+        "name": "Generic PPA-GF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPA-GF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPS @BBL H2C",
+        "name": "Generic PPS @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPS @BBL H2C 0.4 nozzle",
+        "name": "Generic PPS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPS-CF @BBL H2C",
+        "name": "Generic PPS-CF @BBL H2C",
+        "source": "standard",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PPS-CF @BBL H2C 0.4 nozzle",
+        "name": "Generic PPS-CF @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PPS-CF",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PVA @BBL H2C",
+        "name": "Generic PVA @BBL H2C",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PVA @BBL H2C 0.2 nozzle",
+        "name": "Generic PVA @BBL H2C 0.2 nozzle",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.2 nozzle"
+        ]
+      },
+      {
+        "id": "Generic PVA @BBL H2C 0.4 nozzle",
+        "name": "Generic PVA @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "PVA",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic TPU @BBL H2C",
+        "name": "Generic TPU @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic TPU @BBL H2C 0.4 nozzle",
+        "name": "Generic TPU @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      },
+      {
+        "id": "Generic TPU for AMS @BBL H2C",
+        "name": "Generic TPU for AMS @BBL H2C",
+        "source": "standard",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.6 nozzle",
+          "Bambu Lab H2C 0.8 nozzle"
+        ]
+      },
+      {
+        "id": "Generic TPU for AMS @BBL H2C 0.4 nozzle",
+        "name": "Generic TPU for AMS @BBL H2C 0.4 nozzle",
+        "source": "standard",
+        "filament_type": "TPU-AMS",
+        "filament_colour": null,
+        "compatible_printers": [
+          "Bambu Lab H2C 0.4 nozzle"
+        ]
+      }
+    ]
+  },
+  "local": {
+    "printer": [],
+    "process": [],
+    "filament": []
+  },
+  "orca_cloud": {
+    "printer": [],
+    "process": [],
+    "filament": []
+  }
+}

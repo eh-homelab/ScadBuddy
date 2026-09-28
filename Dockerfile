@@ -440,7 +440,12 @@ VOLUME ["/data"]
 # uvicorn, which does not reap, and a killed-on-timeout openscad stays a zombie
 # for the life of the pod.
 ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080"]
+# --ws-max-size bounds one inbound WebSocket message before the app sees it (uvicorn's
+# default is 16 MiB: https://www.uvicorn.org/settings/#implementation). It is the same
+# 8 MiB ceiling `api/limits.py` puts on a text body, because the LSP bridge carries a
+# whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
+# frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
+CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.
