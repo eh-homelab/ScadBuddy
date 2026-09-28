@@ -218,7 +218,7 @@ def printable(file_type: str | None) -> bool:
 
 
 def _refusal(file: LibraryFile) -> str:
-    if file.file_type == SLICED_TYPE:
+    if (file.file_type or "").lower() == SLICED_TYPE:
         return f"{file.filename} is sliced already. Print it from Bambuddy."
     kind = file.file_type or "file of unknown type"
     return (

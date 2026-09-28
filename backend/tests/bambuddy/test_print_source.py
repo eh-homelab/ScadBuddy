@@ -168,6 +168,19 @@ async def test_a_file_the_dialog_cannot_print_is_a_422(
 
 
 @respx.mock
+async def test_an_uppercase_sliced_type_still_gets_the_sliced_message(
+    bambuddy: BambuddyClient,
+) -> None:
+    _file(105, "GCODE.3MF")
+
+    with pytest.raises(ApiError) as refused:
+        await LibrarySource.load(bambuddy, 105)
+
+    assert refused.value.status == 422
+    assert "is sliced already" in refused.value.detail
+
+
+@respx.mock
 async def test_an_stl_is_one_plate_of_one_filament(bambuddy: BambuddyClient) -> None:
     _file(46, "stl")
     respx.get(f"{API}/library/files/46/plates").mock(

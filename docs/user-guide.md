@@ -305,6 +305,24 @@ per **printer**, not per model. Reopening the dialog restores all of it, and ope
 straight into Advanced mode if the remembered choice is a named process or a High Flow
 flow — either would otherwise apply unseen from Simple mode.
 
+### Library
+
+The **Library** page lists everything already in Bambuddy's library, by folder. By
+default it shows only unsliced `.3mf` files. The **Advanced** switch, remembered per
+browser, also lists STLs (printable, as one plate) and sliced `.gcode.3mf` files —
+shown without **Print**, since a sliced file is printed from Bambuddy directly.
+
+**Print** on a file opens the same print picker an output uses. The file itself is
+never touched: it prints exactly as its author left it, never replated for the
+printer (#105) or recolored for the spools (#476), and never uploaded again. The
+nozzle refusals above still apply, since they read the printer, not the file.
+
+Choices are remembered per library file, the way an output's are remembered per
+model. There's no ScadBuddy progress panel or History entry for a library print —
+Bambuddy's queue and archives are the record — so once it's queued, the dialog
+links to Bambuddy's queue instead. The queue item is tagged with the last-used
+project, the same as an output's.
+
 ### History and versions
 
 - **History** lists every output generated for a model, with the parameters that

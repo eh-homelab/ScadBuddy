@@ -39,6 +39,10 @@ multi-colour rules, connecting Bambuddy and each feature.
   through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
   nozzle flow, the full process list and a per-slot filament preset override. Also lets
   you set copies, a project, and print options.
+- **Library**: print any file already in Bambuddy's library through the same print
+  picker, printed exactly as its author left it — never replated, recolored or
+  uploaded again. Advanced also lists STLs and sliced `.gcode.3mf` files (printed
+  from Bambuddy directly).
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,

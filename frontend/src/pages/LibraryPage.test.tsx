@@ -1,5 +1,5 @@
 import { screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { HttpResponse, delay, http } from 'msw'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -65,6 +65,17 @@ describe('LibraryPage', () => {
     const { user } = renderPage(<LibraryPage />, { route: '/library' })
     await user.click(await screen.findByTestId('library-print-89'))
     expect(await screen.findByRole('dialog', { name: 'Print' })).toBeInTheDocument()
+  })
+
+  it('clears the old listing while a new folder is loading, so its Print buttons go away', async () => {
+    const { user } = renderPage(<LibraryPage />, { route: '/library' })
+    await screen.findByTestId('library-print-89')
+
+    server.use(http.get('/api/v1/print/library', () => delay('infinite')))
+    await user.click(screen.getByTestId('library-folder-9'))
+
+    await waitFor(() => expect(screen.queryByTestId('library-print-89')).toBeNull())
+    expect(screen.getByText(/Reading the Bambuddy library/)).toBeInTheDocument()
   })
 
   it('says when the library cannot be read', async () => {

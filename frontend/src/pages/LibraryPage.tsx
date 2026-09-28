@@ -31,6 +31,7 @@ export function LibraryPage() {
   useEffect(() => {
     let live = true
     setError(null)
+    setListing(null)
     api
       .listLibrary({ folderId, all: advanced })
       .then((next) => live && setListing(next))
@@ -157,7 +158,7 @@ export function LibraryPage() {
                   </Button>
                 ) : (
                   <p className="text-[12px] text-faint">
-                    {file.file_type === 'gcode.3mf'
+                    {file.file_type?.toLowerCase() === 'gcode.3mf'
                       ? 'Sliced already. Print it from Bambuddy.'
                       : 'ScadBuddy cannot print this file type.'}
                   </p>
