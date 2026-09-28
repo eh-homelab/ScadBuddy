@@ -45,6 +45,10 @@ def archive(archive_id: int, **fields: Any) -> dict[str, Any]:
 
 
 def mock_archive(archive_id: int, **fields: Any) -> respx.Route:
+    """The archive, and its runs (named ``runs-<id>``): the printer's name is theirs."""
+    respx.get(f"{API}/archives/{archive_id}/runs", name=f"runs-{archive_id}").mock(
+        return_value=httpx.Response(200, json=recording("archive-runs.json"))
+    )
     return respx.get(f"{API}/archives/{archive_id}").mock(
         return_value=httpx.Response(200, json=archive(archive_id, **fields))
     )
@@ -80,6 +84,7 @@ def test_a_linked_print_is_listed_with_its_summary(client: TestClient, model: st
         "output_name": "Elan",
         "status": "completed",
         "printer_id": 1,
+        "printer_name": "3DP-31B-598",
         "started_at": "2026-09-27T04:09:36.529201",
         "completed_at": "2026-09-27T05:56:53.660315",
         "actual_time_seconds": 6437,
@@ -117,8 +122,12 @@ def test_a_deleted_archive_is_listed_not_dropped(client: TestClient, model: str)
     respx.get(f"{API}/archives/35").mock(
         return_value=httpx.Response(404, json={"detail": "Archive not found"})
     )
+    runs = respx.get(f"{API}/archives/35/runs").mock(return_value=httpx.Response(404))
 
     [summary] = client.get("/api/v1/prints").json()["items"]
+
+    assert summary["printer_name"] is None
+    assert not runs.called
 
     assert summary["archive_id"] == 35
     assert summary["status"] == "deleted_in_bambuddy"
@@ -160,6 +169,24 @@ def test_the_list_pages_by_cursor_newest_archive_first(client: TestClient, model
     assert first["next_cursor"] is not None
     assert [item["archive_id"] for item in second.json()["items"]] == [16]
     assert second.json()["next_cursor"] is None
+
+
+@respx.mock
+def test_the_printer_name_is_read_only_for_the_prints_on_the_page(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    output_id = make_output(client, model)
+    link(client, output_id, 35)
+    link(client, output_id, 36)
+    mock_archive(35)
+    mock_archive(36, status="failed")
+
+    [summary] = client.get("/api/v1/prints", params={"status": "failed"}).json()["items"]
+
+    assert summary["printer_name"] == "3DP-31B-598"
+    assert respx.routes["runs-36"].called
+    assert not respx.routes["runs-35"].called, "a print the filter dropped"
 
 
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"cursor": "nope"}])
@@ -252,9 +279,7 @@ def test_archive_reads_are_cached_briefly(client: TestClient, model: str) -> Non
 
 def mock_detail_reads(archive_id: int = 35) -> dict[str, respx.Route]:
     return {
-        "runs": respx.get(f"{API}/archives/{archive_id}/runs").mock(
-            return_value=httpx.Response(200, json=recording("archive-runs.json"))
-        ),
+        "runs": respx.routes[f"runs-{archive_id}"],
         "info": respx.get(f"{API}/archives/{archive_id}/timelapse/info").mock(
             return_value=httpx.Response(200, json=recording("timelapse-info.json"))
         ),
@@ -337,6 +362,7 @@ def test_the_detail_joins_provenance_files_media_and_outcome(
     assert outcome["cost"] == 0.43
     assert outcome["printer_id"] == 1
     assert outcome["printer_name"] == "3DP-31B-598"
+    assert body["printer_name"] == outcome["printer_name"]
     assert [run["id"] for run in outcome["runs"]] == [27]
 
     assert body["printer_media"] is None
