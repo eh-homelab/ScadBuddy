@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
@@ -41,21 +41,24 @@ export function CataloguePage() {
   const [lightbox, setLightbox] = useState<{ slides: Slide[]; index: number } | null>(null)
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
-  // #278 — with no `view` in the URL, the one this browser last chose.
-  const [storedView, setStoredView] = useState(readStoredView)
-  const query = useMemo(() => {
-    const parsed = parseQuery(params)
-    return params.has('view') ? parsed : { ...parsed, view: storedView ?? parsed.view }
-  }, [params, storedView])
+  const query = useMemo(() => parseQuery(params), [params])
+  // #278 — arriving with no `view` in the URL, the one this browser last chose is
+  // written into it (replacing this entry), so the URL stays the one source of truth
+  // and back/forward move between views like any other filter (#276).
+  useEffect(() => {
+    const stored = readStoredView()
+    if (!params.has('view') && stored && stored !== query.view) {
+      setParams(toParams({ ...query, view: stored }), { replace: true })
+    }
+    // Only on arrival: afterwards the URL alone decides.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
-    if (next.view !== query.view) {
-      storeView(next.view)
-      setStoredView(next.view)
-    }
+    if (next.view !== query.view) storeView(next.view)
     setParams(toParams(next), options)
   }
 

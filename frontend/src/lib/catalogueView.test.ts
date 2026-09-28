@@ -41,4 +41,13 @@ describe('the remembered catalogue view (#278)', () => {
     expect(() => storeView('list')).not.toThrow()
     expect(readStoredView()).toBe('list')
   })
+
+  it('falls back to memory when storage reads but will not write', () => {
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'cards')
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError')
+    })
+    storeView('list')
+    expect(readStoredView()).toBe('list')
+  })
 })

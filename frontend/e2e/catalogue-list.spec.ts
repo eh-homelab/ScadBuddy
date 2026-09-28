@@ -19,11 +19,20 @@ test.describe('catalogue list mode (#278)', () => {
     await expect(page.locator('[data-model-row]')).toHaveCount(4)
     await expect(view.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
 
-    // With no `view` in the URL, the browser's last choice is restored.
+    // With no `view` in the URL, the browser's last choice is restored into it.
     await page.goto('/')
+    await expect(page).toHaveURL(/\/\?view=list$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(4)
 
     await view.getByRole('button', { name: 'Cards' }).click()
+    await expect(page).toHaveURL(/\/$/)
+    await expect(page.locator('[data-model-row]')).toHaveCount(0)
+
+    // Back undoes the toggle, Forward redoes it.
+    await page.goBack()
+    await expect(page).toHaveURL(/\/\?view=list$/)
+    await expect(page.locator('[data-model-row]')).toHaveCount(4)
+    await page.goForward()
     await expect(page).toHaveURL(/\/$/)
     await expect(page.locator('[data-model-row]')).toHaveCount(0)
     await page.reload()

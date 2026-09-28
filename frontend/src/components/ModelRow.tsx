@@ -20,10 +20,13 @@ interface Props {
 /**
  * #278 — one template in the catalogue's list mode: a small cover (which opens the
  * lightbox, never navigates), the name (which does), then the details a card shows.
- * No carousel. On narrow widths only the cover, the name and the tags are kept.
+ * No carousel. On narrow widths the description, badge and time are dropped; Duplicate stays.
  */
 export function ModelRow({ model, slides, onOpen, onTag }: Props) {
-  const cover = slides[0]
+  // The backend's cover rule (`catalogue._cover`): a video with no poster has no frame
+  // to show, so the cover is the first image or poster'd video.
+  const coverIndex = slides.findIndex((slide) => slide.kind === 'image' || slide.poster)
+  const cover = coverIndex >= 0 ? slides[coverIndex] : undefined
   const src = model.has_thumbnail
     ? api.modelThumbnailUrl(model)
     : cover?.kind === 'image'
@@ -42,7 +45,7 @@ export function ModelRow({ model, slides, onOpen, onTag }: Props) {
           <button
             type="button"
             aria-label={`View media of ${model.name}${slides.length > 1 ? ` (${slides.length})` : ''}`}
-            onClick={() => onOpen(0)}
+            onClick={() => onOpen(coverIndex)}
             className="block w-full cursor-zoom-in rounded-[4px] focus-visible:outline-2 focus-visible:outline-accent"
           >
             <ModelThumbnail src={src} alt="" />
@@ -107,7 +110,7 @@ export function ModelRow({ model, slides, onOpen, onTag }: Props) {
       <p className="hidden shrink-0 text-[12px] text-faint md:block">
         Updated {timeAgo(model.updated_at)}
       </p>
-      <span className="hidden shrink-0 sm:block">
+      <span className="shrink-0">
         <DuplicateModelButton slug={model.slug} name={model.name} />
       </span>
     </li>

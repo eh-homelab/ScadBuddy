@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useLocation } from 'react-router'
+import { Route, Routes, useLocation, useNavigate } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { toSlides } from '../components/media/slides'
@@ -17,11 +17,27 @@ function Search() {
   return <p data-testid="search">{search}</p>
 }
 
+/** The browser's Back and Forward buttons. */
+function History() {
+  const navigate = useNavigate()
+  return (
+    <>
+      <button type="button" onClick={() => void navigate(-1)}>
+        Back
+      </button>
+      <button type="button" onClick={() => void navigate(1)}>
+        Forward
+      </button>
+    </>
+  )
+}
+
 function renderCatalogue(route = '/') {
   return renderPage(
     <>
       <CataloguePage />
       <Search />
+      <History />
     </>,
     { route },
   )
@@ -627,28 +643,46 @@ describe('CataloguePage list mode (#278)', () => {
     expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('cards')
   })
 
-  it('restores the remembered view only when the URL has none', async () => {
+  it('restores the remembered view into a URL that has none, replacing the entry', async () => {
     window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
-    renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
-    expect(rows()).toHaveLength(4)
+    const { user } = renderCatalogue('/?tag=keychain')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list')
+    expect(rows()).toHaveLength(2)
     expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
-  })
 
-  it('switches back to Cards from a remembered List, though the URL stays the same', async () => {
-    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
-    const { user } = renderCatalogue()
-    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    // Replaced, not pushed: Cards then Back returns to List, not to a view-less URL.
     await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain')
     expect(rows()).toHaveLength(0)
-    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('cards')
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&view=list')
+    expect(rows()).toHaveLength(2)
   })
 
   it('lets a view in the URL win over the remembered one', async () => {
-    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
-    renderCatalogue('/?view=cards')
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'cards')
+    renderCatalogue('/?view=list')
     await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(4)
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+  })
+
+  it('undoes and redoes a view toggle with back and forward', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(4)
+
+    await user.click(screen.getByRole('button', { name: 'Back' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
     expect(rows()).toHaveLength(0)
+    expect(screen.getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+
+    await user.click(screen.getByRole('button', { name: 'Forward' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+    expect(rows()).toHaveLength(4)
   })
 
   it('works when storage throws, as a sandboxed iframe may', async () => {
@@ -666,6 +700,22 @@ describe('CataloguePage list mode (#278)', () => {
     expect(rows()).toHaveLength(4)
     await user.click(screen.getByRole('button', { name: 'Cards' }))
     expect(rows()).toHaveLength(0)
+  })
+
+  it('keeps the choice for this page when storage reads but will not write', async () => {
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('full', 'QuotaExceededError')
+    })
+    const first = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await first.user.click(screen.getByRole('button', { name: 'List' }))
+    first.unmount()
+
+    // Back on the catalogue with no `view` in the URL, the choice is still List.
+    renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(4)
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
   })
 
   it('keeps the filters and sort when the view changes', async () => {
@@ -724,6 +774,37 @@ describe('CataloguePage list mode (#278)', () => {
     expect(dialog).toHaveTextContent('Printed in blue and orange')
     // Opening the media is not a navigation.
     expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+  })
+
+  it('skips a video with no poster when picking the cover, as the backend does', async () => {
+    const posterless = {
+      id: 'e5f6a1b2c3d4',
+      file: 'e5f6a1b2c3d4.mp4',
+      kind: 'video' as const,
+      caption: '',
+      poster: null,
+      missing: false,
+      content_type: 'video/mp4',
+      size: 24,
+    }
+    const list = models.map((model) =>
+      model.slug === GALLERY_SLUG ? { ...model, media: [posterless, ...media[GALLERY_SLUG]!] } : model,
+    )
+    server.use(http.get('/api/v1/models', () => HttpResponse.json(list)))
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(
+      within(rowOf('Crème Coaster')).getByRole('button', { name: 'View media of Crème Coaster (5)' }),
+    )
+    await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const slides = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        slides[0]!.src,
+      ),
+    )
   })
 
   it('gives a single cover no count badge', async () => {

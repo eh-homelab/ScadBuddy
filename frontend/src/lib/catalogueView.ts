@@ -7,6 +7,7 @@ import type { CatalogueView } from './catalogueQuery'
  */
 export const CATALOGUE_VIEW_KEY = 'scadbuddy.catalogue.view'
 
+/** The choice made on this page when storage would not take it; wins over storage. */
 let fallback: CatalogueView | null = null
 
 function asView(value: string | null): CatalogueView | null {
@@ -14,19 +15,21 @@ function asView(value: string | null): CatalogueView | null {
 }
 
 export function readStoredView(): CatalogueView | null {
+  if (fallback) return fallback
   try {
     return asView(window.localStorage.getItem(CATALOGUE_VIEW_KEY))
   } catch {
-    return fallback
+    return null
   }
 }
 
 export function storeView(view: CatalogueView) {
-  fallback = view
   try {
     window.localStorage.setItem(CATALOGUE_VIEW_KEY, view)
+    fallback = null
   } catch {
-    // Kept in memory for this page only.
+    // Kept in memory for this page only, even where storage can still be read.
+    fallback = view
   }
 }
 
