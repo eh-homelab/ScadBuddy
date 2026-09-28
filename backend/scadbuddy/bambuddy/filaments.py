@@ -512,6 +512,33 @@ def queue_filaments(options: FilamentOptions, plan: FilamentPlan) -> QueueFilame
     return QueueFilaments(filament_overrides=overrides, required_filament_types=types)
 
 
+class InventoryReads(BaseModel):
+    """What Bambuddy answers the same for every plate of a file: the spool inventory,
+    where each spool is loaded, and the chosen printer with its reconciled remaining
+    weights. Only the slots a plate needs are the plate's own."""
+
+    spools: list[Spool]
+    assignments: list[SpoolAssignment]
+    printer: Printer | None = None
+    slot_materials: list[SlotMaterial] = Field(default_factory=list)
+
+
+async def gather_inventory(
+    client: BambuddyClient, *, printer_id: int | None = None
+) -> InventoryReads:
+    """The plate-invariant part of :func:`gather_options`, read once."""
+    spools = await client.spools()
+    assignments = await client.spool_assignments()
+    printer = None
+    slot_materials: list[SlotMaterial] = []
+    if printer_id is not None:
+        printer = await client.printer(printer_id)
+        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+    return InventoryReads(
+        spools=spools, assignments=assignments, printer=printer, slot_materials=slot_materials
+    )
+
+
 async def gather_options(
     client: BambuddyClient,
     *,
@@ -520,31 +547,29 @@ async def gather_options(
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
     own_colours: list[str] | None = None,
+    inventory: InventoryReads | None = None,
 ) -> FilamentOptions:
     """Read Bambuddy once for everything the filament step needs.
 
     ``own_colours`` replace the colors the file reports, slot by slot: the file was
     recolored for a run's spools (#457), and the step shows the model's.
+
+    ``inventory`` is a :func:`gather_inventory` already made: an all-plates read asks
+    for each plate's slots on top of the one inventory instead of re-reading it per
+    plate. Without it, it is read here for ``printer_id``.
     """
-    spools = await client.spools()
-    assignments = await client.spool_assignments()
+    if inventory is None:
+        inventory = await gather_inventory(client, printer_id=printer_id)
     requirements = await _requirements(
         client, library_file_id, plate_id, fallback_colours, own_colours
     )
-
-    printer = None
-    slot_materials: list[SlotMaterial] = []
-    if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
-
     return build_options(
         library_file_id=library_file_id,
-        spools=spools,
-        assignments=assignments,
+        spools=inventory.spools,
+        assignments=inventory.assignments,
         requirements=requirements,
-        printer=printer,
-        slot_materials=slot_materials,
+        printer=inventory.printer,
+        slot_materials=inventory.slot_materials,
     )
 
 
