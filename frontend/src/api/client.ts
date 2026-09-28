@@ -35,6 +35,7 @@ import type {
   PrinterBedType,
   PrintAgain,
   PrintDetail,
+  PrintPage,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -65,6 +66,7 @@ import type {
   McpTokenList,
   MintedMcpToken,
 } from './mcpTokens'
+import type { PrintFilters } from '../lib/printsQuery'
 
 export const API_BASE = '/api/v1'
 
@@ -740,6 +742,19 @@ export const api = {
    */
   getPrintProgress: (outputId: string) =>
     request<PrintProgress | null>(`/print/outputs/${seg(outputId)}/progress`),
+
+  /** #308 — the print history, newest first, a page at a time; `cursor` is the last
+   * page's `next_cursor`. */
+  listPrints: (filters: PrintFilters, page: { cursor?: string | null; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== '') search.set(key, String(value))
+    }
+    if (page.limit !== undefined) search.set('limit', String(page.limit))
+    if (page.cursor) search.set('cursor', page.cursor)
+    const suffix = search.size > 0 ? `?${search.toString()}` : ''
+    return request<PrintPage>(`/prints${suffix}`)
+  },
 
   listFonts: () => request<FontFamily[]>('/fonts'),
 

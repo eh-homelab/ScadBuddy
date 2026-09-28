@@ -104,8 +104,14 @@ function paramsFileName(print: PrintDetail): string {
 
 export function PrintDetailPage() {
   const { archiveId = '' } = useParams()
-  const id = Number(archiveId)
-  const state = useAsync(() => api.getPrint(id), [id])
+  // An id that is not one would be refused as malformed; it is not a print either way (#310).
+  const state = useAsync(
+    () =>
+      /^[1-9]\d{0,14}$/.test(archiveId)
+        ? api.getPrint(Number(archiveId))
+        : Promise.reject(new Error(`archive ${archiveId} is not a print of any ScadBuddy output`)),
+    [archiveId],
+  )
   const print = state.data
 
   if (state.loading) {
