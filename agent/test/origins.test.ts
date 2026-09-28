@@ -5,6 +5,7 @@ import {
   isLoopbackPeer,
   isSecureTransport,
   normaliseOrigin,
+  OriginConfigError,
   originPolicy,
   parseCidrList,
   type RequestFacts,
@@ -91,6 +92,31 @@ describe('checkOrigin', () => {
     expect(via({ host: 'scadbuddy.example', origin: 'https://evil.test' }).ok).toBe(false)
     expect(via({ host: 'scadbuddy.example' })).toEqual({ ok: false, reason: 'no-origin' })
     expect(via({ host: 'scadbuddy.example', origin: 'null' })).toEqual({ ok: false, reason: 'malformed-origin' })
+  })
+
+  it('accepts every origin in SCADBUDDY_ALLOWED_ORIGINS beside the public URL, each as its own pair', () => {
+    const policy = originPolicy(
+      'https://scadbuddy.example',
+      '10.0.0.0/8',
+      ' https://scadbuddy.internal.example:443 ,http://scadbuddy.lan:8080, ',
+    )
+    const via = (headers: Record<string, string>) => checkOrigin(req('10.0.0.7', { 'x-forwarded-proto': 'https', ...headers }), policy)
+    expect(via({ host: 'scadbuddy.internal.example', origin: 'https://scadbuddy.internal.example' })).toEqual({
+      ok: true,
+      origin: 'https://scadbuddy.internal.example',
+      via: 'public',
+    })
+    expect(via({ host: 'scadbuddy.example', origin: 'https://scadbuddy.example' }).ok).toBe(true)
+    // Both names are allowed, but a page on one may not address the other.
+    expect(via({ host: 'scadbuddy.example', origin: 'https://scadbuddy.internal.example' }).ok).toBe(false)
+    expect(via({ host: 'scadbuddy.lan', origin: 'https://scadbuddy.lan' }).ok).toBe(false)
+    expect(
+      checkOrigin(
+        req('10.0.0.7', { 'x-forwarded-proto': 'http', host: 'scadbuddy.lan:8080', origin: 'http://scadbuddy.lan:8080' }),
+        policy,
+      ).ok,
+    ).toBe(true)
+    expect(() => originPolicy(undefined, undefined, 'scadbuddy.lan')).toThrow(OriginConfigError)
   })
 
   it('accepts the loopback pair only from a loopback peer that is not a proxy', () => {
