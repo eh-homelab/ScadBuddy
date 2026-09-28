@@ -340,7 +340,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
       const ran = await confirm(a, id)
       expect(ran.isError).toBeFalsy()
       expect(firstText(ran)).toMatchObject({ status: 'sent' })
-      expect(sent).toEqual([{ id: OUTPUT, body: { mode: 'library', copies: null, options: {} } }])
+      expect(sent).toEqual([{ id: OUTPUT, body: { mode: 'library' } }])
 
       // Replay: refused, nothing more sent.
       const replay = await confirm(a, id)
