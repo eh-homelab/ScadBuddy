@@ -18,12 +18,14 @@ from scadbuddy.api.deps import (
     QueueDep,
     SettingsStoreDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
@@ -47,6 +49,10 @@ THREE_MF_MEDIA_TYPE = "model/3mf"
 
 class OutputSummary(OutputMeta):
     has_thumbnail: bool
+    #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's file library (#316),
+    #: in upload order, read from `BambuddyUploadStore` (#455). One per (folder,
+    #: target): a project's folder keeps the file each of its prints came from.
+    library_files: list[LibraryCopy] = Field(default_factory=list)
 
 
 class OutputDetail(OutputSummary):
@@ -80,12 +86,20 @@ class EditTarget(BaseModel):
     source: Literal["record", "3mf"]
 
 
-def _detail(store: OutputStore, meta: OutputMeta) -> OutputDetail:
+def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCopy]) -> OutputDetail:
     return OutputDetail(
         **meta.model_dump(),
         has_thumbnail=store.thumbnail_path(meta.id).is_file(),
         params=store.params(meta.id),
+        library_files=library_files,
     )
+
+
+def _details(
+    store: OutputStore, uploads: BambuddyUploadStore, metas: list[OutputMeta]
+) -> list[OutputDetail]:
+    copies = uploads.for_outputs(meta.id for meta in metas)
+    return [_detail(store, meta, copies[meta.id]) for meta in metas]
 
 
 def require_output(store: OutputStore, output_id: str) -> OutputMeta:
@@ -122,22 +136,24 @@ def create_output(
         )
     meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
-    return _detail(outputs, meta)
+    # A new output has no uploads yet: no read to make.
+    return _detail(outputs, meta, [])
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
 def list_outputs(
-    slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep
+    slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep, uploads: UploadsDep
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
     a summary list would make it fetch every row again one at a time."""
     require_model(catalogue, slug)
-    return [_detail(outputs, meta) for meta in outputs.list_for(slug)]
+    return _details(outputs, uploads, outputs.list_for(slug))
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
-def get_output(output_id: OutputIdPath, outputs: OutputsDep) -> OutputDetail:
-    return _detail(outputs, require_output(outputs, output_id))
+def get_output(output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep) -> OutputDetail:
+    meta = require_output(outputs, output_id)
+    return _detail(outputs, meta, uploads.for_output(meta.id))
 
 
 @router.get(
@@ -192,6 +208,7 @@ def get_edit_target(
 async def delete_output(
     output_id: OutputIdPath,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     events: EventsDep,
     store: SettingsStoreDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
@@ -205,11 +222,13 @@ async def delete_output(
     fails stops here, before the record goes — it is the only pointer to the file.
     """
     meta = require_output(outputs, output_id)
-    if delete_inbox_copies and meta.library_files:
+    if delete_inbox_copies and uploads.for_output(meta.id):
         settings = store.load()
         async with client_for(settings) as client:
-            await remove_inbox_copies(client, outputs, meta, settings)
+            await remove_inbox_copies(client, uploads, meta, settings)
     outputs.delete(output_id)
+    # After the files: a failed delete keeps the output, and so must keep its records.
+    uploads.delete_output(output_id)
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -369,6 +388,7 @@ async def send_output_to_bambuddy(
     output_id: OutputIdPath,
     body: SendRequest,
     outputs: OutputsDep,
+    uploads: UploadsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
 ) -> SendResult:
@@ -382,7 +402,7 @@ async def send_output_to_bambuddy(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, meta, settings, body)
+        result = await send_output(client, outputs, uploads, meta, settings, body)
     # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
     if result.pipeline_run_id is not None or result.queue_item_id is not None:
         observer.started(meta)

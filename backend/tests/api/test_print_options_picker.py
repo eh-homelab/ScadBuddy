@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -35,6 +36,7 @@ def slice_route() -> respx.Route:
     return route
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_option_moves_the_picker_onto_slice_and_queue(
     client: TestClient, model: str
@@ -71,6 +73,7 @@ def test_a_remembered_option_moves_the_picker_onto_slice_and_queue(
     assert record["queue_item_id"] == body["queue_item_ids"][0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_printer_option_applies_to_the_pipelines_printer(
     client: TestClient, model: str
@@ -89,6 +92,7 @@ def test_a_per_printer_option_applies_to_the_pipelines_printer(
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_no_remembered_option_still_runs_the_pipeline(client: TestClient, model: str) -> None:
     configure(client)
@@ -110,6 +114,7 @@ def test_no_remembered_option_still_runs_the_pipeline(client: TestClient, model:
     assert body["route"] == "pipeline"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_filament_plan_carries_the_remembered_options_too(client: TestClient, model: str) -> None:
     """#141: the plan route queues with the options as well as the plan's overrides.
@@ -151,6 +156,7 @@ def test_a_filament_plan_carries_the_remembered_options_too(client: TestClient, 
     assert [override["slot_id"] for override in queued["filament_overrides"]] == [1, 2]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str) -> None:
     configure(client)
@@ -169,6 +175,7 @@ def test_a_per_model_option_applies_to_the_picker(client: TestClient, model: str
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     client: TestClient, model: str
@@ -196,6 +203,7 @@ def test_a_named_printer_scopes_the_options_and_takes_the_queue_item(
     assert body["printer_id"] == 7
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_quantity_reaches_the_pipeline_run(client: TestClient, model: str) -> None:
     """Quantity is the one option a pipeline run carries; an omitted `copies` lets the
@@ -222,6 +230,7 @@ def test_a_remembered_quantity_reaches_the_pipeline_run(client: TestClient, mode
     assert explicit.json()["copies"] == 2
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_deleted_pipeline_is_a_friendly_conflict_on_the_scope_path(
     client: TestClient, model: str
@@ -243,6 +252,7 @@ def test_a_deleted_pipeline_is_a_friendly_conflict_on_the_scope_path(
     assert "no longer has slicer pipeline 1" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_class_pipeline_forced_onto_the_queue_says_it_did_not_fan_out(
     client: TestClient, model: str
@@ -270,6 +280,7 @@ def test_a_class_pipeline_forced_onto_the_queue_says_it_did_not_fan_out(
     assert "timelapse" not in warning["message"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_project_alone_still_runs_the_pipeline(client: TestClient, model: str) -> None:
     """The picker's project comes from its own control, so a remembered project_id
@@ -292,6 +303,7 @@ def test_a_remembered_project_alone_still_runs_the_pipeline(client: TestClient, 
     assert body["route"] == "pipeline"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_remembered_quantity_is_reported_on_the_queue_route(
     client: TestClient, model: str
@@ -313,6 +325,7 @@ def test_a_remembered_quantity_is_reported_on_the_queue_route(
     assert body["copies"] == 4
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_pickers_own_options_ride_on_this_print_only(client: TestClient, model: str) -> None:
     """#78: the Print dialog's options disclosure, like the send bar's, overrides every

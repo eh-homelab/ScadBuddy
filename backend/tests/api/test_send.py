@@ -126,6 +126,7 @@ def plate_routes(
 # --- #25 library mode ---------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     client: TestClient, model: str, paths: DataPaths
@@ -148,16 +149,18 @@ def test_library_mode_uploads_to_the_configured_folder_and_records_the_id(
     assert request.headers["X-API-Key"] == "s3cret"
     assert b"demo-elan.3mf" in request.content
 
+    # Recorded in Postgres, not in meta.json (#455)...
     meta = json.loads(
         (paths.output_dir(model, output_id) / "meta.json").read_text(encoding="utf-8")
     )
-    assert [(row["id"], row["folder_id"]) for row in meta["library_files"]] == [(41, 2)]
+    assert "library_files" not in meta
 
-    # And the detail route reports it, so the UI can deep-link without re-sending.
+    # ...and the detail route reports it, so the UI can deep-link without re-sending.
     rows = client.get(f"/api/v1/outputs/{output_id}").json()["library_files"]
-    assert [row["id"] for row in rows] == [41]
+    assert [(row["id"], row["folder_id"]) for row in rows] == [(41, 2)]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     client: TestClient, model: str
@@ -176,6 +179,7 @@ def test_a_re_send_reuses_the_inbox_copy_rather_than_duplicating_it(
     assert not delete.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_re_send_survives_the_file_having_been_deleted_in_bambuddy(
     client: TestClient, model: str
@@ -214,6 +218,7 @@ def test_sending_an_unknown_output_is_a_404(client: TestClient) -> None:
 # --- #26 queue mode -----------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_runs_the_configured_pipeline(
     client: TestClient, model: str, paths: DataPaths
@@ -257,6 +262,7 @@ def test_queue_mode_runs_the_configured_pipeline(
     assert meta["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
     client: TestClient, model: str
@@ -281,6 +287,7 @@ def test_an_ineligible_pipeline_surfaces_bambuddys_report_verbatim(
     assert response.json()["bambuddy_body"] == report
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_without_a_pipeline_slices_then_enqueues(
     client: TestClient, model: str, paths: DataPaths
@@ -330,6 +337,7 @@ def test_queue_mode_without_a_pipeline_slices_then_enqueues(
     assert meta["queue_item_id"] == 9
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, **PRESETS)
@@ -353,6 +361,7 @@ def test_a_failed_slice_is_reported_rather_than_queued(client: TestClient, model
     assert not queue.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
     client: TestClient, model: str
@@ -368,6 +377,7 @@ def test_queue_mode_with_neither_a_pipeline_nor_presets_says_so(
     assert "presets" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_queue_mode_with_no_printer_and_no_pipeline_says_so(client: TestClient, model: str) -> None:
     configure(client, **PRESETS)
@@ -380,6 +390,7 @@ def test_queue_mode_with_no_printer_and_no_pipeline_says_so(client: TestClient, 
     assert "printer" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_more_colours_than_filament_slots_is_refused_before_slicing(
     client: TestClient, model: str
@@ -414,6 +425,7 @@ def test_copies_is_bounded(client: TestClient, model: str, copies: int) -> None:
 # --- #105 the plate follows the target printer --------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_upload_is_laid_out_for_the_target_printers_plate(
     client: TestClient, model: str
@@ -454,6 +466,7 @@ def test_the_upload_is_laid_out_for_the_target_printers_plate(
     assert transform[9:11] == [175.0, 160.0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     client: TestClient, model: str
@@ -472,6 +485,7 @@ def test_an_unknown_printer_model_still_uploads_on_the_default_plate(
     assert [float(v) for v in (item.get("transform") or "").split()][9:11] == [128.0, 128.0]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_model_too_big_for_the_printer_is_refused_before_the_upload(
     client: TestClient, model: str, paths: DataPaths
@@ -515,6 +529,7 @@ def _uploaded_nozzle(route: respx.Route) -> list[str]:
     return nozzle
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, model: str) -> None:
     """A 0.2-nozzle pipeline's file must not tell someone at the printer it is 0.4."""
@@ -529,6 +544,7 @@ def test_the_upload_states_the_pipelines_nozzle_diameter(client: TestClient, mod
     assert _uploaded_nozzle(upload) == ["0.2"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
     client: TestClient, model: str
@@ -547,6 +563,7 @@ def test_without_a_pipeline_the_upload_keeps_the_placeholder_nozzle(
     assert not presets.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
     client: TestClient, model: str
@@ -562,6 +579,7 @@ def test_a_printer_preset_the_catalogue_cannot_name_keeps_the_placeholder(
     assert _uploaded_nozzle(upload) == ["0.4"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
     client: TestClient, model: str
@@ -586,6 +604,7 @@ def test_an_unreadable_preset_catalogue_does_not_fail_the_send(
     ],
     ids=["not-json", "wrong-shape"],
 )
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_malformed_preset_catalogue_does_not_fail_the_send(
     client: TestClient, model: str, response: httpx.Response
@@ -612,6 +631,7 @@ def _uploaded_3mf(route: respx.Route) -> bytes:
     raise AssertionError("the upload carried no file part")
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_refused_re_send_leaves_the_previous_file_in_place(
     client: TestClient, model: str, paths: DataPaths
@@ -683,6 +703,7 @@ def annotate_route(file_id: int = 41, notes: str | None = None) -> respx.Route:
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_edit_link_is_attached_to_the_uploaded_file(
     client: TestClient, model: str, paths: DataPaths
@@ -702,6 +723,7 @@ def test_the_edit_link_is_attached_to_the_uploaded_file(
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_nothing_is_attached_when_no_public_url_is_configured(
     client: TestClient, model: str, paths: DataPaths
@@ -739,6 +761,7 @@ def pipeline_run_route(run_id: int = 12) -> respx.Route:
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_annotation_still_queues_the_print(
     client: TestClient, model: str, paths: DataPaths
@@ -770,6 +793,7 @@ def test_a_failed_annotation_still_queues_the_print(
     assert meta["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, model: str) -> None:
     """A slow or broken annotate must not sit in front of the pipeline run."""
@@ -788,6 +812,7 @@ def test_the_annotation_runs_after_the_work_that_matters(client: TestClient, mod
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, model: str) -> None:
     """Bambuddy's ``update_file`` guards every assignment with ``if data.X is not
@@ -804,6 +829,7 @@ def test_the_annotation_is_a_partial_update_of_notes_alone(client: TestClient, m
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_slice_and_queue_branch_annotates_both_files_last(
     client: TestClient, model: str
@@ -851,6 +877,7 @@ def test_the_slice_and_queue_branch_annotates_both_files_last(
     )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, model: str) -> None:
     configure(client, printer_id=1, public_url="https://scad.test", **PRESETS)
@@ -881,6 +908,7 @@ def test_a_failed_annotation_still_returns_the_queued_item(client: TestClient, m
     assert response.json()["edit_url"] is None
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
     client: TestClient, model: str

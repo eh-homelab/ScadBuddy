@@ -439,6 +439,7 @@ def test_an_empty_filament_preset_list_is_refused_before_bambuddy_sees_it(
 # --- eligibility --------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_eligibility_uploads_once_and_reports_every_pipeline_verbatim(
     client: TestClient, model: str
@@ -480,6 +481,7 @@ def test_eligibility_uploads_once_and_reports_every_pipeline_verbatim(
     assert upload.call_count == 1
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
     client: TestClient, model: str
@@ -513,6 +515,7 @@ def test_every_pipeline_is_checked_concurrently_rather_than_one_after_another(
     assert [entry["pipeline_id"] for entry in body["reports"]] == [1, 2, 3]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_one_pipeline_failing_to_answer_does_not_sink_the_others(
     client: TestClient, model: str
@@ -567,6 +570,7 @@ def test_a_pipeline_report_must_carry_either_a_report_or_a_reason(kwargs: Any) -
         PipelineReport(pipeline_id=1, **kwargs)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_ineligible_pipeline_is_a_200_not_a_409(client: TestClient, model: str) -> None:
     """``check-eligibility`` answers 200 with the report; only ``run`` turns it into 409.
@@ -585,6 +589,7 @@ def test_an_ineligible_pipeline_is_a_200_not_a_409(client: TestClient, model: st
     assert response.json()["reports"][0]["report"]["ok"] is False
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_printer_class_report_keeps_the_per_printer_reasons(
     client: TestClient, model: str
@@ -632,6 +637,7 @@ def test_eligibility_for_an_unknown_output_is_a_404(client: TestClient) -> None:
 # --- run ----------------------------------------------------------------------------
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_run_uses_the_named_pipeline_with_copies_and_records_the_run(
     client: TestClient, model: str
@@ -660,6 +666,7 @@ def test_run_uses_the_named_pipeline_with_copies_and_records_the_run(
     assert client.get(f"/api/v1/outputs/{output_id}").json()["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_run_without_a_pipeline_uses_the_models_default_before_the_global_one(
     client: TestClient, model: str
@@ -681,6 +688,7 @@ def test_run_without_a_pipeline_uses_the_models_default_before_the_global_one(
     assert body["pipeline_id"] == 4
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_run_falls_back_to_the_global_pipeline_when_the_model_has_none(
     client: TestClient, model: str
@@ -714,6 +722,7 @@ def test_run_with_no_pipeline_anywhere_says_so_rather_than_guessing(
     assert "pipeline" in response.json()["detail"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_blocking_issue_surfaces_bambuddys_report_and_force_overrides_it(
     client: TestClient, model: str
@@ -749,6 +758,7 @@ def test_a_blocking_issue_surfaces_bambuddys_report_and_force_overrides_it(
     assert json.loads(run.calls.last.request.read())["force"] is True
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_send_bar_still_works_and_now_honours_the_models_pipeline(
     client: TestClient, model: str
@@ -772,6 +782,7 @@ def test_the_send_bar_still_works_and_now_honours_the_models_pipeline(
     assert body["pipeline_run_id"] == 12
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_run_route_uploads_the_3mf_when_the_output_was_never_sent(
     client: TestClient, model: str
@@ -819,6 +830,7 @@ def _two_pipelines() -> dict[str, Any]:
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_changing_the_target_printer_re_uploads_instead_of_reusing_the_old_placement(
     client: TestClient, model: str
@@ -856,6 +868,7 @@ def test_changing_the_target_printer_re_uploads_instead_of_reusing_the_old_place
     assert upload.call_count == 3
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_running_a_pipeline_lays_the_file_out_for_that_pipeline_not_the_default(
     client: TestClient, model: str
@@ -895,6 +908,7 @@ def _two_nozzles() -> dict[str, Any]:
     }
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_running_a_pipeline_states_that_pipelines_nozzle_and_re_uploads_for_it(
     client: TestClient, model: str
@@ -924,6 +938,7 @@ def test_running_a_pipeline_states_that_pipelines_nozzle_and_re_uploads_for_it(
     assert _uploaded_nozzle(upload) == ["0.2"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_checking_several_pipelines_judges_them_all_against_one_upload(
     client: TestClient, model: str

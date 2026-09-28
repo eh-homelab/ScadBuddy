@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
@@ -69,6 +70,7 @@ def test_scadbuddy_keeps_no_model_to_project_relationship(client: TestClient) ->
     ).status_code in (404, 405)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_send_to_a_project_uploads_into_that_projects_folder(
     client: TestClient, model: str
@@ -98,6 +100,7 @@ def test_a_send_to_a_project_uploads_into_that_projects_folder(
     assert uploaded.calls.last.request.url.params["folder_id"] == "9"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder(
     client: TestClient, model: str
@@ -142,6 +145,7 @@ def test_an_already_uploaded_output_gets_a_copy_of_its_own_in_the_project_folder
     assert not moved.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_queue_route_files_the_item_under_the_project_with_no_race(
     client: TestClient, model: str

@@ -289,9 +289,6 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
-    #: Only on a read (``FileResponse``); the upload's answer does not carry it. Read to
-    #: learn where a copy recorded before #316 lives, since that record never said.
-    folder_id: int | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None

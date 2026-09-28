@@ -86,6 +86,7 @@ def test_every_read_route_takes_a_built_in(client: TestClient) -> None:
     assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
 
 
+@pytest.mark.requires_postgres
 def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: DataPaths) -> None:
     job_id = _finished_job(client, BUILTIN)
 

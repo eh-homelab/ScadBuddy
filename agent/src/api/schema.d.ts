@@ -2126,7 +2126,7 @@ export interface components {
         };
         /**
          * LibraryCopy
-         * @description One copy of the output's 3MF in Bambuddy's library (#316).
+         * @description One copy of the output's 3MF in Bambuddy's file library (#316).
          *
          *     Keyed by (``folder_id``, ``target_key``). The folder is what files it under a
          *     project, and the target is what it was laid out for, so a copy is reusable only
@@ -2137,11 +2137,6 @@ export interface components {
         LibraryCopy: {
             /** Folder Id */
             folder_id: number | null;
-            /**
-             * Folder Known
-             * @default true
-             */
-            folder_known: boolean;
             /** Id */
             id: number;
             /** Sliced */

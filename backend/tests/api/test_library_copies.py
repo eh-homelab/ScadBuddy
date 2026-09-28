@@ -11,11 +11,13 @@ import json
 from typing import Any
 
 import httpx
+import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.plate import DEFAULT_PLATE
 from tests.api.test_print import (
     _two_pipelines,
@@ -26,6 +28,9 @@ from tests.api.test_print import (
 )
 from tests.api.test_print_filaments import inventory_routes, queue_route, slice_routes
 from tests.api.test_send import BASE, configure, make_output
+
+# Every test here reads or writes an output's upload records, which live in Postgres.
+pytestmark = pytest.mark.requires_postgres
 
 API = f"{BASE}/api/v1"
 INBOX = 2
@@ -85,6 +90,11 @@ def run(client: TestClient, output_id: str, **body: Any) -> dict[str, Any]:
     assert response.status_code == 200, response.text
     result: dict[str, Any] = response.json()
     return result
+
+
+def upload_store(client: TestClient) -> BambuddyUploadStore:
+    uploads: BambuddyUploadStore = getattr(client.app.state, STATE_ATTR).uploads  # type: ignore[attr-defined]
+    return uploads
 
 
 def copies(client: TestClient, output_id: str) -> list[tuple[int, int | None]]:
@@ -242,70 +252,31 @@ def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: s
     assert upload.call_count == 1
 
 
-# --- records written before #316 -----------------------------------------------------
+# --- records written before #455 ----------------------------------------------------
 
 
-def write_legacy(paths: DataPaths, model: str, output_id: str, **legacy: Any) -> None:
+@respx.mock
+def test_an_old_records_copy_is_not_reused_and_the_next_send_uploads_afresh(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """No data migration (#455): the keys a ``meta.json`` carried for its uploads, before
+    they moved to Postgres, load without error and mean no recorded copy."""
+    output_id = set_up(client, model)
     path = paths.output_dir(model, output_id) / "meta.json"
     meta = json.loads(path.read_text(encoding="utf-8"))
-    meta.pop("library_files", None)
-    meta.update(legacy)
-    path.write_text(json.dumps(meta), encoding="utf-8")
-
-
-def test_a_single_slot_record_loads_as_one_copy_in_an_unknown_folder() -> None:
-    meta = OutputMeta.model_validate(
-        {
-            "id": "a" * 32,
-            "slug": "demo",
-            "job_id": "b" * 32,
-            "created_at": "2026-09-22T10:00:00Z",
-            "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
-            "library_file_id": 41,
-            "library_file_plate": "H2C@0.4",
-        }
+    meta.update(
+        library_file_id=41,
+        library_file_plate=DEFAULT_PLATE.key,
+        library_files=[{"id": 41, "folder_id": INBOX, "target_key": DEFAULT_PLATE.key}],
     )
-    [copy] = meta.library_files
-    assert (copy.id, copy.folder_known, copy.target_key) == (41, False, "H2C@0.4")
-    assert "library_file_id" not in meta.model_dump()
-
-
-@respx.mock
-def test_a_legacy_output_sent_to_a_project_is_not_moved(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    output_id = set_up(client, model)
-    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate="H2C")
-    read = exists(41, folder_id=INBOX)
+    path.write_text(json.dumps(meta), encoding="utf-8")
     upload = uploads(42)
-    delete = deletes()
-    moved = never_moved()
-
-    body = run(client, output_id, pipeline_id=1, project_id=7)
-
-    assert body["library_file_id"] == 42
-    assert folders_uploaded_to(upload) == ["9"]
-    assert not moved.called
-    assert not delete.called
-    # Its folder was read once and recorded; from here the normal rules apply.
-    assert copies(client, output_id) == [(41, INBOX), (42, 9)]
-    run(client, output_id, pipeline_id=1, project_id=7)
-    assert read.call_count == 1
-
-
-@respx.mock
-def test_a_legacy_output_still_resolves_to_its_file(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    output_id = set_up(client, model)
-    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate=DEFAULT_PLATE.key)
-    exists(41, folder_id=INBOX)
-    upload = uploads()
 
     response = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "library"})
 
-    assert response.json()["library_file_id"] == 41
-    assert not upload.called
+    assert response.json()["library_file_id"] == 42
+    assert upload.call_count == 1
+    assert copies(client, output_id) == [(42, INBOX)]
 
 
 # --- sliced files --------------------------------------------------------------------
@@ -375,6 +346,8 @@ def test_deleting_an_output_can_take_its_inbox_copies_and_never_a_projects(
     assert response.status_code == 204
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+    # The project's copy stays in Bambuddy; the record of it goes with the output.
+    assert upload_store(client).for_output(output_id) == []
 
 
 @respx.mock
@@ -407,16 +380,3 @@ def test_an_inbox_copy_that_cannot_be_deleted_keeps_the_output(
 
     assert response.status_code >= 500
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
-
-
-@respx.mock
-def test_deleting_resolves_a_legacy_copys_folder_first(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    output_id = set_up(client, model)
-    write_legacy(paths, model, output_id, library_file_id=41, library_file_plate="H2C")
-    exists(41, folder_id=9)
-    delete = deletes()
-
-    assert client.delete(f"/api/v1/outputs/{output_id}?delete_inbox_copies=true").is_success
-    assert not delete.called, "a legacy copy that sits in a project folder was deleted"
