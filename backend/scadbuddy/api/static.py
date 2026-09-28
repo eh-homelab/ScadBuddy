@@ -39,6 +39,8 @@ class SPAStaticFiles(StaticFiles):
             response = await super().get_response(path, scope)
         except HTTPException as error:
             if error.status_code != 404 or not self.index.is_file():
+                # Starlette's handler answers it as text/plain, without the CSP:
+                # not a document, so nothing runs in it.
                 raise
             response = FileResponse(self.index)
         if response.status_code == 404 and self.index.is_file():
