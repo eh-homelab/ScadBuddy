@@ -136,6 +136,9 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        # Off, so no test renders a preview behind its back; `test_previews`
+        # turns them on with a stub render.
+        preview_renders=False,
     )
 
 

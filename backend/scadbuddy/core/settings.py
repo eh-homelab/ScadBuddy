@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
+    # SCADBUDDY_PREVIEW_RENDERS: render a model with no thumbnail and no output at
+    # its default parameters, in the background, and show that as its thumbnail.
+    preview_renders: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
