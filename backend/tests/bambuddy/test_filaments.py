@@ -384,7 +384,8 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
         bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3]
     )
     assert len(built) == 3
-    assert [call.request.url.params.get("plate_id") for call in requirements.calls] == [
+    # The reads run concurrently, so only which plates were read is pinned, not the order.
+    assert sorted(call.request.url.params.get("plate_id") for call in requirements.calls) == [
         "1",
         "2",
         "3",

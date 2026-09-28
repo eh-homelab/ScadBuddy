@@ -550,24 +550,36 @@ async def gather_plate_options(
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
     The spools, assignments and printer are the same for every plate, so they are read
-    once; only each plate's slots are read per plate (#480), concurrently. A failed
-    read raises the first failing plate's error, as reading them in turn would."""
-    spools = await client.spools()
-    assignments = await client.spool_assignments()
+    once; only each plate's slots are read per plate (#480). Every read runs
+    concurrently. A failed read raises the first failure in the order spools,
+    assignments, printer, then plates, as reading them in turn would."""
 
-    printer = None
-    slot_materials: list[SlotMaterial] = []
-    if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+    async def printer_side() -> tuple[Printer | None, list[SlotMaterial]]:
+        if printer_id is None:
+            return None, []
+        printer, remain = await asyncio.gather(
+            client.printer(printer_id), client.inventory_remain(printer_id)
+        )
+        return printer, remain.slot_materials
 
-    answers = await asyncio.gather(
+    shared = asyncio.gather(
+        client.spools(), client.spool_assignments(), printer_side(), return_exceptions=True
+    )
+    plates = asyncio.gather(
         *(
             _requirements(client, library_file_id, plate, fallback_colours, own_colours)
             for plate in plate_ids
         ),
         return_exceptions=True,
     )
+    (spools, assignments, side), answers = await asyncio.gather(shared, plates)
+    if isinstance(spools, BaseException):
+        raise spools
+    if isinstance(assignments, BaseException):
+        raise assignments
+    if isinstance(side, BaseException):
+        raise side
+    printer, slot_materials = side
     per_plate: list[list[SlotNeed]] = []
     for answer in answers:
         if isinstance(answer, BaseException):
