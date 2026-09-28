@@ -50,7 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX
+from scadbuddy.core.paths import BUILTIN_DIR, BUILTIN_PREFIX, RENDERS_DIR_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -180,13 +180,21 @@ def git_env() -> dict[str, str]:
 
 def _gitignore_body(wrapper_prefix: str) -> str:
     # Every transient file a render drops beside a model: the colour wrappers and,
-    # since #204, the uploaded assets staged for `import()` -- which are not .scad.
+    # since #204, the uploaded assets staged for `import()` -- which are not .scad
+    # -- and the finished renders kept under the template (`render_cache`).
     transient = f"{wrapper_prefix}*" if wrapper_prefix else "*.scad"
     return (
         "# Written by ScadBuddy. Everything here is regenerated from the model\n"
         "# source, so versioning it would only add noise to the history.\n"
         f"{transient}\n"
+        f"{RENDERS_DIR_NAME}/\n"
         f"{LOCK_NAME}\n"
+        "# Template videos (#274) stay out of the history so the repository stays\n"
+        "# small; their order in model.json is still committed. Images are kept.\n"
+        "*/media/*.mp4\n"
+        "*/media/*.webm\n"
+        "_builtin/*/media/*.mp4\n"
+        "_builtin/*/media/*.webm\n"
     )
 
 
@@ -510,15 +518,15 @@ class ModelHistory:
 
         Walks the model's own history newest first. ``None`` when the model was
         made some other way -- uploaded, duplicated, or recreated after a delete --
-        since an older seed of the same slug is then not its origin.
+        since an older seed of the same slug is then not its origin. The subject
+        alone is not trusted: any commit can carry it, so the seed must also be
+        authored and committed as ScadBuddy.
         """
-        completed = self._run("log", "--format=%H%x1f%s", "--", slug, check=False)
-        assert isinstance(completed.stdout, str)
-        if completed.returncode != 0:
-            raise GitError(f"git log failed: {completed.stderr.strip()}", completed.stderr)
-        for line in completed.stdout.splitlines():
-            commit, _, subject = line.partition(_FIELD)
-            if _SEED_SUBJECT.match(subject):
+        log = self._out("log", "--format=%H%x1f%an%x1f%ae%x1f%cn%x1f%ce%x1f%s", "--", slug)
+        ours = [AUTHOR_NAME, AUTHOR_EMAIL, AUTHOR_NAME, AUTHOR_EMAIL]
+        for line in log.splitlines():
+            commit, *identity, subject = line.split(_FIELD, 5)
+            if _SEED_SUBJECT.match(subject) and identity == ours:
                 return commit
             if subject in (f"Add {slug}", f"Delete {slug}") or subject.endswith(f" as {slug}"):
                 return None

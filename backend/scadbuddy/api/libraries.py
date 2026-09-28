@@ -119,7 +119,9 @@ def list_libraries(libraries: LibrariesDep) -> list[CatalogueLibrary]:
     description=(
         "Clones the library at `ref` onto the data volume and records the commit that "
         "resolved to in this model's `model.json`, as one revision of the model. The "
-        "model renders against that pin from then on; no other model moves."
+        "model renders against that pin from then on; no other model moves. A 503 when "
+        "the URL's host could not be looked up just now (try again), as distinct from "
+        "the 422 for a host that is not a public address."
     ),
 )
 async def pin_library(

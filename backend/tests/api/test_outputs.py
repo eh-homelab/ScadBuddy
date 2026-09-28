@@ -5,10 +5,12 @@ import re
 import shutil
 import zipfile
 
+import pytest
 import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
@@ -40,7 +42,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["colors"] == ["#FF0000"]
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
-    assert body["library_file_id"] is None
+    assert body["library_files"] == []
     assert body["pipeline_run_id"] is None
     assert body["queue_item_id"] is None
 
@@ -54,6 +56,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert json.loads((directory / "params.json").read_text(encoding="utf-8")) == {"width": 12}
 
 
+@pytest.mark.requires_postgres
 def test_outputs_are_listed_newest_first(client: TestClient, model: str) -> None:
     first = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model, 1)}
@@ -66,6 +69,7 @@ def test_outputs_are_listed_newest_first(client: TestClient, model: str) -> None
     assert [row["id"] for row in listed] == [second["id"], first["id"]]
 
 
+@pytest.mark.requires_postgres
 def test_an_output_is_readable_by_id_alone(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
@@ -119,6 +123,7 @@ def test_an_unnamed_output_downloads_under_its_id(client: TestClient, model: str
     assert f"demo-{created['id']}.3mf" in response.headers["content-disposition"]
 
 
+@pytest.mark.requires_postgres
 def test_the_viewer_can_upload_and_read_back_a_thumbnail(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
@@ -148,6 +153,7 @@ def test_a_thumbnail_that_is_not_a_png_is_refused(client: TestClient, model: str
     assert response.status_code == 422
 
 
+@pytest.mark.requires_postgres
 def test_deleting_an_output_removes_it(client: TestClient, model: str) -> None:
     created = client.post(
         f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
@@ -398,3 +404,22 @@ def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
     assert missing.status_code == 404
     assert "no plate 3" in missing.json()["detail"]
     assert client.get(url, params={"plate": 0}).status_code == 422
+
+
+def test_an_old_records_upload_keys_are_ignored() -> None:
+    """The keys a ``meta.json`` carried for its Bambuddy uploads before they moved to
+    Postgres (#455) still load, and mean nothing: no data is migrated."""
+    meta = OutputMeta.model_validate(
+        {
+            "id": "a" * 32,
+            "slug": "demo",
+            "job_id": "b" * 32,
+            "created_at": "2026-09-22T10:00:00Z",
+            "bbox_mm": {"min": [0, 0, 0], "max": [1, 1, 1], "size": [1, 1, 1]},
+            "library_file_id": 41,
+            "library_file_plate": "H2C@0.4",
+            "library_files": [{"id": 41, "folder_id": 2, "target_key": "H2C@0.4"}],
+        }
+    )
+    dumped = meta.model_dump()
+    assert not {"library_file_id", "library_file_plate", "library_files"} & dumped.keys()

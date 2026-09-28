@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
+from scadbuddy.core.events import EventBus, JobEvent, JobKind, JobProgress, emit
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -60,6 +60,7 @@ from scadbuddy.render.job_store import JobNotFoundError as JobNotFoundError
 from scadbuddy.render.job_store import JobStore as JobStore
 from scadbuddy.render.job_store import QueueFullError as QueueFullError
 from scadbuddy.render.provenance import source_version
+from scadbuddy.render.render_cache import cached_render, keep_render, prune_render_cache
 from scadbuddy.render.runner import OpenSCADError, cached_schema, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, render_solids
@@ -599,9 +600,12 @@ async def render_job(
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
     checkouts: CheckoutGate | None = None,
+    on_stage: Callable[[RenderStage], None] | None = None,
     fetcher: CheckoutFetcher | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
+        if on_stage is not None:
+            on_stage(name)
         return metrics.stage(name) if metrics is not None else nullcontext()
 
     # Resolved again rather than carried on the job: the model can be edited
@@ -744,6 +748,10 @@ class RenderQueue:
     - **Coalesce.** A submit identical to a job still waiting is answered with that
       job. Only waiting jobs: a running one has already read its source, and an
       edit since would be rendered stale.
+    - **Kept renders** (`render_cache`). A finished render's files stay under the
+      template, keyed like a coalesce plus the revision rendered, and a later submit
+      of that key is recorded done with them: no worker, no OpenSCAD. Entries are
+      evicted with the jobs, on `job_ttl` since last use.
     - **Deadline** (optional, `render_queue_timeout`). A job that waited longer than
       that for a worker is failed unrendered rather than rendered for nobody.
     - **Leases** (Postgres). A worker heartbeats its job; one whose worker died is
@@ -809,6 +817,9 @@ class RenderQueue:
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
                 checkouts=checkouts,
+                on_stage=lambda stage: emit(
+                    self.events, JobProgress(job_id=job.id, slug=job.slug, stage=stage)
+                ),
                 fetcher=fetcher,
             )
         )
@@ -820,6 +831,9 @@ class RenderQueue:
         self.listener: Listener | None = None
         self._listening = False
         self._listened_before = False
+        #: Whether `open_store` opened the store, making its caller the one that
+        #: closes it if the boot fails (`close_store`) rather than `start`.
+        self._store_opened_by_caller = False
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
@@ -832,6 +846,20 @@ class RenderQueue:
         """The cover rasteriser's pool, for background work that draws plate images."""
         return self._thumbnails
 
+    async def open_store(self) -> None:
+        """Open -- and migrate -- the store ahead of `start`, for boot steps that read
+        what other stores keep in its database. `start` opens it too, harmlessly.
+
+        The caller then owns the store until `start` succeeds: a failed `start`
+        leaves it open for the caller's `close_store`, so it is closed once."""
+        await asyncio.to_thread(self.store.open)
+        self._store_opened_by_caller = True
+
+    async def close_store(self) -> None:
+        """Undo `open_store` when the boot fails before `start` has succeeded."""
+        self._store_opened_by_caller = False
+        await asyncio.to_thread(self.store.close)
+
     async def start(self) -> None:
         self.paths.ensure()
         await asyncio.to_thread(self.store.open)
@@ -839,12 +867,15 @@ class RenderQueue:
         # connections and threads). If the rest of startup fails, release them
         # here: the caller's `aclose` is typically in a `finally` that a failed
         # start never reaches, and a process that builds many apps -- the test
-        # suite -- would otherwise leak a pool per failure.
+        # suite -- would otherwise leak a pool per failure. Not a store the caller
+        # opened with `open_store`, though: that caller closes it, and closing it
+        # here too would close it twice.
         try:
             abandoned = await asyncio.to_thread(self.store.abandon_orphans)
             await self._prune()
         except BaseException:
-            await asyncio.to_thread(self.store.close)
+            if not self._store_opened_by_caller:
+                await asyncio.to_thread(self.store.close)
             raise
         for job in abandoned:
             self._announce(job, "job.failed")
@@ -896,11 +927,28 @@ class RenderQueue:
             model_version=model_version,
             created_at=_now(),
         )
+        key = render_key(slug, params, model_version)
+        # The render kept under the template from the last time these values were
+        # rendered at this revision (`render_cache`): the job is recorded done with
+        # it, and no worker runs. Only with a revision in the key -- without one an
+        # edited source would be answered with the old render.
+        kept = (
+            await asyncio.to_thread(cached_render, self.paths, slug, key)
+            if model_version is not None
+            else None
+        )
+        if kept is not None:
+            job.state = "done"
+            job.started_at = job.finished_at = job.created_at
+            job.result = kept.result
+            job.log_tail = kept.log_tail
+            job.diagnostics = kept.result.diagnostics
+            job.diagnostics_dropped = kept.result.diagnostics_dropped
         try:
             submitted = await asyncio.to_thread(
                 self.store.submit,
                 job,
-                render_key(slug, params, model_version),
+                key,
                 supersedes=supersedes,
                 max_pending=self.config.render_queue_max,
             )
@@ -912,7 +960,10 @@ class RenderQueue:
         own = not self.store.announces_jobs
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded", announce=own)
-        if submitted.coalesced:
+        if submitted.cached:
+            self.metrics.render_cached.inc()
+            self._settled(submitted.job, "done", announce=own)
+        elif submitted.coalesced:
             # The answer is a job already waiting, whose `job.pending` went out when
             # it was submitted: nothing about it changed.
             self.metrics.render_coalesced.inc()
@@ -1000,6 +1051,7 @@ class RenderQueue:
     async def _prune(self) -> None:
         await asyncio.to_thread(self.store.prune, self.config.job_ttl)
         await asyncio.to_thread(prune_revision_exports, self.paths, self.config.job_ttl)
+        await asyncio.to_thread(prune_render_cache, self.paths, self.config.job_ttl)
 
     def _settled(self, job: Job, outcome: RenderOutcome, *, announce: bool = True) -> None:
         """Every way a job leaves the queue comes through here: done, failed,
@@ -1142,6 +1194,8 @@ class RenderQueue:
         heartbeat = asyncio.create_task(self._heartbeat(job))
         try:
             result, log_tail = await self._render(job)
+            # Under the template, for the next submit of these values (`render_cache`).
+            result = await asyncio.to_thread(keep_render, self.paths, job, result, log_tail)
         except OpenSCADError as error:
             outcome = "failed"
             job.state = "failed"

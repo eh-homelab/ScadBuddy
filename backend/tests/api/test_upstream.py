@@ -385,7 +385,7 @@ def test_a_template_without_an_upstream_has_none(client: TestClient, model: str)
 
 
 def test_without_history_there_is_no_upstream_state(paths: DataPaths) -> None:
-    catalogue = Catalogue(paths)
+    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("keychain", SOURCE, ModelMeta(name="Keychain"))
     catalogue.duplicate("keychain", "copy", "Copy")
 
@@ -398,7 +398,7 @@ def _racing(paths: DataPaths) -> Catalogue:
     """A duplicate of a template that has moved since, in a catalogue with history."""
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    catalogue = Catalogue(paths, history)
+    catalogue = Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create("keychain", SOURCE, ModelMeta(name="Keychain"))
     catalogue.duplicate("keychain", "copy", "Copy")
     catalogue.write_source("keychain", SOURCE.replace("width = 40;", "width = 50;"))

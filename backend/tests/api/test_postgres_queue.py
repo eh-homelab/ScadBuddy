@@ -15,7 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg_pool import PoolTimeout
 
-from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
+from scadbuddy.analyzers.decisions import PostgresDecisionStore
+from scadbuddy.core.events import Event, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -27,7 +28,7 @@ from tests.api.conftest import wait_for_job
 def test_the_app_queues_renders_in_postgres(
     settings: Settings, model: str, pg_conninfo: str
 ) -> None:
-    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
+    app = create_app(settings)
     with TestClient(app) as client:
         accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
         assert accepted.status_code == 202
@@ -42,11 +43,6 @@ def test_the_app_queues_renders_in_postgres(
         row = conn.execute("SELECT state FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
     assert row is not None and row[0] == settled["status"]
     assert "scadbuddy_render_queue_depth 0.0" in metrics
-
-
-def test_without_a_database_url_the_queue_uses_files(settings: Settings) -> None:
-    app = create_app(settings)
-    assert not isinstance(app.state.scadbuddy.queue.store, PostgresJobStore)
 
 
 def _wait(predicate: Callable[[], bool], timeout: float = 5.0) -> None:
@@ -93,16 +89,6 @@ def test_two_replicas_each_hear_every_event_once(
         assert changed("one")[0].id == changed("other")[0].id
 
 
-def test_without_a_database_url_events_stay_in_process(settings: Settings) -> None:
-    app = create_app(settings)
-    assert isinstance(app.state.scadbuddy.events, InProcessEventBus)
-    heard: list[Event] = []
-    app.state.scadbuddy.events.add_listener(heard.append)
-    with TestClient(app) as client:
-        assert client.put("/api/v1/settings", json={"pipeline_id": 3}).status_code == 200
-    assert [e.kind for e in heard if isinstance(e, SettingsChanged)] == ["settings.changed"]
-
-
 @pytest.mark.requires_postgres
 def test_a_bus_that_fails_to_start_releases_the_queue_that_did(
     settings: Settings, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
@@ -131,3 +117,21 @@ def test_a_bus_that_fails_to_start_releases_the_queue_that_did(
     assert store._pool.closed
     assert bus._pool.closed
     assert store.pg_listener.backend_pid is None
+
+
+@pytest.mark.requires_postgres
+def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo: str) -> None:
+    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
+    with TestClient(app) as client:
+        created = client.post(
+            "/api/v1/analyzers/decisions",
+            json={"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}},
+        )
+        assert created.status_code == 201, created.text
+        listed = client.get("/api/v1/analyzers/decisions").json()
+
+    assert isinstance(app.state.scadbuddy.decisions, PostgresDecisionStore)
+    assert [row["id"] for row in listed] == [created.json()["id"]]
+    with psycopg.connect(pg_conninfo) as conn:
+        row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()
+    assert row is not None and row[0] == "ignore"

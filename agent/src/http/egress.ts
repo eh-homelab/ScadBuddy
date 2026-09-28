@@ -52,19 +52,82 @@ export class EgressError extends Error {
   override name = 'EgressError'
 }
 
+// IPv6 forms that carry an IPv4 address inside them, and reach it: a NAT64
+// gateway or 6to4 relay turns `64:ff9b::a9fe:a9fe` into 169.254.169.254.
+// Each is checked as the IPv4 address it embeds (RFC 6052 §2.2 for the /96
+// well-known prefix, RFC 3056 §2 for 6to4, RFC 4380 §4 for Teredo's
+// obfuscated client address, RFC 4291 §2.5.5.1 for the deprecated
+// IPv4-compatible form). The local-use NAT64 prefix 64:ff9b:1::/48 (RFC 8215)
+// may embed at several offsets, so it is refused whole.
+BLOCKED.addSubnet('64:ff9b:1::', 48, 'ipv6')
+
+/** The 16 bytes of an IPv6 address (any textual form Node accepts), or undefined. */
+export function ipv6Bytes(address: string): number[] | undefined {
+  let text = address
+  const dotted = /^(.*:)(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(text)
+  if (dotted) {
+    const [a, b, c, d] = dotted.slice(2).map(Number) as [number, number, number, number]
+    if ([a, b, c, d].some((n) => n > 255)) return undefined
+    text = `${dotted[1]}${((a << 8) | b).toString(16)}:${((c << 8) | d).toString(16)}`
+  }
+  const halves = text.split('::')
+  if (halves.length > 2) return undefined
+  const head = halves[0] ? halves[0].split(':') : []
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : []
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0
+  if (fill < 0 || (halves.length === 1 && head.length !== 8)) return undefined
+  const groups = [...head, ...Array<string>(fill).fill('0'), ...tail].map((g) =>
+    /^[0-9a-f]{1,4}$/i.test(g) ? parseInt(g, 16) : NaN,
+  )
+  if (groups.length !== 8 || groups.some((g) => Number.isNaN(g))) return undefined
+  return groups.flatMap((g) => [g >> 8, g & 0xff])
+}
+
+/** The IPv4 address an IPv6 address embeds and routes to, if it is one of the forms above. */
+export function embeddedIPv4(address: string): string | undefined {
+  const b = ipv6Bytes(address)
+  if (!b) return undefined
+  const v4 = (o: number, xor = 0) => [0, 1, 2, 3].map((i) => (b[o + i]! ^ xor) & 0xff).join('.')
+  const zero = (from: number, to: number) => b.slice(from, to).every((x) => x === 0)
+  if (zero(0, 12)) return v4(12) // ::a.b.c.d (IPv4-compatible)
+  if (zero(0, 10) && b[10] === 0xff && b[11] === 0xff) return v4(12) // ::ffff:a.b.c.d
+  if (b[0] === 0x00 && b[1] === 0x64 && b[2] === 0xff && b[3] === 0x9b && zero(4, 12)) return v4(12) // 64:ff9b::/96
+  if (b[0] === 0x20 && b[1] === 0x02) return v4(2) // 2002::/16, 6to4
+  if (b[0] === 0x20 && b[1] === 0x01 && b[2] === 0x00 && b[3] === 0x00) return v4(12, 0xff) // 2001::/32, Teredo
+  return undefined
+}
+
 function blockedAddress(address: string): boolean {
   const plain = plainAddress(address)
   const family = isIP(plain)
   if (family === 0) return true // not an address at all: refuse rather than guess
-  return BLOCKED.check(plain, family === 4 ? 'ipv4' : 'ipv6')
+  if (BLOCKED.check(plain, family === 4 ? 'ipv4' : 'ipv6')) return true
+  const inner = family === 6 ? embeddedIPv4(plain) : undefined
+  return inner !== undefined && BLOCKED.check(inner, 'ipv4')
 }
 
 /** Throws EgressError when `baseUrl`'s host is, or resolves to, a refused address. */
 export async function assertGatewayHostAllowed(baseUrl: string, resolve: Resolver = systemResolver): Promise<void> {
-  const hostname = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, '')
+  await assertHostAllowed(baseUrl, resolve, 'base_url', 'a model gateway')
+}
+
+/**
+ * The same check for any URL a secret is sent to: the gateway base URL above,
+ * or a plugin's MCP endpoint (#297, src/plugins/registry.ts). `field` names the
+ * setting in the error; `purpose` says what the host was meant to be.
+ * Resolves to the checked addresses, so a caller can connect to exactly those
+ * (the plugin forwarder does, src/plugins/forwarder.ts).
+ */
+export async function assertHostAllowed(
+  url: string,
+  resolve: Resolver = systemResolver,
+  field = 'url',
+  purpose = 'an allowed host',
+): Promise<string[]> {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
   const bare = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname
   if (BLOCKED_NAMES.has(bare)) {
-    throw new EgressError(`base_url host ${bare} is a cloud metadata service, not a model gateway`)
+    throw new EgressError(`${field} host ${bare} is a cloud metadata service, not ${purpose}`)
   }
   let addresses: string[]
   if (isIP(bare) !== 0) {
@@ -73,15 +136,16 @@ export async function assertGatewayHostAllowed(baseUrl: string, resolve: Resolve
     try {
       addresses = await resolve(bare)
     } catch {
-      throw new EgressError(`base_url host ${bare} cannot be resolved from the agent service`)
+      throw new EgressError(`${field} host ${bare} cannot be resolved from the agent service`)
     }
-    if (addresses.length === 0) throw new EgressError(`base_url host ${bare} resolves to no address`)
+    if (addresses.length === 0) throw new EgressError(`${field} host ${bare} resolves to no address`)
   }
   const refused = addresses.find(blockedAddress)
   if (refused !== undefined) {
     throw new EgressError(
-      `base_url host ${bare} resolves to ${refused}, a link-local or cloud metadata address; ` +
+      `${field} host ${bare} resolves to ${refused}, a link-local or cloud metadata address; ` +
         'loopback and private addresses are allowed, those are not',
     )
   }
+  return addresses
 }

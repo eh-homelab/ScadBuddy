@@ -4,6 +4,11 @@ import type { Operation } from './registry.js'
 // operation in backend/openapi.json has neither a tool nor an explicit
 // allowlist entry"). test/coverage.test.ts enforces it.
 
+const ANALYZERS_LATER =
+  'The print analyzers (#284) land API-first; their agent tools are a follow-up (#368 wraps them). ' +
+  'Recording a decision or applying a fix writes only to ScadBuddy (write tier) and sends nothing; ' +
+  'a send that consumes accepted diffs must go through the outward approval flow (AI spec §8.2).'
+
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
   {
@@ -21,6 +26,62 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
     reason:
       "Uploads the 3D viewer's canvas capture. An agent has no canvas; a browser_* tool driving the open tab " +
       'can (#254, #266).',
+  },
+  // #274: template media. An agent reads `media` (ids, captions, order) from the model record.
+  ...(
+    [
+      'GET /api/v1/models/{slug}/media/{item_id}',
+      'GET /api/v1/models/{slug}/media/{item_id}/poster',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      'Serves an image or video file to the browser; an agent gets the item list from the model record ' +
+      'and has no use for the bytes.',
+  })),
+  {
+    operation: 'POST /api/v1/models/{slug}/media',
+    reason: 'A multipart upload of an image or video from the user; an agent has no file to send.',
+  },
+  ...(
+    [
+      'PATCH /api/v1/models/{slug}/media/{item_id}',
+      'PUT /api/v1/models/{slug}/media/order',
+      'DELETE /api/v1/models/{slug}/media/{item_id}',
+    ] as const
+  ).map((operation) => ({
+    operation,
+    reason:
+      "Captioning, reordering and removing a template's media happen on the edit page (#279); the plan " +
+      'adds no agent tools in the gallery epic (#273, decision 7).',
+  })),
+  {
+    operation: 'GET /api/v1/analyzers',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'POST /api/v1/analyzers/run',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'POST /api/v1/analyzers/fixes/preview',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'POST /api/v1/analyzers/fixes/apply',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'GET /api/v1/analyzers/decisions',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'POST /api/v1/analyzers/decisions',
+    reason: ANALYZERS_LATER,
+  },
+  {
+    operation: 'DELETE /api/v1/analyzers/decisions/{decision_id}',
+    reason: ANALYZERS_LATER,
   },
 ]
 

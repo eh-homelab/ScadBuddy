@@ -2,6 +2,7 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { ApiError, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
+import { fakeRealtime } from './realtime.fake'
 import { useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
@@ -38,7 +39,7 @@ async function settle() {
   })
 }
 
-type Props = { slug: string; params: Record<string, number>; version?: string }
+type Props = { slug: string; params: Record<string, number> | undefined; version?: string }
 
 function mount(initialProps: Props) {
   return renderHook(({ slug, params, version }: Props) => useRenderJob(slug, params, version), {
@@ -48,9 +49,11 @@ function mount(initialProps: Props) {
 
 describe('useRenderJob', () => {
   let submit: MockInstance<typeof api.render>
+  let realtime: ReturnType<typeof fakeRealtime>
 
   beforeEach(() => {
     vi.useFakeTimers()
+    realtime = fakeRealtime()
     let next = 0
     const ids = [JOB_A, JOB_B, JOB_C]
     submit = vi.spyOn(api, 'render').mockImplementation(async () => accepted(ids[next++]!))
@@ -165,9 +168,7 @@ describe('useRenderJob', () => {
     expect(result.current.rendering).toBe(true)
 
     poll.mockImplementation(async (id) => job(id, 'done'))
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(400)
-    })
+    await realtime.signal(`job:${JOB_B}`)
     expect(result.current.job?.id).toBe(JOB_B)
     expect(result.current.rendering).toBe(false)
     // By identity: the caller compares it to the exact values object it rendered.
@@ -184,5 +185,107 @@ describe('useRenderJob', () => {
 
     expect(submit).toHaveBeenNthCalledWith(2, 'other', { n: 1 }, undefined, undefined)
     expect(submit).toHaveBeenNthCalledWith(3, 'other', { n: 1 }, 'f'.repeat(40), undefined)
+  })
+
+  describe('following a job (#267)', () => {
+    it('reads the job when the subscription is confirmed and on each event, never on a timer', async () => {
+      const read = vi.mocked(api.getJob)
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(realtime.following()).toEqual([`job:${JOB_A}`])
+      expect(read).toHaveBeenCalledTimes(1)
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000)
+      })
+      expect(read).toHaveBeenCalledTimes(1)
+
+      read.mockImplementation(async (id) => job(id, 'running'))
+      await realtime.signal(`job:${JOB_A}`)
+      expect(read).toHaveBeenCalledTimes(2)
+      expect(result.current.job?.status).toBe('running')
+
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await realtime.signal(`job:${JOB_A}`)
+      expect(result.current.rendering).toBe(false)
+      expect(result.current.job?.status).toBe('done')
+    })
+
+    it('shows the step a job.progress names without reading the job, and clears it on settle', async () => {
+      const read = vi.mocked(api.getJob)
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      const reads = read.mock.calls.length
+      await realtime.signal(`job:${JOB_A}`, 'job.progress', { stage: 'solids' })
+      expect(result.current.stage).toBe('solids')
+      await realtime.signal(`job:${JOB_A}`, 'job.progress', { stage: 'not-a-stage' })
+      expect(result.current.stage).toBe('solids')
+      expect(read.mock.calls.length).toBe(reads)
+
+      read.mockImplementation(async (id) => job(id, 'done'))
+      await realtime.signal(`job:${JOB_A}`)
+      expect(result.current.stage).toBeUndefined()
+    })
+
+    it('drops the step when the params change and the job is no longer followed', async () => {
+      const { result, rerender } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      await realtime.signal(`job:${JOB_A}`, 'job.progress', { stage: 'solids' })
+      expect(result.current.stage).toBe('solids')
+      // Mid-typing: CustomizePage passes no params until the debounce settles.
+      rerender({ slug: 'demo', params: undefined })
+      expect(result.current.stage).toBeUndefined()
+    })
+
+    it('stops following a job once it settles', async () => {
+      vi.mocked(api.getJob).mockImplementation(async (id) => job(id, 'failed'))
+      const { result } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(result.current.rendering).toBe(false)
+      expect(realtime.following()).toEqual([])
+    })
+
+    it('stops following a job when the view goes', async () => {
+      const { unmount } = mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      expect(realtime.following()).toEqual([`job:${JOB_A}`])
+      unmount()
+      expect(realtime.following()).toEqual([])
+    })
+
+    it('reads one at a time, and once more for events that came during a read', async () => {
+      const read = vi.mocked(api.getJob)
+      mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      const slow = deferred<Job>()
+      read.mockImplementationOnce(() => slow.promise)
+      await realtime.signal(`job:${JOB_A}`)
+      await realtime.signal(`job:${JOB_A}`)
+      await realtime.signal(`job:${JOB_A}`)
+      expect(read).toHaveBeenCalledTimes(2)
+      await act(async () => {
+        slow.resolve(job(JOB_A, 'running'))
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(read).toHaveBeenCalledTimes(3)
+    })
+
+    it('polls every 400 ms while the socket is unavailable, and stops when it is back', async () => {
+      const read = vi.mocked(api.getJob)
+      realtime.setStatus('unavailable')
+      mount({ slug: 'demo', params: { n: 1 } })
+      await settle()
+      const before = read.mock.calls.length
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_200)
+      })
+      expect(read.mock.calls.length - before).toBe(3)
+
+      realtime.setStatus('live')
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_200)
+      })
+      expect(read.mock.calls.length - before).toBe(3)
+    })
   })
 })
