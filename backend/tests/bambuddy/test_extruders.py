@@ -244,6 +244,21 @@ def test_a_single_nozzle_printer_prints_many_colors_through_its_one_nozzle(
     assert result == type(result)()
 
 
+@pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])
+def test_a_single_nozzle_printer_with_the_wrong_size_is_refused(
+    nozzles: list[dict[str, str]],
+) -> None:
+    """Review of #538: the "no side matches" branch must refuse a single-nozzle
+    printer's known, wrong-size nozzle the way the "one side matches" branch already
+    does for the same printer shape — not warn and let a doomed print through."""
+    status = mapped_status(nozzles=nozzles, ams_extruder_map={"0": 0}, fila_switch=None)
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
+    assert result.errors == [
+        "The nozzle is 0.4 mm, not 0.2 mm. Choose 0.4, or fit a 0.2 mm nozzle."
+    ]
+    assert result.warnings == []
+
+
 @pytest.mark.parametrize("status", [fts_status(), mapped_status()])
 def test_a_two_nozzle_printer_with_one_side_unreported_is_warned_not_refused(
     status: PrinterStatus,

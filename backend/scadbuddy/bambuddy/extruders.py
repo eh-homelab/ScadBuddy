@@ -199,8 +199,9 @@ def plan_extruders(
 
     ``used_slots`` are the filaments (1-based) the plate or plates being printed use.
 
-    * Neither side has ``size``: refused. Nozzles the printer doesn't report: a
-      warning, since nothing can be checked.
+    * Neither side has ``size``: refused. A single-nozzle printer whose one known
+      nozzle doesn't match is refused the same way. Nozzles the printer doesn't
+      report: a warning, since nothing can be checked.
     * Without the switch, a spool on the side with another size: refused.
     * One side has ``size``: more than one filament is refused, because the slicer
       spreads them across both extruders — what paused queue item 108. One filament
@@ -228,6 +229,13 @@ def plan_extruders(
         if known_side is not None:
             known = right if known_side == RIGHT else left
             other_side = LEFT if known_side == RIGHT else RIGHT
+            if known_side == RIGHT and not two_nozzles(status):
+                return ExtruderPlan(
+                    errors=[
+                        f"The nozzle is {known} mm, not {size} mm. Choose {known}, or fit a "
+                        f"{size} mm nozzle."
+                    ]
+                )
             return ExtruderPlan(
                 warnings=[
                     FilamentWarning(
