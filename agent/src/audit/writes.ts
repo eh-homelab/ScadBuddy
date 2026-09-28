@@ -37,6 +37,11 @@ export function auditWrites(options: {
   remoteAddress: RemoteAddress
   /** The action for a method and path, or undefined for a request that is not a write. */
   verb: (method: string, path: string) => string | undefined
+  /**
+   * Record only requests that did not succeed: for routes whose store records
+   * its own successes with more detail (MCP tokens: `auditedTokenStore`).
+   */
+  failuresOnly?: boolean
 }): MiddlewareHandler {
   return async (c, next) => {
     const action = options.verb(c.req.method, c.req.path)
@@ -44,6 +49,7 @@ export function auditWrites(options: {
     await next()
     if (action === undefined) return
     const status = c.res.status
+    if (options.failuresOnly && status < 400) return
     await options.audit.record({
       kind: options.kind,
       action,

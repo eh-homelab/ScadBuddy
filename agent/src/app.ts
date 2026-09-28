@@ -1,6 +1,8 @@
 import { Hono } from 'hono'
 import type { UpgradeWebSocket } from 'hono/ws'
 import type { ApprovalService } from './approvals/service.js'
+import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import type { TokenStore } from './auth/tokens.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
@@ -16,6 +18,7 @@ import { registerAuditRoutes } from './routes/audit.js'
 import { registerChatRoute } from './routes/chat.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginRoutes } from './routes/plugins.js'
+import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import { registerSessionRoutes } from './routes/sessions.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
@@ -25,9 +28,9 @@ import type { SessionManager } from './sessions/manager.js'
 // direct streaming. /healthz, /api/v1/ai/status (below), the Claude credential
 // routes (#255, routes/credentials.ts), the approval routes (#258,
 // routes/approvals.ts), the plugin registry routes (#297, routes/plugins.ts),
-// the session routes and the assistant's chat socket (#300, #256,
-// routes/sessions.ts, routes/chat.ts), and /mcp when `mcp` is given (#251,
-// mcp/http.ts).
+// the MCP token routes (#251, routes/mcpTokens.ts), the session routes and the
+// assistant's chat socket (#300, #256, routes/sessions.ts, routes/chat.ts), and
+// /mcp when `mcp` is given (#251, mcp/http.ts).
 //
 // Every response carries `X-ScadBuddy-Service: agent`, so a request through
 // the ingress shows which container answered it (spec §4.2: the agent's paths
@@ -50,6 +53,12 @@ export type AppDeps = {
   /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
   pluginForwarder?: PluginForwarder
   testConnection: (credential: Credential) => Promise<ConnectionTest>
+  /**
+   * The MCP bearer-token store Settings manages (routes/mcpTokens.ts). Pass the
+   * same instance as `mcp.tokens`. Undefined (or left out) when there is no
+   * database: the routes then answer 503.
+   */
+  tokens?: TokenStore | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
@@ -84,6 +93,13 @@ export type AppDeps = {
 function credentialVerb(method: string, path: string): string | undefined {
   if (path !== '/api/v1/ai/credentials') return undefined
   return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+}
+
+/** MCP token mint and revoke (routes/mcpTokens.ts). */
+function tokenVerb(method: string, path: string): string | undefined {
+  if (method === 'POST' && path === '/api/v1/ai/mcp-tokens') return 'mint'
+  if (method === 'DELETE' && path.startsWith('/api/v1/ai/mcp-tokens/')) return 'revoke'
+  return undefined
 }
 
 /** Which plugin requests are writes; connection tests are not. */
@@ -253,6 +269,12 @@ export function createApp(deps: AppDeps): AgentApp {
   if (deps.audit) {
     const audit = deps.audit
     app.use('/api/v1/ai/credentials', auditWrites({ audit, kind: 'credential', remoteAddress: deps.remoteAddress, verb: credentialVerb }))
+    // Refused or failed token writes; successful ones are recorded by the
+    // token store itself (audit/writes.ts auditedTokenStore), with the token's id.
+    app.use(
+      '/api/v1/ai/mcp-tokens/*',
+      auditWrites({ audit, kind: 'token', remoteAddress: deps.remoteAddress, verb: tokenVerb, failuresOnly: true }),
+    )
     // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
     app.use('/api/v1/ai/plugins/*', auditWrites({ audit, kind: 'plugin', remoteAddress: deps.remoteAddress, verb: pluginVerb }))
   }
@@ -296,6 +318,14 @@ export function createApp(deps: AppDeps): AgentApp {
               truncated: false,
             })),
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+  })
+
+  registerMcpTokenRoutes(app, {
+    tokens: deps.database ? deps.tokens : undefined,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   registerApprovalRoutes(app, {
