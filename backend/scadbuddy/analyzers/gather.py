@@ -26,12 +26,13 @@ from scadbuddy.analyzers.context import (
     base_profile,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.filaments import gather_options
+from scadbuddy.bambuddy.filaments import every_plate, gather_options
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.schema import ParamValue
@@ -151,14 +152,24 @@ async def _read_bambuddy(
     if library_file_id is None:
         context.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
         return
+    # An all-plates print needs each slot's total over every plate, as the filament
+    # step reads it (`pipelines.filament_options_for_output`).
+    plate_ids = [request.plate_id]
+    if request.all_plates and context.model_3mf is not None:
+        plates = await asyncio.to_thread(plates_of, context.model_3mf)
+        plate_ids = [plate.index for plate in plates] or [1]
     try:
-        context.filament_options = await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=context.printer.id if context.printer else None,
-            plate_id=request.plate_id,
-            fallback_colours=list(meta.colors) if meta is not None else None,
-        )
+        read = [
+            await gather_options(
+                client,
+                library_file_id=library_file_id,
+                printer_id=context.printer.id if context.printer else None,
+                plate_id=plate,
+                fallback_colours=list(meta.colors) if meta is not None else None,
+            )
+            for plate in plate_ids
+        ]
+        context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:
         context.unavailable["inventory"] = error.detail
 

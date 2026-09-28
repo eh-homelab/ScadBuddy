@@ -84,6 +84,24 @@ export function scopeLabel(scope: ScopeRef): string {
 }
 
 /**
+ * The scopes a decision about `diagnostic` can take effect at. The backend resolves a
+ * finding at `context.scopes_for(slots)`: a material scope applies only when one of the
+ * finding's slots is that material, and a finding with no slots is about every slot, so
+ * each of the report's materials. The report does not say which slot holds which
+ * material, so a finding about some slots is offered no material scope rather than one
+ * that would be stored and never apply (`backend/scadbuddy/analyzers/context.py`).
+ */
+export function scopesForFinding(scopes: ScopeRef[], diagnostic: AnalyzerDiagnostic): ScopeRef[] {
+  if (!diagnostic.slots?.length) return scopes
+  return scopes.filter((scope) => scope.kind !== 'material')
+}
+
+/** Scopes broader than a template: a decision there reaches other models' prints. */
+export function widerThanTemplate(scope: ScopeRef): boolean {
+  return scope.kind === 'global' || scope.kind === 'material' || scope.kind === 'printer'
+}
+
+/**
  * The findings the dialog lists, and the ones it sets aside under a disclosure: `hidden`
  * is advanced detail only, and a suppressed or ignored one was decided on
  * (`_simple`, `backend/scadbuddy/analyzers/runner.py:233`). A crashed analyzer

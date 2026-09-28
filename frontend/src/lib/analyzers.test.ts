@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 import type { AnalyzerDiagnostic } from '../api/types'
-import { describeLocation, partition, scopeLabel } from './analyzers'
+import {
+  describeLocation,
+  partition,
+  scopeLabel,
+  scopesForFinding,
+  widerThanTemplate,
+} from './analyzers'
 
 function diagnostic(over: Partial<AnalyzerDiagnostic>): AnalyzerDiagnostic {
   return {
@@ -56,6 +62,32 @@ describe('scopeLabel', () => {
     expect(scopeLabel({ kind: 'template_version', key: 'k@abc' })).toBe('This template version')
     expect(scopeLabel({ kind: 'configuration', key: 'k#0123' })).toBe('These parameters')
     expect(scopeLabel({ kind: 'print', key: 'a'.repeat(32) })).toBe('This print')
+  })
+})
+
+describe('scopesForFinding', () => {
+  const scopes = [
+    { kind: 'global', key: '' },
+    { kind: 'material', key: 'pla' },
+    { kind: 'material', key: 'petg' },
+    { kind: 'print', key: 'a'.repeat(32) },
+  ] as const
+  it("offers every material for a whole-print finding and none for a slot's", () => {
+    expect(scopesForFinding([...scopes], diagnostic({ slots: [] }))).toEqual(scopes)
+    expect(scopesForFinding([...scopes], diagnostic({ slots: [2] })).map((s) => s.kind)).toEqual([
+      'global',
+      'print',
+    ])
+  })
+})
+
+describe('widerThanTemplate', () => {
+  it('is true for the scopes that reach other templates', () => {
+    expect(widerThanTemplate({ kind: 'global', key: '' })).toBe(true)
+    expect(widerThanTemplate({ kind: 'material', key: 'pla' })).toBe(true)
+    expect(widerThanTemplate({ kind: 'printer', key: 'id:1' })).toBe(true)
+    expect(widerThanTemplate({ kind: 'template', key: 'k' })).toBe(false)
+    expect(widerThanTemplate({ kind: 'print', key: 'a'.repeat(32) })).toBe(false)
   })
 })
 

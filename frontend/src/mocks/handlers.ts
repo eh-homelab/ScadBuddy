@@ -51,6 +51,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
+import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -63,6 +64,7 @@ import { keychainGlb } from './glb'
 import {
   analysisReport,
   analysisScopes,
+  scopesFor,
   fixDigest,
   fixFingerprint,
   openEdgesDiagnostic,
@@ -169,7 +171,7 @@ function announceDecision(decision: AnalyzerDecision, action: 'recorded' | 'remo
 function findFix(body: FixRequest) {
   const output = state.outputs.find((o) => o.id === body.target.output_id)
   if (!output) return { refusal: problem(404, 'Output not found') }
-  const analysis = body.request ?? { plate_id: 1 }
+  const analysis = body.request ?? { plate_id: 1, all_plates: false }
   const diagnostic = state.analyzerDiagnostics.find((row) => row.key === body.diagnostic_key)
   if (!diagnostic) {
     return {
@@ -180,7 +182,7 @@ function findFix(body: FixRequest) {
   if (!fix) {
     return { refusal: problem(404, 'Not Found', `${body.diagnostic_key} offers no fix '${body.fix_id}'`) }
   }
-  const scopes = analysisScopes(output, analysis)
+  const scopes = scopesFor(analysisScopes(output, analysis), diagnostic.slots ?? [])
   const scope = body.scope ?? scopes[scopes.length - 1]!
   if (!scopes.some((row) => row.kind === scope.kind && row.key === scope.key)) {
     return {
@@ -289,6 +291,7 @@ export function resetMockState(): void {
   state.pendingPreviews.clear()
   state.analyzerDecisions = []
   state.analyzerDiagnostics = [overhangDiagnostic, openEdgesDiagnostic]
+  resetMcpTokens()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -344,6 +347,11 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 /** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
+export function setMockMedia(slug: string, media: MediaView[]): void {
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -1006,6 +1014,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's routes (#251); the rest of this list is the backend.
+  ...mcpTokenHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()
@@ -2320,7 +2330,7 @@ export const handlers = [
     return HttpResponse.json(
       analysisReport(
         output,
-        body.request ?? { plate_id: 1 },
+        body.request ?? { plate_id: 1, all_plates: false },
         state.analyzerDiagnostics,
         state.analyzerDecisions,
       ),

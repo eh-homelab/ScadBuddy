@@ -395,8 +395,8 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
 
   /**
    * #284 — what the analyzers judge: this dialog's run request as `AnalysisRequest` takes
-   * it (`backend/scadbuddy/analyzers/context.py:46`). It has one
-   * `plate_id` and no project, so "All plates" is judged on plate 1.
+   * it (`backend/scadbuddy/analyzers/context.py:46`). It has no project. With
+   * "All plates" the filament checks read every plate; the mesh checks read plate 1.
    */
   const analysisRequest: AnalysisRequest | null =
     choices && printChoices
@@ -405,6 +405,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
           filament_plan: { slots: plan, force_colour_match: false },
           choices: printChoices,
           plate_id: chosenPlate,
+          all_plates: allPlates,
           copies: effectiveCopies,
           options,
         }

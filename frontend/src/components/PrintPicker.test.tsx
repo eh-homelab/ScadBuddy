@@ -956,6 +956,28 @@ describe('PrintPicker · Checks (#284)', () => {
     )
   })
 
+  it('judges an all-plates print on every plate', async () => {
+    server.use(
+      http.get('/api/v1/outputs/:id/plates', () =>
+        HttpResponse.json([
+          { index: 1, has_thumbnail: false },
+          { index: 2, has_thumbnail: false },
+        ]),
+      ),
+    )
+    const { bodies } = watch('POST', '/run', '/api/v1/analyzers/')
+    const { user } = renderPicker()
+    await loaded()
+    await waitFor(() => expect(bodies.at(-1)).toMatchObject({ request: { all_plates: false } }))
+
+    await user.click(
+      within(await screen.findByTestId('plate-choice')).getByRole('radio', { name: 'All plates' }),
+    )
+    await waitFor(() =>
+      expect(bodies.at(-1)).toMatchObject({ request: { all_plates: true, plate_id: 1 } }),
+    )
+  })
+
   it('leaves Print enabled when a check reports a problem', async () => {
     server.use(
       http.post('/api/v1/analyzers/run', async ({ request }) => {

@@ -22,9 +22,11 @@ from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source,
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.uploads import LibraryCopy
+from scadbuddy.core.paths import DataPaths
 from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
+from tests.test_bambu3mf import add_plate
 
 API = f"{BASE}/api/v1"
 SILK_SPOOL = 5  # "Tri Color" subtype, preset "Bambu PLA Silk" (inventory-spools.json)
@@ -275,6 +277,57 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
     assert {e["label"]: e["value"] for e in low["evidence"]}["needed per copy"] == 2000
     # Reads only: nothing is uploaded, sliced or queued.
     assert all(call.request.method == "GET" for call in respx.calls)
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+@pytest.mark.parametrize(("all_plates", "short"), [(True, True), (False, False)])
+def test_an_all_plates_print_is_judged_on_every_plates_filament(
+    client: TestClient, model: str, app: FastAPI, paths: DataPaths, all_plates: bool, short: bool
+) -> None:
+    """The silk spool has ~965 g left: plate 1's 600 g fits, both plates' 1200 g do not,
+    as the print dialog's filament step sums them for "All plates" (#198)."""
+    configure(client)
+    bambuddy_routes()
+    output_id = make_output(client, model)
+    [path] = paths.outputs.glob(f"*/{output_id}/model.3mf")
+    add_plate(path, 2)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
+    plates: list[int] = []
+
+    def requirements(request: httpx.Request) -> httpx.Response:
+        plate = int(request.url.params["plate_id"])
+        plates.append(plate)
+        return httpx.Response(
+            200,
+            json={
+                "file_id": 41,
+                "plate_id": plate,
+                "filaments": [{"slot_id": 1, "type": "PLA", "color": "#FFFFFF", "used_grams": 600}],
+            },
+        )
+
+    respx.get(f"{API}/library/files/41/filament-requirements").mock(side_effect=requirements)
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+
+    report = _run(
+        client, output_id, request={**SILK_REQUEST, "all_plates": all_plates}, detail="advanced"
+    )
+    found = {row["key"]: row for row in report["diagnostics"]}
+    assert sorted(plates) == ([1, 2] if all_plates else [1])
+    assert ("SB3002:slot-1" in found) is short
+    if short:
+        evidence = {e["label"]: e["value"] for e in found["SB3002:slot-1"]["evidence"]}
+        assert evidence["needed per copy"] == 1200
 
 
 def test_a_database_that_cannot_be_reached_degrades_to_a_503(

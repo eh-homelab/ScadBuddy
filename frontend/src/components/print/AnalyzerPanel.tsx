@@ -7,7 +7,13 @@ import type {
   AnalyzerSource,
   ScopeRef,
 } from '../../api/types'
-import { SEVERITY_LABEL, describeLocation, partition, scopeLabel } from '../../lib/analyzers'
+import {
+  SEVERITY_LABEL,
+  describeLocation,
+  partition,
+  scopeLabel,
+  scopesForFinding,
+} from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAnalysis } from '../../lib/useAnalysis'
@@ -200,7 +206,7 @@ interface Props {
   outputId: string | undefined
   /** The request the dialog would print with; `null` until it has one. */
   request: AnalysisRequest | null
-  /** Printing every plate: the analyzers take one plate (`AnalysisRequest.plate_id`). */
+  /** Printing every plate: the mesh checks still read one (`AnalysisRequest.plate_id`). */
   allPlates?: boolean
 }
 
@@ -255,7 +261,7 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
               <DiagnosticItem
                 key={diagnostic.key}
                 diagnostic={diagnostic}
-                scopes={decidable ? (report?.scopes ?? []) : []}
+                scopes={decidable && report ? scopesForFinding(report.scopes, diagnostic) : []}
                 outputId={outputId}
                 request={request}
                 onChanged={reload}
@@ -276,7 +282,7 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
 
       {report && allPlates && (
         <p className="mt-1.5 text-[12px] text-faint">
-          The mesh checks read plate 1; the plate-fit check reads every plate.
+          The mesh checks read plate 1; the plate-fit and filament checks read every plate.
         </p>
       )}
 

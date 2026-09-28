@@ -60,6 +60,10 @@ class AnalysisRequest(BaseModel):
     filament_plan: FilamentPlan | None = None
     choices: PrintChoices | None = None
     plate_id: int = Field(default=1, ge=1)
+    #: An all-plates print (#83): the filament checks read every plate's usage, summed
+    #: per slot as the print dialog's filament step does. The mesh checks still read
+    #: ``plate_id``.
+    all_plates: bool = False
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
 
