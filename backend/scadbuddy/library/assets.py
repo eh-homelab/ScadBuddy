@@ -10,7 +10,9 @@ An asset lives as long as something names it (#296). An output's parameters, a
 saved preset, a template's shipped presets or a job still in the store keep it, so
 "re-render" and "Customize this version" reproduce the output long after the upload.
 One that nothing names, and that nothing has uploaded or used for the grace period
-(SCADBUDDY_ASSET_SWEEP_GRACE), is removed by `AssetStore.sweep`. The store is capped
+(SCADBUDDY_ASSET_SWEEP_GRACE), is removed by `AssetStore.sweep`. The bytes are files
+under ``data/assets/``; the metadata, the last use and so the usage are rows of the
+``assets`` table (#591). The store is capped
 in total bytes and in count (SCADBUDDY_ASSET_MAX_TOTAL_BYTES / _MAX_COUNT); an upload
 past either is refused, and re-uploading what is already stored never is.
 
@@ -24,7 +26,6 @@ anywhere -- OpenSCAD reads them where they are, as it does any bundled file.
 
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import io
 import json
@@ -35,13 +36,17 @@ import secrets
 import time
 import unicodedata
 import zipfile
-from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
-from contextlib import contextmanager, suppress
+from collections.abc import Collection, Iterable, Mapping, Sequence
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
 
 from lxml import etree
 from PIL import Image, UnidentifiedImageError
+from psycopg import Connection
+from psycopg.rows import DictRow
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel
 
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
@@ -56,9 +61,21 @@ AssetKind = Literal["svg", "png"]
 
 ASSET_ID_PATTERN = r"^[0-9a-f]{64}$"
 ASSET_ID_RE = re.compile(ASSET_ID_PATTERN)
-#: A stored blob's file name: the id and the kind, nothing else. The metadata and a
-#: write's temporary file never match.
+#: A stored blob's file name: the id and the kind, nothing else. A write's temporary
+#: file never matches.
 _BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png)$")
+#: The metadata sidecar the file-based store kept beside each blob: a leftover (#591).
+_SIDECAR_RE = re.compile(r"^[0-9a-f]{64}\.json$")
+#: The store's advisory lock, hashed as the preset store hashes its own.
+ASSET_LOCK_KEY = "scadbuddy-assets"
+_LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
+_LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
+_UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
+_SELECT_META = "SELECT id, name, kind, size, width, height FROM assets WHERE id = %s"
+_MARK_USED = (
+    "UPDATE assets SET last_used_at = %s WHERE id = %s"
+    " RETURNING id, name, kind, size, width, height"
+)
 #: Anything in a reference source that could be an asset id. Deliberately looser than
 #: "the value of a `file` parameter": a sweep that keeps an asset it need not is
 #: harmless, one that misses a reference destroys an output's provenance. Matching
@@ -269,53 +286,57 @@ def sniff(data: bytes) -> AssetKind:
     raise AssetRejectedError("only SVG and PNG files can be attached")
 
 
+class AssetStoreUnavailableError(RuntimeError):
+    """The upload store's metadata lives in Postgres, and this store has no pool."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "the upload store's metadata is in the database; set SCADBUDDY_DATABASE_URL (#401)"
+        )
+
+
 class AssetStore:
-    """``data/assets/<sha256>.<kind>`` plus ``<sha256>.json`` for its metadata.
+    """``data/assets/<sha256>.<kind>`` for the bytes, an ``assets`` row for the rest (#591).
 
-    An asset's LAST USE is the later of its two files' mtimes: rewritten by every
-    upload of the content (a re-upload included) and touched by every render or
-    preset save that names it (`use`). The sweep removes only what was last used
-    before its grace period.
+    The row is the asset: its metadata, its LAST USE (``last_used_at``, set by every
+    upload of the content, a re-upload included, and by every render or preset save
+    that names it, `use`) and so the store's usage, which is ``count(*)`` and
+    ``sum(size)`` over the table -- no scan, no running total to go stale, and every
+    replica reads the same numbers. The pool is the render queue's
+    (`PostgresJobStore.pool`), opened and migrated at startup; this store opens
+    nothing of its own.
 
-    How much it holds is a running total, not a directory scan (#390): the ledger
-    (`ledger_path`) is read and rewritten under the lock by every `put` that adds a
-    blob and every removal the sweep makes, so the quota check is O(1) and every
-    process sharing the volume sees the same numbers. A change marks the ledger
-    dirty before it touches a file and clean once it is counted, so one that dies
-    in between leaves a ledger the next read recounts from the directory. A
-    missing or unreadable ledger is recounted the same way, and the boot recounts
-    it unconditionally (`rebuild_usage`) for files changed behind the store's back.
+    A row never exists without its blob: `put` writes the blob before its insert
+    commits, and the sweep deletes the row before it removes the blob. The other way
+    round -- a blob with no row, left by an upload whose insert failed, or by the
+    file-based store this replaced (nothing was copied over) -- is an orphan: `get`
+    does not find it, usage does not count it, and the sweep removes it once its
+    mtime is older than the grace.
+
+    What must not interleave -- storing with its quota check, and the sweep's
+    re-check and removal of one asset -- holds the store's advisory lock
+    (`ASSET_LOCK_KEY`), so it holds across threads, processes and replicas alike.
+    `use` needs only its row: the sweep locks that row before it re-checks it.
     """
 
-    def __init__(self, root: Path, *, max_total_bytes: int = 0, max_count: int = 0) -> None:
+    def __init__(
+        self,
+        root: Path,
+        pool: ConnectionPool[Connection[DictRow]] | None = None,
+        *,
+        max_total_bytes: int = 0,
+        max_count: int = 0,
+    ) -> None:
         self.root = root
+        self._pool = pool
         #: 0 is no limit, for either.
         self.max_total_bytes = max_total_bytes
         self.max_count = max_count
 
-    @property
-    def lock_path(self) -> Path:
-        """Beside the store rather than in it (``data/.assets.lock``), so the store
-        directory holds nothing but assets."""
-        return self.root.with_name(f".{self.root.name}.lock")
-
-    @contextmanager
-    def _locked(self) -> Iterator[None]:
-        """Serialise the steps that must not interleave: storing (with its quota
-        check), marking used, and the sweep's re-check and removal of one asset.
-
-        An ``flock`` on `lock_path` rather than a ``threading.Lock``, so it
-        also holds between processes sharing the volume (replicas on a
-        ReadWriteMany PVC). Each call opens its own descriptor, so threads of one
-        process exclude each other too.
-        """
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+b") as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle, fcntl.LOCK_UN)
+    def _require(self) -> ConnectionPool[Connection[DictRow]]:
+        if self._pool is None:
+            raise AssetStoreUnavailableError
+        return self._pool
 
     def _blobs(self) -> dict[str, Path]:
         """Every stored blob by id, as the directory lists it now."""
@@ -330,59 +351,6 @@ class AssetStore:
                 found[match.group(1)] = entry
         return found
 
-    @property
-    def ledger_path(self) -> Path:
-        """The running ``(count, bytes)`` total (#390), beside the store like the lock
-        (``data/.assets.usage.json``)."""
-        return self.root.with_name(f".{self.root.name}.usage.json")
-
-    def _scan(self) -> tuple[int, int]:
-        """``(count, bytes)`` from listing the store and ``stat``-ing every blob: O(n),
-        so only for rebuilding the ledger, never per upload."""
-        count = 0
-        total = 0
-        for blob in self._blobs().values():
-            try:
-                total += blob.stat().st_size
-            except FileNotFoundError:  # removed between the listing and the stat
-                continue
-            count += 1
-        return count, total
-
-    def _write_ledger(self, count: int, total: int, *, dirty: bool = False) -> None:
-        payload = {"count": count, "bytes": total, "dirty": dirty}
-        _write_atomically(self.ledger_path, (json.dumps(payload) + "\n").encode())
-
-    def _read_ledger(self) -> tuple[int, int] | None:
-        """The ledger's total, or None when it cannot be trusted: missing, unreadable,
-        or left dirty by a change that did not finish (a crash, a failed write)."""
-        try:
-            data = json.loads(self.ledger_path.read_bytes())
-            count, total, dirty = data["count"], data["bytes"], data["dirty"]
-        except (OSError, ValueError, TypeError, KeyError):
-            return None
-        valid = isinstance(count, int) and isinstance(total, int) and count >= 0 and total >= 0
-        if dirty is not False or not valid:
-            return None
-        return count, total
-
-    def _tracked(self) -> tuple[int, int]:
-        """The store's ``(count, bytes)``, from the ledger, rebuilt by a scan when the
-        ledger cannot be trusted. Under the lock."""
-        current = self._read_ledger()
-        if current is None:
-            current = self._scan()
-            self._write_ledger(*current)
-        return current
-
-    def rebuild_usage(self) -> AssetUsage:
-        """Recount the store from the directory and rewrite the ledger. Run at boot, so
-        a file added or removed behind the store's back is counted again from then."""
-        with self._locked():
-            count, total = self._scan()
-            self._write_ledger(count, total)
-        return self._usage(count, total)
-
     def _usage(self, count: int, total: int) -> AssetUsage:
         return AssetUsage(
             count=count,
@@ -391,10 +359,17 @@ class AssetStore:
             max_total_bytes=self.max_total_bytes,
         )
 
+    def _counted(self, conn: Connection[DictRow]) -> AssetUsage:
+        row = conn.execute(
+            "SELECT count(*) AS count, coalesce(sum(size), 0)::bigint AS total FROM assets"
+        ).fetchone()
+        assert row is not None
+        return self._usage(row["count"], row["total"])
+
     def usage(self) -> AssetUsage:
-        """O(1): the ledger, read under the lock so no change is half-applied."""
-        with self._locked():
-            return self._usage(*self._tracked())
+        """One aggregate over the rows: what `put` checks its caps against."""
+        with self._require().connection() as conn:
+            return self._counted(conn)
 
     def _require_room(self, usage: AssetUsage, size: int) -> None:
         if self.max_count and usage.count + 1 > self.max_count:
@@ -416,16 +391,14 @@ class AssetStore:
     def blob_path(self, meta: AssetMeta) -> Path:
         return self.root / f"{meta.id}.{meta.kind}"
 
-    def _meta_path(self, asset_id: str) -> Path:
-        return self.root / f"{asset_id}.json"
-
     def get(self, asset_id: str) -> AssetMeta:
         if not ASSET_ID_RE.fullmatch(asset_id):
             raise AssetNotFoundError(asset_id)
-        path = self._meta_path(asset_id)
-        if not path.is_file():
+        with self._require().connection() as conn:
+            found = conn.execute(_SELECT_META, (asset_id,)).fetchone()
+        if found is None:
             raise AssetNotFoundError(asset_id)
-        meta = AssetMeta.model_validate_json(path.read_text(encoding="utf-8"))
+        meta = AssetMeta.model_validate(found)
         if not self.blob_path(meta).is_file():
             raise AssetNotFoundError(asset_id)
         return meta
@@ -433,14 +406,22 @@ class AssetStore:
     def use(self, asset_id: str) -> AssetMeta:
         """`get`, and mark the asset used now, so a sweep already under way skips it.
 
-        Under the lock: a sweep re-checks the last use under the same lock just
-        before it removes anything, so either this finds the asset and the sweep
-        then sees it fresh, or the sweep removed it first and this is a not-found.
+        The update waits on the row lock the sweep takes before it re-checks the last
+        use, so either this lands first and the sweep sees the asset fresh, or the
+        sweep deleted the row first and this is a not-found.
         """
-        with self._locked():
-            meta = self.get(asset_id)
-            os.utime(self._meta_path(asset_id))
-            return meta
+        if not ASSET_ID_RE.fullmatch(asset_id):
+            raise AssetNotFoundError(asset_id)
+        with self._require().connection() as conn, conn.transaction():
+            found = conn.execute(_MARK_USED, (datetime.now(UTC), asset_id)).fetchone()
+            if found is None:
+                raise AssetNotFoundError(asset_id)
+            meta = AssetMeta.model_validate(found)
+            if not self.blob_path(meta).is_file():
+                # Raised inside the transaction: a row whose blob is gone is not
+                # kept alive by a use that could not have read it.
+                raise AssetNotFoundError(asset_id)
+        return meta
 
     def put(self, data: bytes, filename: str | None) -> AssetMeta:
         """Validate, sanitise and store an upload; the same content is stored once."""
@@ -461,35 +442,54 @@ class AssetStore:
             width=width,
             height=height,
         )
-        with self._locked():
-            count, total = self._tracked()
-            had_blob = self.blob_path(meta).is_file()
+        with self._require().connection() as conn, conn.transaction():
+            conn.execute(_LOCK_XACT, (ASSET_LOCK_KEY,))
+            known = conn.execute("SELECT 1 FROM assets WHERE id = %s", (meta.id,)).fetchone()
             # Content already stored costs nothing, so a full store still takes it:
             # re-uploading a file an output uses must keep working at the cap.
-            if not (had_blob and self._meta_path(meta.id).is_file()):
-                self._require_room(self._usage(count, total), len(stored))
-            if not had_blob:
-                # Dirty until the blob is written and counted: a crash in between
-                # leaves a ledger the next read rebuilds rather than trusts.
-                self._write_ledger(count, total, dirty=True)
-            _write_atomically(self.blob_path(meta), stored)
-            _write_atomically(
-                self._meta_path(meta.id),
-                (json.dumps(meta.model_dump(), indent=2) + "\n").encode(),
+            if known is None:
+                self._require_room(self._counted(conn), meta.size)
+            blob = self.blob_path(meta)
+            # Before the row: a failed write rolls the insert back, so no row is ever
+            # without its blob. The id is the content hash, so a blob already there
+            # (an orphan, or this asset's own) is these bytes; the lock keeps the
+            # sweep from removing it until this commits.
+            if not blob.is_file():
+                self.root.mkdir(parents=True, exist_ok=True)
+                _write_atomically(blob, stored)
+            now = datetime.now(UTC)
+            conn.execute(
+                "INSERT INTO assets"
+                " (id, name, kind, size, width, height, created_at, last_used_at)"
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (id) DO UPDATE"
+                " SET name = EXCLUDED.name, last_used_at = EXCLUDED.last_used_at",
+                (meta.id, meta.name, meta.kind, meta.size, meta.width, meta.height, now, now),
             )
-            if not had_blob:
-                # The id is the content hash, so a blob already there is these bytes.
-                self._write_ledger(count + 1, total + len(stored))
         return meta
 
-    def _last_used(self, asset_id: str, blob: Path) -> float | None:
-        """The later of the blob's and the metadata's mtime; None once both are gone."""
-        stamps: list[float] = []
-        for path in (blob, self._meta_path(asset_id)):
+    def _remove_legacy_files(self) -> None:
+        """What the file-based store left (#591): a ``<id>.json`` metadata sidecar per
+        asset, and the running total and the flock beside the store. Nothing reads
+        them, and nothing was copied from them, so they only take room."""
+        legacy = [
+            self.root.with_name(f".{self.root.name}.usage.json"),
+            self.root.with_name(f".{self.root.name}.lock"),
+        ]
+        with suppress(FileNotFoundError):
+            legacy += [e for e in self.root.iterdir() if _SIDECAR_RE.fullmatch(e.name)]
+        for path in legacy:
             try:
-                stamps.append(path.stat().st_mtime)
-            except FileNotFoundError:
-                continue
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("could not remove a leftover of the file-based upload store")
+
+    def _orphan_last_used(self, asset_id: str) -> float | None:
+        """A blob with no row has only its mtime to go by; None once it is gone."""
+        stamps: list[float] = []
+        for kind in MEDIA_TYPES:
+            with suppress(FileNotFoundError):
+                stamps.append((self.root / f"{asset_id}.{kind}").stat().st_mtime)
         return max(stamps) if stamps else None
 
     def sweep(
@@ -498,44 +498,73 @@ class AssetStore:
         """Remove every asset not in ``referenced`` and last used more than ``grace``
         seconds before ``now``; answer the ids removed.
 
+        The candidates are every row and every blob on disk, so an orphan blob (no
+        row: an upload whose insert failed, or one from before #591) goes too, once
+        its mtime is past the grace. The file-based store's leftovers are removed
+        first (`_remove_legacy_files`).
+
         ``referenced`` is collected before the call (`referenced_asset_ids`), so a
         reference made while the sweep runs is not in it. What protects that asset
         is its last use: every path that creates a reference -- an upload, a render
-        submit, a preset save -- marks the asset used under the lock first, and each
-        removal re-checks the last use under that same lock. Removal takes the
-        metadata first, so `get` stops finding the asset before its bytes go.
+        submit, a preset save -- marks the asset used first, and each removal
+        re-checks the last use with the row locked, under the store's advisory lock.
+        That lock is held from before the re-check until the blob is gone, which is
+        after the row's delete has committed: `get` stops finding the asset before
+        its bytes go, and an upload of the same content waits until they have.
         Anything that cannot be removed is logged and skipped, like the other sweeps.
         """
+        pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
+        cutoff_at = datetime.fromtimestamp(cutoff, UTC)
+        self._remove_legacy_files()
+        with pool.connection() as conn:
+            rows = {
+                row["id"]: row["last_used_at"]
+                for row in conn.execute("SELECT id, last_used_at FROM assets")
+            }
+        # A row last used inside the grace needs no second look; an orphan's mtime is
+        # read under the lock.
+        candidates = sorted(
+            asset_id
+            for asset_id in rows.keys() | self._blobs().keys()
+            if asset_id not in referenced and (asset_id not in rows or rows[asset_id] < cutoff_at)
+        )
         removed: list[str] = []
-        for asset_id, blob in self._blobs().items():
-            if asset_id in referenced:
-                continue
-            with self._locked():
-                last_used = self._last_used(asset_id, blob)
-                if last_used is None or last_used >= cutoff:
-                    continue
-                count, total = self._tracked()
-                # Dirty until the removal is counted, as in `put`: a failure or a
-                # crash in between leaves the ledger to be rebuilt, not trusted.
-                self._write_ledger(count, total, dirty=True)
+        for asset_id in candidates:
+            with pool.connection() as conn:
+                # A session lock, not a transaction's: it must outlive the commit of
+                # the row's delete, until the blob is gone.
+                conn.execute(_LOCK_SESSION, (ASSET_LOCK_KEY,))
                 try:
-                    size: int | None = blob.stat().st_size
-                except FileNotFoundError:
-                    # Gone behind the store's back. Its metadata still goes (the
-                    # sweep lists blobs, so nothing would ever revisit it), and the
-                    # ledger stays dirty for the next read to recount.
-                    size = None
-                try:
-                    self._meta_path(asset_id).unlink(missing_ok=True)
-                    blob.unlink(missing_ok=True)
+                    if self._remove(conn, asset_id, cutoff, cutoff_at):
+                        removed.append(asset_id)
                 except OSError:
                     logger.exception("could not remove an unused asset", extra={"asset": asset_id})
-                    continue
-                if size is not None:
-                    self._write_ledger(count - 1, total - size)
-            removed.append(asset_id)
+                finally:
+                    conn.execute(_UNLOCK_SESSION, (ASSET_LOCK_KEY,))
         return removed
+
+    def _remove(
+        self, conn: Connection[DictRow], asset_id: str, cutoff: float, cutoff_at: datetime
+    ) -> bool:
+        """One candidate of the sweep, under the store's lock: whether it went."""
+        with conn.transaction():
+            row = conn.execute(
+                "SELECT last_used_at FROM assets WHERE id = %s FOR UPDATE", (asset_id,)
+            ).fetchone()
+            if row is not None:
+                if row["last_used_at"] >= cutoff_at:
+                    return False
+                conn.execute("DELETE FROM assets WHERE id = %s", (asset_id,))
+        if row is None:
+            last_used = self._orphan_last_used(asset_id)
+            if last_used is None or last_used >= cutoff:
+                return False
+        # After the delete has committed: a failure here leaves an orphan blob, which
+        # a later sweep removes, never a row without its blob.
+        for kind in MEDIA_TYPES:
+            (self.root / f"{asset_id}.{kind}").unlink(missing_ok=True)
+        return True
 
 
 def _write_atomically(path: Path, payload: bytes) -> None:

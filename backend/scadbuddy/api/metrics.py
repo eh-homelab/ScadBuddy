@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 
+import psycopg
 from fastapi import APIRouter, Response
 
 from scadbuddy.api.deps import AppState, StateDep
@@ -17,7 +18,7 @@ def refresh_asset_metrics(state: AppState) -> None:
     the last values rather than failing the scrape."""
     try:
         usage = state.assets.usage()
-    except OSError:
+    except (OSError, psycopg.Error):
         logger.exception("could not read the upload store's usage")
         return
     state.metrics.assets_stored.set(usage.count)
