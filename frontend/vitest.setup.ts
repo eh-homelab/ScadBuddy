@@ -4,6 +4,7 @@ import { resetMockState } from './src/mocks/handlers'
 import { server } from './src/mocks/server'
 import { resetDisplayUnit } from './src/lib/units'
 import { resetRealtime } from './src/lib/realtime'
+import { resetAiAvailability } from './src/agent/chat/availability'
 
 beforeAll(() => server.listen({ onUnhandledRequest: 'error' }))
 afterEach(() => {
@@ -11,6 +12,7 @@ afterEach(() => {
   resetMockState()
   resetDisplayUnit()
   resetRealtime()
+  resetAiAvailability()
 })
 afterAll(() => server.close())
 

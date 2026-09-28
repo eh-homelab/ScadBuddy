@@ -29,8 +29,21 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
   useEffect(() => {
     const t = factory()
     let open = true
+    let opened = false
     transport.current = t
     t.connect({
+      onOpen: () => {
+        if (!open) return
+        // A reconnect: the new connection follows nothing yet, so re-attach the
+        // session on screen (attach replays it, and `select` clears it first).
+        const active = latest.current.activeId
+        if (opened && active) {
+          dispatch({ type: 'select', sessionId: active })
+          t.send(clientMessage({ type: 'session.attach', sessionId: active }))
+        }
+        opened = true
+        dispatch({ type: 'connected' })
+      },
       onFrame: (frame) => {
         if (!open) return
         const parsed = parseServerEvent(frame)
