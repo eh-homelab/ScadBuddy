@@ -379,7 +379,19 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment.
+  credential's environment. The one exception is the headless browser (#349,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
+  writes that plugin itself and starts its server under `env -i`. It is off
+  until switched on in Settings ("AI headless browser", stored through
+  `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
+  writes), and the image carries its Chromium (about 600 MB of the image). The
+  backend refuses its outward requests unless a human approved that exact one
+  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
+  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
+  Chromium keeps its sandbox only where the pod's seccomp profile allows user
+  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
+  browser turn and runs it with `--no-sandbox`
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session
@@ -463,9 +475,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Hindsight: the tool names and annotations a real server lists, and whether
   `reflect` writes anything.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
+  Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
-  recreates `claude/` and `work/` in that volume, and it exits 1 with a
+  recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
 - Nothing deploys it yet. The clusters manifest, and the ingress routes for
   `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories

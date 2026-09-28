@@ -58,7 +58,7 @@ What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/
 
 - `/mcp` refuses plain HTTP, except on loopback;
 - `bearer` is the default auth mode, and a request without a valid token gets `401`.
-  The mode is an `ai_settings` key ([operating.md](operating.md#9-mcp-auth-mode));
+  The mode is an `ai_settings` key ([operating.md](operating.md#10-mcp-auth-mode));
 - outward actions (send, print, delete, settings writes) always need a human approval
   in the ScadBuddy UI, whatever the token allows. The tool returns a
   `pending_action_id`; once the user approves it, `confirm_action` runs it, once
@@ -79,13 +79,15 @@ The spec (§10) has the agent service load this directory by path, through the A
 ([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)). The harness can
 do this: `pluginPaths` in `runHarness()`
 ([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)) vets and passes local
-plugins. But `main.ts` passes no plugin path, on purpose: every query runs with
+plugins. But `main.ts` does not pass this one, on purpose (it does load the headless
+browser's vendored plugin when that is enabled, see
+[headless-browser.md](headless-browser.md), and any approved plugin packages): every query runs with
 `tools: []` ([`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)), so
 there is no `Skill` or `Agent` tool, and the plugin's skills and subagents would be
 listed but never usable. The harness's own tools reach the model directly as
 `mcp__scadbuddy__<tool>` ([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts));
-[`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) asserts that
-they are the only tools offered.
+[`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) asserts that,
+with no other plugin enabled, they are the only tools offered.
 
 Vetting is described in [security.md](security.md#plugin-vetting).
 

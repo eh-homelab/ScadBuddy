@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
+    PrintLinksDep,
     PrintProgressDep,
     PrintWatcherDep,
     SettingsStoreDep,
@@ -26,6 +27,7 @@ from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
+from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.pipelines import (
     PrintRunRequest,
     PrintRunResult,
@@ -215,6 +217,7 @@ async def get_progress(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
@@ -232,7 +235,9 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        progress = await progress_for(client, meta, uploads=uploads)
+        progress = await progress_for(
+            client, meta, uploads=uploads, links=links if links.available else None
+        )
     observer.observe(meta, progress)
     # Someone is looking at a print that is still moving: make sure it is followed
     # (#268). The watcher may not be, after a restart without a database, for a print
@@ -278,6 +283,7 @@ async def post_attach_project(
     output_id: OutputIdPath,
     body: ProjectAttach,
     outputs: OutputsDep,
+    links: PrintLinksDep,
     store: SettingsStoreDep,
 ) -> AttachResult:
     """``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
@@ -300,4 +306,14 @@ async def post_attach_project(
         or ([meta.queue_item_id] if meta.queue_item_id else [])
     )
     async with client_for(settings) as client:
-        return await attach_results(client, project_id, queue_item_ids=ids)
+        # The body's ids are filed under the project as asked, but only the output's own
+        # items are linked to it: a caller-named item would open its archive's media.
+        linkable = await owned_queue_items(client, meta, links, ids) if links.available else set()
+        return await attach_results(
+            client,
+            project_id,
+            queue_item_ids=ids,
+            output_id=meta.id,
+            links=links if links.available else None,
+            linkable=linkable,
+        )

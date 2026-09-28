@@ -5,6 +5,7 @@ import {
   SETTING_MCP_ANONYMOUS_CAP,
   SETTING_MCP_AUTH_MODE,
 } from '../src/auth/authenticate.js'
+import { defaultOidcConfig, type OidcConfig } from '../src/auth/oidc.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
 import { appFetch, MCP_URL, testApp } from './helpers/mcp.js'
@@ -15,6 +16,10 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 
 function reader(values: Record<string, unknown>) {
   return { get: <T>(key: string) => Promise.resolve(values[key] as T | undefined) }
+}
+
+function oidcRepo(config: OidcConfig | undefined) {
+  return { get: () => Promise.resolve(config), put: () => Promise.resolve() }
 }
 
 describe('mcpAuthSettings', () => {
@@ -59,6 +64,39 @@ describe('mcpAuthSettings', () => {
     values[SETTING_MCP_AUTH_MODE] = 'disabled'
     await settings()
     expect(warned).toHaveLength(3)
+  })
+
+  // #519's OIDC (ai_settings.mcp_oidc) merged with this PR's mode key.
+  it('is oidc, with its configuration, while OIDC is enabled, whatever the mode key says', async () => {
+    const enabled = { ...defaultOidcConfig(), enabled: true }
+    for (const mode of [undefined, 'bearer', 'oidc']) {
+      const warned: string[] = []
+      const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: mode }), (m) => warned.push(m), oidcRepo(enabled))
+      expect(await settings(), String(mode)).toEqual({ mode: 'oidc', anonymousCap: 'outward', oidc: enabled })
+      expect(warned).toEqual([])
+    }
+    // The stricter of two explicit choices: OIDC over `disabled`, said once.
+    const warned: string[] = []
+    const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: 'disabled' }), (m) => warned.push(m), oidcRepo(enabled))
+    expect((await settings()).mode).toBe('oidc')
+    expect(warned).toEqual([expect.stringMatching(/"disabled", but OIDC is enabled.*using oidc/)])
+  })
+
+  it('does not run oidc on the mode key alone: bearer while OIDC is off or unset', async () => {
+    for (const config of [undefined, defaultOidcConfig()]) {
+      const warned: string[] = []
+      const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: 'oidc' }), (m) => warned.push(m), oidcRepo(config))
+      expect(await settings()).toEqual(DEFAULT_MCP_AUTH)
+      expect(warned).toEqual([expect.stringMatching(/"oidc", but no OIDC configuration is enabled; using bearer/)])
+    }
+    // An OIDC repo with OIDC off leaves `disabled` as it is.
+    const settings = mcpAuthSettings(reader({ [SETTING_MCP_AUTH_MODE]: 'disabled' }), () => {}, oidcRepo(defaultOidcConfig()))
+    expect((await settings()).mode).toBe('disabled')
+  })
+
+  it('leaves a failed OIDC read to throw too', async () => {
+    const broken = { get: () => Promise.reject(new Error('oidc read failed')), put: () => Promise.resolve() }
+    await expect(mcpAuthSettings(reader({}), () => {}, broken)()).rejects.toThrow('oidc read failed')
   })
 
   it('leaves a failed read to throw, so /mcp fails closed', async () => {

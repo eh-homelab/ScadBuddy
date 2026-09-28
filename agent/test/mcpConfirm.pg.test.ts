@@ -34,6 +34,24 @@ describe('ownerOf', () => {
     expect(ownerOf({ id: 'anonymous:other', kind: 'anonymous', tiers: ['read'] }).id).not.toBe(owner.id)
     expect(ownerOf(principalA)).toMatchObject({ kind: 'bearer', id: 'token:a' })
   })
+
+  it('records an OIDC caller as itself, by subject and client, never as the browser user', () => {
+    const owner = ownerOf({
+      id: 'oidc:https://idp.example/#alice',
+      kind: 'oidc',
+      tiers: tiersUpTo('outward'),
+      subject: 'alice',
+      clientId: 'claude-code',
+    })
+    expect(owner).toEqual({ kind: 'oidc', id: 'oidc:https://idp.example/#alice', label: 'MCP OIDC alice via claude-code' })
+    expect(ownerOf({ id: 'oidc:https://idp.example/#bob', kind: 'oidc', tiers: ['read'], subject: 'bob' }).label).toBe(
+      'MCP OIDC bob',
+    )
+  })
+
+  it('refuses a principal kind it does not know rather than calling it the browser user', () => {
+    expect(() => ownerOf({ id: 'x', kind: 'future' as never, tiers: ['read'] })).toThrow(/unknown principal kind/)
+  })
 })
 
 describe.skipIf(!TEST_DATABASE_URL)(

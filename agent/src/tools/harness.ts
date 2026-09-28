@@ -1,5 +1,5 @@
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk'
-import { harnessPrincipal } from '../auth/principal.js'
+import { harnessPrincipal, hasTier } from '../auth/principal.js'
 import type { TierResolver } from '../harness/permissions.js'
 import type { Owner } from '../sessions/protocol.js'
 import { ALL_TOOLS } from './index.js'
@@ -18,7 +18,10 @@ import type { Tool, ToolServices } from './registry.js'
 //     principal's tiers, outward ones park for a human approval (#258). Any
 //     other name (a plugin's tool) stays unknown, and so `outward` (spec §8.1).
 //   - `mcpServers` builds one in-process server per turn, bound to the
-//     session owner's principal (auth/principal.ts `harnessPrincipal`).
+//     session owner's principal (auth/principal.ts `harnessPrincipal`), with
+//     only the tools that principal's tiers allow: a tool it could never run
+//     is not offered, so no human is asked to approve a call that `runTool`
+//     would then refuse for want of the tier.
 
 export type HarnessTools = {
   tierOf: TierResolver
@@ -29,6 +32,10 @@ export function harnessTools(services: ToolServices, tools: readonly Tool[] = AL
   const risk = new Map(tools.map((t) => [`mcp__${SERVER_NAME}__${t.name}`, t.risk]))
   return {
     tierOf: (name) => risk.get(name),
-    mcpServers: (session) => ({ [SERVER_NAME]: createHarnessServer(tools, services, harnessPrincipal(session.owner)) }),
+    mcpServers: (session) => {
+      const principal = harnessPrincipal(session.owner)
+      const allowed = tools.filter((t) => hasTier(principal, t.risk))
+      return { [SERVER_NAME]: createHarnessServer(allowed, services, principal) }
+    },
   }
 }

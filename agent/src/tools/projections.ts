@@ -56,31 +56,6 @@ function signalFrom(extra: unknown): AbortSignal {
 }
 
 /**
- * The shape as the Agent SDK's in-process server validates it. That server is
- * the SDK's own bundled copy of the MCP server and of zod (4.4.3 in SDK
- * 0.3.283, sdk.mjs), which builds the top-level object itself and treats a key
- * as omittable only when its schema's `_zod.optin` is `"optional"`. Our zod
- * (4.6.5, zod/v4/core/schemas.js `$ZodDefault`) marks a `.default()` field
- * `"defaulted"`, and `.optional()` on top keeps that, so the bundled parser
- * refused every call that left such a field out ("expected nonoptional";
- * test/harnessWiring.test.ts, `delete_model` without `force`). A top-level
- * `.default()` field is therefore offered as its inner type, `.optional()`,
- * with the default (and any description) as metadata, which renders the same
- * JSON Schema (test/projections.test.ts compares the two listings). `runTool`
- * parses the arguments with the tool's own schema, which applies the default.
- * Nested fields are parsed by our zod's own schemas and need nothing.
- */
-function sdkShape(shape: z.ZodRawShape): z.ZodRawShape {
-  return Object.fromEntries(
-    Object.entries(shape).map(([key, field]) => {
-      if (!(field instanceof z.ZodDefault)) return [key, field]
-      const inner = field.unwrap() as z.ZodType
-      return [key, inner.optional().meta({ ...z.globalRegistry.get(field), default: field.def.defaultValue })]
-    }),
-  )
-}
-
-/**
  * Harness projection: an in-process SDK MCP server, so the tools reach Claude
  * as `mcp__scadbuddy__<name>` (custom tools,
  * https://code.claude.com/docs/en/agent-sdk/custom-tools). The principal is the
@@ -102,7 +77,19 @@ export function createHarnessServer(
       sdkTool(
         t.name,
         t.description,
-        sdkShape(t.shape),
+        // A whole z.object, not the raw shape the SDK's types ask for. Given a
+        // raw shape, the server bundled in @anthropic-ai/claude-agent-sdk
+        // 0.3.283 rebuilds the object with its own copy of zod, and that copy
+        // refuses an omitted `.default()` field ("expected nonoptional,
+        // received undefined") instead of filling the default, so e.g.
+        // update_source without `force` never ran. Measured 2026-09-28 by the
+        // eval harness (evals/, test/evals.test.ts); test/projections.test.ts
+        // keeps it fixed. The server accepts any zod schema at runtime
+        // (it validates with the schema's own `safeParseAsync`), and the
+        // listed JSON Schema is unchanged (same test). The cast hides that
+        // from the types, so the same file pins the SDK version: a bump fails
+        // there until someone re-checks this (and drops it if fixed).
+        z.object(t.shape) as unknown as typeof t.shape,
         (args, extra) =>
           // `gate: 'harness'`: the query's permission seam has already parked
           // an outward call for approval (registry.ts ToolContext.gate).
