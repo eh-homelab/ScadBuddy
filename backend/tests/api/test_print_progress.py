@@ -158,9 +158,7 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
 
 
 @respx.mock
-def test_a_run_starts_the_print_watcher(
-    client: TestClient, model: str
-) -> None:
+def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     """#268: the backend follows the print itself from the moment it starts."""
     configure(client)
     output_id = make_output(client, model)
