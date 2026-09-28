@@ -21,127 +21,6 @@
 ARG BOSL2_REF=v2.0.761
 ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
-# ── frontend bundle ───────────────────────────────────────────────────────────
-# Built here rather than copied from the host so a stale local `frontend/dist`
-# can never reach the image (.dockerignore drops it from the context too).
-# Node MAJORS here are LTS-only, and that is a constraint rather than a
-# preference. Odd-numbered releases (25, 27, ...) never become LTS, and they do
-# not ship corepack -- which the next line depends on. Installing it from npm
-# does not rescue them either: corepack 0.36 declares
-# `node: ^22.22.2 || ^24.15.0 || >=26.0.0`, so npm refuses node 25 outright.
-# Dependabot bumped this 24 -> 25 in #55 and broke every build on main; that is
-# now excluded in .github/dependabot.yml. Move it deliberately, to the next
-# EVEN major, together with ci.yml's `node-version` (they must not diverge --
-# a mismatch passes the frontend job and fails only in the image).
-FROM node:24-bookworm-slim AS frontend
-
-WORKDIR /src/frontend
-
-# corepack reads the `packageManager` field in package.json, so the pnpm
-# version is pinned by the frontend's own lockfile rather than by this file.
-RUN corepack enable
-
-# Manifest + lockfile + workspace config first: `pnpm install` is the expensive
-# layer and only these can invalidate it.
-#
-# pnpm-workspace.yaml is NOT optional and is easy to leave out. pnpm 10+ refuses
-# to silently skip a dependency's build scripts — it hard-errors with
-# ERR_PNPM_IGNORED_BUILDS — and the approvals live in that file
-# (`allowBuilds: {esbuild, msw}`), not in package.json. Copying only the
-# manifest and lockfile produced an install that worked in the `frontend` CI job
-# (whole tree checked out) and failed only here, which is the worst shape for
-# this class of bug. Verified on CI run 35820566117.
-COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY frontend/ ./
-RUN pnpm build
-
-# ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
-# A SEPARATE image, reached with `--target agent` and deployed as a second
-# container in the ScadBuddy pod — the sidecar layout the AI design spec picks
-# in §4.1 (docs/superpowers/specs/2026-09-27-ai-integration-design.md): one
-# process per container, no supervisor under tini, independent restarts. It
-# shares nothing with the OpenSCAD stages below, and it sits ABOVE them so
-# `runtime` stays the last stage and a bare `docker build .` still produces the
-# backend image.
-#
-# Same Node major as the `frontend` stage and ci.yml, for the same reasons
-# (see the comment on that stage); move all three together.
-FROM node:24-bookworm-slim AS agent-build
-
-WORKDIR /src/agent
-RUN corepack enable
-
-# agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
-# install script that is declined there); without it the frozen install fails
-# with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
-# stage does.
-COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile
-
-COPY agent/ ./
-RUN pnpm build
-
-# Production dependencies only, installed from the same lockfile in a stage of
-# their own so the shipped node_modules carries no eslint/vitest/typescript.
-FROM node:24-bookworm-slim AS agent-deps
-
-WORKDIR /src/agent
-RUN corepack enable
-COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
-RUN pnpm install --frozen-lockfile --prod
-
-FROM node:24-bookworm-slim AS agent
-
-# tini for the same reason as the backend image: the Agent SDK spawns the
-# Claude Code binary as a child process per query, and node as PID 1 does not
-# reap orphans.
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
-    && rm -rf /var/lib/apt/lists/*
-
-# Numeric uid 10001, the same as the backend image, so one pod
-# securityContext covers both containers. The state directory is the only
-# writable tree the service needs (agent/src/harness/options.ts
-# DEFAULT_STATE_DIR): `claude/` is CLAUDE_CONFIG_DIR, `work/` the scratch cwd.
-# Mount an emptyDir (or the data volume) there and the root filesystem can be
-# read-only (spec §4.4).
-RUN groupadd --gid 10001 scadbuddy \
-    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/scadbuddy-agent --shell /usr/sbin/nologin scadbuddy \
-    && install -d -o 10001 -g 10001 /var/lib/scadbuddy-agent /var/lib/scadbuddy-agent/claude /var/lib/scadbuddy-agent/work
-
-WORKDIR /app/agent
-COPY --from=agent-deps /src/agent/node_modules ./node_modules
-COPY --from=agent-build /src/agent/package.json ./
-COPY --from=agent-build /src/agent/dist ./dist
-
-# The Claude Code binary the Agent SDK bundles is pinned the way
-# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
-# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
-# the harness underneath every query. This fails the build when either the
-# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
-# from the pin. Bump it together with the SDK version in agent/package.json.
-# It runs against the node_modules that ship, for the platform being built.
-ARG CLAUDE_CODE_VERSION=2.1.283
-RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
-ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
-    NODE_ENV=production \
-    HOME=/var/lib/scadbuddy-agent \
-    CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
-
-USER 10001:10001
-EXPOSE 8081
-
-ENTRYPOINT ["/usr/bin/tini", "--"]
-CMD ["node", "dist/main.js"]
-
-# No curl in this image; node's fetch is the probe. Exec form, like the
-# backend's, so the exit status is the signal.
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-
 # ── uv ────────────────────────────────────────────────────────────────────────
 # A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
 # docker ecosystem sees the version and can bump it. The image is scratch-based
@@ -212,6 +91,156 @@ RUN groupadd --gid 10001 scadbuddy \
 # Build the system font cache as root so the runtime user never has to, and so
 # `fc-list` (the font dropdown in the customizer) answers immediately.
 RUN fc-cache --force --system-only
+
+# ── api-spec: the OpenAPI spec the clients are typed against ──────────────────
+# backend/openapi.json and both schema.d.ts files are not committed (#492). The
+# spec is exported here, off `base`, with the backend's own interpreter and
+# locked dependencies, and the `frontend` and `agent-build` stages copy it in to
+# generate their clients (their `pnpm gen:api` reads SCADBUDDY_OPENAPI_JSON).
+# That is why `uv` and `base` sit above the Node stages: a stage can only copy
+# from one defined before it.
+FROM base AS api-spec
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_LINK_MODE=copy
+
+WORKDIR /src/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# The venv's python, not `uv run`: that would sync the dev group too.
+COPY backend/ ./
+RUN uv sync --frozen --no-dev \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+
+# ── frontend bundle ───────────────────────────────────────────────────────────
+# Built here rather than copied from the host so a stale local `frontend/dist`
+# can never reach the image (.dockerignore drops it from the context too).
+# Node MAJORS here are LTS-only, and that is a constraint rather than a
+# preference. Odd-numbered releases (25, 27, ...) never become LTS, and they do
+# not ship corepack -- which the next line depends on. Installing it from npm
+# does not rescue them either: corepack 0.36 declares
+# `node: ^22.22.2 || ^24.15.0 || >=26.0.0`, so npm refuses node 25 outright.
+# Dependabot bumped this 24 -> 25 in #55 and broke every build on main; that is
+# now excluded in .github/dependabot.yml. Move it deliberately, to the next
+# EVEN major, together with ci.yml's `node-version` (they must not diverge --
+# a mismatch passes the frontend job and fails only in the image).
+FROM node:24-bookworm-slim AS frontend
+
+WORKDIR /src/frontend
+
+# corepack reads the `packageManager` field in package.json, so the pnpm
+# version is pinned by the frontend's own lockfile rather than by this file.
+RUN corepack enable
+
+# Manifest + lockfile + workspace config first: `pnpm install` is the expensive
+# layer and only these can invalidate it.
+#
+# pnpm-workspace.yaml is NOT optional and is easy to leave out. pnpm 10+ refuses
+# to silently skip a dependency's build scripts — it hard-errors with
+# ERR_PNPM_IGNORED_BUILDS — and the approvals live in that file
+# (`allowBuilds: {esbuild, msw}`), not in package.json. Copying only the
+# manifest and lockfile produced an install that worked in the `frontend` CI job
+# (whole tree checked out) and failed only here, which is the worst shape for
+# this class of bug. Verified on CI run 35820566117.
+COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+# After the install, so an API change does not re-download node_modules.
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+
+COPY frontend/ ./
+RUN pnpm build
+
+# ── agent: the AI sidecar (#261) ──────────────────────────────────────────────
+# A SEPARATE image, reached with `--target agent` and deployed as a second
+# container in the ScadBuddy pod — the sidecar layout the AI design spec picks
+# in §4.1 (docs/superpowers/specs/2026-09-27-ai-integration-design.md): one
+# process per container, no supervisor under tini, independent restarts. It
+# shares nothing with the OpenSCAD stages except the exported spec (`api-spec`),
+# and it sits above `app` so `runtime` stays the last stage and a bare
+# `docker build .` still produces the backend image.
+#
+# Same Node major as the `frontend` stage and ci.yml, for the same reasons
+# (see the comment on that stage); move all three together.
+FROM node:24-bookworm-slim AS agent-build
+
+WORKDIR /src/agent
+RUN corepack enable
+
+# agent/pnpm-workspace.yaml holds `allowBuilds` (msw, a test dependency, has an
+# install script that is declined there); without it the frozen install fails
+# with ERR_PNPM_IGNORED_BUILDS, so copy it with the lockfile, as the frontend
+# stage does.
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+
+COPY agent/ ./
+RUN pnpm build
+
+# Production dependencies only, installed from the same lockfile in a stage of
+# their own so the shipped node_modules carries no eslint/vitest/typescript.
+FROM node:24-bookworm-slim AS agent-deps
+
+WORKDIR /src/agent
+RUN corepack enable
+COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile --prod
+
+FROM node:24-bookworm-slim AS agent
+
+# tini for the same reason as the backend image: the Agent SDK spawns the
+# Claude Code binary as a child process per query, and node as PID 1 does not
+# reap orphans.
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tini \
+    && rm -rf /var/lib/apt/lists/*
+
+# Numeric uid 10001, the same as the backend image, so one pod
+# securityContext covers both containers. The state directory is the only
+# writable tree the service needs (agent/src/harness/options.ts
+# DEFAULT_STATE_DIR): `claude/` is CLAUDE_CONFIG_DIR, `work/` the scratch cwd.
+# Mount an emptyDir (or the data volume) there and the root filesystem can be
+# read-only (spec §4.4).
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/scadbuddy-agent --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o 10001 -g 10001 /var/lib/scadbuddy-agent /var/lib/scadbuddy-agent/claude /var/lib/scadbuddy-agent/work
+
+WORKDIR /app/agent
+COPY --from=agent-deps /src/agent/node_modules ./node_modules
+COPY --from=agent-build /src/agent/package.json ./
+COPY --from=agent-build /src/agent/dist ./dist
+
+# The Claude Code binary the Agent SDK bundles is pinned the way
+# OPENSCAD_VERSION is: the SDK "runs the Claude Code binary"
+# (https://code.claude.com/docs/en/agent-sdk/overview), so an SDK bump changes
+# the harness underneath every query. This fails the build when either the
+# SDK's declared `claudeCodeVersion` or the binary's own `--version` differs
+# from the pin. Bump it together with the SDK version in agent/package.json.
+# It runs against the node_modules that ship, for the platform being built.
+ARG CLAUDE_CODE_VERSION=2.1.283
+RUN node dist/check-cli-version.js "$CLAUDE_CODE_VERSION"
+ENV CLAUDE_CODE_VERSION=${CLAUDE_CODE_VERSION} \
+    NODE_ENV=production \
+    HOME=/var/lib/scadbuddy-agent \
+    CLAUDE_CONFIG_DIR=/var/lib/scadbuddy-agent/claude
+
+USER 10001:10001
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["node", "dist/main.js"]
+
+# No curl in this image; node's fetch is the probe. Exec form, like the
+# backend's, so the exit status is the signal.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
