@@ -1,5 +1,8 @@
 /** Comments, so a commented-out `use` suggests nothing. An unterminated block comment
- * comments out everything after it. */
+ * comments out everything after it. String literals are not recognised, so a `/*` or
+ * `//` inside one (`label = "a /* b";`) is read as a comment and can hide the imports
+ * after it; that is accepted, since this only drives the suggested checkboxes and the
+ * server checks whatever is submitted. */
 const COMMENTS = /\/\*[\s\S]*?(?:\*\/|$)|\/\/[^\n]*/g
 
 /** The first path segment of a `use <DIR/...>` or `include <DIR/...>`. */

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pydantic import Field, field_validator
+from pydantic import Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from scadbuddy.core.config import (
@@ -14,6 +14,8 @@ from scadbuddy.core.config import (
     DEFAULT_DATA_DIR,
     DEFAULT_DATABASE_POOL_SIZE,
     DEFAULT_DUPLICATE_STAGING_MAX_AGE,
+    DEFAULT_EVENT_LOG_RETENTION_ROWS,
+    DEFAULT_EVENT_LOG_RETENTION_SECONDS,
     DEFAULT_FONTS_CATALOGUE_TTL,
     DEFAULT_JOB_TTL,
     DEFAULT_LIBRARY_MAX_BYTES,
@@ -111,6 +113,20 @@ class Settings(BaseSettings):
     def _pool_size_at_least_one(cls, value: int) -> int:
         if value < 1:
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
+        return value
+
+    # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
+    # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
+    # limit on that dimension.
+    event_log_retention_seconds: float = DEFAULT_EVENT_LOG_RETENTION_SECONDS
+    event_log_retention_rows: int = DEFAULT_EVENT_LOG_RETENTION_ROWS
+
+    @field_validator("event_log_retention_seconds", "event_log_retention_rows")
+    @classmethod
+    def _retention_not_negative(cls, value: float, info: ValidationInfo) -> float:
+        if value < 0:
+            name = f"SCADBUDDY_{(info.field_name or '').upper()}"
+            raise ValueError(f"{name} must be at least 0, not {value}")
         return value
 
     log_level: str = Field(default="INFO")
