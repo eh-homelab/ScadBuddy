@@ -567,6 +567,32 @@ def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, 
     assert _patch_presets(client, model, fine).status_code == 200
 
 
+def test_a_template_tag_written_with_a_comma_still_loads(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Until #327 a model.json tag could hold a comma. Such a file keeps loading, the
+    tag read as the tags it lists (cleaned, and the list cut at the bound), rather than
+    costing the template every preset it defines. A save still refuses one (422)."""
+    full = [f"t{n}" for n in range(MAX_PRESET_TAGS - 1)]
+    _define(
+        paths,
+        model,
+        [
+            {"name": "Bits", "tags": ["M3, M4", "m3", "x"], "description": "Hex bits"},
+            {"name": "Full", "tags": [*full, "a , b"]},
+            {"name": "Plain", "tags": ["a"]},
+        ],
+    )
+    listed = client.get(_url(model)).json()
+    assert [(p["name"], p["tags"]) for p in listed] == [
+        ("Bits", ["M3", "M4", "x"]),
+        ("Full", [*full, "a"]),
+        ("Plain", ["a"]),
+    ]
+    assert listed[0]["description"] == "Hex bits"
+    assert _patch_presets(client, model, [{"name": "X", "tags": ["M3, M4"]}]).status_code == 422
+
+
 def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model: str) -> None:
     response = client.post(
         _url(model),

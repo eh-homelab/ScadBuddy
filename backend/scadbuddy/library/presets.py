@@ -117,12 +117,45 @@ def _clean_tags(value: object) -> object:
 
 #: A preset's tags (#327): cleaned before the bounds are checked, so padding and
 #: repeats never count against them. A tag holds no comma: the UI edits tags as one
-#: comma-separated line, which would split such a tag in two.
+#: comma-separated line, which would split such a tag in two. That is a rule for what
+#: is written from now on; a template's file written before it is read as
+#: :func:`_tags_as_written` reads it.
 PresetTags = Annotated[
     list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
     BeforeValidator(_clean_tags),
     Field(max_length=MAX_PRESET_TAGS),
 ]
+
+
+def _tags_as_written(raw: Any) -> Any:
+    """``raw``, a preset list read from a template's file, with a tag written before
+    #327 read as the tags it lists.
+
+    Until #327 a tag could hold a comma, and a template of mine may still have one in
+    its ``model.json``. Its list is validated whole, so refusing the tag now would cost
+    the template every preset it defines; instead the tag is split at its commas (as
+    the UI's tag line would split it) and cleaned, and a list that grew past
+    ``MAX_PRESET_TAGS`` is cut there. Entries without such a tag, and anything that is
+    not a preset list, are left for the validator to judge as they are; a save still
+    refuses a comma (422).
+    """
+    if not isinstance(raw, list):
+        return raw
+    read: list[Any] = []
+    for entry in raw:
+        tags = entry.get("tags") if isinstance(entry, dict) else None
+        if not isinstance(tags, list) or not any(isinstance(t, str) and "," in t for t in tags):
+            read.append(entry)
+            continue
+        split = [
+            part for tag in tags for part in (tag.split(",") if isinstance(tag, str) else [tag])
+        ]
+        cleaned = _clean_tags(split)
+        assert isinstance(cleaned, list)
+        read.append({**entry, "tags": cleaned[:MAX_PRESET_TAGS]})
+    return read
+
+
 #: A preset's description (#327): short Markdown, trimmed.
 PresetDescription = Annotated[
     str, StringConstraints(strip_whitespace=True, max_length=MAX_PRESET_DESCRIPTION)
@@ -318,7 +351,7 @@ class PresetStore:
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
         try:
-            return _checked(_PRESET_LIST.validate_python(raw))
+            return _checked(_PRESET_LIST.validate_python(_tags_as_written(raw)))
         except (ValidationError, ValueError, RecursionError) as error:
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}
