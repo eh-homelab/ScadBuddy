@@ -38,7 +38,7 @@ from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
 from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
-from scadbuddy.store.fonts import FontMirror, wanted_families
+from scadbuddy.store.fonts import FontMirror, model_dir, wanted_families
 from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError
 from scadbuddy.workflows.models import (
     Failure,
@@ -267,7 +267,8 @@ class RenderActivities:
         if d.fonts_mirror is not None:
             # Only the families this template could name: a fresh worker does not
             # download the whole font library for its first piece.
-            families = await asyncio.to_thread(wanted_families, prepared.scad.parent, req.params)
+            source = model_dir(prepared.scad, req.file)
+            families = await asyncio.to_thread(wanted_families, source, req.params)
             await _heartbeating(asyncio.create_task(d.fonts_mirror.sync(families)))
         return PrepareResult(
             version=prepared.version,

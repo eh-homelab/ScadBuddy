@@ -148,6 +148,8 @@ def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep)
         saved = store.save(patch)
     except StoreNotReadyError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    # This process sees its own write at once; workers within the source's TTL.
+    state.store.source.invalidate()
     return _view(saved, state.settings.media_upload_max_bytes)
 
 
