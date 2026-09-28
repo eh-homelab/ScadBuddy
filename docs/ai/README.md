@@ -17,7 +17,7 @@ Part of issue [#259](https://github.com/eh-homelab/ScadBuddy/issues/259) (docs h
 | [security.md](security.md) | Reviewers, operators | The threat model as built: risk tiers, the permission seam, envelope encryption, DNS-rebinding defence, egress checks, stderr redaction, plugin vetting, event-log scrubbing, known limitations and open §3.2 items |
 | [browser-bridge.md](browser-bridge.md) | Contributors | The tab-side agent tools, `data-agent-user-only`, and the WebMCP opt-in |
 | [claude-plugin.md](claude-plugin.md) | Users of Claude Code | Installing the ScadBuddy Claude plugin from this repository's marketplace |
-| [evals.md](evals.md) | Contributors | **Plan only**: the test and eval half of #259 |
+| [evals.md](evals.md) | Contributors | The eval harness (`agent/evals/`, scripted in CI, live with `pnpm evals`), the AI test and e2e coverage, and what is still planned (#259) |
 
 ## What the AI integration is today
 

@@ -54,6 +54,10 @@ against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 `SCADBUDDY_TEST_DATABASE_URL` (e.g. `docker run -d -e POSTGRES_PASSWORD=postgres
 -e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
 `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
+Evals (`agent/evals/`, `docs/ai/evals.md`): `test/evals.test.ts` replays each scenario
+against the fake endpoint in `pnpm test`; `pnpm evals` runs them live with the
+credential saved in Settings (or `SCADBUDDY_EVAL_ANTHROPIC_API_KEY`, CI only; the
+manual `ai-evals.yml` workflow) and skips cleanly without one.
 
 Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
 `agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,

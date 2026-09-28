@@ -17,6 +17,7 @@
     "pretest": "pnpm gen:api",
     "test": "vitest run",
     "test:watch": "vitest",
+    "evals": "vitest run --config vitest.evals.config.ts",
     "gen:api": "node scripts/gen-api.mjs"
   },
   "dependencies": {
