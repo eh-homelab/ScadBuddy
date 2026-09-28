@@ -82,7 +82,7 @@ wall_width = 4; // [2:0.5:10]
 mask_file = "sample-lattice.svg"; // file:svg,png
 
 // File type: auto picks by the name (.png is read as an image, anything else as an SVG outline)
-mask_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, image_threshold:Image threshold - PNG]
+mask_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, png_threshold:Image threshold - PNG]
 
 // What the picture does
 mask_mode = "cutout"; // [outline:Outline - the picture is the bookmark shape, cutout:Cutout - cut through as negative space, inlay:Inlay - flush colour in the top layers, emboss:Emboss - raised, deboss:Deboss - recessed]
@@ -132,7 +132,7 @@ tie_pitch = 15; // [5:1:50]
 overlay_file = "sample-overlay.svg"; // file:svg,png
 
 // File type: auto picks by the name (.png is read as an image, anything else as an SVG outline)
-overlay_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, image_threshold:Image threshold - PNG]
+overlay_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, png_threshold:Image threshold - PNG]
 
 // Flush inlay in the top layers, or raised on top
 overlay_style = "inlay"; // [inlay:Flush inlay, raised:Raised]
@@ -286,18 +286,22 @@ if (overlay_file != "" && !safe_file(overlay_file))
     echo(str("NOTE: overlay_file \"", overlay_file, "\" ignored - only a bare file name in the model's directory is accepted"));
 
 // Type "auto" reads a name ending .png (any case) as an image and anything
-// else as an SVG outline; "svg" / "image_threshold" force the reader.
+// else as an SVG outline; "svg" / "png_threshold" force the reader.
+// "png_threshold" was "image_threshold" until #318 renamed it (it shared a name
+// with the numeric image_threshold parameter); saved presets and past outputs
+// still hold the old value, so both force the image reader.
 function lower(c) = let (o = ord(c)) (o >= 65 && o <= 90) ? chr(o + 32) : c;
 function ext_is(f, e) = len(f) > len(e)
     && [for (i = [0 : len(e) - 1]) lower(f[len(f) - len(e) + i])] == [for (i = [0 : len(e) - 1]) e[i]];
-function file_type(f, type) = type != "auto" ? type : ext_is(f, ".png") ? "image_threshold" : "svg";
+function is_image(f, type) = type == "png_threshold" || type == "image_threshold"
+    || (type == "auto" && ext_is(f, ".png"));
 
 // A picture in 2D, centred. An SVG is imported as-is; an image goes through
 // surface(), whose height is the pixel brightness (0-100), and the pixels
 // darker than image_threshold are kept.
 module file_2d(f, type) {
     if (safe_file(f)) {
-        if (file_type(f, type) == "image_threshold")
+        if (is_image(f, type))
             difference() {
                 projection() surface(file = f, center = true);
                 projection(cut = true)

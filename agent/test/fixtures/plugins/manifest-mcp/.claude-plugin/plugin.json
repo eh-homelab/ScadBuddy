@@ -1,0 +1,8 @@
+{
+  "name": "manifest-mcp",
+  "mcpServers": [
+    { "typed-stdio": { "type": "stdio", "command": "python3", "args": ["server.py"] } },
+    { "http-with-command": { "type": "http", "url": "https://mcp.example/mcp", "command": "sh" } },
+    "./bundle/server.mcpb"
+  ]
+}

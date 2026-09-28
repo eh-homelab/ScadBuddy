@@ -52,6 +52,18 @@ DEFAULT_GIT_TIMEOUT = 30.0
 # A shallow clone is still unbounded in size, and every checkout shares the data
 # volume (#213). NopSCADlib, the largest curated library, is about 60 MB.
 DEFAULT_LIBRARY_MAX_BYTES = 200_000_000
+# The files uploaded for `// file` parameters (#296). Each is small once stored (a PNG
+# is downscaled to 256 px; an SVG upload is capped at 8 MiB), so these are about a
+# runaway client, not normal use. 0 is no limit for either.
+DEFAULT_ASSET_MAX_TOTAL_BYTES = 1_000_000_000
+DEFAULT_ASSET_MAX_COUNT = 10_000
+# An upload nothing references (no output, preset or job) is removed once it has not
+# been uploaded again or used by a render or preset save for this long. The grace is
+# what protects an upload whose render has not been submitted yet, so it has a floor.
+DEFAULT_ASSET_SWEEP_GRACE = 7 * 86400.0
+MIN_ASSET_SWEEP_GRACE = 3600.0
+# How often the sweep runs after the one at boot; 0 turns the sweep off entirely.
+DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
 
 
 @dataclass(frozen=True)
@@ -84,6 +96,10 @@ class Config:
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
     # The most one library's clone may take on the data volume (#213).
     library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
+    asset_max_total_bytes: int = DEFAULT_ASSET_MAX_TOTAL_BYTES
+    asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
+    asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
+    asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
 
     def __post_init__(self) -> None:
         # Sizes the worker pool and the thumbnail executor, neither of which can be
@@ -97,6 +113,9 @@ class Config:
             ("SCADBUDDY_RENDER_QUEUE_TIMEOUT", self.render_queue_timeout),
             ("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO", self.render_queue_depth_slo),
             ("SCADBUDDY_RENDER_LATENCY_SLO", self.render_latency_slo),
+            ("SCADBUDDY_ASSET_MAX_TOTAL_BYTES", self.asset_max_total_bytes),
+            ("SCADBUDDY_ASSET_MAX_COUNT", self.asset_max_count),
+            ("SCADBUDDY_ASSET_SWEEP_INTERVAL", self.asset_sweep_interval),
         ):
             if value < 0:
                 raise ValueError(f"{name} must be at least 0, not {value}")
@@ -118,6 +137,12 @@ class Config:
         if self.library_max_bytes < 1:
             raise ValueError(
                 f"SCADBUDDY_LIBRARY_MAX_BYTES must be at least 1, not {self.library_max_bytes}"
+            )
+        # Below it, an upload waiting for its first render could be swept first.
+        if self.asset_sweep_grace < MIN_ASSET_SWEEP_GRACE:
+            raise ValueError(
+                f"SCADBUDDY_ASSET_SWEEP_GRACE must be at least {MIN_ASSET_SWEEP_GRACE:g}, "
+                f"not {self.asset_sweep_grace:g}"
             )
 
 
@@ -168,4 +193,23 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         library_max_bytes=int(
             source.get("SCADBUDDY_LIBRARY_MAX_BYTES") or DEFAULT_LIBRARY_MAX_BYTES
         ),
+        # Not `or`: 0 is a meaningful value for each (no limit, sweep off).
+        asset_max_total_bytes=_int_or(
+            source.get("SCADBUDDY_ASSET_MAX_TOTAL_BYTES"), DEFAULT_ASSET_MAX_TOTAL_BYTES
+        ),
+        asset_max_count=_int_or(source.get("SCADBUDDY_ASSET_MAX_COUNT"), DEFAULT_ASSET_MAX_COUNT),
+        asset_sweep_grace=float(
+            source.get("SCADBUDDY_ASSET_SWEEP_GRACE") or DEFAULT_ASSET_SWEEP_GRACE
+        ),
+        asset_sweep_interval=_float_or(
+            source.get("SCADBUDDY_ASSET_SWEEP_INTERVAL"), DEFAULT_ASSET_SWEEP_INTERVAL
+        ),
     )
+
+
+def _int_or(value: str | None, default: int) -> int:
+    return default if value is None or value == "" else int(value)
+
+
+def _float_or(value: str | None, default: float) -> float:
+    return default if value is None or value == "" else float(value)

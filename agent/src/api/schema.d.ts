@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/v1/assets/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How much the upload store holds
+         * @description The files stored for `// file` parameters: how many, their total bytes, and the caps an upload is refused past (0 is no limit). Files that no output, preset or render job references are removed by a sweep once nothing has uploaded or used them for SCADBUDDY_ASSET_SWEEP_GRACE.
+         */
+        get: operations["get_asset_usage_api_v1_assets_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/fonts": {
         parameters: {
             query?: never;
@@ -89,6 +109,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Render job preview from a named view
+         * @description The job's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer.
+         */
+        get: operations["get_job_view_api_v1_jobs__job_id__views__view__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/libraries": {
         parameters: {
             query?: never;
@@ -104,6 +144,46 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/libraries/installed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Library checkouts on the volume
+         * @description Every library checkout on the data volume, with the models whose live pins read it. One no model uses can be removed.
+         */
+        get: operations["list_installed_libraries_api_v1_libraries_installed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/libraries/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a library's checkouts from the volume
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         */
+        delete: operations["remove_library_api_v1_libraries__name__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -206,7 +286,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a file for a file parameter
-         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.
+         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422. A file not already stored that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries the store's `usage`; re-uploading stored content is never refused.
          */
         post: operations["upload_asset_api_v1_models__slug__assets_post"];
         delete?: never;
@@ -241,6 +321,26 @@ export interface paths {
         };
         /** An uploaded file's bytes */
         get: operations["get_asset_content_api_v1_models__slug__assets__asset_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Diagnostics of the latest render
+         * @description OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently settled render (done or failed). A 404 when no render of it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`.
+         */
+        get: operations["get_model_diagnostics_api_v1_models__slug__diagnostics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -290,7 +390,11 @@ export interface paths {
         delete: operations["unpin_library_api_v1_models__slug__libraries__name__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Re-pin a model's library from the upstream it already pins
+         * @description Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library, and a 409 when its entry is changed or removed by another request while the clone runs.
+         */
+        patch: operations["repin_library_api_v1_models__slug__libraries__name__patch"];
         trace?: never;
     };
     "/api/v1/models/{slug}/outputs": {
@@ -843,6 +947,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Output preview from a named view
+         * @description The saved output's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG.
+         */
+        get: operations["get_output_view_api_v1_outputs__output_id__views__view__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/plate": {
         parameters: {
             query?: never;
@@ -1352,6 +1476,20 @@ export interface components {
             size: number;
             /** Width */
             width?: number | null;
+        };
+        /**
+         * AssetUsage
+         * @description How much the upload store holds, against its caps (#296).
+         */
+        AssetUsage: {
+            /** Bytes */
+            bytes: number;
+            /** Count */
+            count: number;
+            /** Max Count */
+            max_count: number;
+            /** Max Total Bytes */
+            max_total_bytes: number;
         };
         /**
          * AttachResult
@@ -1903,6 +2041,18 @@ export interface components {
             /** Styles */
             styles?: string[];
         };
+        /**
+         * InstalledLibrary
+         * @description One checkout on the volume, and the models whose live pins read it.
+         */
+        InstalledLibrary: {
+            /** Commit */
+            commit: string;
+            /** Name */
+            name: string;
+            /** Used By */
+            used_by?: string[];
+        };
         /** JobStatus */
         JobStatus: {
             bbox_mm?: components["schemas"]["BoundingBox"] | null;
@@ -1913,6 +2063,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
             /** Error */
             error?: string | null;
             /** Finished At */
@@ -1923,6 +2077,8 @@ export interface components {
             log_tail?: string[];
             /** Model Version */
             model_version?: string | null;
+            /** Notes */
+            notes?: string[] | null;
             /** Params */
             params?: {
                 [key: string]: boolean | number | string;
@@ -1955,6 +2111,14 @@ export interface components {
              * @description An https git URL; the catalogue's when omitted
              */
             url?: string | null;
+        };
+        /** LibraryRepinRequest */
+        LibraryRepinRequest: {
+            /**
+             * Ref
+             * @description The tag or branch to pin; the ref already pinned when omitted, which moves a branch pin to where that branch is now
+             */
+            ref?: string | null;
         };
         /**
          * LoadedAt
@@ -2040,6 +2204,29 @@ export interface components {
                 number,
                 number
             ];
+        };
+        /**
+         * ModelDiagnostics
+         * @description What the latest settled render of a model reported (#252).
+         */
+        ModelDiagnostics: {
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Job Id */
+            job_id: string;
+            /** Model Version */
+            model_version?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "done" | "failed";
         };
         /**
          * ModelLibrary
@@ -3534,6 +3721,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_asset_usage_api_v1_assets_usage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetUsage"];
+                };
+            };
+        };
+    };
     get_fonts_api_v1_fonts_get: {
         parameters: {
             query?: never;
@@ -3682,6 +3889,41 @@ export interface operations {
             };
         };
     };
+    get_job_view_api_v1_jobs__job_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_libraries_api_v1_libraries_get: {
         parameters: {
             query?: never;
@@ -3698,6 +3940,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogueLibrary"][];
+                };
+            };
+        };
+    };
+    list_installed_libraries_api_v1_libraries_installed_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstalledLibrary"][];
+                };
+            };
+        };
+    };
+    remove_library_api_v1_libraries__name__delete: {
+        parameters: {
+            query?: {
+                /** @description Only this checkout; every one when omitted */
+                commit?: string | null;
+            };
+            header?: never;
+            path: {
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -4027,6 +4322,37 @@ export interface operations {
             };
         };
     };
+    get_model_diagnostics_api_v1_models__slug__diagnostics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelDiagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     duplicate_model_api_v1_models__slug__duplicate_post: {
         parameters: {
             query?: never;
@@ -4111,6 +4437,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    repin_library_api_v1_models__slug__libraries__name__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryRepinRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -5338,6 +5701,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_output_view_api_v1_outputs__output_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
             };
             /** @description Validation Error */
             422: {

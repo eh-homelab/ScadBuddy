@@ -7,6 +7,7 @@ import { z } from 'zod'
 import type { Credential } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { RiskTier, ToolDecision } from '../src/harness/permissions.js'
+import { PluginRefusedError } from '../src/harness/plugins.js'
 import { buildHarnessOptions, credentialEnv, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { testConnection } from '../src/harness/testConnection.js'
@@ -69,17 +70,56 @@ describe('buildHarnessOptions', () => {
   })
 
   it('loads plugins by absolute local path, and wires both permission seams', () => {
-    const options = buildHarnessOptions({ ...base, pluginPaths: ['plugins/scadbuddy'] })
-    expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('plugins/scadbuddy') }])
+    const options = buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy'] })
+    expect(options.plugins).toEqual([{ type: 'local', path: path.resolve('../plugins/scadbuddy') }])
     expect(typeof options.canUseTool).toBe('function')
     expect(options.hooks?.PreToolUse).toHaveLength(1)
+  })
+
+  it('passes the session options through (#300)', () => {
+    const store = { append: () => Promise.resolve(), load: () => Promise.resolve(null) }
+    const options = buildHarnessOptions({
+      ...base,
+      sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e',
+      sessionStore: store,
+      cwd: '/var/lib/scadbuddy-agent/work/sessions/0f8fad5b-d9cb-469f-a165-70867728950e',
+      includePartialMessages: true,
+    })
+    expect(options).toMatchObject({
+      sessionId: '0f8fad5b-d9cb-469f-a165-70867728950e',
+      cwd: '/var/lib/scadbuddy-agent/work/sessions/0f8fad5b-d9cb-469f-a165-70867728950e',
+      includePartialMessages: true,
+    })
+    expect(options.sessionStore).toBe(store)
+    expect(options.resume).toBeUndefined()
+    // Without them, the service-wide scratch dir and no mirror, as before.
+    const plain = buildHarnessOptions(base)
+    expect(plain.cwd).toBe('/var/lib/scadbuddy-agent/work')
+    expect(plain.sessionStore).toBeUndefined()
+    expect(plain.includePartialMessages).toBeUndefined()
+  })
+
+  it('refuses a plugin that would start a process with the credential env (spec §8.6)', () => {
+    expect(() =>
+      buildHarnessOptions({ ...base, pluginPaths: ['../plugins/scadbuddy', 'test/fixtures/plugins/command-hook'] }),
+    ).toThrow(PluginRefusedError)
   })
 
   it('redacts the credential from stderr', () => {
     const lines: string[] = []
     const options = buildHarnessOptions({ ...base, stderr: (l) => lines.push(l) })
-    options.stderr?.(`request failed with key ${API_KEY}`)
-    expect(lines).toEqual(['request failed with key [redacted]'])
+    options.stderr?.(`request failed with key ${API_KEY}\n`)
+    expect(lines).toEqual(['request failed with key [redacted]\n'])
+  })
+
+  it('redacts a credential split across stderr chunks', () => {
+    const lines: string[] = []
+    const options = buildHarnessOptions({ ...base, stderr: (l) => lines.push(l) })
+    const cut = 12
+    options.stderr?.(`401 with key ${API_KEY.slice(0, cut)}`)
+    options.stderr?.(`${API_KEY.slice(cut)} rejected\nnext line\n`)
+    expect(lines).toEqual([`401 with key [redacted] rejected\n`, 'next line\n'])
+    expect(lines.join('')).not.toContain(API_KEY.slice(0, cut))
   })
 })
 

@@ -931,6 +931,14 @@ export const queuedSliceProgress: PrintProgress = {
 
 export const FAILING_NAME = 'boom'
 
+/** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
+export const NOTED_NAME = 'alexandra'
+
+export const TEMPLATE_NOTES = [
+  'text_size reduced from 14 to 9.5 mm so the tag fits the 300 mm plate',
+  'modules are 0.59 mm; below about 0.8 mm a 0.4 mm nozzle cannot print them cleanly',
+]
+
 export const OPENSCAD_LOG_TAIL = [
   'Compiling design (CSG Tree generation)...',
   'ERROR: Parser error: syntax error in file model.scad, line 42',

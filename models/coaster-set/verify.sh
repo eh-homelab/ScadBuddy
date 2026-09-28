@@ -15,6 +15,9 @@
 #   - an overlay_file that is not a bare file name is refused before any
 #     import()/surface() call; a missing file only drops the picture
 #   - no OpenSCAD warnings other than for a deliberately missing file
+#   - the overlay_type value "image_threshold" (the PNG choice's name before
+#     #318 renamed it "png_threshold") still renders the same parts as the
+#     new value, so saved presets and past outputs keep working
 #
 # The XML checking runs on the host with python3 and the standard library.
 set -euo pipefail
@@ -31,7 +34,7 @@ mkdir -p "$OUT"
 # image installs. If the family is missing, derive a throwaway image that has
 # it -- otherwise OpenSCAD silently falls back and text widths change.
 IMAGE="$BASE_IMAGE"
-if ! docker run --rm "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if ! docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$BASE_IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "==> $BASE_IMAGE has no '$FONT_FAMILY'; building $FONTS_IMAGE with the image's font packages"
     docker build -q -t "$FONTS_IMAGE" - <<DOCKERFILE
 FROM $BASE_IMAGE
@@ -44,7 +47,7 @@ DOCKERFILE
     IMAGE="$FONTS_IMAGE"
 fi
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 # Values of a dropdown annotation: `name = "x"; // [a:Label, b, ...]` -> a b ...
 options() {
@@ -84,7 +87,9 @@ CASES+=(
     'overlay-svg|pattern="rings";overlay_file="sample-overlay.svg"'
     'overlay-png-auto|pattern="stripes";overlay_file="sample-overlay.png";count=1;shape="square"'
     "overlay-png-upper-ext|pattern=\"dots\";overlay_file=\"$UPPER\";count=1"
-    'overlay-png-forced|overlay_file="sample-overlay.png";overlay_type="image_threshold";image_threshold=30;count=1'
+    'overlay-png-forced|overlay_file="sample-overlay.png";overlay_type="png_threshold";image_threshold=30;count=1'
+    # The value before #318 renamed it; must render exactly as overlay-png-forced.
+    'overlay-png-legacy-value|overlay_file="sample-overlay.png";overlay_type="image_threshold";image_threshold=30;count=1'
     'overlay-invert-face-down|overlay_file="sample-overlay.svg";overlay_invert=true;overlay_scale=80;overlay_rotation=20;face="down";count=2'
     'overlay-keeps-pattern|overlay_file="sample-overlay.svg";overlay_clears_pattern=false;pattern="checker";count=1'
     'overlay-missing|overlay_file="no-such-file.svg";count=1'
@@ -313,6 +318,31 @@ for line in open(os.path.join(OUT, "cases.txt")):
                       for j in range(k) for z in (5, 8, 11)]
                 check(name, abs(min(zz) - lo) < 1e-3 and abs(max(zz) - hi) < 1e-3,
                       "%s inlay spans z %.2f..%.2f, flush with the %s face" % (c, lo, hi, "bed" if face_down else "top"))
+
+# #318: the PNG choice's value was "image_threshold" until it was renamed
+# "png_threshold"; saved presets and past outputs still hold the old value.
+# The legacy case must render the same colour parts, of the same volume, as
+# its twin with the new value. (Without the fallback the old value is not
+# "auto", so the PNG goes to import() instead and the picture is lost.)
+def part_volumes(name):
+    mats, V, T = load(os.path.join(OUT, name + ".3mf"))
+    vols = Counter()
+    for t in T:
+        vols[mats[t[3]][1]] += tetvol(V[t[0]], V[t[1]], V[t[2]])
+    return {c: v for c, v in vols.items() if abs(v) > 1e-9}
+
+
+for old, new in [("overlay-png-legacy-value", "overlay-png-forced")]:
+    if not all(os.path.exists(os.path.join(OUT, n + ".3mf")) for n in (old, new)):
+        continue  # ONLY= skipped one of them
+    print("\n%s vs %s" % (old, new))
+    a, b = part_volumes(old), part_volumes(new)
+    for key in ("overlay_color",):
+        check(old, DEFAULTS[key].upper() in b, "%s renders the %s part %s" % (new, key, DEFAULTS[key].upper()))
+    check(old, set(a) == set(b) and all(abs(a[c] - b[c]) <= 1e-6 * max(1.0, abs(b[c])) for c in b),
+          "the legacy value renders the same parts as the new one (%s vs %s)"
+          % (", ".join("%s %.1f" % kv for kv in sorted(a.items())),
+             ", ".join("%s %.1f" % kv for kv in sorted(b.items()))))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))

@@ -6,8 +6,13 @@ SVG is parsed and stripped of everything that is not geometry. What is stored is
 the result, keyed by its SHA-256 -- so the id IS the content hash, and a render's
 `params.json` names exactly the bytes it read.
 
-Assets are never pruned. An output's parameters point at one, and "re-render" and
-"Customize this version" must reproduce the output long after the upload.
+An asset lives as long as something names it (#296). An output's parameters, a
+saved preset, a template's shipped presets or a job still in the store keep it, so
+"re-render" and "Customize this version" reproduce the output long after the upload.
+One that nothing names, and that nothing has uploaded or used for the grace period
+(SCADBUDDY_ASSET_SWEEP_GRACE), is removed by `AssetStore.sweep`. The store is capped
+in total bytes and in count (SCADBUDDY_ASSET_MAX_TOTAL_BYTES / _MAX_COUNT); an upload
+past either is refused, and re-uploading what is already stored never is.
 
 Nothing here ever becomes a path OpenSCAD sees. The render stages a copy under a
 name it generates (`render/jobs.py`); the original file name is display-only.
@@ -19,14 +24,19 @@ anywhere -- OpenSCAD reads them where they are, as it does any bundled file.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import io
 import json
+import logging
 import os
 import re
 import secrets
+import time
 import unicodedata
-from collections.abc import Mapping, Sequence
+import zipfile
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Literal
 
@@ -34,14 +44,26 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
+from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
+from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX
+
+logger = logging.getLogger(__name__)
 
 AssetKind = Literal["svg", "png"]
 
 ASSET_ID_PATTERN = r"^[0-9a-f]{64}$"
 ASSET_ID_RE = re.compile(ASSET_ID_PATTERN)
+#: A stored blob's file name: the id and the kind, nothing else. The metadata and a
+#: write's temporary file never match.
+_BLOB_RE = re.compile(r"^([0-9a-f]{64})\.(svg|png)$")
+#: Anything in a reference source that could be an asset id. Deliberately looser than
+#: "the value of a `file` parameter": a sweep that keeps an asset it need not is
+#: harmless, one that misses a reference destroys an output's provenance. Matching
+#: raw text rather than parsed JSON also reads a file too damaged to parse.
+_ID_IN_TEXT = re.compile(rb"(?<![0-9a-f])[0-9a-f]{64}(?![0-9a-f])")
 
 #: The largest upload read. An SVG this size is already far past a logo or a mask.
 MAX_ASSET_BYTES = 8 * 1024 * 1024
@@ -96,6 +118,27 @@ class AssetRejectedError(ValueError):
 
 class AssetNotFoundError(KeyError):
     pass
+
+
+class AssetUsage(BaseModel):
+    """How much the upload store holds, against its caps (#296)."""
+
+    #: Distinct stored files.
+    count: int
+    #: Their total size in bytes, as stored (after sanitising and downscaling).
+    bytes: int
+    #: SCADBUDDY_ASSET_MAX_COUNT; 0 is no limit.
+    max_count: int
+    #: SCADBUDDY_ASSET_MAX_TOTAL_BYTES; 0 is no limit.
+    max_total_bytes: int
+
+
+class AssetQuotaError(Exception):
+    """Storing the upload would take the store past one of its caps."""
+
+    def __init__(self, detail: str, usage: AssetUsage) -> None:
+        super().__init__(detail)
+        self.usage = usage
 
 
 class AssetMeta(BaseModel):
@@ -227,10 +270,90 @@ def sniff(data: bytes) -> AssetKind:
 
 
 class AssetStore:
-    """``data/assets/<sha256>.<kind>`` plus ``<sha256>.json`` for its metadata."""
+    """``data/assets/<sha256>.<kind>`` plus ``<sha256>.json`` for its metadata.
 
-    def __init__(self, root: Path) -> None:
+    An asset's LAST USE is the later of its two files' mtimes: rewritten by every
+    upload of the content (a re-upload included) and touched by every render or
+    preset save that names it (`use`). The sweep removes only what was last used
+    before its grace period.
+    """
+
+    def __init__(self, root: Path, *, max_total_bytes: int = 0, max_count: int = 0) -> None:
         self.root = root
+        #: 0 is no limit, for either.
+        self.max_total_bytes = max_total_bytes
+        self.max_count = max_count
+
+    @property
+    def lock_path(self) -> Path:
+        """Beside the store rather than in it (``data/.assets.lock``), so the store
+        directory holds nothing but assets."""
+        return self.root.with_name(f".{self.root.name}.lock")
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Serialise the steps that must not interleave: storing (with its quota
+        check), marking used, and the sweep's re-check and removal of one asset.
+
+        An ``flock`` on `lock_path` rather than a ``threading.Lock``, so it
+        also holds between processes sharing the volume (replicas on a
+        ReadWriteMany PVC). Each call opens its own descriptor, so threads of one
+        process exclude each other too.
+        """
+        self.root.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a+b") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+    def _blobs(self) -> dict[str, Path]:
+        """Every stored blob by id, as the directory lists it now."""
+        try:
+            entries = list(self.root.iterdir())
+        except FileNotFoundError:
+            return {}
+        found: dict[str, Path] = {}
+        for entry in entries:
+            match = _BLOB_RE.fullmatch(entry.name)
+            if match:
+                found[match.group(1)] = entry
+        return found
+
+    def usage(self) -> AssetUsage:
+        count = 0
+        total = 0
+        for blob in self._blobs().values():
+            try:
+                total += blob.stat().st_size
+            except FileNotFoundError:  # swept between the listing and the stat
+                continue
+            count += 1
+        return AssetUsage(
+            count=count,
+            bytes=total,
+            max_count=self.max_count,
+            max_total_bytes=self.max_total_bytes,
+        )
+
+    def _require_room(self, size: int) -> None:
+        usage = self.usage()
+        if self.max_count and usage.count + 1 > self.max_count:
+            raise AssetQuotaError(
+                f"the upload store already holds {usage.count} files, the most "
+                f"SCADBUDDY_ASSET_MAX_COUNT ({self.max_count}) allows; a file no output, "
+                "preset or render uses is removed once unused for the sweep's grace period",
+                usage,
+            )
+        if self.max_total_bytes and usage.bytes + size > self.max_total_bytes:
+            raise AssetQuotaError(
+                f"storing this file ({size} bytes) would take the upload store to "
+                f"{usage.bytes + size} bytes, past SCADBUDDY_ASSET_MAX_TOTAL_BYTES "
+                f"({self.max_total_bytes}); a file no output, preset or render uses is "
+                "removed once unused for the sweep's grace period",
+                usage,
+            )
 
     def blob_path(self, meta: AssetMeta) -> Path:
         return self.root / f"{meta.id}.{meta.kind}"
@@ -248,6 +371,18 @@ class AssetStore:
         if not self.blob_path(meta).is_file():
             raise AssetNotFoundError(asset_id)
         return meta
+
+    def use(self, asset_id: str) -> AssetMeta:
+        """`get`, and mark the asset used now, so a sweep already under way skips it.
+
+        Under the lock: a sweep re-checks the last use under the same lock just
+        before it removes anything, so either this finds the asset and the sweep
+        then sees it fresh, or the sweep removed it first and this is a not-found.
+        """
+        with self._locked():
+            meta = self.get(asset_id)
+            os.utime(self._meta_path(asset_id))
+            return meta
 
     def put(self, data: bytes, filename: str | None) -> AssetMeta:
         """Validate, sanitise and store an upload; the same content is stored once."""
@@ -268,12 +403,59 @@ class AssetStore:
             width=width,
             height=height,
         )
-        self.root.mkdir(parents=True, exist_ok=True)
-        _write_atomically(self.blob_path(meta), stored)
-        _write_atomically(
-            self._meta_path(meta.id), (json.dumps(meta.model_dump(), indent=2) + "\n").encode()
-        )
+        with self._locked():
+            # Content already stored costs nothing, so a full store still takes it:
+            # re-uploading a file an output uses must keep working at the cap.
+            if not (self.blob_path(meta).is_file() and self._meta_path(meta.id).is_file()):
+                self._require_room(len(stored))
+            _write_atomically(self.blob_path(meta), stored)
+            _write_atomically(
+                self._meta_path(meta.id),
+                (json.dumps(meta.model_dump(), indent=2) + "\n").encode(),
+            )
         return meta
+
+    def _last_used(self, asset_id: str, blob: Path) -> float | None:
+        """The later of the blob's and the metadata's mtime; None once both are gone."""
+        stamps: list[float] = []
+        for path in (blob, self._meta_path(asset_id)):
+            try:
+                stamps.append(path.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+        return max(stamps) if stamps else None
+
+    def sweep(
+        self, referenced: Collection[str], *, grace: float, now: float | None = None
+    ) -> list[str]:
+        """Remove every asset not in ``referenced`` and last used more than ``grace``
+        seconds before ``now``; answer the ids removed.
+
+        ``referenced`` is collected before the call (`referenced_asset_ids`), so a
+        reference made while the sweep runs is not in it. What protects that asset
+        is its last use: every path that creates a reference -- an upload, a render
+        submit, a preset save -- marks the asset used under the lock first, and each
+        removal re-checks the last use under that same lock. Removal takes the
+        metadata first, so `get` stops finding the asset before its bytes go.
+        Anything that cannot be removed is logged and skipped, like the other sweeps.
+        """
+        cutoff = (time.time() if now is None else now) - grace
+        removed: list[str] = []
+        for asset_id, blob in self._blobs().items():
+            if asset_id in referenced:
+                continue
+            with self._locked():
+                last_used = self._last_used(asset_id, blob)
+                if last_used is None or last_used >= cutoff:
+                    continue
+                try:
+                    self._meta_path(asset_id).unlink(missing_ok=True)
+                    blob.unlink(missing_ok=True)
+                except OSError:
+                    logger.exception("could not remove an unused asset", extra={"asset": asset_id})
+                    continue
+            removed.append(asset_id)
+        return removed
 
 
 def _write_atomically(path: Path, payload: bytes) -> None:
@@ -283,6 +465,67 @@ def _write_atomically(path: Path, payload: bytes) -> None:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _ids_in(data: bytes) -> set[str]:
+    return {match.decode("ascii") for match in _ID_IN_TEXT.findall(data)}
+
+
+def _ids_in_archive(archive: Path) -> set[str]:
+    """The ids in a 3MF's root model, where its provenance is stamped.
+
+    Not `provenance.read`: that answers None for a stamp it cannot parse as well as
+    for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
+    damaged or foreign-version stamp must still keep what it names. So the root
+    model's raw text is matched, as a JSON record's is. An archive that cannot be
+    opened at all raises OSError, which skips the whole sweep.
+    """
+    try:
+        with zipfile.ZipFile(archive) as opened:
+            return _ids_in(opened.read(ROOT_MODEL))
+    except FileNotFoundError:  # removed since the listing: it keeps nothing now
+        return set()
+    except (KeyError, zipfile.BadZipFile) as error:
+        raise OSError(f"cannot read {archive} for the asset ids it names: {error}") from None
+
+
+def referenced_asset_ids(
+    paths: DataPaths, params: Iterable[Mapping[str, ParamValue]] = ()
+) -> set[str]:
+    """Every asset id something keeps (#296): the sweep removes nothing in here.
+
+    - every output's records (``params.json`` and the rest of its JSON), and for an
+      output whose ``params.json`` is gone, the root model of its 3MF, where the
+      provenance "Edit in ScadBuddy" falls back to is stamped;
+    - every saved preset (``data/presets/``);
+    - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
+    - ``params``: the jobs in the render queue's store, finished or not.
+
+    A source that exists but cannot be read raises OSError: a sweep that cannot see
+    every reference must not remove anything, so the caller skips the whole sweep
+    rather than guessing.
+    """
+    found: set[str] = set()
+
+    def scan(path: Path) -> None:
+        # Removed since the listing: it keeps nothing now.
+        with suppress(FileNotFoundError):
+            found.update(_ids_in(path.read_bytes()))
+
+    for directory in paths.outputs.glob("*/*/"):
+        for record in directory.glob("*.json"):
+            scan(record)
+        archive = directory / "model.3mf"
+        if not (directory / "params.json").is_file() and archive.is_file():
+            found.update(_ids_in_archive(archive))
+    for preset_file in paths.presets.glob("*.json"):
+        scan(preset_file)
+    for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
+        for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
+            scan(template_file)
+    for values in params:
+        found.update(_ids_in(json.dumps(values).encode()))
+    return found
 
 
 def sample_files(model_dir: Path, accept: Sequence[str] = FILE_KINDS) -> list[str]:
@@ -370,7 +613,9 @@ def file_assets(
         if value in samples[accept]:
             continue
         try:
-            meta = store.get(value)
+            # `use`, not `get`: whatever validates a value here is about to keep it
+            # (a job, a preset), so it is marked used before a sweep can take it.
+            meta = store.use(value)
         except AssetNotFoundError:
             raise ValueError(
                 f"parameter {parameter.name!r} is not an uploaded or sample file: {value[:80]!r}"
