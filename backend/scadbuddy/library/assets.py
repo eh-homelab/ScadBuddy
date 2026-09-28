@@ -82,6 +82,10 @@ _LOCK_XACT = "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))"
 _LOCK_SESSION = "SELECT pg_advisory_lock(hashtextextended(%s, 0))"
 _UNLOCK_SESSION = "SELECT pg_advisory_unlock(hashtextextended(%s, 0))"
 _SELECT_META = "SELECT id, name, kind, size, width, height FROM assets WHERE id = %s"
+#: The sweep's candidates among the rows: those last used before the cutoff, read
+#: through the `assets_last_used` index.
+STALE_ROWS = "SELECT id FROM assets WHERE last_used_at < %s"
+_ROWS_AMONG = "SELECT id FROM assets WHERE id = ANY(%s)"
 _MARK_USED = (
     "UPDATE assets SET last_used_at = %s WHERE id = %s"
     " RETURNING id, name, kind, size, width, height"
@@ -347,6 +351,8 @@ class AssetStore:
     ) -> None:
         self.root = root
         self._pool = pool
+        #: Whether a sweep has removed the file-based store's leftovers yet.
+        self._legacy_removed = False
         #: 0 is no limit, for either.
         self.max_total_bytes = max_total_bytes
         self.max_count = max_count
@@ -520,7 +526,8 @@ class AssetStore:
         The candidates are every row and every blob on disk, so an orphan blob (no
         row: an upload whose insert failed, or one from before #591) goes too, once
         its mtime is past the grace. The file-based store's leftovers are removed
-        first (`_remove_legacy_files`).
+        by the first sweep of this store (`_remove_legacy_files`): nothing writes
+        them any more, so one pass per process is enough.
 
         ``referenced`` is collected before the call (`referenced_asset_ids`), so a
         reference made while the sweep runs is not in it. What protects that asset
@@ -536,19 +543,18 @@ class AssetStore:
         pool = self._require()
         cutoff = (time.time() if now is None else now) - grace
         cutoff_at = datetime.fromtimestamp(cutoff, UTC)
-        self._remove_legacy_files()
+        if not self._legacy_removed:
+            self._remove_legacy_files()
+            self._legacy_removed = True
+        blobs = self._blobs()
         with pool.connection() as conn:
-            rows = {
-                row["id"]: row["last_used_at"]
-                for row in conn.execute("SELECT id, last_used_at FROM assets")
-            }
+            # Only the stale rows (`assets_last_used`), and which blobs have a row
+            # at all (the primary key): never the whole table.
+            stale = {row["id"] for row in conn.execute(STALE_ROWS, (cutoff_at,))}
+            owned = {row["id"] for row in conn.execute(_ROWS_AMONG, (list(blobs),))}
         # A row last used inside the grace needs no second look; an orphan's mtime is
         # read under the lock.
-        candidates = sorted(
-            asset_id
-            for asset_id in rows.keys() | self._blobs().keys()
-            if asset_id not in referenced and (asset_id not in rows or rows[asset_id] < cutoff_at)
-        )
+        candidates = sorted((stale | (blobs.keys() - owned)) - set(referenced))
         removed: list[str] = []
         for asset_id in candidates:
             key = asset_lock_key(asset_id)

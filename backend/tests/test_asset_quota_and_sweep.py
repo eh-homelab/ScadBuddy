@@ -26,6 +26,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library import assets as assets_module
 from scadbuddy.library.assets import (
     ASSET_LOCK_KEY,
+    STALE_ROWS,
     AssetMeta,
     AssetNotFoundError,
     AssetQuotaError,
@@ -687,6 +688,36 @@ def test_the_sweep_removes_the_file_based_stores_leftovers(
     assert store.sweep(set(), grace=GRACE) == []
     assert not any(path.exists() for path in leftovers)
     assert exists(store, kept)
+
+
+def test_only_the_first_sweep_looks_for_the_file_based_stores_leftovers(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing writes them any more, so one pass per process removes them for good;
+    later sweeps do not scan the store for them again."""
+    passes: list[int] = []
+    real = AssetStore._remove_legacy_files
+
+    def counted(self: AssetStore) -> None:
+        passes.append(1)
+        real(self)
+
+    monkeypatch.setattr(AssetStore, "_remove_legacy_files", counted)
+    for _ in range(3):
+        store.sweep(set(), grace=GRACE)
+    assert len(passes) == 1
+
+
+def test_the_sweep_reads_the_stale_rows_through_the_last_use_index(pg_pool: PgPool) -> None:
+    """The sweep reads only the rows past the grace, through `assets_last_used`, not
+    the whole table."""
+    with pg_pool.connection() as conn, conn.transaction():
+        conn.execute("SET LOCAL enable_seqscan = off")
+        plan = "\n".join(
+            str(next(iter(row.values())))
+            for row in conn.execute(f"EXPLAIN {STALE_ROWS}", (datetime.now(UTC),))
+        )
+    assert "assets_last_used" in plan, plan
 
 
 def no_scan(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -14,13 +14,36 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
-from scadbuddy.api.deps import STATE_ATTR, get_queue
+from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR, get_queue
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.assets import MAX_ASSET_BYTES
+from scadbuddy.library.assets import MAX_ASSET_BYTES, AssetStore
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
 from tests.api.conftest import MODEL_SLUG, wait_for_job
+from tests.conftest import UNUSED_DATABASE_URL
+
+
+def test_an_upload_store_without_its_database_is_a_503_problem(tmp_path: Path) -> None:
+    """The server never starts without a database (#401), but a store built without
+    one answers a problem naming it rather than an unexplained 500 (#591)."""
+    app = create_app(
+        Settings(
+            data_dir=tmp_path / "data",
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+        )
+    )
+    state = getattr(app.state, STATE_ATTR)
+    setattr(app.state, STATE_ATTR, replace(state, assets=AssetStore(state.paths.assets)))
+    # No lifespan: nothing here may dial the (unused) database.
+    response = TestClient(app, raise_server_exceptions=False).get("/api/v1/assets/usage")
+    assert response.status_code == 503, response.text
+    assert response.headers["content-type"] == "application/problem+json"
+    problem = response.json()
+    assert problem["type"] == DATABASE_REQUIRED_PROBLEM
+    assert "SCADBUDDY_DATABASE_URL" in problem["detail"]
+
 
 # The fake openscad exports `width` and `label` (initial "hi"); the annotation is
 # ScadBuddy's own overlay, so it turns `label` into a file parameter.

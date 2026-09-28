@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import health, libraries, media, metrics, models
+from scadbuddy.api import assets, health, libraries, media, metrics, models
 from scadbuddy.api.agent_actor import AgentActorGate, postgres_grants
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
 from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
@@ -355,6 +355,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     setattr(app.state, STATE_ATTR, state)
     install_problem_handlers(app)
     libraries.install_library_handlers(app)
+    assets.install_asset_handlers(app)
     models.install_model_handlers(app)
     # The agent's headless browser may not make outward requests (#349, AI spec §5.3):
     # refused on the method, path and marker header alone, before any body is read.
