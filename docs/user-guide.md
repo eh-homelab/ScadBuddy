@@ -171,19 +171,15 @@ stored on ScadBuddy's server and is never sent to the browser.
    | Scope | Used for |
    |---|---|
    | **Manage Library** | uploading 3MFs, library folders, slicing, presets, and the sidebar External Link |
-   | **Manage Queue** | queueing prints and running slicer pipelines |
+   | **Manage Queue** | queueing prints from the print picker |
    | **Read Status** | listing printers, spools and AMS slots for the print picker and **Test connection** |
    | **Manage Projects** | only if you use the project picker |
 
-   Which scope Bambuddy checks for `/slicer-pipelines/` hasn't been confirmed:
-   ScadBuddy assumes Manage Queue. If a call is refused, ScadBuddy's error names the
-   scope that call asked for.
-
 2. Open **Settings** in ScadBuddy. Enter the Bambuddy URL and the key, then press
    **Test connection**.
-3. Under **Where files go**, choose the library folder, the slicer pipeline the send
-   bar runs and the printer. That one pipeline is used for every model; a per-model
-   pipeline saved by an older ScadBuddy is no longer used.
+3. Under **Where files go**, choose the library folder and the printer. **Send to
+   Bambuddy** lays its upload out for that printer's plate, and the print picker opens
+   on it.
 4. Under **Bambuddy sidebar**, enter ScadBuddy's own URL (the address Bambuddy
    should link to; ScadBuddy can't work it out from behind a proxy). Then press
    **Add to Bambuddy sidebar**. This creates an External Link called "ScadBuddy"
@@ -223,9 +219,10 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
 - **Generate** saves the current render as an output, with its parameters and a
   thumbnail.
 - **Download 3MF** downloads that output.
-- **Send to Bambuddy** uploads the output to the library, or slices and queues it.
-  If ScadBuddy's own URL is set, the library file gets an "Edit in ScadBuddy" link
-  that opens these parameters again.
+- **Send to Bambuddy** uploads the output to the library, laid out for the printer set
+  in Settings. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
+  is set, the library file gets an "Edit in ScadBuddy" link that opens these parameters
+  again.
 - **Print** opens the print picker.
 
 The button at the top right of the preview shows it full screen, with the plate and
@@ -242,8 +239,8 @@ it, the view fills the frame instead.
 The print picker is spool-first: you choose the spools, the nozzle size, a quality
 tier and a plate, and ScadBuddy derives every Bambu printer, process and filament
 preset itself, then slices and queues through Bambuddy. There is no slicer pipeline to
-pick or maintain here — pipelines still exist in Bambuddy, and the one-click send bar
-and Settings' default pipeline still use one, until #312.
+pick or maintain. Pipelines still exist in Bambuddy, but ScadBuddy doesn't use them, and
+**Print** is the only way it prints.
 
 Top to bottom, the dialog is:
 
@@ -256,7 +253,7 @@ Top to bottom, the dialog is:
   printer set in Settings, else the first active printer — skipping a remembered or
   Settings printer that is no longer active. Presets are only resolved for the H2C, so
   printing on any other model is refused before anything is sliced.
-- **Filament** — the same spool-inventory picker the send bar uses. Loaded spools are
+- **Filament** — a spool-inventory picker. Loaded spools are
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
   presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
