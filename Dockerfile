@@ -17,6 +17,7 @@
 
 # The library pins the `libraries` stage bakes in (#169), global so that stage and
 # the `app` stage's catalogue check read one value. See that stage.
+# Moving BOSL2_REF/BOSL2_COMMIT or baking in another library: update THIRD_PARTY_NOTICES.md.
 ARG BOSL2_REF=v2.0.761
 ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
@@ -402,6 +403,7 @@ ENV SCADBUDDY_DATA_DIR=/data \
 # seeded ref is not the catalogue's, or the seed holds anything not listed.
 ARG BOSL2_REF
 COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
+COPY THIRD_PARTY_NOTICES.md /app/THIRD_PARTY_NOTICES.md
 RUN python -m scadbuddy.library.library_seed verify /app/libraries "BOSL2=${BOSL2_REF}"
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
