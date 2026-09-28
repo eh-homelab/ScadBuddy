@@ -27,7 +27,7 @@ from scadbuddy.analyzers.context import (
     base_profile,
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
-from scadbuddy.bambuddy.filaments import every_plate, gather_inventory, gather_options
+from scadbuddy.bambuddy.filaments import every_plate, gather_plate_options
 from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
@@ -167,22 +167,14 @@ async def _read_bambuddy(
         return
     try:
         # The spools, where they are loaded and the printer's remaining weights are the
-        # same for every plate, so they are read once; then each plate's own slots,
-        # concurrently: each is an independent Bambuddy read.
-        inventory = await gather_inventory(
-            client, printer_id=context.printer.id if context.printer else None
-        )
-        read = await asyncio.gather(
-            *(
-                gather_options(
-                    client,
-                    library_file_id=library_file_id,
-                    plate_id=plate,
-                    fallback_colours=list(meta.colors) if meta is not None else None,
-                    inventory=inventory,
-                )
-                for plate in plate_ids
-            )
+        # same for every plate, so `gather_plate_options` reads them once (#480); then
+        # each plate's own slots, concurrently.
+        read = await gather_plate_options(
+            client,
+            library_file_id=library_file_id,
+            printer_id=context.printer.id if context.printer else None,
+            plate_ids=plate_ids,
+            fallback_colours=list(meta.colors) if meta is not None else None,
         )
         context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:

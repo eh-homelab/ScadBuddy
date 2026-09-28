@@ -4,7 +4,7 @@ import { AgentToolError } from '../agent/types'
 import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { api, ApiError } from '../api/client'
 import type { Job, Output, PlateFit, PrintRunResult, SendResult } from '../api/types'
-import { triggerDownload } from '../lib/embed'
+import { DownloadBlockedError, downloadBlob } from '../lib/embed'
 import { fitLabel, fitMessages } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
 import { ColorStrip } from './ColorStrip'
@@ -126,15 +126,15 @@ export function ActionBar({
     setDownloading(true)
     setError(null)
     try {
-      // Fetched as a blob so the download works from inside Bambuddy's sandboxed iframe.
-      const response = await fetch(api.downloadUrl(output.id))
-      if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const blob = await response.blob()
-      const url = URL.createObjectURL(blob)
-      triggerDownload(url, `${slug}-${output.id}.3mf`)
-      setTimeout(() => URL.revokeObjectURL(url), 30_000)
-    } catch {
-      setError('Download failed.')
+      // Fetched as a blob and saved through lib/embed, so it works inside Bambuddy's
+      // sandboxed iframe (a popup that escapes the sandbox, opened before the fetch).
+      await downloadBlob(async () => {
+        const response = await fetch(api.downloadUrl(output.id))
+        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        return await response.blob()
+      }, `${slug}-${output.id}.3mf`)
+    } catch (cause) {
+      setError(cause instanceof DownloadBlockedError ? cause.message : 'Download failed.')
     } finally {
       setDownloading(false)
     }
