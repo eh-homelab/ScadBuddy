@@ -253,7 +253,8 @@ Data on the PVC (`SCADBUDDY_DATA_DIR`, default `/data`):
 models/                           A GIT REPOSITORY (see below)
 models/<slug>/model.scad          the source (plus any included files)
 models/<slug>/model.json          name, description, tags, thumbnail, origin_url (NOT the schema)
-models/<slug>/thumbnail.png
+models/<slug>/thumbnail.png        legacy cover; the first media write moves it into media/ (#274)
+models/<slug>/media/<id>.<ext>    the template's images and videos (#274); their order is `template_media` rows
 models/_builtin/<slug>/           a built-in template, mirrored from the image on boot (§4.3)
 outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail.png, meta.json
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
@@ -349,6 +350,24 @@ on the volume sees the same thing.
   now lives under `cache/`: it is written lazily, by a *read*, outside any
   commit, so in the tree it would leave the repository permanently dirty and
   fold a cache blob into the next unrelated metadata commit.
+- **Template media (#274): images are committed, videos are not.** Images
+  (PNG, JPEG, WebP, at most 10 MiB each) and video posters are committed with
+  the template, like `thumbnail.png`. Videos (MP4, WebM, up to
+  `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, 1 GiB by default) would bloat a history that is
+  kept for good, so `ensure_repo`'s `.gitignore` carries `*/media/*.mp4`,
+  `*/media/*.webm` and the same under `_builtin/`.
+- **The media list is Postgres, not history (#274).** The order, captions and
+  posters of a template of mine are rows of `template_media` (backend migration
+  `20260928T0718Z_template_media.sql`), not `model.json`, so they are not versioned: a restore brings back an
+  image's file but not its row. A file with no row is ignored (an orphan sweep is
+  a follow-up), and a row whose file is gone -- a video removed by hand, say -- is
+  reported `missing: true`, which the cover skips. A write puts the file in place
+  first, then the rows, and removes the file again if the rows cannot be written;
+  a removal drops the row first. A built-in's list is its bundled `model.json`
+  `media`, shipped read-only in the image. A duplicate copies `media/` from the
+  working tree, videos included, and the upstream's list as rows of its own. With
+  no `SCADBUDDY_DATABASE_URL` (until #401 makes it required) only the legacy
+  `thumbnail.png` is listed and every media write answers 503.
 - **A commit message is flattened to one printable line** (`subject_line`).
   `PUT /models/{slug}/source` takes a caller-supplied `message`, and the log
   parser splits records on ASCII RS/US — bytes nothing can put in a hash, an
@@ -1116,7 +1135,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |
 | POST | `/models/{slug}/duplicate` | body `{name}` → copies any template, built-in or mine, to a new template of mine (slug derived from `name` as on `POST /models`, with the same 422/409), recording `upstream: {id, path, base, dismissed}` in its `model.json`, where `base` is the upstream's last commit. The copy includes the upstream's `thumbnail.png` and `README.md`, as its own (#179). One commit, `Duplicate <id> as <new-slug>`; derived files (schema cache, outputs, revisions) are not copied, and a metadata PATCH never touches `upstream` (201) |
-| GET | `/models/{slug}/thumbnail` | the model's own `thumbnail.png`, or else the `Metadata/plate_1.png` of its first (oldest) generated output that has one (the record's `thumbnail_output_id`), or else its default-render preview (§6.2.2); 404 when there is none of the three. A strong `ETag` over the image with `Cache-Control: no-cache`, so a copy is revalidated on every use and a matching `If-None-Match` is a 304 with no body. Not `immutable` behind the catalogue's `?v=` key: without git `version` is null, so the key is not proven to change with the bytes |
+| GET | `/models/{slug}/thumbnail` | the model's cover (#274: its first media image, or its first video's poster; a legacy `thumbnail.png` while it has no media rows), or else the `Metadata/plate_1.png` of its first (oldest) generated output that has one (the record's `thumbnail_output_id`), or else its default-render preview (§6.2.2); 404 when there is none of the three. A strong `ETag` over the image with `Cache-Control: no-cache`, so a copy is revalidated on every use and a matching `If-None-Match` is a 304 with no body. Not `immutable` behind the catalogue's `?v=` key: without git `version` is null, so the key is not proven to change with the bytes |
+| GET/POST/PATCH/PUT/DELETE | `/models/{slug}/media…` | #274, `api/media.py`: `GET media/{id}` serves one item (honours `Range`; `immutable`, since an id never changes its contents, except the legacy `thumbnail` item) and `GET media/{id}/poster` a video's poster; `POST media` (multipart `file`, optional `poster`, `caption`) adds one, typed by magic bytes (415 otherwise), streamed to `cache/` rather than spooled, behind its own body gate at `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (environment only, reported read-only as `media_upload_max_bytes` by `GET /settings`; 413 naming the limit in MB) in place of the 32 MiB multipart cap; `PATCH media/{id}` `{caption}`; `PUT media/order` `{ids}`, a permutation (422 otherwise); `DELETE media/{id}`. Each write updates the template's `template_media` rows (a commit too when an image or poster file changes) and answers the `ModelRecord`; built-ins answer 403, and with no database every write answers 503. The first item is the cover `GET /thumbnail` serves: the first image, or the first video's poster |
 | PUT/DELETE | `/models/{slug}/thumbnail` | multipart `file` (a PNG of at most 10 MiB, else a 422 naming the limit, with nothing written) sets or replaces the model's own thumbnail; `DELETE` removes it (404 when it has none of its own). Each is one git commit in the model's history, and each returns the record, which after a `DELETE` can still show the output fallback (#179), or the default-render preview once that has rendered (§6.2.2) |
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |

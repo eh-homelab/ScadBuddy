@@ -13,9 +13,9 @@ from pydantic import BaseModel
 
 import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import health, libraries, metrics, models
+from scadbuddy.api import health, libraries, media, metrics, models
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
-from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
+from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -361,7 +361,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
-    app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
+    app.add_middleware(
+        BodySizeGate,
+        limits=BODY_LIMITS,
+        routes=[
+            RouteLimit(
+                "POST",
+                MEDIA_UPLOAD_PATH,
+                app_settings.media_upload_max_bytes,
+                "a media upload",
+                "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            )
+        ],
+    )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth
     # counting. It reads no body, so wrapping the gate costs the gate nothing.
@@ -370,7 +382,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()
