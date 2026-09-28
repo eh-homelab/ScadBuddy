@@ -22,7 +22,11 @@ from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import load_config
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, git_env
-from tests.support.temporal import TEST_TEMPORAL_ADDRESS_ENV, temporal_available
+from tests.support.temporal import (
+    TEST_TEMPORAL_ADDRESS_ENV,
+    TEST_TEMPORAL_DEV_SERVER_ENV,
+    temporal_available,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures"
 GOLDEN = Path(__file__).parent / "golden"
@@ -123,7 +127,10 @@ def _skip_without_postgres(request: pytest.FixtureRequest) -> None:
 @pytest.fixture(autouse=True)
 def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
     if request.node.get_closest_marker("requires_temporal") and not temporal_available():
-        pytest.skip(f"no Temporal: set {TEST_TEMPORAL_ADDRESS_ENV} or put `temporal` on PATH")
+        pytest.skip(
+            f"no Temporal: set {TEST_TEMPORAL_ADDRESS_ENV} (a running server) or"
+            f" {TEST_TEMPORAL_DEV_SERVER_ENV} (a temporal CLI), or put `temporal` on PATH"
+        )
 
 
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
