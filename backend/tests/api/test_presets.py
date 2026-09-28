@@ -419,6 +419,16 @@ def test_a_template_preset_edit_replaces_a_legacy_file_too(
     assert _ids(client, model) == []
 
 
+def test_a_template_preset_cannot_take_a_saved_one_s_name(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    assert client.post(_url(model), json={"name": "Mum", "params": {}}).status_code == 201
+    response = _patch_presets(client, model, [{"name": "mum", "params": {}}])
+    assert response.status_code == 409, response.text
+    assert response.json()["name"] == "mum"
+    assert "presets" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
+
+
 @pytest.mark.requires_git
 def test_a_built_in_s_presets_cannot_be_edited(client: TestClient) -> None:
     assert _patch_presets(client, BUILTIN, []).status_code == 403

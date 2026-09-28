@@ -23,7 +23,7 @@ import json
 import logging
 import threading
 import uuid
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 
@@ -345,6 +345,12 @@ class PresetStore:
             if preset.id == preset_id:
                 return preset
         raise PresetNotFoundError(preset_id)
+
+    def saved_name_among(self, model_id: str, names: Iterable[str]) -> str | None:
+        """The first of ``names`` a saved preset of the template already has, ignoring
+        case: the other direction of :meth:`_require_free`, for a template's own list."""
+        saved = [preset.name for preset in self._read(model_id).presets]
+        return next((n for n in names if any(_same_name(n, other) for other in saved)), None)
 
     def _require_free(self, model_id: str, stored: _StoredPresets, name: str, own: str) -> None:
         """A name is one preset's in the picker: none of the template's, nor another saved one."""

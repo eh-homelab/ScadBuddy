@@ -270,7 +270,7 @@ export interface paths {
         head?: never;
         /**
          * Edit model metadata
-         * @description `presets` replaces the template's own presets (#326) whole. Each preset's values are checked against the template's current schema as a saved preset's are (422), and every preset is written with its key as `id`, so reordering or renaming it later keeps it the same preset.
+         * @description `presets` replaces the template's own presets (#326) whole. Each preset's values are checked against the template's current schema as a saved preset's are (422), a name a saved preset of the template already has is refused (409), and every preset is written with its key as `id`, so reordering or renaming it later keeps it the same preset.
          */
         patch: operations["patch_model_api_v1_models__slug__patch"];
         trace?: never;

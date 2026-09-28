@@ -66,7 +66,7 @@ from scadbuddy.library.libraries import (
     parse_declaration,
     search_path,
 )
-from scadbuddy.library.presets import with_keys
+from scadbuddy.library.presets import InvalidPresetsFileError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -748,6 +748,7 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
     description=(
         "`presets` replaces the template's own presets (#326) whole. Each preset's values "
         "are checked against the template's current schema as a saved preset's are (422), "
+        "a name a saved preset of the template already has is refused (409), "
         "and every preset is written with its key as `id`, so reordering or renaming it "
         "later keeps it the same preset."
     ),
@@ -761,6 +762,7 @@ async def patch_model(
     config: ConfigDep,
     events: EventsDep,
     assets: AssetsDep,
+    presets: PresetsDep,
 ) -> ModelRecord:
     require_mine(slug)
     # The record, not only existence: a model.json that no longer reads as metadata is
@@ -775,6 +777,18 @@ async def patch_model(
             config=config,
             assets=assets,
         )
+        # A name is one preset's in the picker: saving refuses a template's name, so the
+        # template's list refuses a saved one's.
+        try:
+            clash = presets.saved_name_among(slug, (p.name for p in patch.presets))
+        except InvalidPresetsFileError as error:
+            raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
+        if clash is not None:
+            raise ApiError(
+                status.HTTP_409_CONFLICT,
+                f"{slug!r} already has a saved preset named {clash!r}",
+                name=clash,
+            )
         patch.presets = with_keys(patch.presets)
     try:
         # `to_thread`: a git commit, from an `async def` handler. See `_create`.
