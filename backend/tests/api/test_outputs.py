@@ -5,11 +5,14 @@ import re
 import shutil
 import zipfile
 
+import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
 from scadbuddy.render.provenance import Provenance, source_version
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.split import ColourPart
 from tests.api.conftest import FAIL_WIDTH, PNG_BYTES, wait_for_job
 
 
@@ -366,3 +369,32 @@ def test_the_geometry_of_a_damaged_3mf_is_422(
     response = client.get(f"/api/v1/outputs/{created['id']}/geometry")
     assert response.status_code == 422, response.text
     assert "cannot be analysed" in response.json()["detail"]
+
+
+def test_the_geometry_of_a_multi_plate_output_is_measured_a_plate_at_a_time(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    created = client.post(
+        f"/api/v1/models/{model}/outputs", json={"job_id": _finished_job(client, model)}
+    ).json()
+    directory = paths.output_dir(model, created["id"])
+    small = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(10, 10, 10)))
+    big = ColourPart(1, "Color 1", "#FF0000", trimesh.creation.box(extents=(30, 30, 30)))
+    write_plates_3mf(
+        [PlateParts((small,), (1,)), PlateParts((big,), (1,))],
+        ["#FF0000"],
+        directory / "model.3mf",
+        thumbnails=None,
+    )
+    url = f"/api/v1/outputs/{created['id']}/geometry"
+
+    first = client.get(url).json()
+    second = client.get(url, params={"plate": 2}).json()
+
+    assert (first["plate"], first["plates"], first["height_mm"]) == (1, 2, 10)
+    assert (second["plate"], second["plates"], second["height_mm"]) == (2, 2, 30)
+    assert json.loads((directory / "geometry-plate-2.json").read_text(encoding="utf-8")) == second
+    missing = client.get(url, params={"plate": 3})
+    assert missing.status_code == 404
+    assert "no plate 3" in missing.json()["detail"]
+    assert client.get(url, params={"plate": 0}).status_code == 422

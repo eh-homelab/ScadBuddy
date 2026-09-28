@@ -57,7 +57,14 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
   // Its notes and warnings travel with it: they explain the model on screen, not the
   // one rendering.
   const [shown, setShown] = useState<
-    | { url: string; bbox?: BoundingBox; colors: string[]; notes: string[]; warnings: string[] }
+    | {
+        url: string
+        bbox?: BoundingBox
+        colors: string[]
+        notes: string[]
+        warnings: string[]
+        plates: number
+      }
     | undefined
   >()
 
@@ -69,6 +76,7 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
         colors: job.colors ?? [],
         notes: job.notes ?? [],
         warnings: job.warnings ?? [],
+        plates: Math.max(job.plates?.length ?? 0, 1),
       })
     }
   }, [job])
@@ -132,7 +140,7 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
           <div className="flex flex-col items-start gap-2">
             {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
             {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
-            {shown?.bbox && <Dimensions bbox={shown.bbox} />}
+            {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
           </div>
         )}
       </div>
@@ -158,7 +166,7 @@ function PlateBadge({ plate }: { plate: Plate }) {
   )
 }
 
-function Dimensions({ bbox }: { bbox: BoundingBox }) {
+function Dimensions({ bbox, plates }: { bbox: BoundingBox; plates: number }) {
   const unit = useDisplayUnit()
   return (
     <dl
@@ -167,6 +175,15 @@ function Dimensions({ bbox }: { bbox: BoundingBox }) {
     >
       <dt className="text-[10px] tracking-wide text-faint">Bounding box</dt>
       <dd className="sb-num mt-0.5 text-[13px] text-ink">{formatBbox(bbox, unit)}</dd>
+      {/* #289 — the preview draws every plate at once; the 3MF splits them. */}
+      {plates > 1 && (
+        <>
+          <dt className="mt-1 text-[10px] tracking-wide text-faint">Plates</dt>
+          <dd data-testid="plate-count" className="sb-num mt-0.5 text-[13px] text-ink">
+            {plates}, shown together
+          </dd>
+        </>
+      )}
     </dl>
   )
 }
