@@ -123,8 +123,8 @@ class PrintSummary(_Response):
 
 class PrintPage(_Response):
     items: list[PrintSummary]
-    #: Pass as ``cursor`` for the next page; None on the last. A next page can be
-    #: empty when the remaining prints all fail the filters.
+    #: Pass as ``cursor`` for the next page; None when no linked print is left. A
+    #: next page can still be empty when the remaining prints all fail the filters.
     next_cursor: str | None = None
 
 
@@ -476,14 +476,21 @@ async def list_prints(
                 output = known[link.output_id]
                 if output is None:
                     continue  # The output went between its link and this read.
-                summary = _summary(link, output.meta, archive, await defaults.diff(output))
+                summary = _summary(link, output.meta, archive, None)
                 if not _matches(filters, summary, link, archive, output):
                     continue
-                items.append(summary)
+                # Only for a print that is shown: the first of each template revision
+                # can take a schema export (#609 review).
+                diff = await defaults.diff(output)
+                items.append(summary.model_copy(update={"params_diff": diff}))
                 if archive is not None:
                     present.add(archive.id)
                 if len(items) == limit:
-                    more = index < len(batch) - 1 or len(batch) == limit
+                    # A further linked row, whether or not it will pass the filters:
+                    # one row from Postgres, no Bambuddy read (#609 review).
+                    more = index < len(batch) - 1 or bool(
+                        await links.page(limit=1, before=before, output_ids=output_ids)
+                    )
                     return PrintPage(
                         items=await _named(cache, client, items, present),
                         next_cursor=str(before) if more else None,

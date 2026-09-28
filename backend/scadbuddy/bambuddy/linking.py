@@ -18,16 +18,17 @@ Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1-L3 and L8-L10)
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import timedelta
 
+import psycopg
 from fastapi import status
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.stages import Stage, stage_of
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 
@@ -73,18 +74,36 @@ async def link_item(
     return link
 
 
-async def owned_queue_items(client: BambuddyClient, meta: OutputMeta) -> set[int]:
-    """The queue items ScadBuddy created for this output's prints: its plates' and last
-    item on the slice-and-queue route, and its pipeline run's entries.
+async def owned_queue_items(
+    client: BambuddyClient,
+    meta: OutputMeta,
+    links: PrintLinkStore,
+    wanted: Collection[int],
+) -> set[int]:
+    """Which of ``wanted`` are queue items ScadBuddy created for this output's prints:
+    its plates' and last item on the slice-and-queue route, and its pipeline run's
+    entries.
 
     Only these may be linked from outside a progress read. An id a caller names is
     otherwise any queue item in Bambuddy, and linking its archive would open the media
     proxy to a print ScadBuddy never made (#522 review).
+
+    An item already linked to the output is one of these (links are recorded only from
+    them), so the pipeline run is read only for a wanted id that is neither on the
+    output nor linked yet. The UI files a print once its progress read has settled, and
+    that read has linked the dispatched entries, so an attach then costs no extra read.
     """
     owned = {plate.queue_item_id for plate in meta.plates}
     if meta.queue_item_id is not None:
         owned.add(meta.queue_item_id)
-    if meta.pipeline_run_id is not None:
+    try:
+        known = await links.for_output(meta.id)
+    except (psycopg.Error, DatabaseRequiredError):
+        # The run is then read for them instead.
+        logger.exception("could not read an output's print links", extra={"output_id": meta.id})
+    else:
+        owned.update(link.queue_item_id for link in known if link.queue_item_id is not None)
+    if meta.pipeline_run_id is not None and not owned.issuperset(wanted):
         try:
             run = await client.pipeline_run(meta.pipeline_run_id)
         except ApiError:
@@ -95,7 +114,7 @@ async def owned_queue_items(client: BambuddyClient, meta: OutputMeta) -> set[int
             )
         else:
             owned.update(job.queue_entry_id for job in run.jobs if job.queue_entry_id is not None)
-    return owned
+    return owned.intersection(wanted)
 
 
 async def link_run(
