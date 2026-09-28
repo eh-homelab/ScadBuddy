@@ -17,10 +17,12 @@ import type { ToolServices } from './registry.js'
 // The pinned @modelcontextprotocol/sdk (1.30.1, types.d.ts ResourceLinkSchema)
 // types it as { type: 'resource_link', uri, name, mimeType?, size?, description? }.
 //
-// There are no ScadBuddy MCP resources yet (#264), so the link is the backend
-// route itself: absolute under SCADBUDDY_PUBLIC_URL when that is set (the
-// ingress sends /api/v1/* to the backend, spec §4.2), else the bare path with
-// a note saying so. When #264 lands this becomes a `scadbuddy://` resource.
+// The link is the backend route itself: absolute under SCADBUDDY_PUBLIC_URL
+// when that is set (the ingress sends /api/v1/* to the backend, spec §4.2),
+// else the bare path with a note saying so. It is not a `scadbuddy://`
+// resource (#264): those are read through the same tools, so they carry the
+// same cap, and over it a resource read returns this JSON note as its content
+// (src/resources/server.ts `toContents`).
 //
 // The harness projection gets the same link: the harness runs with `tools: []`
 // (spec D7), so a file written to its work directory could not be read by the
@@ -103,9 +105,9 @@ export function linkResult(
             mime_type: mimeType,
             fetch: { method: 'GET', path: ref.path, ...(base ? { url: uri } : {}) },
             note: base
-              ? 'Served by ScadBuddy at its public URL. An MCP resource for this arrives with #264.'
+              ? 'Served by ScadBuddy at its public URL.'
               : 'A path on the ScadBuddy backend (its public URL is not configured here: ' +
-                'SCADBUDDY_PUBLIC_URL). An MCP resource for this arrives with #264.',
+                'SCADBUDDY_PUBLIC_URL).',
           },
           null,
           2,

@@ -478,7 +478,9 @@ ENTRYPOINT ["/usr/bin/tini", "--"]
 # 8 MiB ceiling `api/limits.py` puts on a text body, because the LSP bridge carries a
 # whole source (up to MAX_SOURCE_CHARS) in one message; `/api/v1/ws` caps its own
 # frames far lower in the app (`api/realtime.py` MAX_FRAME_CHARS).
-CMD ["uvicorn", "scadbuddy.main:app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
+# A factory, not a module-level app: building one reads Settings, which refuses to
+# start without SCADBUDDY_DATABASE_URL (#401), and importing the module must not.
+CMD ["uvicorn", "--factory", "scadbuddy.main:create_app", "--host", "0.0.0.0", "--port", "8080", "--ws-max-size", "8388608"]
 
 # start-period covers uv's first import of the app; the interval is short
 # because a wedged render worker is the failure this is meant to catch.

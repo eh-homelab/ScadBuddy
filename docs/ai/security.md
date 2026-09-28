@@ -13,10 +13,62 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **The agent service has no authentication.** Its credential writes are *gated*, but
   not authenticated (see [Origin gate](#dns-rebinding-defence)). The limitation is
   stated in the header of [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts).
-- **No `/mcp`, no tool registry, no approvals** exist on `main`. Those are open PRs
-  #368 and #471. The only tool paths today are the harness's in-process MCP servers
-  (none registered in `main.ts`) and the browser bridge in the user's own tab
+- **`/mcp`, the tool registry and approvals are on `main`** (#251's registry in
+  [`agent/src/tools/`](../../agent/src/tools/) and
+  [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts); #258's approval store in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
+  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)). The
+  other tool paths are the harness's in-process MCP servers (none registered in
+  `main.ts`) and the browser bridge in the user's own tab
   ([browser-bridge.md](browser-bridge.md)).
+
+## MCP bearer tokens
+
+Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
+(hashed)" live in the database). The implementation is `PostgresTokenStore` in
+[`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
+([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
+
+- **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
+  makes a leaked token recognisable to secret scanners.
+- **Hash only.** The row holds `token_hash`, the SHA-256 (hex) of the token, and never
+  the plaintext; a `CHECK` rejects anything that is not 64 hex characters. An unsalted
+  fast hash is enough because the token is 256 random bits: there is nothing to
+  brute-force that a slow KDF would protect (comment on `hashToken()`). A read of the
+  table therefore yields no usable token. The plaintext is returned once, by `mint`.
+- **Verify** is a single `UPDATE … RETURNING` that matches the hash, skips revoked and
+  expired rows, and stamps `last_used_at` (only forwards, with `GREATEST`). Revoking on
+  one replica takes effect on every replica at the next request.
+- **No other store.** There is no file or in-memory persistence. Without a database,
+  `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
+  `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
+  the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
+- **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
+  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
+  over `/api/v1/ai/mcp-tokens`
+  ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
+  routes in [operating.md §4.1](operating.md#41-mcp-access-tokens)):
+  - `GET` returns metadata only (name, tier, created, expires, last used, revoked and a
+    derived `status`), never the token or its hash. The store keeps no last-4 hint, so
+    none is shown. It passes `uiReadProblem()` (HTTPS, and an `Origin` or `Host` on the
+    allowlist; a cross-site `Sec-Fetch-Site` is refused).
+  - `POST` returns the plaintext once, in the `201` body, with `Cache-Control:
+    no-store`. The route never logs it. `DELETE /:id` sets `revoked_at`; a revoked
+    token stays listed and never verifies again.
+  - Both writes pass `uiRequestProblem()`, as credential writes do: minting a
+    token is an outward write (spec §8.1). `POST` also needs `Content-Type:
+    application/json` (`415` otherwise). The same limitation applies: this is a gate, not
+    authentication (spec §8.3, "Stated plainly").
+  - In the browser, the plaintext is held only in the section's React state until
+    **Done**. It is rendered as text in a `<code>` element, not as a field value, so the
+    browser agent's snapshot ([`frontend/src/agent/snapshot.ts`](../../frontend/src/agent/snapshot.ts)),
+    which reads field values and `role=status`/`alert` text, never sees it. Create,
+    Copy and Revoke are `USER_ONLY`, so the browser agent cannot press them.
+  - Every auth mode allows managing tokens. In `disabled` mode `/mcp` does not check
+    them; they are kept for when the mode returns to `bearer`, and Settings shows a
+    warning. In `oidc` mode (#262) bearer tokens keep working alongside the IdP
+    (spec §8.3). `GET` reports `auth_mode` for this.
 
 ## Risk tiers and the permission seam
 
@@ -28,9 +80,11 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 
 - `decide(toolName, tierOf)`: an unknown tool (`tierOf` returns `undefined`) is treated
   as `outward`. `read` and `write` are allowed. `outward` gets `needs_approval`.
-- **Approvals are not built** (#258, open PR #471). Until then `needs_approval` is
-  answered with a **deny**, whose message tells the model to explain rather than retry.
-  An outward tool therefore never runs unattended.
+- **Approvals** (#258): in a session, `needs_approval` parks the call until a human
+  decides it in the UI (`approvalGate`, [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  with no gate (outside a session) it is answered with a **deny**, whose message tells
+  the model to explain rather than retry. An outward tool therefore never runs
+  unattended. External MCP clients use prepare/confirm instead (below).
 - **It is enforced twice**, as spec §8.2 asks:
   - `makePreToolUseHook()` runs first. The [Agent SDK permissions docs](https://code.claude.com/docs/en/agent-sdk/permissions)
     say "a hook deny applies even in bypassPermissions mode" (quoted in the file).
@@ -59,6 +113,49 @@ outside the gateway path").
 **Runaway limits.** Each query gets `maxTurns` (25) and `maxBudgetUsd` (1 USD), plus an
 abort signal (`run.ts`). Sessions spend one budget across all their turns, and any
 watcher can interrupt (PR #377 body, "Budget and turns", "Interrupt").
+
+## MCP prepare/confirm on the approval store
+
+Spec §8.2 gives external MCP clients "a two-step `prepare` (returns a pending action
+id and a human-readable summary) then `confirm`, where the confirm completes only after
+the UI approval". As built:
+
+- **Prepare.** `runTool` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts))
+  does not run a gated outward tool. `ApprovalActions.prepare`
+  ([`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts)) records a pending
+  row in `ai_approvals` through `ApprovalService.create()`, with no session and no turn.
+  The row holds the MCP principal (`requested_by`), the tool, the HMAC-SHA256 input hash
+  under the KEK-derived key (`approvalHashKey`) and the scrubbed input summary. It never
+  holds the full input. The row id is the `pending_action_id`.
+- **Bounds.** A caller keeps at most 50 pending actions; a 51st cancels that caller's
+  oldest. At 10,000 pending sessionless rows, a new prepare is refused and nobody's row
+  is evicted. These are the in-memory store's bounds from #368, applied to the table.
+  `ApprovalService.createPrepared` checks and applies both bounds in the insert's own
+  transaction, under one `pg_advisory_xact_lock`, so concurrent prepares cannot
+  overshoot them (covered by a concurrent-burst test in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Anonymous callers.** In `disabled` mode the principal id is
+  `anonymous:<Mcp-Session-Id>`, and the session id is that client's capability
+  (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
+  of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
+  session id itself.
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
+  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+  the browser user. `authorize` refuses a principal deciding its own request even with
+  an approval grant, so an MCP client cannot approve what it prepared (covered in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
+  takes the `pending_action_id` and the same `arguments` again, because the table has
+  only the hash. It answers `pending_approval` while the row is undecided. It runs the
+  tool only when `ApprovalService.consumePrepared` marks the row used. That is one
+  `UPDATE` requiring: no session, the same `requested_by`, the same input hash,
+  `decision = 'approved'`, not consumed, not revoked, and `usable_until > now()`. Two
+  confirms cannot both win. A replay, another principal, a changed input, a denial or an
+  expiry is refused and nothing is sent. The approval is used up before the tool runs,
+  so a call that then fails is not retried on the same approval.
+- **No database.** `main.ts` falls back to the in-memory `PendingActionStore`
+  ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)). Nothing can approve
+  its actions, so its `confirm_action` always refuses.
 
 ## Envelope encryption and AAD binding
 
@@ -251,7 +348,6 @@ merged code.
 |---|---|
 | Whether `canUseTool` can wait on an asynchronous human decision, or a `PreToolUse` hook must deny and the session resume after approval | #255, #258 |
 | Bambuddy 1.2.5.5 routes for print archive outcomes and stats | #251 |
-| Whether the #241 Postgres needs anything for `LISTEN/NOTIFY` across replicas | #264 |
 | Bambu Studio's "Open in Bambu Studio" hand-off | #284 |
 | Keys accepted by `filament_overrides` on `PrintQueueItemCreate` | #284 |
 | Whether `/local-presets/` can create a derived process preset | #284 |
@@ -265,6 +361,11 @@ merged code.
 | Whether `outputDir` confines every write | #349 |
 | How the backend matches the agent-actor marker to an approved outward action | #349 |
 | Chromium on the agent image: install, non-root, read-only root, size | #349 |
+
+The `LISTEN/NOTIFY` across replicas item is answered by #264 (spec §3.2): connect to
+the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
+([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
+see [mcp-resources.md](mcp-resources.md#the-event-source).
 
 The headless browser (spec §5.3, merged as a spec in #363) stays off until its rows are
 verified (spec §8.2).

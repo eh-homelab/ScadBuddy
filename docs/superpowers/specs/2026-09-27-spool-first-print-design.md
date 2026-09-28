@@ -204,7 +204,12 @@ the left, and `status.nozzles` is indexed the same way.
 - **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …").
 - **One side fitted with it** (the nozzles differ): more than one filament is a 422,
   since the slicer spreads them across both. One filament prints, with a warning that
-  the slicer, not ScadBuddy, picks its extruder.
+  the slicer, not ScadBuddy, picks its extruder. Filaments are counted for the plate or
+  plates being printed (the parts' extruders in the local 3MF's `model_settings.config`),
+  not the whole model.
+- **One side fitted with it, the other unreported:** a single-nozzle printer (X1C, P1S,
+  A1: an empty second `nozzles` entry, no AMS wired left, no switch) prints any number of
+  filaments. On a printer with a left side, that side is unknown: a warning, not a 422.
 - **Both fitted with it:** any filament prints on either.
 - **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
   switch routes any AMS to either nozzle (user ruling, 2026-09-28). A spool's side, from
@@ -216,7 +221,9 @@ the left, and `status.nozzles` is indexed the same way.
   a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
   0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
   never pre-selects it.
-- Nozzles the printer doesn't report refuse nothing and warn.
+- Nozzles the printer doesn't report refuse nothing and warn. Nor does an unreadable
+  `/inventory/assignments`: every spool's side is then unknown. With no status it isn't
+  read.
 - `extruders.plan_extruders` decides all of it, from one status read per run, right
   after #472's `choice_errors` in `run_for_output`. Only the nozzle **diameter** is
   compared, not its flow type (HS vs HH).

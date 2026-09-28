@@ -19,9 +19,12 @@ from typing import Any
 import httpx
 import pytest
 import respx
+import trimesh
 from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.api.test_print import printers_route
 from tests.api.test_print_choices import MIXED_ARCHIVES, h2c_presets
@@ -804,6 +807,35 @@ def _status(**changes: Any) -> None:
     respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=body))
 
 
+def two_colour_output(
+    client: TestClient, model: str, paths: DataPaths, *plates: tuple[int, ...]
+) -> str:
+    """The test model rewritten in two colours, one plate per entry of ``plates`` naming
+    the filaments its parts print with (by default one plate using both)."""
+    output_id = prepared(client, model)
+    directory = paths.output_dir(model, output_id)
+    colours = ["#FF0000", "#0000FF"]
+    meta = json.loads((directory / "meta.json").read_text(encoding="utf-8"))
+    meta["colors"] = colours
+    (directory / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    box = trimesh.creation.box(extents=(10, 10, 5))
+    write_plates_3mf(
+        [
+            PlateParts(
+                tuple(ColourPart(n, f"Color {n}", colours[n - 1], box) for n in extruders),
+                extruders,
+            )
+            for extruders in plates or [(1, 2)]
+        ],
+        colours,
+        directory / "model.3mf",
+        thumbnails=None,
+        model_name=model,
+    )
+    return output_id
+
+
+TWO_SPOOLS = {"slots": [{"slot_id": 1, "spool_id": 9}, {"slot_id": 2, "spool_id": 10}]}
 BOTH_02 = [{"nozzle_type": "HS00", "nozzle_diameter": "0.2"}] * 2
 #: Printer 1 as if it had no switch: each AMS wired to one side.
 WIRED = {
@@ -840,11 +872,7 @@ def test_a_multi_color_print_on_differing_nozzles_is_a_422_before_upload(
 ) -> None:
     """Queue item 108 itself: two colors, a 0.2 on the right and a 0.4 on the left. The
     slicer spreads the colors across both nozzles and nothing ScadBuddy writes stops it."""
-    output_id = prepared(client, model)
-    meta_path = paths.output_dir(model, output_id) / "meta.json"
-    meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    meta["colors"] = ["#FF0000", "#0000FF"]
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    output_id = two_colour_output(client, model, paths)
     upload = upload_route()
     run_routes()
     sliced = slice_routes()
@@ -981,3 +1009,152 @@ def test_the_run_reads_the_printer_status_once(client: TestClient, model: str) -
 
     assert response.status_code == 200, response.text
     assert status.call_count == 1
+
+
+@respx.mock
+def test_a_single_nozzle_printer_prints_a_multi_color_model(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Review of #538: an X1C, P1S or A1 with an AMS prints every colour through its one
+    nozzle; Bambuddy reports an empty second nozzle for it."""
+    output_id = two_colour_output(client, model, paths)
+    upload = upload_route()
+    run_routes()
+    _status(
+        nozzles=[
+            {"nozzle_type": "HS00", "nozzle_diameter": "0.2"},
+            {"nozzle_type": "", "nozzle_diameter": ""},
+        ],
+        ams_extruder_map={"0": 0, "1": 0},
+        ams_switch_inlet={},
+        fila_switch=None,
+    )
+    slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={**body(), "filament_plan": TWO_SPOOLS}
+    )
+
+    assert response.status_code == 200, response.text
+    assert upload.called
+    assert "side-unknown" not in {warning["kind"] for warning in response.json()["warnings"]}
+
+
+@respx.mock
+def test_a_dual_printer_with_one_nozzle_unreported_warns_rather_than_refuses(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    output_id = two_colour_output(client, model, paths)
+    upload_route()
+    run_routes()
+    _status(
+        nozzles=[
+            {"nozzle_type": "HS00", "nozzle_diameter": "0.2"},
+            {"nozzle_type": "HH01", "nozzle_diameter": ""},
+        ]
+    )
+    slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={**body(), "filament_plan": TWO_SPOOLS}
+    )
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
+    assert "didn't report the left one" in warning["message"]
+
+
+@respx.mock
+def test_a_one_color_plate_of_a_multi_color_model_prints_on_differing_nozzles(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """Review of #538: the plate printed decides, not the model. Its one filament goes
+    to either nozzle, so the run warns that the slicer picks rather than refusing."""
+    output_id = two_colour_output(client, model, paths, (1,))
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={**body(), "filament_plan": TWO_SPOOLS}
+    )
+
+    assert response.status_code == 200, response.text
+    [warning] = [w for w in response.json()["warnings"] if w["kind"] == "side-unknown"]
+    assert warning["message"].startswith("Only the right nozzle is 0.2 mm")
+
+
+@respx.mock
+def test_unreadable_spool_assignments_leave_the_sides_unknown_rather_than_fail(
+    client: TestClient, model: str
+) -> None:
+    """Review of #538: the pre-upload read tolerates ``/inventory/assignments`` failing
+    as it does the status; the filament read after the upload still gets it."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    _status(**WIRED)
+    assignments = respx.get(f"{API}/inventory/assignments").mock(
+        side_effect=[
+            httpx.Response(503),
+            *[httpx.Response(200, json=recording("inventory-assignments.json"))] * 4,
+        ]
+    )
+    slice_routes()
+    queue_route()
+
+    # Spool 10 is wired to the left's 0.4, which a readable assignment would refuse.
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=on_spool(10))
+
+    assert response.status_code == 200, response.text
+    assert assignments.call_count >= 2
+
+
+@respx.mock
+def test_an_unreadable_status_skips_the_spool_assignments(client: TestClient, model: str) -> None:
+    """No status, no side can be told, so the pre-upload read isn't made."""
+    output_id = prepared(client, model)
+    upload_route()
+    run_routes()
+    respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(503))
+    assignments = respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    slice_routes()
+    queue_route()
+
+    response = client.post(f"/api/v1/print/outputs/{output_id}/run", json=on_spool(10))
+
+    assert response.status_code == 200, response.text
+    # Only the plate's filament read after the upload.
+    assert assignments.call_count == 1
+
+
+@respx.mock
+def test_all_plates_with_a_later_plates_spool_on_the_wrong_side_is_a_422_before_upload(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """claude-review on #538: slot 2 is used only by plate 2, and its spool is wired to
+    the left's 0.4. Printing every plate checks it before anything is uploaded."""
+    output_id = two_colour_output(client, model, paths, (1,), (2,))
+    upload = upload_route()
+    printers_route()
+    h2c_presets()
+    spool_preset_routes()
+    hardware_routes()
+    split_plates_routes()
+    _status(**WIRED)
+    sliced = slice_routes()
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/run",
+        json=run_request(all_plates=True, filament_plan=TWO_SPOOLS),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["detail"].startswith("Slot 2's spool (AMS 2, left) is on the 0.4 mm")
+    assert not upload.called
+    assert not sliced.called

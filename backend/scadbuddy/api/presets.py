@@ -28,7 +28,6 @@ from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.presets import (
     MAX_PRESET_NAME,
     TEMPLATE_ID_PREFIX,
-    InvalidPresetsFileError,
     ParamPreset,
     ParamPresetCreate,
     ParamPresetDuplicate,
@@ -71,10 +70,6 @@ async def _require_valid(
     )
 
 
-def _unreadable(error: InvalidPresetsFileError) -> ApiError:
-    return ApiError(status.HTTP_409_CONFLICT, str(error))
-
-
 def _taken(slug: str, name: str) -> ApiError:
     return ApiError(
         status.HTTP_409_CONFLICT, f"{slug!r} already has a preset named {name!r}", name=name
@@ -106,10 +101,7 @@ def _require_saved(slug: str, preset_id: str) -> None:
 )
 def list_presets(slug: SlugPath, catalogue: CatalogueDep, presets: PresetsDep) -> list[ParamPreset]:
     require_model_exists(catalogue, slug)
-    try:
-        return presets.presets(slug)
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
+    return presets.presets(slug)
 
 
 @router.post(
@@ -151,8 +143,6 @@ async def create_preset(
         raise _taken(slug, body.name) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.post(
@@ -185,8 +175,6 @@ async def duplicate_preset(
         source = await asyncio.to_thread(presets.find, slug, preset_id)
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
     await _require_valid(
         slug,
         source.params,
@@ -203,8 +191,6 @@ async def duplicate_preset(
         raise _taken(slug, body.name) from None
     except TooManyPresetsError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.patch(
@@ -246,8 +232,6 @@ async def update_preset(
         raise _missing(slug, preset_id) from None
     except PresetExistsError:
         raise _taken(slug, body.name or "") from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
 
 
 @router.delete(
@@ -265,6 +249,4 @@ def delete_preset(
         presets.delete(slug, preset_id)
     except PresetNotFoundError:
         raise _missing(slug, preset_id) from None
-    except InvalidPresetsFileError as error:
-        raise _unreadable(error) from None
     return Response(status_code=status.HTTP_204_NO_CONTENT)

@@ -70,14 +70,9 @@ def frontend(tmp_path: Path) -> Path:
 
 
 def test_the_spa_is_served_with_a_fallback_for_client_routes(
-    frontend: Path, data_dir: Path, seed_dir: Path, fake_openscad: str
+    frontend: Path, settings: Settings
 ) -> None:
-    settings = Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=frontend,
-    )
+    settings = settings.model_copy(update={"frontend_dir": frontend})
     with TestClient(create_app(settings)) as client:
         assert client.get("/").text == INDEX
         assert client.get("/assets/app.js").status_code == 200
