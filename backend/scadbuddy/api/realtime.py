@@ -89,7 +89,9 @@ MAX_TOPICS = 64
 #: Inbound frames: a burst of RATE_BURST, refilled at RATE_PER_SECOND.
 RATE_BURST = 40
 RATE_PER_SECOND = 20.0
-#: The largest inbound frame read; subscribe frames are small.
+#: The largest inbound frame this route acts on; subscribe frames are small. The
+#: server refuses anything over ``--ws-max-size`` (the Dockerfile's CMD, 8 MiB, shared
+#: with the LSP bridge's whole-source messages) before it reaches here.
 MAX_FRAME_CHARS = 16_384
 
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "[::1]", "::1"})

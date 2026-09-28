@@ -119,20 +119,20 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
         <div className="ml-auto flex items-center gap-2">
           <LiveUpdatesIndicator />
           {ai.available && (
-          <button
-            ref={toggleButton}
-            type="button"
-            onClick={toggle}
-            aria-expanded={open}
-            aria-controls={mounted ? PANEL_ID : undefined}
-            aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
-            title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})`}
-            className={`rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
-              open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
-            }`}
-          >
-            Assistant
-          </button>
+            <button
+              ref={toggleButton}
+              type="button"
+              onClick={toggle}
+              aria-expanded={open}
+              aria-controls={mounted ? PANEL_ID : undefined}
+              aria-keyshortcuts={ASSISTANT_SHORTCUT_ARIA}
+              title={`Assistant (${ASSISTANT_SHORTCUT_LABEL})`}
+              className={`rounded-[6px] px-2.5 py-1 text-[13px] transition-colors ${
+                open ? 'bg-surface-3 text-ink' : 'text-muted hover:bg-surface-2 hover:text-ink'
+              }`}
+            >
+              Assistant
+            </button>
           )}
         </div>
       </header>
