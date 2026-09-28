@@ -6,6 +6,11 @@ export function printPath(archiveId: number): string {
   return `/prints/${archiveId}`
 }
 
+/** A printer Bambuddy gave no name for. */
+export function printerLabel(id: number): string {
+  return `Printer ${id}`
+}
+
 /** What a history item names a print by: its output's name, else its archive. */
 export function printLabel(print: Pick<PrintSummary, 'archive_id' | 'output_name'>): string {
   return print.output_name ?? `Print #${print.archive_id}`

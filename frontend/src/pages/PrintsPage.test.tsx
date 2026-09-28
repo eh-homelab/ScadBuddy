@@ -73,11 +73,26 @@ describe('PrintsPage (#310): the global print history', () => {
     const done = await item(35)
     expect(done).toHaveTextContent('1h 47m')
     expect(done).toHaveTextContent('16.4 g')
-    expect(done).toHaveTextContent('Printer 1')
+    expect(done).toHaveTextContent('3DP-31B-598')
+    expect(done).not.toHaveTextContent('Printer 1')
     expect(within(done).getByLabelText('Has a timelapse')).toBeInTheDocument()
     expect(within(done).getByText('name')).toBeInTheDocument()
     expect(within(done).getByText('Reagan', { selector: 'dd' })).toBeInTheDocument()
     expect(within(await item(36)).queryByLabelText('Has a timelapse')).not.toBeInTheDocument()
+  })
+
+  it('names the printer, and falls back to its id where Bambuddy gave no name', async () => {
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({
+          items: [{ ...summaryOf(35), printer_id: 3, printer_name: null }],
+          next_cursor: null,
+        } satisfies PrintPage),
+      ),
+    )
+    render('/prints?printer=3')
+    expect(await item(35)).toHaveTextContent('Printer 3')
+    expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: 'Printer 3' })).toHaveValue('3')
   })
 
   it('names the attachments a print has', async () => {
@@ -105,6 +120,7 @@ describe('PrintsPage (#310): the global print history', () => {
     const { user } = render('/prints?printer=2')
     await waitFor(async () => expect(await shown()).toEqual(['37']))
     expect(screen.getByLabelText('Printer')).toHaveValue('2')
+    expect(within(screen.getByLabelText('Printer')).getByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
 
     await user.selectOptions(screen.getByLabelText('Printer'), '')
     await waitFor(async () => expect(await shown()).toHaveLength(4))
@@ -248,7 +264,9 @@ describe('PrintsPage (#310): the global print history', () => {
     render()
     const printing = await item(37)
     expect(await within(printing).findByText('Layer 42 of 180')).toBeInTheDocument()
-    expect(printing).toHaveTextContent('3DP-31B-598')
+    // The archive's printer, named once: the progress read's is only a fallback.
+    expect(printing).toHaveTextContent('3DP-H2C-042')
+    expect(printing).not.toHaveTextContent('3DP-31B-598')
   })
 })
 

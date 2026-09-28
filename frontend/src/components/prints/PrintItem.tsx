@@ -4,7 +4,7 @@ import type { PrintSummary } from '../../api/types'
 import { formatDuration, formatValue } from '../../lib/format'
 import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
-import { printLabel, printPath } from './prints'
+import { printerLabel, printLabel, printPath } from './prints'
 import { PrintStatus } from './PrintStatus'
 
 /** How many changed parameters an item lists before "+N more". */
@@ -52,7 +52,7 @@ export function PrintItem({ print, view, templateName, onOpenMedia }: Props) {
         </div>
         {templateName && <p className="mt-0.5 truncate text-[12px] text-muted">{templateName}</p>}
         <Facts print={print} />
-        {print.status === 'printing' && <PrintingNow outputId={print.output_id} />}
+        {print.status === 'printing' && <PrintingNow outputId={print.output_id} named={print.printer_name !== null} />}
         <ParamsDiff diff={print.params_diff} />
       </div>
     </li>
@@ -129,7 +129,7 @@ function Cover({
 function Facts({ print }: { print: PrintSummary }) {
   const when = print.started_at ?? print.completed_at
   const facts = [
-    print.printer_id !== null ? `Printer ${print.printer_id}` : null,
+    print.printer_name ?? (print.printer_id !== null ? printerLabel(print.printer_id) : null),
     print.actual_time_seconds !== null ? formatDuration(print.actual_time_seconds) : null,
     print.filament_used_grams !== null ? `${print.filament_used_grams.toFixed(1)} g` : null,
     print.run_count > 1 ? `${print.run_count} runs` : null,
@@ -154,16 +154,18 @@ function Facts({ print }: { print: PrintSummary }) {
  * `print:<output id>`. That read follows the output's latest send, which is this print
  * while it is the one printing.
  */
-function PrintingNow({ outputId }: { outputId: string }) {
+function PrintingNow({ outputId, named }: { outputId: string; named: boolean }) {
   const { data } = useAsync(() => api.getPrintProgress(outputId), [outputId], [`print:${outputId}`])
   const copies = data?.copies_detail ?? []
   const copy = copies.find((c) => c.stage === 'running') ?? copies[0]
   if (!copy) return null
   const text = copy.message ?? copy.waiting_reason
-  if (!copy.printer_name && !text) return null
+  // The list names the archive's printer; the read's is only a fallback.
+  const printer = named ? null : copy.printer_name
+  if (!printer && !text) return null
   return (
     <p aria-live="polite" className="mt-1 flex flex-wrap gap-x-2 text-[12px] text-ink">
-      {copy.printer_name && <span className="text-muted">{copy.printer_name}</span>}
+      {printer && <span className="text-muted">{printer}</span>}
       {text && <span>{text}</span>}
     </p>
   )

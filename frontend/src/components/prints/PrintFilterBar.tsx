@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useLatest } from '../../agent/useAgentHandlers'
 import { clearPrintFilters, isFiltered, type PrintsQuery, type PrintsView } from '../../lib/printsQuery'
 import { Button } from '../ui/Button'
+import { printerLabel } from './prints'
 import { STATUS_LABELS } from './status'
 
 const SEARCH_DEBOUNCE_MS = 250
@@ -17,8 +18,9 @@ interface Props {
   onChange: (next: PrintsQuery, options?: { replace?: boolean }) => void
   /** The template picker's choices; absent on a template's own Prints tab. */
   templates?: Array<{ slug: string; name: string }>
-  /** Printer ids to offer, besides the one selected. */
-  printers: number[]
+  /** Printers to offer by id, with Bambuddy's name where it gave one, besides the one
+   * selected. */
+  printers: Map<number, string | null>
 }
 
 /**
@@ -60,7 +62,7 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
     onChange(merged)
   }
 
-  const printerIds = [...new Set([...printers, ...(query.printer ? [Number(query.printer)] : [])])].sort(
+  const printerIds = [...new Set([...printers.keys(), ...(query.printer ? [Number(query.printer)] : [])])].sort(
     (a, b) => a - b,
   )
   const statuses = Object.keys(STATUS_LABELS)
@@ -143,7 +145,7 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
             <option value="">Any printer</option>
             {printerIds.map((id) => (
               <option key={id} value={String(id)}>
-                Printer {id}
+                {printers.get(id) ?? printerLabel(id)}
               </option>
             ))}
           </select>

@@ -144,10 +144,14 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     )
   }
 
-  const printers = useMemo(
-    () => [...new Set(pages.items.flatMap((item) => (item.printer_id === null ? [] : [item.printer_id])))],
-    [pages.items],
-  )
+  // Each printer seen, by id, named by the first print that has its name.
+  const printers = useMemo(() => {
+    const seen = new Map<number, string | null>()
+    for (const { printer_id: id, printer_name: name } of pages.items) {
+      if (id !== null && !seen.get(id)) seen.set(id, name)
+    }
+    return seen
+  }, [pages.items])
   const templateNames = useMemo(
     () => new Map((templates.data ?? []).map((model) => [model.slug, model.name])),
     [templates.data],
