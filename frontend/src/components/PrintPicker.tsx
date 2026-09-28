@@ -1,13 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type {
+  ChoicesView,
   FilamentOptions,
-  Output,
+  NozzleChoice,
   OutputPlate,
-  PipelineReport,
-  PipelineChoices,
-  PipelineView,
+  Output,
+  PresetRef,
+  PrintChoices,
   PrintOptions,
   PrintOptionsState,
   PrintRunRequest,
@@ -17,60 +18,51 @@ import type {
 import { openExternal } from '../lib/embed'
 import { seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
-import { eligibilityIssues, verdictFor, type Verdict } from '../lib/problems'
 import { usePrintProgress } from '../lib/usePrintProgress'
-import { FilamentPicker } from './FilamentPicker'
+import { FilamentPicker, WarningList } from './FilamentPicker'
+import { NozzleStep } from './print/NozzleStep'
+import { PlateStep } from './print/PlateStep'
+import { QualityStep } from './print/QualityStep'
 import { PrintOptionsDisclosure } from './PrintOptionsDisclosure'
 import { PrintProgressPanel } from './PrintProgressPanel'
-import { NewPipelineForm } from './NewPipelineForm'
 import { ProjectPicker } from './ProjectPicker'
 import { Button } from './ui/Button'
 import { Dialog } from './ui/Dialog'
 import { Spinner } from './ui/Spinner'
 
 /**
- * The print picker (#86): choose one of Bambuddy's slicer pipelines — or build one — and
- * run it for this output.
+ * The print dialog, spool-first (docs/superpowers/specs/2026-09-27-spool-first-print-design.md).
  *
- * Three things about Bambuddy's model shape this panel:
+ * You choose what you actually think about — the spools from the inventory, the nozzle
+ * size, a quality tier and the plate — and ScadBuddy derives every Bambu preset from
+ * those choices server-side, then slices and queues through Bambuddy. There are no
+ * slicer pipelines here any more; they stay in Bambuddy untouched.
  *
- * - Eligibility is judged against an **uploaded library file**, so opening the panel
- *   uploads the 3MF (once — an output is immutable) and then asks each pipeline. An
- *   ineligible answer is a 200 carrying the report, so a row can be greyed out with its
- *   reasons rather than blowing up on Run.
- * - A pipeline's **target** is either one printer or a printer *class*. Where it is a
- *   class with more than one printer, the panel asks which printer, because that is the
- *   only way to know whose `printer_reports` entry to show.
- * - `PipelineRunRequest` carries **no printer**, so the chosen printer scopes what is
- *   *shown*; Bambuddy still fans out by the pipeline's own `fanout_strategy` and reports
- *   the printer per copy in `run.jobs[]`.
+ * - One read, `GET /print/outputs/{id}/choices`, opens the dialog: printers, installed
+ *   nozzles, tiers and processes per size, plate types with the one last printed on,
+ *   the filament step, and what this model last printed with (#78).
+ * - One write, `POST /print/outputs/{id}/run`, prints. A 422 is the resolver refusing a
+ *   combination (an unpicked slot, no process, no preset for a spool at this size); its
+ *   `detail` is shown above Print and the dialog stays open.
+ * - Simple mode offers the tiers; Advanced adds the full process list, per-side flow and
+ *   a per-slot filament preset override.
  *
- * On top of that it carries the spools per slot (#87), the rest of `PrintQueueItemCreate`
- * as the options disclosure (#88), and follows the run to completion (#89). It opens on
- * what this model last printed with — pipeline, class printer and spools (#78).
- *
- * The plate is chosen here too (#83): its type, from those the printer's Bambu Studio
- * profile takes, remembered per printer; and, for a 3MF with more than one, which plate.
- * Neither rides on a pipeline run, so either one slices and queues.
+ * Around that it keeps what the send bar's print already had: the options disclosure
+ * (#88), the project (#79), copies with the remembered quantity (#124/#145), which plate
+ * of a multi-plate 3MF (#83), and following the run to completion (#89).
  */
 
 const MAX_COPIES = 50
 
-function targetLabel(pipeline: PipelineView): string {
-  if (pipeline.target_kind === 'specific_printer') {
-    return pipeline.target_printer_name ?? `printer #${pipeline.target_printer_id ?? '?'}`
-  }
-  return pipeline.target_model_class ? `any ${pipeline.target_model_class}` : 'any printer'
-}
+type Tier = NonNullable<PrintChoices['tier']>
 
-function presetSummary(pipeline: PipelineView): string {
-  const names = [
-    pipeline.process_preset_name ?? pipeline.process_preset?.id,
-    ...(pipeline.filament_preset_names ?? []).map(
-      (name, slot) => name ?? pipeline.filament_presets?.[slot]?.id,
-    ),
-  ].filter(Boolean)
-  return names.join(' · ')
+const DEFAULT_NOZZLES: NozzleChoice[] = [
+  { size: '0.4', flow: 'standard' },
+  { size: '0.4', flow: 'standard' },
+]
+
+function refKey(ref: PresetRef): string {
+  return `${ref.source}:${ref.id}`
 }
 
 interface Props {
@@ -84,78 +76,55 @@ interface Props {
 }
 
 export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
-  const [choices, setChoices] = useState<PipelineChoices | null>(null)
-  // Keyed by pipeline id, and holding the whole row: a pipeline Bambuddy could not judge
-  // arrives with `error` set and no `report`, which is neither ready nor blocked.
-  const [reports, setReports] = useState<Record<number, PipelineReport>>({})
-  const [selected, setSelected] = useState<number | null>(null)
-  const [printerId, setPrinterId] = useState<number | null>(null)
+  const [choices, setChoices] = useState<ChoicesView | null>(null)
+  /** The printer asked for; `null` lets the server open on the remembered one. */
+  const [askedPrinter, setAskedPrinter] = useState<number | null>(null)
+  const [nozzles, setNozzles] = useState<NozzleChoice[]>(DEFAULT_NOZZLES)
+  const [tier, setTier] = useState<Tier | null>('standard')
+  const [processName, setProcessName] = useState<string | null>(null)
+  const [bedType, setBedType] = useState<string | null>(null)
+  const [advanced, setAdvanced] = useState(false)
+  /** Advanced only — a filament preset per slot id, in place of the spool's own. */
+  const [overrides, setOverrides] = useState<Record<string, PresetRef>>({})
+
+  /** #87 — the inventory behind the filament picker, and the plan built on it. */
+  const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
+  const [plan, setPlan] = useState<SlotChoice[]>([])
+
   // null until the user sets it, so a remembered quantity is not overridden by the
   // box's own starting value (#124).
   const [copies, setCopies] = useState<number | null>(null)
-  /**
-   * #145 — the remembered options, read for the pipeline about to run so the box can say
-   * what an unset Copies will actually queue. The same GET the send bar's disclosure
-   * uses; the run resolves the same layers server-side.
-   */
+  /** #145 — the remembered options, so the box can say what an unset Copies queues. */
   const [remembered, setRemembered] = useState<PrintOptionsState | null>(null)
-  /**
-   * #88 — this print's own overrides from the options disclosure, as on the send bar.
-   * Everything but `quantity`: that one is `copies`, so the Copies box and the Quantity
-   * row stay one value rather than two that can disagree.
-   */
+  /** #88 — this print's overrides, all but `quantity`, which is `copies`. */
   const [options, setOptions] = useState<PrintOptions>({})
-  const [asDefault, setAsDefault] = useState(false)
-  const [force, setForce] = useState(false)
-  const [creating, setCreating] = useState(false)
-  /** #87 — the inventory behind the filament picker, and the plan built on it. */
-  const [filaments, setFilaments] = useState<FilamentOptions | null>(null)
-  const [filamentError, setFilamentError] = useState<string | null>(null)
-  const [plan, setPlan] = useState<SlotChoice[]>([])
-  const [exact, setExact] = useState(false)
-  /**
-   * #79 — the Bambuddy project this print is filed under. Held here rather than in the
-   * picker because it is the run request that carries it; the picker owns the list, the
-   * create and the per-model memory.
-   */
+  /** #79 — the Bambuddy project this print is filed under. */
   const [projectId, setProjectId] = useState<number | null>(null)
-  /**
-   * #83 — the plate type to slice for, `null` for the pipeline's own when it names none;
-   * and the output's plates with the one (or all) to print. ScadBuddy's own renders are
-   * one plate, so the plate question is only asked of a 3MF that has more.
-   */
-  const [bedType, setBedType] = useState<string | null>(null)
+  /** #83 — the output's plates, and the one (or all) to print. */
   const [plates, setPlates] = useState<OutputPlate[]>([])
   const [plate, setPlate] = useState<number | 'all'>(1)
 
   const [loading, setLoading] = useState(false)
-  const [checking, setChecking] = useState(false)
+  const [loadError, setLoadError] = useState<string | null>(null)
+  const [filamentError, setFilamentError] = useState<string | null>(null)
   const [running, setRunning] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [runIssues, setRunIssues] = useState<string[]>([])
+  /** A refused run, shown above Print. */
+  const [runError, setRunError] = useState<string | null>(null)
+  /** Only a 422 — these choices cannot resolve — keeps Print disabled until one changes. */
+  const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
 
   const outputId = output?.id
   /**
-   * #89 — follow only the print this dialog just started. Enabled on `result` rather
-   * than on `open` so opening the picker on an output someone printed last week does
-   * not start polling a run nobody is watching; the hook stops on `settled` and on the
-   * `null` an unprinted output answers with.
+   * #89 — follow only the print this dialog just started, so opening the dialog on an
+   * output printed last week does not start polling a run nobody is watching.
    */
   const { progress, polling } = usePrintProgress(outputId, open && result !== null)
 
   /**
-   * #79 — file the finished print under its project.
-   *
-   * This cannot happen when the run starts. A pipeline run's `jobs[].queue_entry_id` is
-   * null when Bambuddy answers 202, and an archive only exists once a print has
-   * finished — so the ids only become known through the progress read (#89), which is
-   * why `POST /print/outputs/{id}/project` is a call of its own rather than part of the
-   * run. On the slice-and-queue route the queue item already carries `project_id`, and
-   * attaching the same id twice is Bambuddy's to dedupe, so this runs for both routes.
-   *
-   * Once per settled print, tracked by a ref rather than by state: the guard must not
-   * itself re-render and re-run the effect.
+   * #79 — file the finished print under its project, once the progress read (#89) has
+   * the queue entries. Best effort, once per settled print, guarded by a ref so the
+   * guard itself does not re-render and re-run the effect.
    */
   const attached = useRef<string | null>(null)
   useEffect(() => {
@@ -167,81 +136,70 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     const key = `${outputId}:${projectId}:${entries.join(',')}`
     if (attached.current === key) return
     attached.current = key
-    // Best effort on purpose: the print has already been queued, and failing to file it
-    // must not turn a successful send into an error on the panel.
     void api
       .attachToProject(outputId, { project_id: projectId, queue_item_ids: entries })
       .catch(() => {
         attached.current = null
       })
   }, [outputId, projectId, progress])
+
   /**
-   * Supersedes an in-flight load or check. The panel is not unmounted when it closes —
-   * `ActionBar` renders it always and `Dialog` only drops its children — so a request
-   * started for one output can still resolve after the panel has been reopened for
-   * another, and would otherwise overwrite the newer answer with the older one.
+   * Supersedes an in-flight read. The dialog is not unmounted when it closes, so a read
+   * started for one output or printer can resolve after another has been asked for.
    */
   const attempt = useRef(0)
-
-  /** ``prefer`` selects a pipeline the caller has just created. */
-  const load = useCallback(async (prefer?: number) => {
+  /**
+   * Spec §7 — the nozzles, tier and process this model last printed with are applied
+   * once per open, on the first read: a later read for another printer must not undo
+   * what the user has changed since.
+   */
+  const seeded = useRef(false)
+  function seedDialog(last: ChoicesView['model_choices']) {
+    const remembered = last?.nozzles ?? []
+    const nextNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+    const nextProcess = remembered.length > 0 ? (last?.process_name ?? null) : null
+    const nextTier = nextProcess ? null : (last?.tier ?? 'standard')
+    setNozzles(nextNozzles)
+    setTier(nextTier)
+    setProcessName(nextProcess)
+    // A named process and per-side flow are Advanced choices; opening in Simple would
+    // send them unseen.
+    setAdvanced(nextProcess !== null || nextNozzles.some((n) => n.flow === 'high_flow'))
+  }
+  useEffect(() => {
+    if (!open || !outputId) return
     const token = (attempt.current += 1)
     setLoading(true)
-    setError(null)
-    try {
-      const next = await api.getModelPipelines(slug)
-      if (token !== attempt.current) return
-      setChoices(next)
-      const ids = (next.pipelines ?? []).map((pipeline) => pipeline.id)
-      setSelected((current) => {
-        if (prefer !== undefined && ids.includes(prefer)) return prefer
-        if (current !== null && ids.includes(current)) return current
-        if (next.default_pipeline_id && ids.includes(next.default_pipeline_id)) {
-          return next.default_pipeline_id
+    setLoadError(null)
+    api
+      .getChoices(outputId, askedPrinter)
+      .then((next) => {
+        if (token !== attempt.current) return
+        setChoices(next)
+        // The server already applied last archive → remembered → default.
+        setBedType(next.bed_type)
+        if (!seeded.current) {
+          seeded.current = true
+          seedDialog(next.model_choices)
         }
-        return ids[0] ?? null
       })
-    } catch (cause) {
-      if (token !== attempt.current) return
-      setError(cause instanceof ApiError ? cause.detail : 'Could not list the pipelines.')
-    } finally {
-      if (token === attempt.current) setLoading(false)
-    }
-  }, [slug])
+      .catch((cause: unknown) => {
+        if (token !== attempt.current) return
+        setChoices(null)
+        setLoadError(cause instanceof ApiError ? cause.detail : 'Could not read the print choices.')
+      })
+      .finally(() => {
+        if (token === attempt.current) setLoading(false)
+      })
+  }, [open, outputId, askedPrinter])
 
-  const check = useCallback(async () => {
-    if (!outputId) return
-    const token = attempt.current
-    setChecking(true)
-    try {
-      // This uploads the 3MF if Bambuddy has not got it: there is no eligibility answer
-      // before a library file exists.
-      const overview = await api.checkEligibility(outputId)
-      if (token !== attempt.current) return
-      setReports(
-        Object.fromEntries((overview.reports ?? []).map((entry) => [entry.pipeline_id, entry])),
-      )
-    } catch (cause) {
-      if (token !== attempt.current) return
-      setError(cause instanceof ApiError ? cause.detail : 'Could not check eligibility.')
-    } finally {
-      if (token === attempt.current) setChecking(false)
-    }
-  }, [outputId])
-
+  // One output's plates and overrides do not survive a change of output.
   useEffect(() => {
-    if (!open) return
-    void load().then(() => check())
-  }, [open, load, check])
-
-  // The reports describe one output's 3MF, so they do not survive a change of output. Nor
-  // do this print's option overrides, which the collapsed disclosure would not show, or
-  // its plates, which would stay on screen while the new output's load.
-  useEffect(() => {
-    setReports({})
     setOptions({})
     setPlate(1)
     setPlates([])
+    setOverrides({})
+    seeded.current = false
   }, [outputId])
 
   useEffect(() => {
@@ -257,149 +215,91 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     }
   }, [open, outputId])
 
-  /**
-   * The "make this the default" tick follows the selection: it means "the pipeline in view
-   * *is* this model's default", not "this model has one". Without that, opening the picker
-   * on a model that already has a default and switching pipelines for a single print would
-   * silently re-point the default at whatever was selected last. A toggle the user makes
-   * afterwards stands, because `asDefault` is not itself a dependency here.
-   */
-  useEffect(() => {
-    setAsDefault(selected !== null && selected === (choices?.model_pipeline_id ?? null))
-  }, [selected, choices])
-
-  const pipelines = choices?.pipelines ?? []
-  const current = pipelines.find((pipeline) => pipeline.id === selected)
-  const entry = selected === null ? undefined : reports[selected]
-  const report = entry?.report ?? undefined
-  // A class target with more than one printer is the case Bambuddy cannot answer for us.
-  const asksForPrinter = Boolean(
-    current && current.target_kind === 'printer_class' && (current.printer_ids ?? []).length > 1,
-  )
-  const derivedPrinterId = asksForPrinter ? printerId : (current?.printer_ids?.[0] ?? null)
-
-  /**
-   * #78 — a class target opens on the printer this model last printed it with, when that
-   * printer is still in the class; otherwise the question is asked again.
-   */
-  const rememberedPrinter = choices?.model_choices?.printer_id ?? null
-  useEffect(() => {
-    setPrinterId(
-      rememberedPrinter !== null && (current?.printer_ids ?? []).includes(rememberedPrinter)
-        ? rememberedPrinter
-        : null,
-    )
-  }, [current, rememberedPrinter])
-  /**
-   * The spools it last printed with, as a string so a reload of the same answer does not
-   * re-read the inventory.
-   */
-  const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
-  const verdict: Verdict | undefined = report ? verdictFor(report, derivedPrinterId) : undefined
-
-  /**
-   * #81 — the chosen printer's model, else the class a class-targeted pipeline names
-   * (every printer in it shares the plate). Reported only once a pipeline is in view, so
-   * the panel loading does not snap the preview back to the default plate.
-   */
-  const printerModel = current
-    ? ((choices?.printers ?? []).find((printer) => printer.id === derivedPrinterId)?.model ??
-      current.target_model_class ??
-      null)
-    : undefined
-  useEffect(() => {
-    if (printerModel !== undefined) onPrinterModel?.(printerModel)
-  }, [printerModel, onPrinterModel])
-
-  /**
-   * #83 — the plate this printer last printed on, while its profile still takes it; else
-   * the pipeline's own. Bambuddy's printer status reports no plate type, so ScadBuddy's
-   * memory is the only "detected" plate there is.
-   */
-  const pipelineBed = current?.bed_type ?? null
-  const rememberedBed =
-    derivedPrinterId === null
-      ? null
-      : (choices?.printer_bed_types?.[String(derivedPrinterId)] ?? null)
-  useEffect(() => {
-    const takes = (current?.bed_types ?? []).some((entry) => entry.value === rememberedBed)
-    setBedType(rememberedBed !== null && takes ? rememberedBed : (current?.bed_type ?? null))
-  }, [current, rememberedBed])
-  const bedTypes = current?.bed_types ?? []
-  const sendsBedType = bedType !== pipelineBed
-  const bedTypeTaken = bedType === null || bedTypes.some((entry) => entry.value === bedType)
-  // "All plates" picks its spools against plate 1 and the server applies that plan to
-  // every plate: a slot is a colour-numbered project filament (#180), the same colour on
-  // each plate. A slot only a later plate uses comes back as a warning naming the plate.
+  const printerId = choices?.printer_id ?? null
+  const printers = choices?.printers ?? []
+  const printer = printers.find((entry) => entry.id === printerId)
+  const size = nozzles[0]?.size ?? '0.4'
+  // One plan applies to every plate, a slot being the same color-numbered project
+  // filament on each (#180). "All plates" reads every plate's slots, so a slot only a
+  // later plate uses still gets a row (spec §2 step 1).
   const chosenPlate = plate === 'all' ? 1 : plate
+  const allPlates = plate === 'all'
+  const rememberedPlan = JSON.stringify(choices?.model_choices?.filament_plan ?? [])
 
   /**
-   * #87 — the inventory, read once a pipeline and (for a class target) a printer are
-   * settled. It needs the printer: `loaded` means "loaded in *this* machine", and a
-   * spool's reachability is a property of that printer's filament switcher, so asking
-   * before one is chosen would answer about the wrong hardware.
-   *
-   * Its own attempt counter rather than the panel's: `printerId` and `selected` change
-   * without touching `attempt`, so two reads can be in flight for the same output and
-   * the older one must not land last.
+   * The filament step: plate 1 is in the choices read already; another plate's slots
+   * are that plate's own, and all plates' are their union, so those are read for it.
    */
   const filamentAttempt = useRef(0)
-  const awaitingPrinter = asksForPrinter && printerId === null
-  // #78 — the pipeline's nozzle as the pipelines read already named it, so the server
-  // compares it with the mounted ones without reading the preset catalogue again.
-  const pipelineNozzle = current?.nozzle_diameter ?? null
   useEffect(() => {
-    if (!open || !outputId || selected === null || awaitingPrinter) {
-      setFilaments(null)
-      setPlan([])
-      // Cleared too: the message names an output and a printer, so leaving it up while
-      // the panel shows a different one attributes the failure to the wrong thing.
-      setFilamentError(null)
-      return
-    }
     const token = (filamentAttempt.current += 1)
     setFilamentError(null)
-    void (async () => {
-      try {
-        const next = await api.getFilaments(outputId, {
-          printerId: derivedPrinterId,
-          nozzleDiameter: pipelineNozzle,
-          plateId: chosenPlate,
-        })
-        if (token !== filamentAttempt.current) return
-        setFilaments(next)
-        setFilamentError(null)
-        // What this model last printed with seeds the selection, else the server's
-        // auto-match (#78); every slot stays editable.
-        setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
-        // A different printer makes the escalation mean something different — it names
-        // the machine the copies land on — so the consent is asked for again.
-        setExact(false)
-      } catch (cause) {
+    if (!choices || !outputId) {
+      setFilaments(null)
+      setPlan([])
+      return
+    }
+    const seed = (next: FilamentOptions) => {
+      setFilaments(next)
+      // What this model last printed with seeds the selection, else the server's
+      // auto-match (#78); every slot stays editable.
+      setPlan(seedPlan(next, JSON.parse(rememberedPlan) as SlotChoice[]))
+    }
+    if (chosenPlate === 1 && !allPlates) {
+      seed(choices.filaments)
+      return
+    }
+    api
+      .getFilaments(
+        outputId,
+        allPlates
+          ? { printerId: choices.printer_id ?? null, allPlates: true }
+          : { printerId: choices.printer_id ?? null, plateId: chosenPlate },
+      )
+      .then((next) => token === filamentAttempt.current && seed(next))
+      .catch((cause: unknown) => {
         if (token !== filamentAttempt.current) return
         setFilaments(null)
         setPlan([])
         setFilamentError(
           cause instanceof ApiError ? cause.detail : 'Could not read the filament inventory.',
         )
-      }
-    })()
-  }, [
-    open,
-    outputId,
-    selected,
-    derivedPrinterId,
-    awaitingPrinter,
-    rememberedPlan,
-    pipelineNozzle,
-    chosenPlate,
-  ])
+      })
+  }, [choices, outputId, chosenPlate, allPlates, rememberedPlan])
 
-  /**
-   * Whether the user has moved a slot off the server's suggestion. That is what makes
-   * sending a plan *meaningful*: re-sending the suggestion would escalate an otherwise
-   * ordinary pipeline run onto the slice-and-queue route for no gain.
-   */
+  /** #81 — the chosen printer's model, reported once the choices have landed. */
+  const printerModel = choices ? (printer?.model ?? null) : undefined
+  useEffect(() => {
+    if (printerModel !== undefined) onPrinterModel?.(printerModel)
+  }, [printerModel, onPrinterModel])
+
+  useEffect(() => {
+    if (!open) return
+    let live = true
+    api
+      .getPrintOptions()
+      .then((view) => live && setRemembered(view))
+      // Nothing to show is the pre-#145 behavior; the run still resolves it server-side.
+      .catch(() => live && setRemembered(null))
+    return () => {
+      live = false
+    }
+  }, [open, slug])
+
+  // A refused run was refused for *these* choices; any change is worth another try.
+  useEffect(() => {
+    setRunError(null)
+    setRefused(false)
+  }, [nozzles, tier, processName, bedType, plan, overrides, printerId, plate])
+
+  const rememberedCopies =
+    resolveOptions(
+      remembered?.global_options,
+      printerId === null ? undefined : remembered?.printers?.[String(printerId)],
+      remembered?.models?.[slug],
+    ).quantity ?? null
+  const effectiveCopies = copies ?? rememberedCopies ?? 1
+
   const suggested = filaments?.suggested ?? []
   const planChanged =
     plan.length !== suggested.length ||
@@ -407,162 +307,131 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       (choice) =>
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
-  const sendsPlan = filaments !== null && (exact || planChanged)
-
-  useEffect(() => {
-    if (!open || selected === null) return
-    let live = true
-    api
-      .getPrintOptions(slug, selected)
-      .then((view) => live && setRemembered(view))
-      // Nothing to show is the pre-#145 behaviour; the run still resolves it server-side.
-      .catch(() => live && setRemembered(null))
-    return () => {
-      live = false
-    }
-  }, [open, slug, selected])
-
-  // The per-printer scope keys on the printer the run names — only a plan names one —
-  // else the one the server resolved for this pipeline, exactly as the run does.
-  const scopePrinterId = sendsPlan ? derivedPrinterId : (remembered?.printer_id ?? null)
-  const rememberedCopies =
-    resolveOptions(
-      remembered?.global_options,
-      scopePrinterId === null ? undefined : remembered?.printers?.[String(scopePrinterId)],
-      remembered?.models?.[slug],
-    ).quantity ?? null
-  const effectiveCopies = copies ?? rememberedCopies ?? 1
-  // `force` is only offered once the issues have actually been shown.
-  const issuesShown = (verdict !== undefined && !verdict.ok) || runIssues.length > 0
-  const printers = (choices?.printers ?? []).filter((printer) =>
-    (current?.printer_ids ?? []).includes(printer.id),
-  )
-  /**
-   * A failure that hit *every* pipeline — a refused API key, an unreachable Bambuddy — is
-   * one problem, not one per row. Repeating it against each pipeline would read as three
-   * pipeline-specific faults and bury the actual cause.
-   */
-  const checked = pipelines.filter((pipeline) => reports[pipeline.id] !== undefined)
-  const everyCheckFailed =
-    checked.length > 0 && checked.every((pipeline) => !reports[pipeline.id]?.report)
-  const wholeCheckError = everyCheckFailed
-    ? (reports[checked[0]?.id ?? 0]?.error ?? 'Bambuddy gave no reason')
-    : null
 
   function close() {
-    // The picker remounts on the next open and re-seeds from the model's own project,
-    // but until that read lands the parent would still be holding the previous one.
     setProjectId(null)
     setOptions({})
-    setError(null)
-    setRunIssues([])
+    setRunError(null)
+    setRefused(false)
     setResult(null)
-    setForce(false)
-    setCreating(false)
+    setAskedPrinter(null)
+    setNozzles(DEFAULT_NOZZLES)
+    setTier('standard')
+    setProcessName(null)
+    setAdvanced(false)
+    setOverrides({})
+    seeded.current = false
     onClose()
   }
 
+  function changeNozzles(next: NozzleChoice[]) {
+    // A preset chosen for one size is not one the other size takes.
+    if (next[0]?.size !== size) {
+      setOverrides({})
+      setProcessName(null)
+      setTier((current) => current ?? 'standard')
+    }
+    setNozzles(next)
+  }
+
+  function toggleAdvanced() {
+    if (advanced) {
+      // Back to Simple: a flow, named process or preset override would be sent unseen.
+      setNozzles((current) => current.map((nozzle) => ({ ...nozzle, flow: 'standard' })))
+      setProcessName(null)
+      setTier((current) => current ?? 'standard')
+      setOverrides({})
+    }
+    setAdvanced(!advanced)
+  }
+
+  function setOverride(slotId: number, key: string) {
+    const ref = (choices?.filament_presets?.[size] ?? []).find((row) => refKey(row.ref) === key)
+    setOverrides((current) => {
+      const next = { ...current }
+      if (ref) next[String(slotId)] = ref.ref
+      else delete next[String(slotId)]
+      return next
+    })
+  }
+
   /**
-   * #78 — the last-used choices, which is what the picker opens on next time. The printer
-   * only where the picker asked for one, and the plan only where it is one: sending the
-   * suggestion is not a choice, and an unreadable inventory is no reason to forget the
-   * spools picked before. Written only when it differs, and only once the print has
-   * started — best effort, because a preference that fails to save must never stop or
-   * fail the print itself.
+   * #78 / spec §7 — what this model reopens on next time: the printer, the nozzles,
+   * tier and process, and the spools where they differ from the suggestion (re-sending
+   * the suggestion is not a choice). Best effort, and only once the print has started.
    */
   function rememberChoices() {
     const last = choices?.model_choices
     const next = {
-      printer_id: asksForPrinter ? printerId : (last?.printer_id ?? null),
-      filament_plan: filaments === null ? (last?.filament_plan ?? []) : sendsPlan ? plan : [],
+      printer_id: printerId,
+      filament_plan: planChanged ? plan : [],
+      nozzles,
+      tier,
+      process_name: processName,
     }
-    if (
-      next.printer_id === (last?.printer_id ?? null) &&
-      JSON.stringify(next.filament_plan) === rememberedPlan
-    ) {
-      return
+    const before = {
+      printer_id: last?.printer_id ?? null,
+      filament_plan: last?.filament_plan ?? [],
+      nozzles: last?.nozzles ?? [],
+      tier: last?.tier ?? null,
+      process_name: last?.process_name ?? null,
     }
-    // Ignored like the project attach above: the next open just falls back to the auto-match.
+    if (JSON.stringify(next) === JSON.stringify(before)) return
     void api.putModelChoices(slug, next).catch(() => undefined)
   }
 
-  /** #83 — the plate this printer now has on it, written the same best-effort way. */
+  /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
   function rememberBedType() {
-    if (derivedPrinterId === null || bedType === null || bedType === rememberedBed) return
-    void api.putPrinterBedType(derivedPrinterId, bedType).catch(() => undefined)
+    if (printerId === null || bedType === null) return
+    void api.putPrinterBedType(printerId, bedType).catch(() => undefined)
   }
 
   async function run() {
-    if (!outputId || selected === null) return
+    if (!outputId || !choices || bedType === null) return
     setRunning(true)
-    setError(null)
-    setRunIssues([])
+    setRunError(null)
+    setRefused(false)
     try {
-      // The stored default only moves on a real change of intent: ticking the box on a
-      // pipeline that is not already the default, or unticking it on the one that is.
-      // Printing something else once says nothing about what this model should default
-      // to, so neither switching pipelines nor leaving the box alone writes anything.
-      const stored = choices?.model_pipeline_id ?? null
-      const remember = async (pipelineId: number | null) => {
-        await api.putModelPipeline(slug, pipelineId)
-        // Functional, and never spread over a null: `selected` can only be non-null once
-        // `choices` has loaded, so this is unreachable today — but a spread of null would
-        // silently drop `pipelines` and `printers` and empty the list.
-        setChoices((current) =>
-          current ? { ...current, model_pipeline_id: pipelineId } : current,
-        )
-      }
-      if (asDefault && stored !== selected) await remember(selected)
-      else if (!asDefault && stored === selected) await remember(null)
       const body: PrintRunRequest = {
-        pipeline_id: selected,
+        printer_id: printerId,
+        filament_plan: { slots: plan, force_colour_match: false },
+        choices: {
+          nozzles,
+          tier,
+          process_name: processName,
+          bed_type: bedType,
+          filament_overrides: overrides,
+        },
         ...(copies === null ? {} : { copies }),
-        force,
         plate_id: chosenPlate,
         all_plates: plate === 'all',
         project_id: projectId,
         options,
       }
-      /**
-       * #87 — naming a printer or a filament plan is what escalates this off the
-       * pipeline route: `PipelineRunCreateRequest` can express neither, so the backend
-       * has to slice the library file and post queue entries instead. That changes
-       * which printer the copies land on, so it is only done when the user has actually
-       * asked — by moving a slot, or by ticking the box that says so.
-       */
-      if (sendsPlan) {
-        body.printer_id = derivedPrinterId
-        body.filament_plan = { slots: plan, force_colour_match: false }
-      }
-      /**
-       * #83 — a plate type other than the pipeline's is one the printer has on it, so it
-       * names that printer, the same escalation a plan makes.
-       */
-      if (sendsBedType) {
-        body.printer_id = derivedPrinterId
-        body.bed_type = bedType
-      }
-      const ran = await api.runPipeline(outputId, body)
+      const ran = await api.runPrint(outputId, body)
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // A 409 carries Bambuddy's report verbatim; list what blocked it so Run anyway is
-      // an informed choice rather than a shrug.
-      setRunIssues(cause instanceof ApiError ? eligibilityIssues(cause.problem) : [])
+      setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
+      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
+      setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
       setRunning(false)
     }
   }
+
+  const presetsForSize = choices?.filament_presets?.[size] ?? []
 
   return (
     <Dialog
       open={open}
       title="Print"
       description={
-        result || creating ? undefined : 'Bambuddy slices and queues this with the pipeline below.'
+        result
+          ? undefined
+          : 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
       onClose={close}
       footer={
@@ -573,7 +442,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
               Open in queue
             </Button>
           </>
-        ) : creating ? undefined : (
+        ) : (
           <>
             <Button onClick={close} disabled={running}>
               Cancel
@@ -581,12 +450,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
             <Button
               variant="primary"
               onClick={() => void run()}
-              disabled={running || selected === null || (asksForPrinter && printerId === null)}
-              data-testid="run-pipeline"
+              disabled={running || loading || !choices || refused}
+              data-testid="run-print"
               {...USER_ONLY}
             >
               {running && <Spinner />}
-              {force ? 'Run anyway' : 'Run'}
+              Print
             </Button>
           </>
         )
@@ -594,452 +463,275 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     >
       {result ? (
         <div className="space-y-2 text-[13px] text-ink">
-          {/* `run` is null on the slice-and-queue route — there is no pipeline run to
-              report there, only a slice job and the queue entries it produced. */}
-          {result.run && (
-            <>
-              <p>
-                Pipeline run <span className="sb-num">#{result.run.id}</span> started for{' '}
-                <span className="sb-num">{result.run.copies}</span>{' '}
-                {result.run.copies === 1 ? 'copy' : 'copies'}.
+          <div data-testid="queued-items">
+            <p>
+              Sliced and queued for {printer?.name ?? 'the printer you chose'} —{' '}
+              <span className="sb-num">{result.copies}</span>{' '}
+              {result.copies === 1 ? 'copy' : 'copies'} in{' '}
+              <span className="sb-num">{(result.queue_item_ids ?? []).length}</span>{' '}
+              {(result.queue_item_ids ?? []).length === 1 ? 'item' : 'items'}.
+            </p>
+            {(result.queue_item_ids ?? []).length > 0 && (
+              <ul className="mt-1 space-y-0.5 text-[12px] text-muted">
+                {(result.queue_item_ids ?? []).map((itemId) => (
+                  <li key={itemId}>
+                    Queue <span className="sb-num">#{itemId}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {result.slice_job_id !== null && result.slice_job_id !== undefined && (
+              <p className="mt-1 text-[12px] text-faint">
+                Slice job <span className="sb-num">#{result.slice_job_id}</span>.
               </p>
-              {(result.run.jobs ?? []).length > 0 && (
-                <ul className="space-y-0.5 text-[12px] text-muted" data-testid="run-jobs">
-                  {(result.run.jobs ?? []).map((job) => (
-                    <li key={job.id}>
-                      Copy <span className="sb-num">{job.copy_index + 1}</span> on{' '}
-                      {job.assigned_printer_name ?? 'a printer Bambuddy picks'}
-                      {job.queue_entry_id ? (
-                        <>
-                          {' '}
-                          as queue <span className="sb-num">#{job.queue_entry_id}</span>
-                        </>
-                      ) : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {result.run.eligibility_overridden && (
-                <p className="text-[12px] text-warn">
-                  Started with the eligibility check overridden.
-                </p>
-              )}
-            </>
-          )}
-          {result.route === 'slice_queue' && (
-            <div data-testid="queued-items">
-              <p>
-                Sliced and queued for{' '}
-                {filaments?.printer_name ?? 'the printer you chose'} —{' '}
-                <span className="sb-num">{result.copies}</span>{' '}
-                {result.copies === 1 ? 'copy' : 'copies'} in{' '}
-                <span className="sb-num">{(result.queue_item_ids ?? []).length}</span>{' '}
-                {(result.queue_item_ids ?? []).length === 1 ? 'item' : 'items'}.
-              </p>
-              {(result.queue_item_ids ?? []).length > 0 && (
-                <ul className="mt-1 space-y-0.5 text-[12px] text-muted">
-                  {(result.queue_item_ids ?? []).map((itemId) => (
-                    <li key={itemId}>
-                      Queue <span className="sb-num">#{itemId}</span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-              {result.slice_job_id !== null && result.slice_job_id !== undefined && (
-                <p className="mt-1 text-[12px] text-faint">
-                  Slice job <span className="sb-num">#{result.slice_job_id}</span>.
-                </p>
-              )}
-            </div>
-          )}
-          {(result.warnings ?? []).length > 0 && (
-            <ul className="space-y-0.5 text-[12px] text-muted" data-testid="run-warnings">
-              {(result.warnings ?? []).map((warning, index) => (
-                <li key={`${warning.kind}-${index}`}>{warning.message}</li>
-              ))}
-            </ul>
-          )}
+            )}
+          </div>
+          <WarningList warnings={result.warnings ?? []} testId="run-warnings" />
           <PrintProgressPanel progress={progress} polling={polling} />
         </div>
-      ) : creating ? (
-        <NewPipelineForm
-          colors={output?.colors ?? []}
-          onCancel={() => setCreating(false)}
-          onCreated={(pipeline) => {
-            setCreating(false)
-            setSelected(pipeline.id)
-            void load(pipeline.id).then(() => check())
-          }}
-        />
       ) : (
         <>
-          {loading && (
+          {loading && !choices && (
             <p className="flex items-center gap-2 text-[13px] text-muted">
-              <Spinner /> Loading pipelines
+              <Spinner /> Reading the printer and the inventory
             </p>
           )}
 
-          {!loading && pipelines.length === 0 && (
-            <p className="text-[13px] text-muted">
-              Bambuddy has no slicer pipelines yet. Create one and ScadBuddy will remember it
-              for this model.
+          {loadError && (
+            <p role="alert" className="text-[13px] text-warn">
+              {loadError}
             </p>
           )}
 
-          {pipelines.length > 0 && (
-            <fieldset>
-              <legend className="sr-only">Pipeline</legend>
-              <ul className="space-y-2" data-testid="pipeline-list">
-                {pipelines.map((pipeline) => {
-                  const own = reports[pipeline.id]
-                  // The selected row is narrowed to the printer in play; the others are
-                  // shown as the class as a whole, since no printer has been chosen for them.
-                  const rowVerdict = own?.report
-                    ? verdictFor(own.report, pipeline.id === selected ? derivedPrinterId : null)
-                    : undefined
-                  return (
-                    <li key={pipeline.id}>
+          {choices && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-3">
+                <span id="print-advanced" className="text-[13px] text-ink">
+                  Advanced
+                </span>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={advanced}
+                  aria-labelledby="print-advanced"
+                  aria-describedby="print-advanced-help"
+                  onClick={toggleAdvanced}
+                  className={`relative h-5 w-9 shrink-0 rounded-full border transition-colors ${
+                    advanced ? 'border-accent bg-accent' : 'border-line-strong bg-surface-3'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-[2px] size-3.5 rounded-full transition-[left] ${
+                      advanced ? 'left-[18px] bg-accent-ink' : 'left-[2px] bg-muted'
+                    }`}
+                  />
+                </button>
+                <span id="print-advanced-help" className="text-[12px] text-faint">
+                  Pick any process, the flow per side and a preset per slot.
+                </span>
+              </div>
+              {printers.length > 1 && (
+                <div>
+                  <label htmlFor="print-printer" className="block text-[13px]">
+                    Printer
+                  </label>
+                  <select
+                    id="print-printer"
+                    value={printerId === null ? '' : String(printerId)}
+                    onChange={(event) =>
+                      setAskedPrinter(event.target.value === '' ? null : Number(event.target.value))
+                    }
+                    className="sb-field mt-1.5 cursor-pointer"
+                  >
+                    {printerId === null && <option value="">Choose a printer</option>}
+                    {printers.map((entry) => (
+                      <option key={entry.id} value={entry.id}>
+                        {entry.name}
+                        {entry.model ? ` (${entry.model})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {filamentError && (
+                <p className="text-[12px] text-warn" data-testid="filaments-unavailable">
+                  ScadBuddy could not read the filament inventory: {filamentError}
+                </p>
+              )}
+              {filaments && (
+                <FilamentPicker
+                  options={filaments}
+                  plan={plan}
+                  onChange={setPlan}
+                  copies={effectiveCopies}
+                />
+              )}
+
+              {advanced && filaments && (filaments.slots ?? []).length > 0 && (
+                <fieldset className="rounded-[6px] border border-line bg-surface-2 px-3 py-2">
+                  <legend className="px-1 text-[13px] text-ink">
+                    Filament presets — {size} mm nozzle
+                  </legend>
+                  <div className="mt-1.5 flex flex-col gap-2">
+                    {(filaments.slots ?? []).map((slot) => {
+                      const id = `preset-override-${slot.slot_id}`
+                      const chosen = overrides[String(slot.slot_id)]
+                      return (
+                        <div key={slot.slot_id} className="flex flex-col gap-1">
+                          <label htmlFor={id} className="text-[12px] text-muted">
+                            Preset for slot {slot.slot_id}
+                          </label>
+                          <select
+                            id={id}
+                            value={chosen ? refKey(chosen) : ''}
+                            onChange={(event) => setOverride(slot.slot_id, event.target.value)}
+                            className="sb-field"
+                          >
+                            <option value="">The spool&apos;s own preset</option>
+                            {presetsForSize.map((row) => (
+                              <option key={refKey(row.ref)} value={refKey(row.ref)}>
+                                {row.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </fieldset>
+              )}
+
+              <NozzleStep
+                sizes={choices.nozzle_sizes ?? []}
+                installed={choices.installed ?? []}
+                advanced={advanced}
+                value={nozzles}
+                onChange={changeNozzles}
+              />
+              <QualityStep
+                size={size}
+                tiers={choices.tiers?.[size] ?? []}
+                processes={choices.processes?.[size] ?? []}
+                advanced={advanced}
+                tier={tier}
+                processName={processName}
+                onChange={(next) => {
+                  setTier(next.tier)
+                  setProcessName(next.processName)
+                }}
+              />
+              {bedType !== null && (
+                <PlateStep
+                  bedTypes={
+                    (choices.bed_types ?? []).includes(bedType)
+                      ? (choices.bed_types ?? [])
+                      : [bedType, ...(choices.bed_types ?? [])]
+                  }
+                  value={bedType}
+                  lastBedType={choices.last_bed_type ?? null}
+                  printerName={printer?.name ?? null}
+                  onChange={setBedType}
+                />
+              )}
+
+              {plates.length > 1 && outputId && (
+                <fieldset data-testid="plate-choice">
+                  <legend className="text-[13px]">Plates to print</legend>
+                  <div className="mt-1.5 flex flex-wrap gap-2">
+                    {plates.map((entry) => (
                       <label
-                        className={`flex cursor-pointer gap-2.5 rounded-[6px] border p-3 transition-colors ${
-                          selected === pipeline.id
+                        key={entry.index}
+                        className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+                          plate === entry.index
                             ? 'border-accent bg-accent/8'
-                            : 'border-line bg-surface-2 hover:border-line-strong'
+                            : 'border-line bg-surface-2'
                         }`}
                       >
                         <input
                           type="radio"
-                          name="print-pipeline"
-                          value={pipeline.id}
-                          checked={selected === pipeline.id}
-                          onChange={() => {
-                            setSelected(pipeline.id)
-                            setForce(false)
-                            setRunIssues([])
-                          }}
-                          className="mt-0.5 accent-[var(--sb-accent)]"
+                          name="print-plate"
+                          checked={plate === entry.index}
+                          onChange={() => setPlate(entry.index)}
+                          className="accent-[var(--sb-accent)]"
                         />
-                        <span className="min-w-0">
-                          <span className="flex items-center gap-2">
-                            <span className="text-[13px] text-ink">{pipeline.name}</span>
-                            {rowVerdict && (
-                              <span
-                                className={`text-[11px] ${rowVerdict.ok ? 'text-ok' : 'text-warn'}`}
-                              >
-                                {rowVerdict.ok ? 'ready' : 'not ready'}
-                              </span>
-                            )}
-                            {own && !own.report && (
-                              <span className="text-[11px] text-faint">not checked</span>
-                            )}
-                          </span>
-                          <span className="mt-0.5 block text-[12px] text-muted">
-                            {targetLabel(pipeline)}
-                            {pipeline.bed_type ? ` · ${pipeline.bed_type}` : ''}
-                          </span>
-                          {presetSummary(pipeline) && (
-                            <span className="mt-0.5 block truncate text-[12px] text-faint">
-                              {presetSummary(pipeline)}
-                            </span>
-                          )}
-                          {own && !own.report && !everyCheckFailed && (
-                            <span
-                              className="mt-1 block text-[12px] text-faint"
-                              data-testid={`uncheckable-${pipeline.id}`}
-                            >
-                              Bambuddy could not check this pipeline:{' '}
-                              {own.error || 'it gave no reason'}
-                            </span>
-                          )}
-                          {rowVerdict && rowVerdict.issues.length > 0 && (
-                            <ul
-                              className={`mt-1 list-disc space-y-0.5 pl-4 text-[12px] ${
-                                rowVerdict.ok ? 'text-muted' : 'text-warn'
-                              }`}
-                              data-testid={`issues-${pipeline.id}`}
-                            >
-                              {rowVerdict.issues.map((issue) => (
-                                <li key={issue}>{issue}</li>
-                              ))}
-                            </ul>
-                          )}
-                        </span>
+                        {entry.has_thumbnail && (
+                          <img
+                            src={api.outputPlateThumbnailUrl(outputId, entry.index)}
+                            alt={`Plate ${entry.index}`}
+                            className="h-12 w-12 rounded-[4px] object-contain"
+                          />
+                        )}
+                        Plate <span className="sb-num">{entry.index}</span>
                       </label>
-                    </li>
-                  )
-                })}
-              </ul>
-            </fieldset>
-          )}
-
-          {wholeCheckError && (
-            <p
-              role="status"
-              className="mt-2 text-[12px] text-warn"
-              data-testid="eligibility-unavailable"
-            >
-              Bambuddy could not check any of these pipelines: {wholeCheckError}
-            </p>
-          )}
-
-          {checking && (
-            <p className="mt-2 flex items-center gap-2 text-[12px] text-muted">
-              <Spinner /> Checking eligibility
-            </p>
-          )}
-
-          <div className="mt-3">
-            <Button size="sm" onClick={() => setCreating(true)} data-testid="new-pipeline">
-              New pipeline
-            </Button>
-          </div>
-
-          {/* #79 — a send to a project uploads into that project's folder, which is what
-              puts it on Bambuddy's project page. */}
-          <div className="mt-4">
-            <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
-          </div>
-
-          {asksForPrinter && (
-            <div className="mt-4">
-              <label htmlFor="print-printer" className="block text-[13px]">
-                Printer
-              </label>
-              <select
-                id="print-printer"
-                value={printerId === null ? '' : String(printerId)}
-                onChange={(event) =>
-                  setPrinterId(event.target.value === '' ? null : Number(event.target.value))
-                }
-                className="sb-field mt-1.5 cursor-pointer"
-              >
-                <option value="">Choose a printer</option>
-                {printers.map((printer) => (
-                  <option key={printer.id} value={printer.id}>
-                    {printer.name}
-                    {printer.model ? ` (${printer.model})` : ''}
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1.5 text-[12px] text-muted">
-                This pipeline targets a printer class, so ScadBuddy shows that
-                printer&rsquo;s readiness. Bambuddy still assigns the copies itself.
-              </p>
-            </div>
-          )}
-          {!asksForPrinter && verdict?.printerName && (
-            <p className="mt-3 text-[12px] text-muted">
-              Printing on <span className="text-ink">{verdict.printerName}</span>, from the
-              pipeline&rsquo;s target.
-            </p>
-          )}
-
-          {current && (
-            <div className="mt-4">
-              <label htmlFor="print-bed-type" className="block text-[13px]">
-                Plate type
-              </label>
-              <select
-                id="print-bed-type"
-                value={bedType ?? ''}
-                onChange={(event) => setBedType(event.target.value || null)}
-                className="sb-field mt-1.5 cursor-pointer"
-              >
-                {pipelineBed === null && <option value="">As the process preset sets it</option>}
-                {pipelineBed !== null && !bedTypes.some((entry) => entry.value === pipelineBed) && (
-                  <option value={pipelineBed}>{pipelineBed}</option>
-                )}
-                {bedTypes.map((entry) => (
-                  <option key={entry.value} value={entry.value}>
-                    {entry.label}
-                  </option>
-                ))}
-              </select>
-              {!bedTypeTaken && (
-                <p className="mt-1.5 text-[12px] text-warn" data-testid="bed-type-warning">
-                  {bedType} is not a plate the {printerModel ?? 'printer'} takes, according to its
-                  Bambu Studio profile.
-                </p>
-              )}
-              {sendsBedType && (
-                <p className="mt-1.5 text-[12px] text-faint" data-testid="bed-type-route">
-                  Not the pipeline&rsquo;s own plate, so this print will be sliced and queued for{' '}
-                  {verdict?.printerName ?? filaments?.printer_name ?? 'the chosen printer'}.
-                </p>
-              )}
-            </div>
-          )}
-
-          {plates.length > 1 && outputId && (
-            <fieldset className="mt-4" data-testid="plate-choice">
-              <legend className="text-[13px]">Plate</legend>
-              <div className="mt-1.5 flex flex-wrap gap-2">
-                {plates.map((entry) => (
-                  <label
-                    key={entry.index}
-                    className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
-                      plate === entry.index ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
-                    }`}
-                  >
-                    <input
-                      type="radio"
-                      name="print-plate"
-                      checked={plate === entry.index}
-                      onChange={() => setPlate(entry.index)}
-                      className="accent-[var(--sb-accent)]"
-                    />
-                    {entry.has_thumbnail && (
-                      <img
-                        src={api.outputPlateThumbnailUrl(outputId, entry.index)}
-                        alt={`Plate ${entry.index}`}
-                        className="h-12 w-12 rounded-[4px] object-contain"
+                    ))}
+                    <label
+                      className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
+                        plate === 'all' ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
+                      }`}
+                    >
+                      <input
+                        type="radio"
+                        name="print-plate"
+                        checked={plate === 'all'}
+                        onChange={() => setPlate('all')}
+                        className="accent-[var(--sb-accent)]"
                       />
-                    )}
-                    Plate <span className="sb-num">{entry.index}</span>
-                  </label>
-                ))}
-                <label
-                  className={`flex cursor-pointer items-center gap-2 rounded-[6px] border p-2 text-[13px] ${
-                    plate === 'all' ? 'border-accent bg-accent/8' : 'border-line bg-surface-2'
-                  }`}
-                >
-                  <input
-                    type="radio"
-                    name="print-plate"
-                    checked={plate === 'all'}
-                    onChange={() => setPlate('all')}
-                    className="accent-[var(--sb-accent)]"
-                  />
-                  All plates
+                      All plates
+                    </label>
+                  </div>
+                  {plate === 'all' && (
+                    <p className="mt-1.5 text-[12px] text-faint">One queue item per plate.</p>
+                  )}
+                </fieldset>
+              )}
+
+              <PrintOptionsDisclosure
+                slug={slug}
+                printerId={printerId}
+                value={copies === null ? options : { ...options, quantity: copies }}
+                onChange={({ quantity, ...rest }) => {
+                  setCopies(quantity ?? null)
+                  setOptions(rest)
+                }}
+              />
+
+              {/* #79 — a send to a project uploads into that project's folder. */}
+              <ProjectPicker value={projectId} onChange={setProjectId} onLoaded={setProjectId} />
+
+              <div className="flex items-center gap-3">
+                <label htmlFor="print-copies" className="text-[13px] text-ink">
+                  Copies
                 </label>
-              </div>
-              {plate !== 1 && (
-                <p className="mt-1.5 text-[12px] text-faint">
-                  A pipeline run prints plate 1 only, so this will be sliced and queued
-                  {plate === 'all' ? ', one queue item per plate' : ''}.
-                </p>
-              )}
-            </fieldset>
-          )}
-
-          <div className="mt-4 flex items-center gap-3">
-            <label htmlFor="print-copies" className="text-[13px] text-ink">
-              Copies
-            </label>
-            <input
-              id="print-copies"
-              type="number"
-              min={1}
-              max={MAX_COPIES}
-              value={copies ?? ''}
-              placeholder={String(rememberedCopies ?? 1)}
-              onChange={(event) =>
-                setCopies(event.target.value === '' ? null : Math.max(1, Number(event.target.value)))
-              }
-              className="sb-field sb-num w-20 text-right"
-            />
-            {copies === null && rememberedCopies !== null && (
-              <span className="text-[12px] text-muted" data-testid="remembered-copies">
-                <span className="sb-num">{rememberedCopies}</span> remembered — leave blank to
-                use it
-              </span>
-            )}
-          </div>
-
-          <label className="mt-3 flex cursor-pointer items-center gap-2 text-[13px]">
-            <input
-              type="checkbox"
-              checked={asDefault}
-              onChange={(event) => setAsDefault(event.target.checked)}
-              className="accent-[var(--sb-accent)]"
-            />
-            Always use this pipeline for this model
-          </label>
-          {!asDefault && choices?.global_pipeline_id ? (
-            <p className="mt-1 text-[12px] text-faint">
-              Otherwise the pipeline set in Settings is the fallback.
-            </p>
-          ) : null}
-
-          {filamentError && (
-            <p className="mt-3 text-[12px] text-muted" data-testid="filaments-unavailable">
-              ScadBuddy could not read the filament inventory: {filamentError}. The pipeline
-              will use its own filament presets.
-            </p>
-          )}
-
-          {filaments && (
-            <>
-              <FilamentPicker
-                options={filaments}
-                plan={plan}
-                onChange={setPlan}
-                copies={effectiveCopies}
-              />
-              {/**
-               * Off by default, and it says what it costs. Ticking it pins the printer,
-               * which is exactly what a pipeline run cannot express — so the backend
-               * slices and queues instead, and a class-targeted pipeline stops fanning
-               * out across its printers. Changing a slot implies the same thing and is
-               * treated as the same consent, which is why the box is only the way to
-               * ask for it *without* changing anything.
-               */}
-              <label className="mt-3 flex cursor-pointer items-start gap-2 text-[13px]">
                 <input
-                  type="checkbox"
-                  checked={exact}
-                  onChange={(event) => setExact(event.target.checked)}
-                  className="mt-0.5 accent-[var(--sb-accent)]"
-                  data-testid="use-exact-filaments"
+                  id="print-copies"
+                  type="number"
+                  min={1}
+                  max={MAX_COPIES}
+                  value={copies ?? ''}
+                  placeholder={String(rememberedCopies ?? 1)}
+                  onChange={(event) =>
+                    setCopies(
+                      event.target.value === '' ? null : Math.max(1, Number(event.target.value)),
+                    )
+                  }
+                  className="sb-field sb-num w-20 text-right"
                 />
-                <span>
-                  Use exactly these spools — ScadBuddy will slice and queue this for{' '}
-                  {filaments.printer_name ?? 'the chosen printer'}, instead of letting the
-                  pipeline choose a printer.
-                </span>
-              </label>
-              {planChanged && !exact && (
-                <p className="mt-1 text-[12px] text-faint">
-                  These spools are not the suggested ones, so this print will be sliced and
-                  queued for {filaments.printer_name ?? 'the chosen printer'} either way.
-                </p>
-              )}
-            </>
-          )}
+                {copies === null && rememberedCopies !== null && (
+                  <span className="text-[12px] text-muted" data-testid="remembered-copies">
+                    <span className="sb-num">{rememberedCopies}</span> remembered — leave blank
+                    to use it
+                  </span>
+                )}
+              </div>
 
-          <PrintOptionsDisclosure
-            slug={slug}
-            printerId={scopePrinterId}
-            value={copies === null ? options : { ...options, quantity: copies }}
-            onChange={({ quantity, ...rest }) => {
-              setCopies(quantity ?? null)
-              setOptions(rest)
-            }}
-          />
-
-          {issuesShown && (
-            <label className="mt-3 flex cursor-pointer items-center gap-2 text-[13px] text-warn">
-              <input
-                type="checkbox"
-                checked={force}
-                onChange={(event) => setForce(event.target.checked)}
-                className="accent-[var(--sb-accent)]"
-                data-testid="force"
-              />
-              Print anyway, ignoring the issues above
-            </label>
-          )}
-
-          {error && (
-            <div role="alert" className="mt-3 text-[13px] text-warn">
-              <p>{error}</p>
-              {runIssues.length > 0 && (
-                <ul className="mt-1.5 list-disc space-y-0.5 pl-5 text-[12px]">
-                  {runIssues.map((issue) => (
-                    <li key={issue}>{issue}</li>
-                  ))}
-                </ul>
-              )}
             </div>
+          )}
+
+          {runError && (
+            <p role="alert" className="mt-3 text-[13px] text-warn">
+              {runError}
+            </p>
           )}
         </>
       )}

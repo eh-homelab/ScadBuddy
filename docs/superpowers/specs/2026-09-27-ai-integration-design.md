@@ -49,7 +49,8 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 
 The Agent SDK is used under Anthropic's Commercial Terms ("Use of the Claude Agent
 SDK is governed by Anthropic's Commercial Terms of Service", [overview][sdk-overview]).
-ScadBuddy stays MIT. Nothing from the SDK is vendored into the repo; it is an npm
+ScadBuddy is Apache-2.0 (`LICENSE`; it switched from MIT in #301). Nothing from the
+SDK is vendored into the repo; it is an npm
 dependency of `agent/`.
 
 ## 3. Facts this design rests on
@@ -193,7 +194,7 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 browser (SPA, maybe inside the Bambuddy iframe)
   │  https / wss (one origin)
   ▼
-ingress ──/api/v1/*, /──────────────▶ backend (Python, uvicorn)  ◀── Bambuddy (httpx, key server-side)
+ingress ──/api/v1/*, /api/v1/ws, /──▶ backend (Python, uvicorn)  ◀── Bambuddy (httpx, key server-side)
    │                                     ▲        │
    │                                     │        │ pg_notify
    │                                     │        ▼
@@ -201,11 +202,13 @@ ingress ──/api/v1/*, /──────────────▶ backend 
    │                                     │        │
    │                                     │        │ LISTEN
    │                                     │        ▼
-   ├──/mcp, /api/v1/ai/*, /api/v1/ws ─▶ agent (Node 24, Agent SDK)
+   ├──/mcp, /api/v1/ai/* ─────────────▶ agent (Node 24, Agent SDK)
    │                                     │ openapi-fetch → backend on localhost
 external MCP clients ───────────────────┘
 
-(There is no direct backend→agent event channel: events go backend → Postgres → agent, §7.)
+(There is no direct backend→agent event channel: events go backend → Postgres → agent, §7.
+ The backend and the agent each `LISTEN` on their own connection and serve their own
+ sockets: the UI's `/api/v1/ws` from the backend, the agent's own under `/api/v1/ai/*`.)
 ```
 
 ### 4.1 Process layout: sidecar (recommended)
@@ -220,18 +223,24 @@ in one image. That is not recommended, and is left out unless someone needs it.
 
 ### 4.2 Routing: at the ingress (recommended)
 
-The ingress routes `/mcp`, `/api/v1/ai/*` and the realtime socket `/api/v1/ws` to the
-agent container, and everything else to the backend. `/api/v1/ai/*` and `/api/v1/ws`
-are sub-paths of the backend's `/api/v1/*`, so **the agent's paths must take precedence**:
+The ingress routes `/mcp` and `/api/v1/ai/*` to the agent container, and everything
+else, including the UI's realtime socket `/api/v1/ws`, to the backend. `/api/v1/ai/*`
+is a sub-path of the backend's `/api/v1/*`, so **the agent's paths must take precedence**:
 longest-prefix match, or explicit rule priority. A "first rule starting with `/api/v1/`"
 setup would silently send the agent's routes to the backend. The ingress manifest gets a
 test request per agent path. Routing at the ingress avoids a
-uvicorn passthrough, which risks buffering SSE. `/api/v1/ws` lives in the agent service
-because it already holds the database listener (§7) and the browser-bridge pairing
-(#254).
+uvicorn passthrough, which risks buffering SSE.
 
-**Consequence:** with the agent container down, the UI's realtime updates fall back to
-polling (#266) and AI is hidden. Renders and printing are unaffected.
+`/api/v1/ws` lives in the **backend** (decided while building #266, superseding the
+first draft, which put it in the agent). It serves the UI's domain events (jobs, models,
+outputs, prints, libraries, fonts, settings) straight from the backend's event bus
+(`backend/scadbuddy/core/events.py`), so realtime does not depend on the AI container.
+The agent's own streams (sessions, approvals, the browser bridge, #254) are served by
+the agent under `/api/v1/ai/*`. Both are independent consumers of the same `NOTIFY`
+channel (§7).
+
+**Consequence:** with the agent container down, AI is hidden and nothing else changes:
+realtime updates, renders and printing are unaffected.
 
 ### 4.3 Agent → backend
 
@@ -397,19 +406,28 @@ content. Kinds:
 `printer.status`, `inventory.changed`, `library.changed`, `font.installed`,
 `settings.changed`, and from the agent side `session.*` and `analyzer.decision`.
 
-The agent service `LISTEN`s and fans events out to:
+Two independent consumers `LISTEN` on the channel, each on its own connection
+(Postgres delivers a `NOTIFY` to every listening session:
+<https://www.postgresql.org/docs/current/sql-notify.html>):
 
-- MCP resource subscriptions (`notifications/resources/updated`, #264);
-- the UI's WebSocket (#266), which replaces both polling loops (§3.1);
-- plugin event hooks (#297);
-- the event log used for MCP `Last-Event-ID` resumption.
+- **The backend** fans events out to the UI's WebSocket `/api/v1/ws` (#266,
+  `backend/scadbuddy/api/realtime.py`), which replaces both polling loops (§3.1).
+- **The agent service** fans them out to MCP resource subscriptions
+  (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
+  sockets under `/api/v1/ai/*`.
+
+The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). The
+UI socket does not replay: on every (re)subscribe the server confirms with
+`subscribed` only once it is listening, and the client re-reads then, so a reconnect
+cannot leave a gap.
 
 Print progress comes from **one server-side watcher per active print** (#268), not from
 one poll per open dialog. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
-**Without a database**, AI is disabled (§9) and the UI keeps today's polling. The
-polling code stays as the fallback path.
+**The database is required** (decided while building #266; tracked in #401). The
+polling code stays only as the fallback for a socket that cannot connect (#266's
+"live updates unavailable").
 
 ## 8. Authorization and approvals
 
@@ -478,7 +496,8 @@ that reaches the UI. Putting the UI behind OIDC is a separate issue.
   trusted from the ingress only, and plain HTTP gets `403` naming the HTTPS URL. The
   only exception is loopback, for local development and tests. `disabled` mode removes
   the credential requirement, not the transport requirement.
-- An `Origin` check on `/mcp` and `/api/v1/ws` prevents DNS rebinding.
+- An `Origin` check on `/mcp`, the agent's sockets and the backend's `/api/v1/ws` prevents
+  DNS rebinding.
 - Nothing in the path may buffer SSE. A test asserts that events arrive before the
   response completes.
 
@@ -532,8 +551,9 @@ whose `X-Forwarded-*` are believed, §8.4), and `SCADBUDDY_SECRET_KEY_PREVIOUS_F
 - Rotating it re-wraps the data keys only.
 - Without the file, Settings refuses to save credentials and says why.
 
-**No database** (`SCADBUDDY_DATABASE_URL` unset): AI features are disabled, and Settings
-explains that they need the database. The rest of ScadBuddy works as today (§7).
+**The database is required** (#401). Until #401 lands, a ScadBuddy with
+`SCADBUDDY_DATABASE_URL` unset still starts: AI features are disabled, and Settings
+explains that they need the database.
 
 ## 10. Plugins (#297, #299)
 

@@ -22,6 +22,7 @@ from scadbuddy.core.config import (
     DEFAULT_LSP_SESSIONS,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
+    DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
     DEFAULT_RENDER_FALLBACK_POLL_INTERVAL,
     DEFAULT_RENDER_LATENCY_SLO,
@@ -63,8 +64,12 @@ class Settings(BaseSettings):
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
     job_ttl: float = DEFAULT_JOB_TTL
+    # SCADBUDDY_PREVIEW_RENDERS: render a model with no thumbnail and no output at
+    # its default parameters, in the background, and show that as its thumbnail.
+    preview_renders: bool = True
     openscad_lsp: str = DEFAULT_OPENSCAD_LSP
     lsp_sessions: int = DEFAULT_LSP_SESSIONS
+    realtime_sockets: int = DEFAULT_REALTIME_SOCKETS
     library_max_bytes: int = DEFAULT_LIBRARY_MAX_BYTES
     asset_max_total_bytes: int = DEFAULT_ASSET_MAX_TOTAL_BYTES
     asset_max_count: int = DEFAULT_ASSET_MAX_COUNT
@@ -148,6 +153,7 @@ class Settings(BaseSettings):
             fonts_catalogue_ttl=self.fonts_catalogue_ttl,
             openscad_lsp=self.openscad_lsp,
             lsp_sessions=self.lsp_sessions,
+            realtime_sockets=self.realtime_sockets,
             library_max_bytes=self.library_max_bytes,
             asset_max_total_bytes=self.asset_max_total_bytes,
             asset_max_count=self.asset_max_count,

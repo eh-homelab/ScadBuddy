@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import (
@@ -21,6 +22,7 @@ from contextlib import (
 )
 from dataclasses import dataclass, replace
 from pathlib import Path
+from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
@@ -533,7 +535,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
 
 
 @asynccontextmanager
-async def _library_lease(
+async def library_lease(
     checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease on the checkouts a render resolved, when there are any to hold.
@@ -599,7 +601,7 @@ async def render_job(
             # Held from here for every openscad run below -- the schema derivation
             # included: those are what read the checkouts on OPENSCADPATH, and a
             # removal must not take one out from under them (#253).
-            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            await held.enter_async_context(library_lease(checkouts, job.id, source.library_path))
             schema = await cached_schema(scad, source.schema_cache, config=config)
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
@@ -683,6 +685,16 @@ RenderCallable = Callable[[Job], Awaitable[tuple[JobResult, list[str]]]]
 INITIAL_RENDER_ESTIMATE = 10.0
 #: Weight of the newest render in the running mean that sizes Retry-After.
 RENDER_ESTIMATE_WEIGHT = 0.2
+
+
+@dataclass
+class _Background[T]:
+    """A piece of background work, and the future its caller awaits for what the
+    work returns. Held in the process, never in the job store (see
+    `RenderQueue.run_background`)."""
+
+    work: Callable[[], Awaitable[T]]
+    done: asyncio.Future[T]
 
 
 class RenderQueue:
@@ -777,6 +789,14 @@ class RenderQueue:
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
+        #: Background work waiting for a worker with no render to claim. Each entry's
+        #: work returns its own type; only its caller's future carries it.
+        self._background: deque[_Background[Any]] = deque()
+
+    @property
+    def thumbnail_executor(self) -> Executor:
+        """The cover rasteriser's pool, for background work that draws plate images."""
+        return self._thumbnails
 
     async def start(self) -> None:
         self.paths.ensure()
@@ -869,6 +889,42 @@ class RenderQueue:
             self._wakeup.set()
         return submitted.job
 
+    async def run_background[T](self, work: Callable[[], Awaitable[T]]) -> T:
+        """Run ``work`` on one of this process's render workers, once no render is
+        waiting to be claimed -- the default-render previews.
+
+        A worker takes it only when `store.claim` finds nothing, so it never starts
+        ahead of a render someone asked for, including one submitted after it was
+        queued (with Postgres, one waiting on any replica). It holds a worker while
+        it runs, so the process never runs more openscad than `render_concurrency`
+        allows. It is not preempted once started: a caller keeps at most one of
+        these in flight, which leaves every other worker to requested renders.
+
+        It never touches the job store. So it is never a job: never a row or a job
+        file, never listed, never counted by admission (`render_queue_max`) or the
+        queue metrics, never announced as a `job.*` event, and never makes a model's
+        delete wait. Returns what ``work`` returns, or raises what it raised.
+        """
+        done: asyncio.Future[T] = asyncio.get_running_loop().create_future()
+        self._background.append(_Background[T](work=work, done=done))
+        self._wakeup.set()
+        return await done
+
+    async def _run_background[T](self, item: _Background[T]) -> None:
+        if item.done.done():  # its caller gave up waiting
+            return
+        try:
+            result = await item.work()
+        except asyncio.CancelledError:
+            item.done.cancel()
+            raise
+        except Exception as error:  # the caller's to handle; the worker lives on
+            if not item.done.done():
+                item.done.set_exception(error)
+        else:
+            if not item.done.done():
+                item.done.set_result(result)
+
     def _announce(self, job: Job, kind: JobKind) -> None:
         emit(self.events, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
@@ -946,10 +1002,15 @@ class RenderQueue:
             # the wait below sets it again, so the wait returns at once.
             self._wakeup.clear()
             self._busy += 1
+            background: _Background[Any] | None = None
             try:
                 job = await asyncio.to_thread(self.store.claim)
                 if job is not None:
                     await self._run(job)
+                elif self._background:
+                    # Only with no render to claim; the next loop claims again first.
+                    background = self._background.popleft()
+                    await self._run_background(background)
             except asyncio.CancelledError:
                 raise
             except Exception:  # a store outage must not kill the worker
@@ -966,7 +1027,7 @@ class RenderQueue:
             if failed:
                 await asyncio.sleep(self.config.render_poll_interval)
                 continue
-            if job is None:
+            if job is None and background is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._wakeup.wait(), timeout=self.idle_poll_interval)
 
