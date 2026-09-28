@@ -49,6 +49,11 @@ SHORT = timedelta(seconds=60)
 TRANSFER = timedelta(seconds=180)
 #: Every stage that moves a piece beats while it does (`activities._heartbeating`).
 HEARTBEAT = timedelta(seconds=30)
+#: `prepare` downloads the revision's snapshot and the template's font families on a
+#: worker without the API's volume (phase 3): a transfer, heartbeated, so a stalled
+#: download is noticed within `TRANSFER_HEARTBEAT` rather than at the budget's end.
+PREPARE_TIMEOUT = timedelta(minutes=10)
+TRANSFER_HEARTBEAT = timedelta(seconds=30)
 
 
 def _openscad_timeout() -> timedelta:
@@ -128,7 +133,8 @@ class RenderPiece:
             "prepare",
             req,
             result_type=PrepareResult,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=PREPARE_TIMEOUT,
+            heartbeat_timeout=TRANSFER_HEARTBEAT,
             retry_policy=RETRY,
         )
         main: RenderMainResult = await workflow.execute_activity(

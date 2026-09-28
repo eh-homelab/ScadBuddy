@@ -448,3 +448,35 @@ def _job_row(*, finished_ago: timedelta) -> Job:
         inputs={"params": params},
         created_at=now() - finished_ago,
     )
+
+
+class _PinnedSnapshots:
+    """The bambuddy store's `SnapshotStore.pin`, recorded: every job names a revision."""
+
+    def __init__(self, revision: str) -> None:
+        self.revision = revision
+        self.asked: list[tuple[str, str | None]] = []
+
+    async def pin(self, slug: str, revision: str | None) -> str | None:
+        self.asked.append((slug, revision))
+        return self.revision
+
+
+async def test_with_a_snapshot_store_a_submit_names_the_pinned_revision(
+    make_service: ServiceFactory, projection: JobProjection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async with temporal_client() as client:
+        service = make_service(client, f"t-{uuid.uuid4().hex[:8]}")
+        pinned = _PinnedSnapshots("f" * 40)
+        service.snapshots = pinned  # type: ignore[assignment]
+
+        async def unavailable(*_: object, **__: object) -> None:
+            raise RuntimeError("no workflow in this test")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(client, "start_workflow", unavailable)
+            job = await service.submit(SLUG, {"width": 3})
+        await service.aclose()
+    assert pinned.asked == [(SLUG, None)]
+    assert job.model_version == "f" * 40
+    assert (await asyncio.to_thread(projection.read, job.id)).model_version == "f" * 40
