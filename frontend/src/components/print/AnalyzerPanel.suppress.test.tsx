@@ -1,17 +1,25 @@
-import { screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it } from 'vitest'
-import type { AnalysisRequest } from '../../api/types'
-import { analysisReport, overhangDiagnostic } from '../../mocks/analyzers'
+import type { AnalysisRequest, AnalyzerDiagnostic, ScopeRef } from '../../api/types'
+import {
+  analysisReport,
+  analysisScopes,
+  openEdgesDiagnostic,
+  overhangDiagnostic,
+} from '../../mocks/analyzers'
 import * as fixtures from '../../mocks/fixtures'
 import { server } from '../../mocks/server'
 import { renderPage } from '../../test/utils'
 import { AnalyzerPanel } from './AnalyzerPanel'
+import { SuppressForm } from './SuppressForm'
 
 const output = fixtures.outputs[0]!
 const request: AnalysisRequest = {
   printer_id: 1,
   plate_id: 1,
+  all_plates: false,
   choices: {
     nozzles: [{ size: '0.4', flow: 'standard' }],
     tier: 'standard',
@@ -150,5 +158,77 @@ describe('AnalyzerPanel · suppress at a scope', () => {
     renderPanel()
     await screen.findByTestId('diagnostic-SB1003')
     expect(screen.queryByRole('button', { name: 'Suppress…' })).toBeNull()
+  })
+
+  it('offers a finding about some slots no material scope, and a whole-print one each', async () => {
+    const slotTwo: AnalyzerDiagnostic = { ...openEdgesDiagnostic, slots: [2] }
+    server.use(
+      http.post('/api/v1/analyzers/run', () =>
+        HttpResponse.json(analysisReport(output, request, [overhangDiagnostic, slotTwo])),
+      ),
+    )
+    const { user } = renderPanel()
+    const options = async (key: string, id: string) => {
+      const row = await screen.findByTestId(`diagnostic-${key}`)
+      await user.click(within(row).getByRole('button', { name: 'Suppress…' }))
+      const form = within(row).getByRole('form', { name: `Suppress ${id}` })
+      return within(form)
+        .getAllByRole('option')
+        .map((option) => option.textContent)
+    }
+    const slotted = await options('SB1002:part-2', 'SB1002')
+    expect(slotted).not.toContain('Every pla print')
+    expect(slotted).not.toContain('Every petg print')
+    expect(slotted).toContain('Every print')
+    const whole = await options('SB1003', 'SB1003')
+    expect(whole).toEqual(expect.arrayContaining(['Every pla print', 'Every petg print']))
+  })
+})
+
+describe('SuppressForm', () => {
+  const scopesFor = (printerId: number): ScopeRef[] =>
+    analysisScopes(output, { ...request, printer_id: printerId })
+
+  it('posts this print, not a printer the report no longer lists', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    const props = { diagnostic: openEdgesDiagnostic, onDone: () => {}, onCancel: () => {} }
+    const view = render(<SuppressForm {...props} scopes={scopesFor(1)} />)
+    await user.selectOptions(screen.getByLabelText('Scope'), 'This printer (#1)')
+    view.rerender(<SuppressForm {...props} scopes={scopesFor(2)} />)
+    expect(screen.getByLabelText('Scope')).toHaveDisplayValue('This print')
+    await user.type(screen.getByLabelText('Reason'), 'switched printers')
+    await user.click(screen.getByRole('button', { name: 'Suppress' }))
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({ scope: { kind: 'print', key: output.id } })
+  })
+
+  it('asks before suppressing a problem wider than the template', async () => {
+    const { posted } = watchDecisions()
+    const user = userEvent.setup()
+    const problem: AnalyzerDiagnostic = { ...openEdgesDiagnostic, severity: 'error' }
+    render(
+      <SuppressForm diagnostic={problem} scopes={scopesFor(1)} onDone={() => {}} onCancel={() => {}} />,
+    )
+    const submit = screen.getByRole('button', { name: 'Suppress' })
+    await user.type(screen.getByLabelText('Reason'), 'known')
+    expect(submit).toBeEnabled()
+    expect(screen.queryByRole('checkbox', { name: /is a problem/ })).toBeNull()
+
+    await user.selectOptions(screen.getByLabelText('Scope'), 'Every print')
+    expect(submit).toBeDisabled()
+    await user.click(
+      screen.getByRole('checkbox', {
+        name: 'SB1002 is a problem. Suppress it for every print, not only this template?',
+      }),
+    )
+    expect(submit).toBeEnabled()
+    await user.selectOptions(screen.getByLabelText('Scope'), 'Every pla print')
+    expect(submit).toBeDisabled()
+    await user.selectOptions(screen.getByLabelText('Scope'), 'This template')
+    expect(submit).toBeEnabled()
+    await user.click(submit)
+    await waitFor(() => expect(posted).toHaveLength(1))
+    expect(posted[0]).toMatchObject({ scope: { kind: 'template', key: output.slug } })
   })
 })

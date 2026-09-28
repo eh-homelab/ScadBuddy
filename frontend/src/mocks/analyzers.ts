@@ -156,6 +156,9 @@ export function digest(text: string, length = 16): string {
   return hex.repeat(Math.ceil(length / hex.length)).slice(0, length)
 }
 
+/** The material each mock plate slot holds, as `material_keys` spells it. */
+export const SLOT_MATERIALS: Record<number, string> = { 1: 'pla', 2: 'petg' }
+
 /** Every scope a decision about this print can be stored at, broadest first (`context.scopes`). */
 export function analysisScopes(output: Output, request: AnalysisRequest): ScopeRef[] {
   const printerId = request.printer_id ?? 1
@@ -163,7 +166,10 @@ export function analysisScopes(output: Output, request: AnalysisRequest): ScopeR
   const params = JSON.stringify(values, Object.keys(values).sort())
   return [
     { kind: 'global', key: '' },
-    { kind: 'material', key: 'pla' },
+    ...[...new Set(Object.values(SLOT_MATERIALS))].map((key) => ({
+      kind: 'material' as const,
+      key,
+    })),
     { kind: 'printer', key: 'model:h2c' },
     { kind: 'printer', key: `id:${printerId}` },
     { kind: 'template', key: output.slug },
@@ -187,27 +193,50 @@ const SCOPE_ORDER: ScopeRef['kind'][] = [
 ]
 
 /**
- * The decision that decides `diagnostic` (`decisions.resolve`): an enforced one at the
- * broadest scope, else the narrowest, one about this instance beating one about every
- * instance at the same scope.
+ * `scopes` for a finding about `slots` (every slot when empty), as `context.scopes_for`:
+ * a material scope applies only when one of those slots is that material.
+ */
+export function scopesFor(scopes: ScopeRef[], slots: number[]): ScopeRef[] {
+  const allowed = new Set(
+    Object.entries(SLOT_MATERIALS)
+      .filter(([slot]) => slots.length === 0 || slots.includes(Number(slot)))
+      .map(([, material]) => material),
+  )
+  return scopes.filter((scope) => scope.kind !== 'material' || allowed.has(scope.key))
+}
+
+/**
+ * The decision that decides `diagnostic` at `scopes` (`decisions.resolve`): an enforced
+ * one at the broadest scope, else the narrowest, one about this instance beating one
+ * about every instance at the same scope. The rank is the scope's position once sorted
+ * by kind, so a printer id (listed after the model) outranks the printer's model.
  */
 export function resolveDecision(
   diagnostic: AnalyzerDiagnostic,
   decisions: AnalyzerDecision[],
   scopes: ScopeRef[],
 ): AnalyzerDecision | undefined {
-  const rank = (decision: AnalyzerDecision) => SCOPE_ORDER.indexOf(decision.scope.kind)
+  const ordered = scopes
+    .map((scope, index) => ({ scope, index }))
+    .sort(
+      (a, b) =>
+        SCOPE_ORDER.indexOf(a.scope.kind) - SCOPE_ORDER.indexOf(b.scope.kind) || a.index - b.index,
+    )
+  const ranks = new Map(ordered.map(({ scope }, index) => [`${scope.kind}\u0000${scope.key}`, index]))
+  const scopeRank = (decision: AnalyzerDecision) =>
+    ranks.get(`${decision.scope.kind}\u0000${decision.scope.key}`) ?? -1
+  const specific = (decision: AnalyzerDecision) => Number(decision.instance != null)
   const applicable = decisions.filter(
     (decision) =>
       decision.diagnostic_id === diagnostic.id &&
       (decision.instance == null || decision.instance === diagnostic.key) &&
-      scopes.some((scope) => scope.kind === decision.scope.kind && scope.key === decision.scope.key),
+      scopeRank(decision) >= 0,
   )
   const enforced = applicable.filter((decision) => decision.enforced)
-  if (enforced.length > 0) return enforced.sort((a, b) => rank(a) - rank(b))[0]
-  return applicable.sort(
-    (a, b) => rank(b) - rank(a) || Number(b.instance != null) - Number(a.instance != null),
-  )[0]
+  if (enforced.length > 0) {
+    return enforced.sort((a, b) => scopeRank(a) - scopeRank(b) || specific(b) - specific(a))[0]
+  }
+  return applicable.sort((a, b) => scopeRank(b) - scopeRank(a) || specific(b) - specific(a))[0]
 }
 
 /** Each diagnostic with the status its decision gives it (`runner.apply_decisions`). */
@@ -217,7 +246,7 @@ function decide(
   scopes: ScopeRef[],
 ): AnalyzerDiagnostic[] {
   return diagnostics.map((diagnostic) => {
-    const decision = resolveDecision(diagnostic, decisions, scopes)
+    const decision = resolveDecision(diagnostic, decisions, scopesFor(scopes, diagnostic.slots ?? []))
     if (!decision || decision.kind === 'accept') return diagnostic
     return {
       ...diagnostic,

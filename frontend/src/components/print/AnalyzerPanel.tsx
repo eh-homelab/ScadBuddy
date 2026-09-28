@@ -7,7 +7,13 @@ import type {
   AnalyzerSource,
   ScopeRef,
 } from '../../api/types'
-import { SEVERITY_LABEL, describeLocation, partition, scopeLabel } from '../../lib/analyzers'
+import {
+  SEVERITY_LABEL,
+  describeLocation,
+  partition,
+  scopeLabel,
+  scopesForFinding,
+} from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAnalysis } from '../../lib/useAnalysis'
@@ -207,7 +213,7 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
               <DiagnosticItem
                 key={diagnostic.key}
                 diagnostic={diagnostic}
-                scopes={decidable ? (report?.scopes ?? []) : []}
+                scopes={decidable && report ? scopesForFinding(report.scopes, diagnostic) : []}
                 onChanged={reload}
               />
             ))}

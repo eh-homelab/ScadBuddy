@@ -1,7 +1,7 @@
 import { useId, useState, type FormEvent } from 'react'
 import { api, ApiError } from '../../api/client'
 import type { AnalyzerDiagnostic, ScopeRef } from '../../api/types'
-import { scopeLabel } from '../../lib/analyzers'
+import { scopeLabel, widerThanTemplate } from '../../lib/analyzers'
 import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
 
@@ -27,22 +27,32 @@ interface Props {
  * `analyzers.py:141-143`). `POST /analyzers/decisions` stores it; the run's `analyzers`
  * topic reads the report again.
  *
+ * The chosen scope is checked against `scopes` on every render: the report is read
+ * again while the form is open (another printer, other filaments), and a scope it no
+ * longer lists falls back to this print rather than being posted stale. An `error`
+ * finding suppressed wider than the template needs a confirmation, since the backend
+ * asks for one only when the decision is enforced.
+ *
  * Not offered: `enforced` (a broad decision overriding narrower ones, which for an
  * `error` rule also needs a confirmation) and `ignore`, which records no reason.
  */
 export function SuppressForm({ diagnostic, scopes, onDone, onCancel }: Props) {
   const id = useId()
-  const [scope, setScope] = useState<ScopeRef | undefined>(scopes.at(-1))
+  const [choice, setChoice] = useState<string | undefined>(undefined)
+  const scope = scopes.find((row) => scopeValue(row) === choice) ?? scopes.at(-1)
+  const [confirmed, setConfirmed] = useState(false)
+  const needsConfirm = diagnostic.severity === 'error' && scope !== undefined && widerThanTemplate(scope)
   const [everyInstance, setEveryInstance] = useState(false)
   const [reason, setReason] = useState('')
   const [saving, setSaving] = useState(false)
   const [refusal, setRefusal] = useState<string | null>(null)
 
-  const ready = scope !== undefined && reason.trim() !== '' && !saving
+  const ready =
+    scope !== undefined && reason.trim() !== '' && !saving && (!needsConfirm || confirmed)
 
   async function submit(event: FormEvent) {
     event.preventDefault()
-    if (!ready) return
+    if (!ready || !scope) return
     setSaving(true)
     setRefusal(null)
     try {
@@ -75,9 +85,10 @@ export function SuppressForm({ diagnostic, scopes, onDone, onCancel }: Props) {
         <select
           id={`${id}-scope`}
           value={scope ? scopeValue(scope) : ''}
-          onChange={(event) =>
-            setScope(scopes.find((row) => scopeValue(row) === event.target.value))
-          }
+          onChange={(event) => {
+            setChoice(event.target.value)
+            setConfirmed(false)
+          }}
           className="sb-field"
         >
           {scopes.map((row) => (
@@ -110,6 +121,17 @@ export function SuppressForm({ diagnostic, scopes, onDone, onCancel }: Props) {
           className="sb-field h-auto py-1.5"
         />
       </div>
+      {needsConfirm && scope && (
+        <label className="flex items-start gap-2 text-[12px] text-warn">
+          <input
+            type="checkbox"
+            checked={confirmed}
+            onChange={(event) => setConfirmed(event.target.checked)}
+            className="mt-0.5 accent-[var(--sb-accent)]"
+          />
+          {`${diagnostic.id} is a problem. Suppress it for ${scopeLabel(scope).toLowerCase()}, not only this template?`}
+        </label>
+      )}
       {refusal && (
         <p role="alert" className="text-[12px] text-warn">
           {refusal}
