@@ -2,7 +2,14 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vite
 import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
-import { BUILTIN_PREVIEW_ID, BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
+import {
+  BUILTIN_PREVIEW_ID,
+  BUILTIN_SLUG,
+  GALLERY_SLUG,
+  MEDIA_MP4_BASE64,
+  keychainSource,
+  versionIds,
+} from './fixtures'
 import {
   MAX_PRESET_DESCRIPTION,
   MAX_PRESET_ID,
@@ -12,6 +19,7 @@ import {
   MAX_PRESETS,
   resetMockState,
   setMockPresets,
+  setMockUploadLimit,
 } from './handlers'
 
 /**
@@ -690,6 +698,133 @@ describe('mock API: duplicating a preset', () => {
     await expect(
       api.duplicatePreset('name-keychain', 'b1b2c3d4e5f60718293a4b5c6d7e8f90', { name: 'Copy' }),
     ).rejects.toMatchObject({ status: 422 })
+  })
+})
+
+describe('mock media routes, as api/media.py holds them (#274)', () => {
+  withNodeFile()
+  beforeEach(() => resetMockState())
+
+  const PNG = png()
+  const MP4 = Uint8Array.from(atob(MEDIA_MP4_BASE64), (c) => c.charCodeAt(0))
+
+  async function post(slug: string, parts: Part[]) {
+    const response = await fetch(`/api/v1/models/${encodeURIComponent(slug)}/media`, {
+      method: 'POST',
+      headers: { 'Content-Type': `multipart/form-data; boundary=${BOUNDARY}` },
+      body: multipart(parts),
+    })
+    return { status: response.status, body: (await response.json()) as ModelSummary & { detail?: string } }
+  }
+
+  it('lists a legacy thumbnail as one image, several items, and none', async () => {
+    const models = await api.listModels()
+    const of = (slug: string) => models.find((model) => model.slug === slug)?.media
+    expect(of('name-keychain')).toEqual([expect.objectContaining({ id: 'thumbnail', kind: 'image' })])
+    expect(of(GALLERY_SLUG)?.map((item) => item.kind)).toEqual(['image', 'image', 'image', 'video'])
+    expect(of('gridfinity-bin')).toEqual([])
+    expect(of(BUILTIN_SLUG)).toEqual([])
+  })
+
+  it('adds an image last, converting a legacy thumbnail into an ordinary item', async () => {
+    const { status, body } = await post('name-keychain', [
+      { name: 'file', value: PNG, filename: 'side.png' },
+      { name: 'caption', value: 'The side' },
+    ])
+    expect(status).toBe(200)
+    expect(body.media).toHaveLength(2)
+    expect(body.media?.[0]?.id).toMatch(/^[0-9a-f]{12}$/)
+    expect(body.media?.[1]).toMatchObject({ kind: 'image', caption: 'The side', content_type: 'image/png' })
+    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+  })
+
+  it('adds a video with its poster, typed by its bytes', async () => {
+    const { status, body } = await post('gridfinity-bin', [
+      { name: 'file', value: MP4, filename: 'clip.bin' },
+      { name: 'poster', value: PNG, filename: 'poster.png' },
+    ])
+    expect(status).toBe(200)
+    const [item] = body.media ?? []
+    expect(item).toMatchObject({ kind: 'video', content_type: 'video/mp4', poster: `${item?.id}-poster.png` })
+    // A video with a poster is a cover.
+    expect(body).toMatchObject({ has_thumbnail: true, thumbnail_source: 'model' })
+  })
+
+  it('refuses what is not media with a 415', async () => {
+    const { status, body } = await post('gridfinity-bin', [
+      { name: 'file', value: 'hello', filename: 'notes.png' },
+    ])
+    expect(status).toBe(415)
+    expect(body.detail).toBe('the upload is not a PNG, JPEG or WebP image, or an MP4 or WebM video')
+  })
+
+  it('refuses every write to a built-in with a 403', async () => {
+    // Refused before the item is looked up, as `require_mine` does.
+    const id = 'a1b2c3d4e5f6'
+    expect((await post(BUILTIN_SLUG, [{ name: 'file', value: PNG, filename: 'a.png' }])).status).toBe(403)
+    await expect(api.patchMedia(BUILTIN_SLUG, id, 'x')).rejects.toMatchObject({ status: 403 })
+    await expect(api.reorderMedia(BUILTIN_SLUG, [id])).rejects.toMatchObject({ status: 403 })
+    await expect(api.deleteMedia(BUILTIN_SLUG, id)).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('refuses an order that is not a permutation with a 422', async () => {
+    const copy = await api.duplicateModel(GALLERY_SLUG, 'Gallery')
+    const ids = (copy.media ?? []).map((item) => item.id)
+    for (const order of [ids.slice(1), [...ids, ids[0]!], [...ids.slice(1), 'ffffffffffff']]) {
+      await expect(api.reorderMedia(copy.slug, order)).rejects.toMatchObject({ status: 422 })
+    }
+  })
+
+  it('answers 404 for an item the template does not have', async () => {
+    await expect(api.deleteMedia('gridfinity-bin', 'ffffffffffff')).rejects.toMatchObject({ status: 404 })
+    expect((await fetch('/api/v1/models/gridfinity-bin/media/ffffffffffff')).status).toBe(404)
+  })
+
+  it('serves an item and a poster with their types', async () => {
+    const video = (await api.getModel(GALLERY_SLUG)).media?.find((item) => item.kind === 'video')
+    const slug = encodeURIComponent(GALLERY_SLUG)
+    const file = await fetch(`/api/v1/models/${slug}/media/${video!.id}`)
+    expect(file.headers.get('Content-Type')).toBe('video/mp4')
+    expect(new Uint8Array(await file.arrayBuffer())).toEqual(MP4)
+    const poster = await fetch(`/api/v1/models/${slug}/media/${video!.id}/poster`)
+    expect(poster.headers.get('Content-Type')).toBe('image/png')
+  })
+
+  it('drops the cover with the last image', async () => {
+    const removed = await api.deleteMedia('name-keychain', 'thumbnail')
+    expect(removed.media).toEqual([])
+    expect(removed.thumbnail_source).not.toBe('model')
+  })
+
+  it('reports the upload limit read-only: a settings PUT does not change it', async () => {
+    const limit = (await api.getSettings()).media_upload_max_bytes
+    const saved = await fetch('/api/v1/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_upload_max_bytes: 1024 }),
+    }).then((response) => response.json() as Promise<{ media_upload_max_bytes: number }>)
+    expect(saved.media_upload_max_bytes).toBe(limit)
+  })
+
+  it('refuses an upload over the limit with a 413 naming it', async () => {
+    const saved = (await api.getSettings()).media_upload_max_bytes
+    try {
+      setMockUploadLimit(1024 * 1024)
+      const { status, body } = await post('gridfinity-bin', [
+        { name: 'file', value: new Uint8Array([...MP4, ...new Uint8Array(1024 * 1024)]), filename: 'v.mp4' },
+      ])
+      expect(status).toBe(413)
+      expect(body.detail).toBe(
+        'a media upload is at most 1 MB (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES), and this one is larger',
+      )
+    } finally {
+      setMockUploadLimit(saved)
+    }
+  })
+
+  it('copies the media with a duplicate', async () => {
+    const copy = await api.duplicateModel(GALLERY_SLUG, 'Gallery')
+    expect(copy.media).toEqual((await api.getModel(GALLERY_SLUG)).media)
   })
 })
 

@@ -36,7 +36,6 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     RevisionRange,
 )
-from scadbuddy.library.libraries import pin_restored_declaration
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import cached_schema
 from scadbuddy.render.schema import CustomizerSchema
@@ -255,7 +254,6 @@ def restore_version(
     commit: CommitPath,
     catalogue: CatalogueDep,
     history: HistoryDep,
-    paths: PathsDep,
     events: EventsDep,
 ) -> ModelVersion:
     require_mine(slug)
@@ -263,11 +261,8 @@ def restore_version(
     require_history(history)
     resolved = _require_revision(history, commit)
     try:
-        # The revision's own pins come back with its `model.json`; one written
-        # before pins moved into the model gets the ones its lockfile gave it (#93).
-        history.restore(
-            slug, resolved, also=lambda at: pin_restored_declaration(history, paths, slug, at)
-        )
+        # The revision's own pins come back with its `model.json` (#93).
+        history.restore(slug, resolved)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:
