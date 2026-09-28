@@ -311,6 +311,88 @@ Why an allowlist rather than "Origin equals Host" is explained in
 the same rule to the stored public URL (`origin_allowed()` in
 [`backend/scadbuddy/api/realtime.py`](../../backend/scadbuddy/api/realtime.py)).
 
+## 6a. MCP sign-in with OIDC
+
+Issue #262. With OIDC on, MCP clients such as Claude Code or Claude Desktop sign in
+through the homelab IdP instead of being given a pasted `sbmcp_` token. Bearer tokens
+keep working. The design and the specifications followed are in spec §8.3 (`oidc`) and
+[security.md](security.md#mcp-oidc-access-tokens).
+
+**Prerequisites.**
+
+- `SCADBUDDY_PUBLIC_URL` is set (§2). The resource URI is its origin plus `/mcp`, e.g.
+  `https://scadbuddy.example/mcp`; tokens must name it as their audience.
+- The ingress sends `/.well-known/oauth-protected-resource` and
+  `/.well-known/oauth-protected-resource/mcp` to the agent, besides `/mcp` (spec §4.2).
+  Clients find the IdP through that document; a 401 names its URL.
+- The IdP is reachable from the agent over https at an address that is not link-local
+  or a cloud metadata service (the same rule as gateway URLs, §4; enforced on the
+  connection, see security.md).
+
+**In the IdP.**
+
+1. Create three scopes (or reuse existing ones and rename them in Settings):
+   `scadbuddy:read`, `scadbuddy:write`, `scadbuddy:outward`. Grant each user the
+   ones they should have. A group claim works too: set "Also read tiers from claim" to
+   `groups` and use group names as the three values.
+2. Make access tokens JWTs whose `aud` is the resource URI. The MCP client sends it as
+   the RFC 8707 `resource` parameter; IdPs that ignore that parameter need an audience
+   mapper (Keycloak: an "Audience" protocol mapper; other IdPs have their own
+   setting, not verified here). If the IdP cannot put a URL in `aud`, set **Audience** in Settings to
+   what it does write, understanding that any client of that audience is then accepted.
+   Tokens must then be RFC 9068 access tokens (header `typ` `at+jwt`, or a `client_id`
+   claim), so the IdP's ID tokens for that client are not accepted.
+3. Keep access-token lifetimes short (minutes): a JWT stays valid until `exp`.
+
+**Client registration.** MCP clients register in one of two ways
+([MCP authorization spec, 2025-11-25](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization),
+"Client Registration Approaches"):
+
+- **Dynamic client registration** (RFC 7591), when the IdP's metadata has a
+  `registration_endpoint`. The Settings "Test discovery" result says whether it does.
+  Clients then need nothing but the `/mcp` URL. Restrict what registered clients may
+  request in the IdP, since anyone can register.
+- **Pre-registered clients** otherwise: create a public client (PKCE, no secret) per
+  MCP client with its redirect URI (Claude Code uses a loopback redirect), and give the
+  client ID to the MCP client's configuration.
+
+**In ScadBuddy.** Settings → "MCP sign-in (OIDC)" (the section appears where the agent
+service is available), or the API it uses:
+
+```bash
+# see the defaults, the resource URI and the metadata URL
+curl https://scadbuddy.example/api/v1/ai/mcp/oidc
+# check an issuer without saving anything
+curl -X POST -H 'content-type: application/json' -H 'origin: https://scadbuddy.example' \
+  -d '{"issuer":"https://auth.example/application/o/scadbuddy/"}' \
+  https://scadbuddy.example/api/v1/ai/mcp/oidc/test
+```
+
+Writes pass the same UI gate as credential writes (§6), so a `curl` needs the public
+`Origin` and must come through the ingress. `PUT` takes the whole configuration:
+`enabled`, `issuer` (exactly as the IdP writes `iss`, trailing slash included),
+`audience` (null for the resource URI), `client_id` (kept for a future in-app login;
+not used to check `/mcp` tokens), `scopes` `{read, write, outward}`, `tier_claim`
+(null or a claim name) and `algorithms` (from `RS256 RS384 RS512 PS256 PS384 PS512
+ES256 ES384 ES512 EdDSA`; default `RS256`, `ES256`). With `enabled: true` the discovery
+check runs first, and on failure nothing is saved (`400`, naming the reason).
+
+**Checking it.** `curl -i -X POST https://scadbuddy.example/mcp` should answer `401`
+with `WWW-Authenticate: Bearer realm="scadbuddy", resource_metadata="…"`, and that URL
+should return a document whose `authorization_servers` is the issuer. Common failures:
+
+| Symptom | Cause |
+|---|---|
+| `401 … error_description="the token was issued for another audience (resource)"` | the IdP did not put the resource URI in `aud` (step 2) |
+| `401 … "the token was issued by another issuer"` | the issuer in Settings differs from `iss` (often the trailing slash) |
+| `401 … "signed with PS256, which is not allowed"` | add the IdP's algorithm in Settings |
+| `403 … error="insufficient_scope"` | the user or client was granted none of the three scopes |
+| `503` with `Retry-After: 30` | the agent cannot reach the IdP's metadata or JWKS |
+| metadata URL answers 404 | OIDC is off, `SCADBUDDY_PUBLIC_URL` is unset, or the ingress does not route `/.well-known/oauth-protected-resource` to the agent |
+
+A stored configuration that no longer parses (a hand-edited row) reads as "off" and is
+logged as `mcp auth: ai_settings.mcp_oidc is not a valid OIDC configuration`.
+
 ## 7. Database tables
 
 The agent owns and migrates its `ai_*` tables (spec §9;
@@ -324,7 +406,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
   The keys read today are `model` (`main.ts`), and `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
+  and `mcp_oidc`, the OIDC configuration for `/mcp` (#262; see
+  [§6a](#6a-mcp-sign-in-with-oidc)), which `PUT /api/v1/ai/mcp/oidc` writes.
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
   `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,

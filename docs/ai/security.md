@@ -17,7 +17,8 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
   [`agent/src/tools/`](../../agent/src/tools/) and
   [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts); #258's approval store in
   [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
-  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)). The
+  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)) and, when
+  enabled, OIDC access tokens (see [MCP OIDC](#mcp-oidc-access-tokens)). The
   other tool paths are the harness's in-process MCP servers (none registered in
   `main.ts`) and the browser bridge in the user's own tab
   ([browser-bridge.md](browser-bridge.md)).
@@ -69,6 +70,99 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
     them; they are kept for when the mode returns to `bearer`, and Settings shows a
     warning. In `oidc` mode (#262) bearer tokens keep working alongside the IdP
     (spec §8.3). `GET` reports `auth_mode` for this.
+
+## MCP OIDC access tokens
+
+Issue #262, spec §8.3 (`oidc`). `/mcp` is an OAuth 2.1 *resource server*; the IdP
+(Authentik, Keycloak, Pocket ID, …) is the authorization server. The code is
+[`agent/src/auth/oidc.ts`](../../agent/src/auth/oidc.ts) (verifier, discovery, caches),
+`authenticateOidc()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
+and the metadata route in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts).
+Specifications, as cited in the `oidc.ts` header:
+
+- MCP authorization, revision 2025-11-25, the one the pinned `@modelcontextprotocol/sdk`
+  1.30.x implements (`LATEST_PROTOCOL_VERSION`):
+  <https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization>
+- RFC 9728, Protected Resource Metadata: <https://www.rfc-editor.org/rfc/rfc9728>
+- RFC 8707, Resource Indicators: <https://www.rfc-editor.org/rfc/rfc8707>
+- RFC 6750, Bearer Token Usage: <https://www.rfc-editor.org/rfc/rfc6750>
+- RFC 9068, JWT access tokens: <https://www.rfc-editor.org/rfc/rfc9068>
+
+What is checked, in order:
+
+- **The mode.** OIDC runs only while `ai_settings.mcp_oidc.enabled` is true (`main.ts`
+  `authSettings`). `sbmcp_…` tokens still go to `PostgresTokenStore`; everything else
+  must be a JWT.
+- **`alg`** must be on the configured allowlist (default `RS256`, `ES256`). This is
+  checked from the header *before* any key or metadata is fetched, so `none`, `HS256`
+  and friends cost nothing. `OidcConfigSchema` cannot hold `none` or an HMAC algorithm
+  at all, which also closes RSA-public-key-as-HMAC-secret confusion (tested).
+- **`typ`**, when present, must be `at+jwt`, `application/at+jwt` or `JWT`. An ID token
+  typed as such is refused.
+- **Not an ID token** (`idTokenMarker()`): a token carrying `nonce` or `at_hash`, or
+  Keycloak's payload `typ: "ID"`, is refused. When **Audience** is overridden (typically
+  to the client id, which an ID token also names), the token must also be an RFC 9068
+  access token: header `typ` `at+jwt`, or a `client_id` claim.
+- **Signature** by a key from the issuer's JWKS (`jose` `jwtVerify` with a local JWK set).
+  Private (`d`) and symmetric (`oct`) keys and keys with `use` other than `sig` are
+  dropped from the fetched set.
+- **Claims:** `iss` equal to the configured issuer, byte for byte; `aud` containing the
+  resource URI `<origin of SCADBUDDY_PUBLIC_URL>/mcp` (RFC 8707), or the audience the
+  operator set; `exp` required; `nbf`/`iat` checked; 30 s clock leeway; `sub` required
+  (at most 255 characters).
+- **Scopes → tier:** `scope`, `scp`, and the optional `tier_claim` are matched against
+  the scope map. No match is `403 insufficient_scope`. The highest tier found includes
+  the ones below it.
+
+**Resource URI from configuration, never from the request.** The audience demanded is
+built from `SCADBUDDY_PUBLIC_URL`. Taking it from `Host` would let a client present a
+token minted for any other resource by pointing `Host` at that resource's name. Without
+a public URL, JWTs are refused and Settings refuses to enable OIDC.
+
+**No token passthrough** (MCP authorization spec, "Access Token Privilege Restriction"):
+the principal handed to tools carries the subject and tiers, not the token
+(`authInfoFor()` sets `token: ''`), and the backend is called without it.
+
+**Fetching the IdP** (`OidcProvider`, `egressGetJson()` in
+[`agent/src/http/egress.ts`](../../agent/src/http/egress.ts)):
+
+- https only; plain http only to `localhost`/`127.0.0.0/8`/`::1` (development and the
+  tests' fake IdP). No credentials in the URL.
+- The same address rules as the gateway check (link-local, cloud metadata hosts and
+  names refused), but **enforced on the connection**: the socket's `lookup` returns only
+  the addresses that were checked, so DNS rebinding between check and connect cannot
+  reach a refused address.
+- Redirects are not followed; bodies over 512 KiB and requests over 5 s fail.
+- **Caching:** metadata and JWKS for 10 minutes. An unknown `kid` triggers one JWKS
+  refetch, at most every 30 s, so a flood of forged tokens cannot make the agent hammer
+  the IdP. A failed fetch is remembered for 30 s; a failed refresh keeps serving the last
+  good metadata and keys, but only until 1 hour after they were fetched (a failure never
+  re-stamps them as fresh), so a key the IdP rotated out stops verifying even while the
+  IdP stays unreachable. An unreachable IdP answers `503` (with `Retry-After`), not `401`, so clients do
+  not discard good tokens.
+
+**Enabling** (`PUT /api/v1/ai/mcp/oidc`, [`agent/src/routes/mcpAuth.ts`](../../agent/src/routes/mcpAuth.ts)):
+`enabled: true` is saved only after a fresh discovery (metadata whose `issuer` matches
+exactly, and a JWKS with at least one public signing key). The write passes the same
+interim UI gate as credential writes (`uiRequestProblem()`), which is **not an approval**
+(#258) and not authentication; see [Known limitations](#known-limitations).
+
+**Audit.** OIDC principals are `oidc:<issuer>#<sub>` (a `sub` is unique only per
+issuer, so a new issuer's colliding `sub` does not inherit anything) with `subject` (and `clientId` from `azp` or
+`client_id`) on the principal. An approval records it as `requested_by` kind `oidc`, labelled
+`MCP OIDC <sub> via <client>` (`ownerOf()` in
+[`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts), an exhaustive switch).
+
+**Tests.** [`agent/test/oidc.test.ts`](../../agent/test/oidc.test.ts) (bad issuer,
+audience, expiry, `nbf`, missing claims, algorithm allowlist, `none`, HS256 confusion,
+forged signature, key rotation and refetch limits, discovery refusals, the egress
+fetcher), [`agent/test/mcpOidc.test.ts`](../../agent/test/mcpOidc.test.ts) (the 401/403
+headers, metadata, bearer tokens alongside, Settings routes),
+[`agent/test/oidc.e2e.test.ts`](../../agent/test/oidc.e2e.test.ts) (the MCP SDK client's
+own OAuth flow: 401 → metadata → registration → PKCE login with `resource` → call), and
+[`agent/test/oidc.pg.test.ts`](../../agent/test/oidc.pg.test.ts) (the configuration in
+Postgres). The IdP is [`agent/test/support/fakeIdp.ts`](../../agent/test/support/fakeIdp.ts),
+keys generated per run.
 
 ## Risk tiers and the permission seam
 
@@ -500,8 +594,17 @@ From the merged code and PR bodies:
    `sessions` in `main.ts`).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
-   without its sandbox** (see above).
+9. **OIDC access tokens are JWTs only, and live until `exp`** (#262). There is no
+   token introspection (RFC 7662), so an IdP that issues opaque access tokens is not
+   supported, and revoking a session at the IdP does not stop a token already issued;
+   keep access-token lifetimes short there. Turning OIDC off in Settings stops every
+   JWT at the next request.
+10. **The OIDC settings write is gated, not approved.** `PUT /api/v1/ai/mcp/oidc` uses
+    the credential routes' interim gate (item 1). Someone who can reach Settings can
+    point `/mcp` at an IdP they control, which is the "Stated plainly" caveat of spec
+    §8.3.
+11. **Under a `RuntimeDefault` seccomp profile the headless browser's Chromium runs
+    without its sandbox** (see above).
 
 ## Spec §3.2 items still open
 

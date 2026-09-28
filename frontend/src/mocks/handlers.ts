@@ -45,6 +45,7 @@ import type {
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -195,6 +196,7 @@ function runJob(jobId: string): void {
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
   resetAiPluginMocks()
+  resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -952,6 +954,7 @@ export const handlers = [
   ...aiPluginHandlers,
   // The agent service's routes (#251); the rest of this list is the backend.
   ...mcpTokenHandlers,
+  ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()

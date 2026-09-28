@@ -39,16 +39,32 @@ import { ApprovalError, type ApprovalRecord, type ApprovalService } from './serv
  * capability (mcp/http.ts), so only a digest of it is stored and shown.
  */
 export function ownerOf(principal: Principal): Owner {
-  if (principal.kind === 'anonymous') {
-    const digest = createHash('sha256').update(principal.id, 'utf8').digest('hex').slice(0, 32)
-    return {
-      kind: 'anonymous',
-      id: `anonymous:${digest}`,
-      label: `anonymous MCP client${principal.clientIp ? ` (${principal.clientIp})` : ''}`,
+  switch (principal.kind) {
+    case 'anonymous': {
+      const digest = createHash('sha256').update(principal.id, 'utf8').digest('hex').slice(0, 32)
+      return {
+        kind: 'anonymous',
+        id: `anonymous:${digest}`,
+        label: `anonymous MCP client${principal.clientIp ? ` (${principal.clientIp})` : ''}`,
+      }
+    }
+    case 'bearer':
+      return { kind: 'bearer', id: principal.id, label: `MCP ${principal.id}` }
+    case 'oidc': {
+      // The id is `oidc:<issuer>#<sub>` (auth/oidc.ts); the label names the
+      // subject and, when the token says, the OAuth client it was issued to.
+      const subject = principal.subject ?? principal.id
+      const client = principal.clientId ? ` via ${principal.clientId}` : ''
+      return { kind: 'oidc', id: principal.id, label: `MCP OIDC ${subject}${client}` }
+    }
+    case 'browser':
+      return { kind: 'browser', id: principal.id, label: 'You' }
+    default: {
+      // A new PrincipalKind must be mapped here, never fall through to the browser user.
+      const unknown: never = principal.kind
+      throw new Error(`unknown principal kind ${String(unknown)}`)
     }
   }
-  if (principal.kind === 'bearer') return { kind: 'bearer', id: principal.id, label: `MCP ${principal.id}` }
-  return { kind: 'browser', id: principal.id, label: 'You' }
 }
 
 function asAction(a: ApprovalRecord, summary = `${a.tool} ${a.inputSummary}`): PreparedAction {
