@@ -156,10 +156,12 @@ describe('SettingsPage', () => {
     expect(await screen.findByRole('status')).toHaveTextContent('/external/3')
   })
 
-  it('shows how much the upload store holds against its caps (#296)', async () => {
+  it('shows how much the store holds against its caps (#296, #426)', async () => {
     server.use(
-      http.get('/api/v1/assets/usage', () =>
+      http.get('/api/v1/store/usage', () =>
         HttpResponse.json({
+          backend: 'local',
+          by_kind: {},
           count: 12,
           bytes: 3_450_000,
           max_count: 10_000,
@@ -168,21 +170,104 @@ describe('SettingsPage', () => {
       ),
     )
     renderPage(<SettingsPage />)
-    const usage = await screen.findByTestId('asset-usage')
+    const usage = await screen.findByTestId('store-usage')
     expect(usage).toHaveTextContent('12 of 10000')
     expect(usage).toHaveTextContent('3.5 MB of 1.0 GB')
   })
 
   it('says a cap of zero is no limit', async () => {
     server.use(
-      http.get('/api/v1/assets/usage', () =>
-        HttpResponse.json({ count: 2, bytes: 640, max_count: 0, max_total_bytes: 0 }),
+      http.get('/api/v1/store/usage', () =>
+        HttpResponse.json({
+          backend: 'local',
+          by_kind: {},
+          count: 2,
+          bytes: 640,
+          max_count: 0,
+          max_total_bytes: 0,
+        }),
       ),
     )
     renderPage(<SettingsPage />)
-    const usage = await screen.findByTestId('asset-usage')
+    const usage = await screen.findByTestId('store-usage')
     expect(usage).toHaveTextContent('2 (no limit)')
     expect(usage).toHaveTextContent('640 B (no limit)')
+  })
+
+  const stored = {
+    bambuddy_url: 'https://bambuddy.internal.nullreference.io',
+    has_api_key: true,
+    library_folder_id: 7,
+    store_backend: 'local',
+  }
+
+  it('warns while render workers would hold the full key', async () => {
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...stored, has_render_api_key: false, render_key_fallback: true }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.getByTestId('render-key-fallback')).toHaveTextContent(
+      'Render workers hold the full Bambuddy key; template code can print.',
+    )
+    expect(screen.getByLabelText('Render key')).toHaveAttribute('placeholder', 'Paste the key')
+  })
+
+  it('drops the warning once a render key is stored, and never shows the key', async () => {
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...stored, has_render_api_key: true, render_key_fallback: false }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.queryByTestId('render-key-fallback')).toBeNull()
+    const key = screen.getByLabelText('Render key')
+    expect(key).toHaveValue('')
+    expect(key).toHaveAttribute('type', 'password')
+    expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
+  })
+
+  it('sends a typed render key and leaves the stored API key alone', async () => {
+    const bodies: Record<string, unknown>[] = []
+    server.use(
+      http.get('/api/v1/settings', () =>
+        HttpResponse.json({ ...stored, has_render_api_key: false, render_key_fallback: true }),
+      ),
+      http.put('/api/v1/settings', async ({ request }) => {
+        bodies.push((await request.json()) as Record<string, unknown>)
+        return HttpResponse.json({ ...stored, has_render_api_key: true, render_key_fallback: false })
+      }),
+    )
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    await user.type(screen.getByLabelText('Render key'), 'narrow')
+    await user.click(screen.getByRole('button', { name: /^save/i }))
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0]).toMatchObject({ bambuddy_render_api_key: 'narrow' })
+    expect(bodies[0]).not.toHaveProperty('bambuddy_api_key')
+  })
+
+  it('shows store usage in place of the uploads line', async () => {
+    server.use(
+      http.get('/api/v1/store/usage', () =>
+        HttpResponse.json({
+          backend: 'bambuddy',
+          count: 12,
+          bytes: 2048,
+          max_count: 0,
+          max_total_bytes: 0,
+          by_kind: { piece: 1024, asset: 1024 },
+        }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    const usage = await screen.findByTestId('store-usage')
+    expect(usage).toHaveTextContent('Bambuddy library')
+    expect(usage).toHaveTextContent('12')
+    expect(screen.queryByTestId('asset-usage')).toBeNull()
   })
 })
 
