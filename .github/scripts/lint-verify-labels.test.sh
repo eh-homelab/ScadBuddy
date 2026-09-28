@@ -59,6 +59,14 @@ check 'a label that is not the per-template one fails' '1:models/demo/verify.sh:
   "$(run 'docker run --rm --label scadbuddy-verify=demo "$IMAGE" true')"
 check 'a run inside $( ) is still checked' '1:models/demo/verify.sh:1' \
   "$(run 'log=$(docker run --rm "$IMAGE" openscad --version)')"
+check 'a Python argv wrapped one element per line fails' '1:models/demo/verify.sh:2' \
+  "$(run $'r = subprocess.run([\n    "docker",\n    "run",\n    "--rm", IMAGE])')"
+check 'single-quoted Python argv is a run too' '1:models/demo/verify.sh:1' \
+  "$(run "r = subprocess.run(['docker', 'run', '--rm', IMAGE])")"
+check 'a docker \ continuation before the subcommand fails' '1:models/demo/verify.sh:1' \
+  "$(run $'docker \\\n  run --rm "$IMAGE" true')"
+check 'a labelled run whose later arguments wrap passes' '0:' \
+  "$(run "$shell_ok"$' \\\n  -v "$PWD":/w')"
 check 'every finding is reported, not only the first' \
   '1:models/demo/verify.sh:1|models/demo/verify.sh:3' \
   "$(run $'docker run --rm "$IMAGE" a\n'"$shell_ok"$'\ndocker run --rm "$IMAGE" b')"
