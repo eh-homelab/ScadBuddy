@@ -38,6 +38,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.library.previews import sweep_work_dirs
+from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
 API_PREFIX = "/api/v1"
 
@@ -161,6 +163,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # A default render the process died in left its scratch directory, which the
+    # orphan sweep never reads: no slug names it. Only one older than any render may
+    # run goes, since another replica may be rendering into it. Whether or not
+    # previews are on: one may be left from when they were.
+    try:
+        await asyncio.to_thread(
+            sweep_work_dirs, state.paths, state.config.render_timeout * PREVIEW_TIMEOUT_FACTOR
+        )
+    except OSError:
+        logger.exception("could not sweep preview scratch directories")
     # Pins from before they moved into each model (#93): once, then the shared
     # lockfile is gone. It logs what it cannot record, so it never stops the boot.
     try:

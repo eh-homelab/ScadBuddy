@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -15,7 +17,13 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.libraries import CheckoutGate
-from scadbuddy.library.previews import PREVIEW_ID_LENGTH, PreviewStore, source_key
+from scadbuddy.library.previews import (
+    PREVIEW_ID_LENGTH,
+    PreviewStore,
+    new_work_dir,
+    source_key,
+    sweep_work_dirs,
+)
 from scadbuddy.render import previews as previews_module
 from scadbuddy.render.jobs import ModelSource
 from scadbuddy.render.previews import render_preview
@@ -95,6 +103,26 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_but_not_a_write_in_flight(
     assert sorted(removed) == ["cache/previews/gone.json", "cache/previews/gone.png"]
     assert store.image(SLUG) == b"png"
     assert in_flight.exists()
+
+
+def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
+    paths: DataPaths,
+) -> None:
+    store = PreviewStore(paths)
+    store.write(SLUG, "a" * 64, b"png")
+    crashed = new_work_dir(paths)
+    (crashed / "parts").mkdir(parents=True)
+    (crashed / "parts" / "raw.3mf").write_bytes(b"raw")
+    os.utime(crashed, (time.time() - 3600, time.time() - 3600))
+    live = new_work_dir(paths)
+    live.mkdir()
+
+    removed = sweep_work_dirs(paths, max_age=600)
+
+    assert removed == [crashed.name]
+    assert not crashed.exists()
+    assert live.exists()
+    assert store.image(SLUG) == b"png"
 
 
 def test_the_catalogue_ranks_its_own_image_over_the_preview(paths: DataPaths) -> None:

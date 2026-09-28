@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import Executor
 from contextlib import suppress
@@ -30,7 +29,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutGate
-from scadbuddy.library.previews import PreviewStore, source_key
+from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
     RenderQueue,
@@ -82,7 +81,7 @@ async def render_preview(
     """
     source = await resolve_source(slug, None, paths=paths, history=history)
     config = source.configure(config)
-    work = paths.previews / f".work-{uuid.uuid4().hex}"
+    work = new_work_dir(paths)
     async with library_lease(checkouts, f"preview:{slug}", source.library_path):
         schema = await cached_schema(source.scad, source.schema_cache, config=config)
         work.mkdir(parents=True)
@@ -252,6 +251,10 @@ class PreviewScheduler:
         if self.catalogue.has_output_cover(slug):
             self.store.drop(slug)
             return None
+        # A delete landing after the `exists` check above makes this None, and
+        # nothing here drops the preview. That is safe only because
+        # `Catalogue.delete` runs `sweep_orphans` synchronously, which removes the
+        # preview by path whether or not this ever sees the model go.
         key = source_key(self.store.paths, slug)
         if key is None or self.store.current(slug, key):
             return None
