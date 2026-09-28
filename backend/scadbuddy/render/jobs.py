@@ -689,6 +689,7 @@ def attempt_work_dir(paths: DataPaths, job: Job) -> Path:
 
 
 def no_stage(name: RenderStage) -> AbstractContextManager[None]:
+    """A stage that neither reports nor times anything: a stage run on its own."""
     return nullcontext()
 
 
@@ -831,11 +832,14 @@ async def finish_piece_stage(
     slug: str,
     thumbnail_executor: Executor | None,
     stage: Callable[[RenderStage], AbstractContextManager[None]] = no_stage,
+    schema: CustomizerSchema | None = None,
 ) -> JobResult:
     """The cover images and `MODEL_NAME`, from `LAYOUT_NAME` and `PREVIEW_NAME` in
-    ``work``."""
+    ``work``. ``schema`` is the one the render used, when the caller derived it
+    under its lease; otherwise it is derived here."""
     layout = await asyncio.to_thread(PlateLayout.load, work / LAYOUT_NAME)
-    schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
+    if schema is None:
+        schema = await cached_schema(prepared.scad, prepared.schema_cache, config=config)
     # Exit 0 with the picture missing is otherwise invisible: the preview simply
     # has no overlay, and nothing says why.
     warnings = [
@@ -938,6 +942,7 @@ async def render_job(
         slug=job.slug,
         thumbnail_executor=thumbnail_executor,
         stage=stage,
+        schema=schema,
     )
     return result, output.log_tail
 

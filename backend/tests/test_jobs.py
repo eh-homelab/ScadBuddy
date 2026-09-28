@@ -1381,7 +1381,7 @@ async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
             dict(params),
             Path(str(work)),
             plain,
-            config=CONFIG,
+            config=config,
             paths=paths,
             slug="demo",
             thumbnail_executor=None,
@@ -1390,3 +1390,29 @@ async def test_the_layout_round_trips_and_the_last_stage_works_from_it_alone(
     fields = set(JobResult.model_fields) - {"model_3mf", "preview_glb"}
     assert result.model_dump(include=fields) == expected.model_dump(include=fields)
     assert _entries(work / MODEL_NAME) == _entries(paths.root / expected.model_3mf)
+
+
+async def test_render_job_reads_the_schema_once_under_its_lease(paths: DataPaths) -> None:
+    """The colour warnings come from the schema the render used, derived while the
+    checkouts were held (#253), not from a second read once the lease is gone."""
+    checkout = _model_pinning_a_library(paths)
+    gate = CheckoutGate()
+    schema = _colour_schema(("base_color", "#0047BB"))
+    leased: list[list[str]] = []
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        leased.append(gate.leased(checkout))
+        return schema
+
+    with _stage_patches(_stage_openscad({0: [TRAY]}, None)) as stack:
+        stack.enter_context(mock.patch.object(jobs, "cached_schema", cached_schema))
+        result, _ = await jobs.render_job(
+            _job("s", params={"base_color": "not-a-colour"}),
+            config=CONFIG,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+            checkouts=gate,
+        )
+
+    assert leased == [["s"]]
+    assert unreadable_colour_warnings(schema, {"base_color": "not-a-colour"})[0] in result.warnings
