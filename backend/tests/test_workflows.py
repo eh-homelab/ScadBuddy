@@ -228,6 +228,31 @@ async def test_cancelling_one_parent_leaves_a_shared_piece_running() -> None:
         assert [p.state for p in acts.projections if p.job_id == b.id and p.state][-1] == "done"
 
 
+async def test_a_piece_cancelled_by_hand_fails_the_job_that_owns_it() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        gate = asyncio.Event()
+        acts = FakeActivities(block_solids=gate)
+        async with _worker(client, queue, acts):
+            job = _job(width=21)
+            handle = await client.start_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+            try:
+                while "render_solids" not in acts.calls:
+                    await asyncio.sleep(0.05)
+                # An operator cancels the piece itself, not the job that owns it.
+                piece_id = f"piece-{piece_key('demo', None, 'model.scad', {'width': 21})}"
+                await client.get_workflow_handle(piece_id).cancel()
+                # The job was not cancelled: it settles and completes, it does not re-raise.
+                await asyncio.wait_for(handle.result(), timeout=30)
+            finally:
+                gate.set()
+        states = [p.state for p in acts.projections if p.job_id == job.id and p.state]
+        assert states[-1] == "failed"
+        assert "cancelled" not in states
+
+
 async def test_a_job_waiting_on_a_failing_piece_projects_the_failure() -> None:
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"

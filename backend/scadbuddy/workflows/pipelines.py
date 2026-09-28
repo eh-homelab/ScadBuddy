@@ -153,7 +153,7 @@ class TemplatePipeline:
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
             await project(state="running")
-            params = job.inputs.get("params", job.params) if job.inputs else job.params
+            params = job.inputs.get("params", job.params)
             key = piece_key(job.slug, job.model_version, "model.scad", params)
             req = PieceRequest(
                 slug=job.slug, revision=job.model_version, params=dict(params), piece_key=key
