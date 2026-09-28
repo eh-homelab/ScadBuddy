@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -25,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    AssetsDep,
     CatalogueDep,
     CheckoutsDep,
     ChecksDep,
@@ -34,13 +36,17 @@ from scadbuddy.api.deps import (
     HistoryDep,
     InstallsDep,
     LibrariesDep,
+    OutputsDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
+    UploadsDep,
 )
-from scadbuddy.api.library_pins import pinned_at_create
+from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.params import require_valid_presets
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
@@ -73,6 +79,8 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -99,7 +107,7 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import RenderQueue, resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -295,6 +303,21 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
     )
 
 
+def _refuse_binary(source: str) -> None:
+    if "\x00" in source:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
+        )
+
+
+def _require_new(catalogue: Catalogue, slug: str) -> None:
+    """A 409 when ``slug`` is taken. Checked by `_create`, and by a create that names
+    libraries before it clones them (#436): a create bound to fail spends no clone."""
+    if catalogue.exists(slug):
+        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+
+
 async def _guard_source(
     source: str,
     *,
@@ -312,11 +335,7 @@ async def _guard_source(
     `decode_source` already rejects binary, and pasted text must not be the way a
     binary blob gets into the models repository, where it breaks the diff route.
     """
-    if "\x00" in source:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
-        )
+    _refuse_binary(source)
     if force:
         return None
     checked = await inspect_source(source, config=config, limit=limit, context=context)
@@ -405,8 +424,28 @@ async def create_model(
     if content_type == "application/json":
         try:
             pasted = PastedSource.model_validate(await request.json())
-        except (*_BAD_JSON, ValidationError) as error:
+        except ValidationError as error:
+            details = error.errors()
+            bad_names = [
+                str(detail["input"])
+                for detail in details
+                if detail["loc"][:1] == ("libraries",)
+                and detail["type"] == "string_pattern_mismatch"
+            ]
+            if len(bad_names) == len(details):
+                # A malformed library name reads as the multipart form's does (#437).
+                require_library_names(bad_names)
+            problem = _malformed_body(error)
+            if bad_names:
+                # Other errors too: all of them, with the names listed as #437 lists them.
+                problem.extensions["libraries"] = list(dict.fromkeys(bad_names))
+            raise problem from None
+        except _BAD_JSON as error:
             raise _malformed_body(error) from None
+        # Everything that can fail without the network, before any library is cloned.
+        pasted_slug = _slug_from_name(pasted.name)
+        _require_new(catalogue, pasted_slug)
+        _refuse_binary(pasted.source)
         async with pinned_at_create(
             pasted.libraries,
             ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
@@ -419,7 +458,7 @@ async def create_model(
                 config,
                 checks,
                 events,
-                slug=_slug_from_name(pasted.name),
+                slug=pasted_slug,
                 source=pasted.source,
                 meta=pasted_meta,
                 # Either spelling forces, as the design and the OpenAPI both promise.
@@ -465,6 +504,8 @@ async def create_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the upload needs a filename that yields a slug: {exc}",
         ) from None
+    # Before the parts are read, and so before any library is cloned (#436).
+    _require_new(catalogue, slug)
 
     try:
         source = decode_source(await file.read())
@@ -654,8 +695,7 @@ async def _create(
     fetcher: CheckoutFetcher | None = None,
 ) -> ModelRecord:
     """The one path every create takes, whatever carried the source in."""
-    if catalogue.exists(slug):
-        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+    _require_new(catalogue, slug)
     # The pins a dropped model.json carries (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create. A
     # pin whose checkout is not on this volume is fetched again (#169), and one
@@ -788,17 +828,68 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
     return require_model(catalogue, slug)
 
 
-@router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(
-    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, events: EventsDep
+@router.patch(
+    "/models/{slug}",
+    response_model=ModelRecord,
+    summary="Edit model metadata",
+    description=(
+        "`presets` replaces the template's own presets (#326) whole. Each preset's values "
+        "are checked against the template's current schema as a saved preset's are (422), "
+        "a name a saved preset of the template already has is refused (409), "
+        "and every preset is written with its key as `id`, so reordering or renaming it "
+        "later keeps it the same preset."
+    ),
+)
+async def patch_model(
+    slug: SlugPath,
+    patch: ModelPatch,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+    events: EventsDep,
+    assets: AssetsDep,
+    presets: PresetsDep,
+    fetcher: FetcherDep,
 ) -> ModelRecord:
     require_mine(slug)
-    require_model(catalogue, slug)
+    # The record, not only existence: a model.json that no longer reads as metadata is
+    # refused (409) before anything is written into it. Off the loop: a `git log`.
+    await asyncio.to_thread(require_model, catalogue, slug)
+    if patch.presets is not None:
+        await require_valid_presets(
+            slug,
+            [preset.params for preset in patch.presets],
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+            fetcher=fetcher,
+        )
+        patch.presets = with_keys(patch.presets)
+    update = partial(catalogue.update, slug, patch)
     try:
-        record = catalogue.update(slug, patch)
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        if patch.presets is None:
+            record = await asyncio.to_thread(update)
+        else:
+            # A name is one preset's in the picker: saving refuses a template's name, so
+            # the template's list refuses a saved one's -- checked and written under the
+            # preset store's lock, as a save is.
+            names = [preset.name for preset in patch.presets]
+            record = await asyncio.to_thread(presets.with_names_free, slug, names, update)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except PresetExistsError as error:
+        (name,) = error.args
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} already has a saved preset named {name!r}",
+            name=name,
+        ) from None
+    except InvalidPresetsFileError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
@@ -864,15 +955,37 @@ def duplicate_model(
         "they report their upstream as `gone`."
     ),
 )
-def delete_model(
+async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
     queue: QueueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
     events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    # Its outputs went with it; so do their Bambuddy upload records (#455). Bambuddy's
+    # own files are left alone, as a single output's delete leaves them unless asked.
+    # Best effort, like the rest of the cleanup after a delete: the model is gone.
+    if output_ids:
+        try:
+            await uploads.delete_outputs(output_ids)
+        except (DatabaseRequiredError, psycopg.Error):
+            logger.exception(
+                "could not forget a deleted model's upload records", extra={"slug": slug}
+            )
+    emit(events, ModelEvent(kind="model.deleted", slug=slug))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _delete_model(
+    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+) -> list[str]:
+    """The blocking part of :func:`delete_model`; returns the ids of the outputs it
+    removed, read before their directories go."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -891,13 +1004,13 @@ def delete_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
+    output_ids = outputs.ids_for(slug)
     try:
         catalogue.delete(slug)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.deleted", slug=slug))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return output_ids
 
 
 @router.get(

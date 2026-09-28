@@ -344,7 +344,7 @@ index 0000000..1111111
 export const presets: Record<string, ParamPreset[]> = {
   'name-keychain': [
     {
-      id: 'template-0',
+      id: 'template-tiny',
       name: 'Tiny',
       origin: 'template',
       params: { text_size: 10, keyring_hole: false },
@@ -365,7 +365,7 @@ export const presets: Record<string, ParamPreset[]> = {
     },
   ],
   [BUILTIN_SLUG]: [
-    { id: 'template-0', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
+    { id: 'template-tiny', name: 'Tiny', origin: 'template', params: { text_size: 10 } },
   ],
 }
 
@@ -480,7 +480,7 @@ export const outputs: Output[] = [
     colors: ['#1B6CA8', '#E8532F'],
     parts: [],
     warnings: [],
-    library_file_id: 8812,
+    library_files: [{ id: 8812, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] }],
     queue_item_id: 4471,
   },
   {
@@ -507,7 +507,16 @@ export const outputs: Output[] = [
     colors: ['#F2A93B', '#14181F'],
     parts: [],
     warnings: [],
-    library_file_id: 8790,
+    // #316 — one copy in the inbox, one kept in a project's folder.
+    library_files: [
+      {
+        id: 8789,
+        folder_id: 14,
+        target_key: 'Bambu Lab H2C',
+        sliced: [{ id: 8792, preset_key: '1' }],
+      },
+      { id: 8790, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] },
+    ],
   },
   {
     id: 'e'.repeat(32),

@@ -21,6 +21,103 @@
 ARG BOSL2_REF=v2.0.761
 ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
 
+# ── uv ────────────────────────────────────────────────────────────────────────
+# A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
+# docker ecosystem sees the version and can bump it. The image is scratch-based
+# and holds nothing but the two static binaries.
+FROM ghcr.io/astral-sh/uv:0.12.19 AS uv
+
+# ── base: OS packages, fonts, users ───────────────────────────────────────────
+# Pinned to a dated nightly by tag AND index digest (amd64 + arm64), so the base
+# cannot move under a build. OpenSCAD's only stable release (2021.01) has no
+# Manifold backend, so a nightly it has to be. Bump deliberately: tag, digest and
+# OPENSCAD_VERSION below together, after re-verifying §3 of the design spec.
+FROM openscad/openscad:dev.2026-09-28@sha256:992508950d86ed5ea6a6ed19934e7d65aa6b1959df69823666f575e9c1579b49 AS base
+
+# DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
+# a nightly on Debian trixie, so a pinned version here would break the
+# build the first time trixie moves, which is the opposite of reproducibility.
+#
+# Fonts are runtime dependencies, not niceties — `text()` in a .scad silently
+# falls back to a substitute face when the requested family is missing, so a
+# keychain renders with the wrong glyph widths and the bounding box the
+# acceptance test asserts moves. All four packages verified present on trixie
+# (fonts-dejavu 2.37-8, fonts-noto-core 20201225-2, fonts-lobster 2.0-2.1,
+# fonts-lobstertwo 2.0-2.1).
+#
+# `libpq5` is the Postgres client library the render queue's store talks through
+# (backend/scadbuddy/render/pg_store.py, SCADBUDDY_DATABASE_URL). The runtime
+# installs plain `psycopg`, which loads it from here, rather than psycopg's
+# binary wheel with its own bundled libpq and OpenSSL, so their security fixes
+# come with this layer's apt packages. It is loaded at import, so it is needed
+# even when no database is configured.
+#
+# `git` is a runtime dependency too, not tooling: the models directory on the data
+# volume IS a git repository (backend/scadbuddy/library/history.py), and every
+# upload, edit, restore and delete is a commit in it. Without the binary the app
+# still serves models, but the history API answers 503 and nothing is versioned.
+# A build-time FLOOR is asserted below — deliberately a floor and not a pin like
+# OPENSCAD_VERSION, for the opposite reason that one exists.
+#
+# TRAP, measured in this image: there is NO family called "Lobster". Debian's
+# `fonts-lobster` ships /usr/share/fonts/opentype/lobster/lobster.otf, whose
+# internal family name is "Lobster Two" (style "Bold Italic"), so `fc-list`
+# reports exactly two script family names — "Lobster Two" and nothing else. A
+# .scad asking for font="Lobster" gets a silent DejaVu substitution, which
+# changes glyph widths and therefore the bounding box. Script text must ask for
+# "Lobster Two".
+# hadolint ignore=DL3008
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        fontconfig \
+        fonts-dejavu \
+        fonts-lobster \
+        fonts-lobstertwo \
+        fonts-noto-core \
+        git \
+        libpq5 \
+        python3 \
+        python3-venv \
+        tini \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=uv /uv /uvx /usr/local/bin/
+
+# Non-root, with a real writable HOME. OpenSCAD and fontconfig both want one:
+# fontconfig writes its cache under $HOME/.cache when the system cache misses,
+# and a read-only HOME turns that into a per-render warning storm.
+RUN groupadd --gid 10001 scadbuddy \
+    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/scadbuddy --shell /usr/sbin/nologin scadbuddy \
+    && install -d -o scadbuddy -g scadbuddy /data /app
+
+# Build the system font cache as root so the runtime user never has to, and so
+# `fc-list` (the font dropdown in the customizer) answers immediately.
+RUN fc-cache --force --system-only
+
+# ── api-spec: the OpenAPI spec the clients are typed against ──────────────────
+# backend/openapi.json and both schema.d.ts files are not committed (#492). The
+# spec is exported here, off `base`, with the backend's own interpreter and
+# locked dependencies, and the `frontend` and `agent-build` stages copy it in to
+# generate their clients (their `pnpm gen:api` reads SCADBUDDY_OPENAPI_JSON).
+# That is why `uv` and `base` sit above the Node stages: a stage can only copy
+# from one defined before it.
+FROM base AS api-spec
+
+ENV UV_PROJECT_ENVIRONMENT=/opt/venv \
+    UV_PYTHON_INSTALL_DIR=/opt/uv-python \
+    UV_LINK_MODE=copy
+
+WORKDIR /src/backend
+COPY backend/pyproject.toml backend/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# The venv's python, not `uv run`: that would sync the dev group too.
+COPY backend/ ./
+RUN uv sync --frozen --no-dev \
+    && /opt/venv/bin/python -m scadbuddy.tools.export_openapi /src/openapi.json
+
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
 # can never reach the image (.dockerignore drops it from the context too).
@@ -54,6 +151,10 @@ RUN corepack enable
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
 
+# After the install, so an API change does not re-download node_modules.
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
+
 COPY frontend/ ./
 RUN pnpm build
 
@@ -62,9 +163,9 @@ RUN pnpm build
 # container in the ScadBuddy pod — the sidecar layout the AI design spec picks
 # in §4.1 (docs/superpowers/specs/2026-09-27-ai-integration-design.md): one
 # process per container, no supervisor under tini, independent restarts. It
-# shares nothing with the OpenSCAD stages below, and it sits ABOVE them so
-# `runtime` stays the last stage and a bare `docker build .` still produces the
-# backend image.
+# shares nothing with the OpenSCAD stages except the exported spec (`api-spec`),
+# and it sits above `app` so `runtime` stays the last stage and a bare
+# `docker build .` still produces the backend image.
 #
 # Same Node major as the `frontend` stage and ci.yml, for the same reasons
 # (see the comment on that stage); move all three together.
@@ -79,6 +180,9 @@ RUN corepack enable
 # stage does.
 COPY agent/package.json agent/pnpm-lock.yaml agent/pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile
+
+COPY --from=api-spec /src/openapi.json /src/openapi.json
+ENV SCADBUDDY_OPENAPI_JSON=/src/openapi.json
 
 COPY agent/ ./
 RUN pnpm build
@@ -141,77 +245,6 @@ CMD ["node", "dist/main.js"]
 # backend's, so the exit status is the signal.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["node", "-e", "fetch('http://127.0.0.1:8081/healthz').then(r => process.exit(r.ok ? 0 : 1), () => process.exit(1))"]
-
-# ── uv ────────────────────────────────────────────────────────────────────────
-# A FROM line, not `COPY --from=ghcr.io/astral-sh/uv:...`, so Dependabot's
-# docker ecosystem sees the version and can bump it. The image is scratch-based
-# and holds nothing but the two static binaries.
-FROM ghcr.io/astral-sh/uv:0.12.18 AS uv
-
-# ── base: OS packages, fonts, users ───────────────────────────────────────────
-FROM openscad/openscad:dev AS base
-
-# DL3008 (pin apt versions) is disabled repo-wide in .hadolint.yaml: the base is
-# a rolling nightly on Debian trixie, so a pinned version here would break the
-# build the first time trixie moves, which is the opposite of reproducibility.
-#
-# Fonts are runtime dependencies, not niceties — `text()` in a .scad silently
-# falls back to a substitute face when the requested family is missing, so a
-# keychain renders with the wrong glyph widths and the bounding box the
-# acceptance test asserts moves. All four packages verified present on trixie
-# (fonts-dejavu 2.37-8, fonts-noto-core 20201225-2, fonts-lobster 2.0-2.1,
-# fonts-lobstertwo 2.0-2.1).
-#
-# `libpq5` is the Postgres client library the render queue's store talks through
-# (backend/scadbuddy/render/pg_store.py, SCADBUDDY_DATABASE_URL). The runtime
-# installs plain `psycopg`, which loads it from here, rather than psycopg's
-# binary wheel with its own bundled libpq and OpenSSL, so their security fixes
-# come with this layer's apt packages. It is loaded at import, so it is needed
-# even when no database is configured.
-#
-# `git` is a runtime dependency too, not tooling: the models directory on the data
-# volume IS a git repository (backend/scadbuddy/library/history.py), and every
-# upload, edit, restore and delete is a commit in it. Without the binary the app
-# still serves models, but the history API answers 503 and nothing is versioned.
-# A build-time FLOOR is asserted below — deliberately a floor and not a pin like
-# OPENSCAD_VERSION, for the opposite reason that one exists.
-#
-# TRAP, measured in this image: there is NO family called "Lobster". Debian's
-# `fonts-lobster` ships /usr/share/fonts/opentype/lobster/lobster.otf, whose
-# internal family name is "Lobster Two" (style "Bold Italic"), so `fc-list`
-# reports exactly two script family names — "Lobster Two" and nothing else. A
-# .scad asking for font="Lobster" gets a silent DejaVu substitution, which
-# changes glyph widths and therefore the bounding box. Script text must ask for
-# "Lobster Two".
-# hadolint ignore=DL3008
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        fontconfig \
-        fonts-dejavu \
-        fonts-lobster \
-        fonts-lobstertwo \
-        fonts-noto-core \
-        git \
-        libpq5 \
-        python3 \
-        python3-venv \
-        tini \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=uv /uv /uvx /usr/local/bin/
-
-# Non-root, with a real writable HOME. OpenSCAD and fontconfig both want one:
-# fontconfig writes its cache under $HOME/.cache when the system cache misses,
-# and a read-only HOME turns that into a per-render warning storm.
-RUN groupadd --gid 10001 scadbuddy \
-    && useradd --uid 10001 --gid 10001 --create-home --home-dir /home/scadbuddy --shell /usr/sbin/nologin scadbuddy \
-    && install -d -o scadbuddy -g scadbuddy /data /app
-
-# Build the system font cache as root so the runtime user never has to, and so
-# `fc-list` (the font dropdown in the customizer) answers immediately.
-RUN fc-cache --force --system-only
 
 # ── openscad-lsp: the editor's language server ────────────────────────────────
 # Completion, hover and go-to-definition in the source editor (#95), bridged to
@@ -296,11 +329,11 @@ FROM base AS app
 # The assertion is deliberate and it is meant to break the build. Every
 # structural fact the render pipeline depends on (the .param schema fields, the
 # basematerials + per-triangle `p1` index, the `displaycolor` alpha quirk) was
-# measured against one nightly. `:dev` is a rolling tag, so a silent OpenSCAD
-# swap would change render output with nothing anywhere reporting it. When this
-# fires, re-verify §3 of the design spec against the new build and bump the
-# default below in the same commit.
-ARG OPENSCAD_VERSION=2026.09.23
+# measured against one nightly. The base is pinned by digest, so this should
+# never fire; it stays as the check that the tag, digest and version agree. When
+# bumping the base, re-verify §3 of the design spec against the new build and
+# change the FROM line and the default below in the same commit.
+ARG OPENSCAD_VERSION=2026.09.28
 # Written to a file rather than piped into sed: every `run:`-style pipe here
 # trips hadolint's DL4006, and `SHELL -o pipefail` for one command is a worse
 # trade than a temp file.

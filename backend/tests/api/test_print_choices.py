@@ -4,6 +4,7 @@ from typing import Any
 
 import httpx
 import psycopg
+import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -16,6 +17,10 @@ from tests.api.test_print import printers_route
 from tests.api.test_print_filaments import inventory_routes, prepared
 from tests.api.test_send import BASE, upload_route
 from tests.bambuddy.conftest import recording
+
+# A run and the dialog both read or record the output's upload copies (#316), which
+# live in Postgres.
+pytestmark = pytest.mark.requires_postgres
 
 API = f"{BASE}/api/v1"
 

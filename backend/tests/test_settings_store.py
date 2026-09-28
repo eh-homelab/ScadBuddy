@@ -89,9 +89,9 @@ def test_open_creates_the_tables_and_records_the_migrations(
                 " WHERE table_schema = current_schema()"
             )
         }
-        versions = [row[0] for row in conn.execute("SELECT version FROM scadbuddy_migrations")]
+        ids = [row[0] for row in conn.execute("SELECT id FROM scadbuddy_migrations")]
     assert {"settings", "model_print_choices", "printer_bed_types"} <= tables
-    assert sorted(versions) == list(range(1, len(MIGRATIONS) + 1))
+    assert sorted(ids) == [migration.id for migration in MIGRATIONS]
 
 
 def test_a_model_choice_and_a_printer_plate_written_at_once_both_persist(

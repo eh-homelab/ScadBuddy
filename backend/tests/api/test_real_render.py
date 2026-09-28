@@ -8,9 +8,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.config import load_config
+from scadbuddy.core.events import Event, InProcessEventBus, JobEvent, JobProgress
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
@@ -220,6 +223,37 @@ def test_a_sample_the_template_ships_is_rendered_into_every_part(
         "model.json",
         "model.scad",
         "sample-triangle.svg",
+    ]
+
+
+def test_a_real_render_announces_each_stage_in_order(client: TestClient) -> None:
+    """#267: `job.progress` names each step as it starts, between `job.running` and
+    `job.done`, so the preview can say what a slow render is doing."""
+    app = client.app
+    assert isinstance(app, FastAPI)
+    bus = getattr(app.state, STATE_ATTR).events
+    assert isinstance(bus, InProcessEventBus)
+    seen: list[Event] = []
+    bus.add_listener(seen.append)
+    client.post(
+        "/api/v1/models",
+        files={"file": ("Stages.scad", TWO_COLOUR.encode(), "application/octet-stream")},
+    )
+    accepted = client.post("/api/v1/models/stages/render", json={"params": {"size": 6}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+    assert job["status"] == "done", job["error"]
+
+    mine = [event for event in seen if isinstance(event, JobEvent | JobProgress)]
+    assert [event.stage if isinstance(event, JobProgress) else event.kind for event in mine] == [
+        "job.pending",
+        "job.running",
+        "source",
+        "render",
+        "split",
+        "solids",
+        "thumbnail",
+        "write",
+        "job.done",
     ]
 
 

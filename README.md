@@ -23,10 +23,11 @@ multi-colour rules, connecting Bambuddy and each feature.
   toggles, text limits, and `// color` / `// font` pickers.
 - **Presets**: save named parameter sets per template — built-ins too — and start
   from one, changing only what differs this time (a name, a colour, a size). A
-  preset keeps only the values that differ from the defaults. A template can ship
-  its own read-only presets in a `presets.json` beside `model.scad`
-  (`{"presets": [{"name": "…", "params": {…}}]}`); **Duplicate** copies one of
-  those, or any saved preset, to an editable preset of your own.
+  preset keeps only the values that differ from the defaults. A template defines its
+  own read-only presets in the `presets` list of its `model.json`
+  (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
+  same one when it is renamed or moved); **Duplicate** copies one of those, or any
+  saved preset, to an editable preset of your own.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -155,6 +156,19 @@ for the project picker).
     as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
     and the settings each hold one). The schema is created and migrated at
     startup.
+  - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
+    Postgres too: each change is appended to an `events` table and sent with
+    `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
+    hear it once over the same `LISTEN` connection the render queue uses. After
+    that connection drops and comes back, subscribers get a `bus.resync` event.
+    The table keeps events for `Last-Event-ID` replay:
+    `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
+    `SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (100000), 0 for no limit, pruned by every
+    replica every 5 minutes. Unset, events stay in the process as before.
+    `scadbuddy_events_published_total`, `scadbuddy_events_dropped_total{reason}`,
+    `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
+    `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
+    database, so give each deployment its own database, not just its own schema.
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
     than this for a worker, unrendered.
   - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
@@ -202,6 +216,14 @@ becomes ready and its log names the missing variable. The settings live in that
 database, so the Bambuddy connection a deployment needs from the first start
 comes from `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY` (from a Secret)
 and `SCADBUDDY_PUBLIC_URL`.
+
+A deploy that rolls the pod also migrates the database at startup
+(`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
+log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
+`analyzer_decisions`, and `20260928T0840Z_settings.sql` the settings tables). The
+event log's retention is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` /
+`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (see the render queue settings above); the
+defaults need no manifest change.
 
 ```mermaid
 flowchart LR
@@ -298,13 +320,13 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and restart again. A row the old key cannot open is left as it is and
   counted in that log line.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
-  `ai_*` migrations have applied (`agent/src/db/migrations.ts`, run at start
+  `ai_*` migrations have applied (`agent/src/db/migrations/`, run at start
   under an advisory lock with a lock timeout, retried on the next call), the
   key is loaded and a Claude credential is saved. Otherwise `ai` names the
   first missing piece; each database step is bounded (2 s), so a stuck lock
   shows as `"unavailable (database timed out)"` instead of a hung probe. An
   edited, already-applied migration stops the service at start with a message
-  naming it (each entry's sha256 is recorded).
+  naming it (each file's sha256 is recorded).
 - The Claude credential (an Anthropic API key, or a gateway base URL plus
   token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
   tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
@@ -343,6 +365,88 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
   credential's environment.
+- **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
+  harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
+  no files) and managed through `/api/v1/ai/plugins` (below). The session
+  manager takes enabled plugins for each turn (`remotePlugins`), as
+  Streamable HTTP MCP servers named after the plugin, so their tools reach
+  the model as `mcp__<name>__<tool>` (`main.ts` passes
+  `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
+  plugin tool parks for approval like any other, #258). Nothing starts a
+  session over HTTP yet, so for now the connection test is what reaches a
+  plugin. Rules (`agent/src/plugins/registry.ts`):
+  - The URL must be `https://`; plain `http://` only when every address the
+    host resolves to is loopback. Link-local and cloud metadata hosts are
+    refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
+    for gateway base URLs. It is checked at save, at test, and again each
+    time a run loads the plugin. No query string, no credentials in the URL,
+    no `$`.
+  - **Claude Code never gets the plugin's URL or secret.** Each run registers
+    its plugins with a loopback forwarder in the agent
+    (`agent/src/plugins/forwarder.ts`) and hands Claude Code
+    `http://127.0.0.1:<port>/p/<random token>`. The forwarder connects to the
+    address the check passed (no second DNS lookup; TLS still verified
+    against the hostname), follows no redirect, turns a 401 into a failure
+    instead of starting OAuth discovery, and adds the auth header itself.
+    This matters because Claude Code's own MCP client follows redirects and
+    `WWW-Authenticate` `resource_metadata` URLs with the configured header.
+    An egress NetworkPolicy on the pod is still the real boundary.
+  - An optional auth header (name in the clear, value sealed with the same
+    key-encryption key as the Claude credential and bound to the plugin's
+    name, URL and header name). Changing the URL or the header name needs the
+    value again. No route returns it; views show the header name and the last
+    four characters.
+  - **Every tool is `outward`, so it needs approval, until you set its tier.**
+    `tool_tiers` sets tools to `read` or `write` (or `outward` explicitly).
+    `disabled_tools` removes tools from the model's view entirely. MCP
+    annotations such as `readOnlyHint` are only shown as a suggestion by the
+    test; they never change a tier.
+  - Claude Code renames every character outside `[A-Za-z0-9_-]` in a tool
+    name to `_` (`files.list` becomes `mcp__<name>__files_list`). So only
+    tools already named in that alphabet can take a tier; others stay
+    `outward` (or disable them, by their real name). When two tools end up
+    with the same name, both are hidden from the model, and the test marks
+    them `collision`.
+  - New plugins start disabled (`enabled: true` on create is refused). Run
+    the test, review the tools, then enable.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
+  | `POST /api/v1/ai/plugins` | register (disabled): `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `tool_tiers`, `disabled_tools` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`, and `enabled`; `secret: null` removes the header |
+  | `DELETE /api/v1/ai/plugins/{name}` | remove |
+  | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
+
+  Writes and the test go through the same guard as credential writes (next
+  bullet). Reads are guarded too (`uiReadProblem`): HTTPS through the trusted
+  proxy or loopback, addressed to the public origin (or loopback), `Origin`
+  checked when present, and a cross-site `Sec-Fetch-Site` refused. A generic example against a loopback peer (a shell in the pod, or
+  `kubectl port-forward … 8081`; the `Origin` must match the address used):
+
+  ```bash
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"name": "memory", "url": "https://memory.internal.example/mcp/",
+         "secret": "Bearer <token>"}'
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins/memory/test \
+    -H 'Origin: http://127.0.0.1:8081'
+  curl -sS -X PATCH http://127.0.0.1:8081/api/v1/ai/plugins/memory \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"tool_tiers": {"search": "read"}, "enabled": true}'
+  ```
+
+  **Hindsight** (the motivating example, #297). Its docs give a per-bank MCP
+  endpoint at `…/mcp/<bank_id>/`, transport `http`, an optional
+  `Authorization: Bearer <api key>` header for Hindsight Cloud (none for a
+  local Docker deployment), and the tools `retain`, `recall` and `reflect`
+  among others ([MCP memory server](https://hindsight.vectorize.io/blog/2026/03/04/mcp-agent-memory)).
+  Registered as a plugin that is `{"name": "hindsight", "url":
+  "https://<hindsight host>/mcp/<bank_id>/", "secret": "Bearer <api key>"}`.
+  Which of its tools to lower to `read` is your call after the test lists
+  them; `recall` is the obvious candidate. Not yet verified against a running
+  Hindsight: the tool names and annotations a real server lists, and whether
+  `reflect` writes anything.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
@@ -407,11 +511,15 @@ what makes the running image knowable.
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.
 - `models/` — bundled example models; `models/<name>/verify.sh` renders one
   against `openscad/openscad:dev` and checks the result.
-- `backend/openapi.json` and `frontend/public/mockServiceWorker.js` are
-  generated and checked for freshness in CI (`python -m
-  scadbuddy.tools.export_openapi`, `pnpm exec msw init public --save`).
+- `backend/openapi.json` and the frontend and agent `src/api/schema.d.ts`
+  are generated at build time and not committed: `pnpm gen:api` in either
+  package exports the spec (`python -m scadbuddy.tools.export_openapi`) and
+  writes the client. CI posts the API diff on each PR.
+  `frontend/public/mockServiceWorker.js` is committed and checked against
+  msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.

@@ -10,35 +10,43 @@ One table, ``render_jobs``, is both the job record and the wait list:
   render or counts one more claim on the identical one already waiting, atomically.
 - **Leases.** A worker heartbeats the job it holds. `reap` requeues a running job
   whose heartbeat is older than the lease (the pod died mid-render), up to the
-  attempt limit; `finish` only lands for the attempt that still holds the job.
+  attempt limit, each in a transaction of its own; `finish` only lands for the
+  attempt that still holds the job.
 - **Wake-ups.** A new or requeued job sends ``NOTIFY scadbuddy_render_queue`` in the
   transaction that queues it, so it is delivered on commit and never for a job that
-  was rolled back. Each process holds one `QueueListener` connection that wakes its
-  idle workers; their poll is only the fallback for a notification missed while
-  that connection was down.
+  was rolled back. Each process holds one LISTEN connection (`PgListener`, shared
+  with the event bus) that wakes its idle workers; their poll is only the fallback
+  for a notification missed while that connection was down.
+- **Job events.** With an event bus attached (`events`), the ``job.*`` events of a
+  submit, a reap and a finish are logged and NOTIFYed in the same transaction as the
+  change (`PgNotifyEventBus.publish_in`), so they are heard on commit or not at all.
 
-Schema changes go in `MIGRATIONS`, append-only, applied at `open` under an advisory
-lock so two starting pods cannot race each other. The list is the backend's whole
-schema, not only the queue's: the settings tables are in it too.
+Schema changes are files in ``backend/scadbuddy/migrations/`` (`MIGRATIONS_DIR`), one
+per migration, named by UTC timestamp and slug (``20260928T0612Z_settings.sql``). Add a
+new file; never edit, rename or remove a merged one. They are applied at `open`, in
+timestamp order and each once by file id, under an advisory lock so two starting pods
+cannot race each other.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import random
+import re
 import shutil
 from collections.abc import Callable
 from datetime import datetime, timedelta
-from typing import Any
+from pathlib import Path
+from typing import Any, NamedTuple, Protocol
 
-from psycopg import AsyncConnection, Connection
+from psycopg import Connection, sql
 from psycopg.errors import UniqueViolation
 from psycopg.rows import DictRow, dict_row, tuple_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 
+from scadbuddy.core.events import Event, JobEvent, JobKind
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.job_models import Job
 from scadbuddy.render.job_models import now as _now
 from scadbuddy.render.job_store import (
@@ -59,76 +67,55 @@ MIGRATION_LOCK = 0x5343_4144_4244_4459
 #: The channel a queued job is announced on. Channels are per database, not per
 #: schema: deployments sharing one database only wake each other's idle workers.
 QUEUE_CHANNEL = "scadbuddy_render_queue"
-#: How the listening connection shows in `pg_stat_activity`.
-LISTENER_APPLICATION_NAME = "scadbuddy-render-listener"
 
-#: Append-only: each entry is applied once, in order, and recorded by its position.
-MIGRATIONS: tuple[str, ...] = (
-    """
-    CREATE TABLE render_jobs (
-        id            text PRIMARY KEY,
-        slug          text NOT NULL,
-        params        jsonb NOT NULL DEFAULT '{}'::jsonb,
-        model_version text,
-        state         text NOT NULL CHECK (state IN ('pending', 'running', 'done', 'failed')),
-        created_at    timestamptz NOT NULL,
-        started_at    timestamptz,
-        finished_at   timestamptz,
-        log_tail      jsonb NOT NULL DEFAULT '[]'::jsonb,
-        error         text,
-        result        jsonb,
-        render_key    text NOT NULL,
-        claims        integer NOT NULL DEFAULT 1,
-        attempts      integer NOT NULL DEFAULT 0,
-        heartbeat_at  timestamptz
-    );
-    CREATE INDEX render_jobs_pending ON render_jobs (created_at, id) WHERE state = 'pending';
-    CREATE UNIQUE INDEX render_jobs_pending_key ON render_jobs (render_key)
-        WHERE state = 'pending';
-    CREATE INDEX render_jobs_running ON render_jobs (heartbeat_at) WHERE state = 'running';
-    CREATE INDEX render_jobs_unfinished_slug ON render_jobs (slug)
-        WHERE state IN ('pending', 'running');
-    CREATE INDEX render_jobs_settled ON render_jobs (finished_at)
-        WHERE state IN ('done', 'failed');
-    """,
-    # 2: what OpenSCAD reported, parsed (#252). On the row rather than only inside
-    # `result`, because a failed render has no result and is when they matter most.
-    """
-    ALTER TABLE render_jobs
-        ADD COLUMN diagnostics jsonb NOT NULL DEFAULT '[]'::jsonb,
-        ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
-    CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
-        WHERE state IN ('done', 'failed');
-    """,
-    # 3: ScadBuddy's own job warnings (#408), on the row for the same reason: a
-    # failed render has no result to carry them.
-    """
-    ALTER TABLE render_jobs ADD COLUMN warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
-    """,
-    # 4: the settings (`library.settings_store.SettingsStore`), formerly
-    # data/settings.json. One row per setting, so a write touches only its own row.
-    # A JSON `null` value is an env-seeded setting the UI cleared; no row is "never
-    # set" (the environment's value, or the default). The print dialog's per-model
-    # choices and per-printer plates get tables of their own, since it writes both on
-    # every print.
-    """
-    CREATE TABLE settings (
-        name       text PRIMARY KEY,
-        value      jsonb NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE TABLE model_print_choices (
-        model_id   text PRIMARY KEY,
-        choices    jsonb NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    CREATE TABLE printer_bed_types (
-        printer_id bigint PRIMARY KEY,
-        bed_type   text NOT NULL,
-        updated_at timestamptz NOT NULL DEFAULT now()
-    );
-    """,
+#: The migration files (#491): one per migration, named ``<yyyymmdd>T<hhmm>Z_<slug>.sql``
+#: (UTC). The stem is the file's id in ``scadbuddy_migrations``.
+MIGRATIONS_DIR = Path(__file__).resolve().parent.parent / "migrations"
+
+#: ``<yyyymmdd>T<hhmm>Z_<slug>``; fixed width, so sorting ids sorts by time.
+MIGRATION_ID = re.compile(r"\d{8}T\d{4}Z_[a-z0-9_]+")
+
+
+class Migration(NamedTuple):
+    id: str
+    sql: str
+
+
+def load_migrations(directory: Path = MIGRATIONS_DIR) -> tuple[Migration, ...]:
+    """The migration files of `directory`, in timestamp order. Anything there that is
+    not a well-named ``.sql`` file raises, so a misnamed migration fails at start
+    instead of being skipped."""
+    migrations: list[Migration] = []
+    for path in sorted(directory.iterdir()):
+        if path.suffix != ".sql" or not MIGRATION_ID.fullmatch(path.stem):
+            raise ValueError(
+                f"{path} is not a migration: files there are named"
+                " <yyyymmdd>T<hhmm>Z_<slug>.sql (UTC, slug in [a-z0-9_])"
+            )
+        migrations.append(Migration(path.stem, path.read_text(encoding="utf-8")))
+    return tuple(migrations)
+
+
+#: Read at import, so an image without the files fails at start.
+MIGRATIONS: tuple[Migration, ...] = load_migrations()
+
+#: Before #491 the ledger recorded migrations by POSITION in a list: entry ``n`` of
+#: that list is ``LEGACY_VERSIONS[n - 1]``. `migrate` rewrites positional rows to
+#: these ids once, and keeps writing ``version`` for them so an image from before
+#: #491 still starts on the ledger. Frozen: nothing is ever added here.
+LEGACY_VERSIONS: tuple[str, ...] = (
+    "20260927T2243Z_render_jobs",
+    "20260928T0105Z_render_diagnostics",
+    "20260928T0600Z_render_warnings",
+    "20260928T0630Z_events",
 )
+
+
+class MigrationLedgerError(RuntimeError):
+    """The ledger holds a positional row (from before #491) that main's list never
+    had: this database ran a migration from a branch that did not merge as such.
+    Guessing which file it was would either re-run or skip real schema."""
+
 
 JOB_COLUMNS = (
     "id",
@@ -161,27 +148,103 @@ def _notify(conn: Connection[Any]) -> None:
     conn.execute("SELECT pg_notify(%s, '')", (QUEUE_CHANNEL,))
 
 
-def migrate(conn: Connection[Any]) -> list[int]:
-    """Apply the migrations this database has not seen; returns their versions."""
-    applied: list[int] = []
+class TransactionalEvents(Protocol):
+    """Publishes an event inside a caller's transaction (`PgNotifyEventBus`)."""
+
+    def publish_in(self, conn: Connection[Any], event: Event) -> None: ...
+
+
+def migrate(conn: Connection[Any], migrations: tuple[Migration, ...] = MIGRATIONS) -> list[str]:
+    """Apply the migration files this database has not seen, in timestamp order;
+    returns their ids.
+
+    Any file not in the ledger is applied, so one with an OLDER timestamp that
+    merges after newer ones ran (a branch cut earlier) still runs. A ledger row
+    naming a file this build does not have (a newer image ran it) is left alone.
+    """
+    applied: list[str] = []
     with conn.transaction():
         conn.execute("SELECT pg_advisory_xact_lock(%s)", (MIGRATION_LOCK,))
+        _ensure_ledger(conn)
+        ids = conn.cursor(row_factory=tuple_row).execute("SELECT id FROM scadbuddy_migrations")
+        done = {row[0] for row in ids}
+        for migration in sorted(migrations, key=lambda m: m.id):
+            if migration.id in done:
+                continue
+            conn.execute(migration.sql.encode("utf-8"))
+            version = (
+                LEGACY_VERSIONS.index(migration.id) + 1 if migration.id in LEGACY_VERSIONS else None
+            )
+            conn.execute(
+                "INSERT INTO scadbuddy_migrations (id, version) VALUES (%s, %s)",
+                (migration.id, version),
+            )
+            applied.append(migration.id)
+    return applied
+
+
+def _ensure_ledger(conn: Connection[Any]) -> None:
+    """Create the ledger, or convert one from before #491 (keyed by position) to file
+    ids, inside `migrate`'s transaction and advisory lock: exactly once, however many
+    pods start together."""
+    columns = {
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT column_name FROM information_schema.columns"
+            " WHERE table_schema = current_schema() AND table_name = 'scadbuddy_migrations'"
+        )
+    }
+    if not columns:
+        # `version` is kept for the LEGACY_VERSIONS files only.
         conn.execute(
-            "CREATE TABLE IF NOT EXISTS scadbuddy_migrations ("
-            " version integer PRIMARY KEY,"
+            "CREATE TABLE scadbuddy_migrations ("
+            " id text PRIMARY KEY,"
+            " version integer UNIQUE,"
             " applied_at timestamptz NOT NULL DEFAULT now())"
         )
-        versions = conn.cursor(row_factory=tuple_row).execute(
-            "SELECT version FROM scadbuddy_migrations"
+        return
+    if "id" in columns:
+        return
+    versions = [
+        row[0]
+        for row in conn.cursor(row_factory=tuple_row).execute(
+            "SELECT version FROM scadbuddy_migrations ORDER BY version"
         )
-        done = {row[0] for row in versions}
-        for version, statement in enumerate(MIGRATIONS, start=1):
-            if version in done:
-                continue
-            conn.execute(statement.encode("utf-8"))
-            conn.execute("INSERT INTO scadbuddy_migrations (version) VALUES (%s)", (version,))
-            applied.append(version)
-    return applied
+    ]
+    unknown = [v for v in versions if not 1 <= v <= len(LEGACY_VERSIONS)]
+    if unknown:
+        raise MigrationLedgerError(
+            f"scadbuddy_migrations records positional version(s)"
+            f" {', '.join(map(str, unknown))}, but main only ever had {len(LEGACY_VERSIONS)}:"
+            " this database ran a migration from a branch that has not merged as such."
+            " Recreate the database, or delete those rows and the schema they created,"
+            " then start again."
+        )
+    pkey = (
+        conn.cursor(row_factory=tuple_row)
+        .execute(
+            "SELECT conname FROM pg_constraint"
+            " WHERE conrelid = 'scadbuddy_migrations'::regclass AND contype = 'p'"
+        )
+        .fetchone()
+    )
+    conn.execute("ALTER TABLE scadbuddy_migrations ADD COLUMN id text")
+    conn.execute(
+        "UPDATE scadbuddy_migrations SET id = (%s::text[])[version]", (list(LEGACY_VERSIONS),)
+    )
+    if pkey is not None:
+        conn.execute(
+            sql.SQL("ALTER TABLE scadbuddy_migrations DROP CONSTRAINT {}").format(
+                sql.Identifier(pkey[0])
+            )
+        )
+    conn.execute(
+        "ALTER TABLE scadbuddy_migrations"
+        " ALTER COLUMN id SET NOT NULL,"
+        " ADD PRIMARY KEY (id),"
+        " ADD UNIQUE (version),"
+        " ALTER COLUMN version DROP NOT NULL"
+    )
 
 
 class PostgresJobStore:
@@ -198,6 +261,11 @@ class PostgresJobStore:
         self.paths = paths
         self.conninfo = conninfo
         self.connect_timeout = connect_timeout
+        #: This process's LISTEN connection, which the event bus shares.
+        self.pg_listener = PgListener(conninfo, connect_timeout=connect_timeout)
+        #: Where the job events of this store's transactions go; `None` leaves
+        #: them all to the render queue (published after the change commits).
+        self.events: TransactionalEvents | None = None
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             conninfo,
             min_size=1,
@@ -218,20 +286,44 @@ class PostgresJobStore:
     def close(self) -> None:
         self._pool.close()
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The process's one pool, shared with the other Postgres stores
+        (`bambuddy.uploads.BambuddyUploadStore`). Opened and migrated by `open`."""
+        return self._pool
+
     def listener(
         self,
         *,
         on_notify: Callable[[], None],
         on_state: Callable[[bool], None],
         check_interval: float,
-    ) -> QueueListener:
-        return QueueListener(
-            self.conninfo,
-            on_notify=on_notify,
-            on_state=on_state,
-            check_interval=check_interval,
-            connect_timeout=self.connect_timeout,
+    ) -> PgListener:
+        listener = self.pg_listener
+        listener.check_interval = check_interval
+        listener.on_state(on_state)
+        # A (re)connect wakes the workers too: a job queued while nothing
+        # listened sent a notification this process never saw.
+        listener.listen(
+            QUEUE_CHANNEL,
+            on_notify=lambda _payload: on_notify(),
+            on_connect=lambda _reconnected: on_notify(),
         )
+        return listener
+
+    @property
+    def announces_jobs(self) -> bool:
+        return self.events is not None
+
+    def announce(self, job: Job, kind: JobKind) -> None:
+        if self.events is None:
+            return
+        with self._pool.connection() as conn, conn.transaction():
+            self._announce(conn, job, kind)
+
+    def _announce(self, conn: Connection[Any], job: Job, kind: JobKind) -> None:
+        if self.events is not None:
+            self.events.publish_in(conn, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
     def abandon_orphans(self) -> list[Job]:
         # Pending jobs are durable and still wanted; running ones are recovered by
@@ -239,51 +331,71 @@ class PostgresJobStore:
         return []
 
     def reap(self, *, lease: float, max_attempts: int) -> Reaped:
+        """One short transaction per stale job, not one for the whole pass: each
+        job's event takes the event log's lock (`EVENT_LOG_LOCK`), which is held to
+        commit, and a pass over many lost workers must not hold every replica's
+        publishing up for all of them."""
         requeued: list[Job] = []
         failed: list[Job] = []
-        with self._pool.connection() as conn, conn.transaction():
-            stale = conn.execute(
-                "SELECT * FROM render_jobs WHERE state = 'running'"
+        with self._pool.connection() as conn:
+            # Candidates only, unlocked: each is locked, and re-checked, in its own
+            # transaction below, so one another replica is reaping (locked, hence
+            # skipped) or one whose worker heartbeated since is left alone.
+            candidates = conn.execute(
+                "SELECT id FROM render_jobs WHERE state = 'running'"
                 " AND heartbeat_at < now() - make_interval(secs => %s)"
-                " FOR UPDATE SKIP LOCKED",
+                " ORDER BY heartbeat_at, id",
                 (lease,),
             ).fetchall()
-            for row in stale:
-                error = LOST_WORKER_ERROR
-                if row["attempts"] < max_attempts:
-                    # Tried, not checked first: an identical render already pending
-                    # (or submitted concurrently) makes the requeue violate the
-                    # pending-key unique index, and a SELECT beforehand would only
-                    # narrow that race, not close it. The savepoint confines the
-                    # violation to this row instead of rolling back the whole pass.
-                    # `claims` is left as it is: every submitter coalesced onto the
-                    # job is still waiting on it, and a supersede from one of them
-                    # must release only that one's claim.
-                    try:
-                        with conn.transaction():
-                            back = conn.execute(
-                                "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                                " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
-                                " diagnostics_dropped = 0, warnings = '[]'::jsonb"
-                                " WHERE id = %s RETURNING *",
-                                (row["id"],),
-                            ).fetchone()
-                    except UniqueViolation:
-                        error = TWIN_QUEUED_ERROR
-                    else:
-                        assert back is not None
-                        requeued.append(_job(back))
+            for candidate in candidates:
+                with conn.transaction():
+                    row = conn.execute(
+                        "SELECT * FROM render_jobs WHERE id = %s AND state = 'running'"
+                        " AND heartbeat_at < now() - make_interval(secs => %s)"
+                        " FOR UPDATE SKIP LOCKED",
+                        (candidate["id"], lease),
+                    ).fetchone()
+                    if row is None:
                         continue
-                dead = conn.execute(
-                    "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
-                    " error = %s WHERE id = %s RETURNING *",
-                    (error, row["id"]),
-                ).fetchone()
-                assert dead is not None
-                failed.append(_job(dead))
-            if requeued:
-                _notify(conn)
+                    back = self._requeue(conn, row) if row["attempts"] < max_attempts else None
+                    if isinstance(back, Job):
+                        requeued.append(back)
+                        self._announce(conn, back, "job.pending")
+                        _notify(conn)
+                        continue
+                    dead = conn.execute(
+                        "UPDATE render_jobs SET state = 'failed', finished_at = now(),"
+                        " error = %s WHERE id = %s RETURNING *",
+                        (back or LOST_WORKER_ERROR, row["id"]),
+                    ).fetchone()
+                    assert dead is not None
+                    failed.append(_job(dead))
+                    self._announce(conn, failed[-1], "job.failed")
         return Reaped(requeued=requeued, failed=failed)
+
+    @staticmethod
+    def _requeue(conn: Connection[DictRow], row: DictRow) -> Job | str:
+        """Put a stale job back in the queue; the error to fail it with if it cannot.
+
+        Tried, not checked first: an identical render already pending (or submitted
+        concurrently) makes the requeue violate the pending-key unique index, and a
+        SELECT beforehand would only narrow that race, not close it. The savepoint
+        confines the violation to the requeue. `claims` is left as it is: every
+        submitter coalesced onto the job is still waiting on it, and a supersede from
+        one of them must release only that one's claim."""
+        try:
+            with conn.transaction():
+                back = conn.execute(
+                    "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
+                    " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
+                    " diagnostics_dropped = 0, warnings = '[]'::jsonb"
+                    " WHERE id = %s RETURNING *",
+                    (row["id"],),
+                ).fetchone()
+        except UniqueViolation:
+            return TWIN_QUEUED_ERROR
+        assert back is not None
+        return _job(back)
 
     def submit(
         self,
@@ -317,6 +429,7 @@ class PostgresJobStore:
                     ).fetchone()
                     assert dropped is not None
                     superseded = _job(dropped)
+                    self._announce(conn, superseded, "job.superseded")
             if max_pending:
                 # Inside the transaction: raising rolls the supersede above back,
                 # so a refusal changes nothing. A soft limit across replicas --
@@ -352,6 +465,7 @@ class PostgresJobStore:
             if row["inserted"]:
                 # A coalesced submit queued nothing new, so no worker has more to do.
                 _notify(conn)
+                self._announce(conn, _job(row), "job.pending")
         return Submitted(_job(row), coalesced=not row["inserted"], superseded=superseded)
 
     def claim(self) -> Job | None:
@@ -378,8 +492,8 @@ class PostgresJobStore:
                 (job.id, job.attempt),
             )
 
-    def finish(self, job: Job) -> bool:
-        with self._pool.connection() as conn:
+    def finish(self, job: Job, *, announce: JobKind | None = None) -> bool:
+        with self._pool.connection() as conn, conn.transaction():
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, started_at = %s, finished_at = %s,"
                 " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL,"
@@ -399,7 +513,10 @@ class PostgresJobStore:
                     job.attempt,
                 ),
             )
-            return cursor.rowcount == 1
+            landed = cursor.rowcount == 1
+            if landed and announce is not None:
+                self._announce(conn, job, announce)
+        return landed
 
     def read(self, job_id: str) -> Job:
         with self._pool.connection() as conn:
@@ -463,78 +580,5 @@ class PostgresJobStore:
         shutil.rmtree(self.paths.job_work_dir(job_id), ignore_errors=True)
 
 
-class QueueListener:
-    """This process's ``LISTEN`` on `QUEUE_CHANNEL`, on one dedicated connection
-    outside the pool: a notification only reaches the session that listens, and a
-    pooled connection goes back to other callers between uses.
-
-    Every notification calls ``on_notify``, and so does every (re)connect: a job
-    queued while nothing listened sent a notification this process never saw. A
-    dropped or refused connection is retried after a capped exponential back-off
-    with jitter, so replicas do not all reconnect in step after a database restart.
-    An idle connection is checked every ``check_interval``, since a half-open TCP
-    connection delivers nothing and raises nothing until something is sent on it.
-    """
-
-    def __init__(
-        self,
-        conninfo: str,
-        *,
-        on_notify: Callable[[], None],
-        on_state: Callable[[bool], None],
-        check_interval: float,
-        connect_timeout: float = 30.0,
-        backoff: float = 0.5,
-        max_backoff: float = 30.0,
-    ) -> None:
-        self.conninfo = conninfo
-        self.on_notify = on_notify
-        self.on_state = on_state
-        self.check_interval = check_interval
-        self.connect_timeout = connect_timeout
-        self.backoff = backoff
-        self.max_backoff = max_backoff
-        #: Times a LISTEN has been established.
-        self.connects = 0
-        #: The listening session's server process while connected, else `None`.
-        self.backend_pid: int | None = None
-
-    async def run(self) -> None:
-        delay = self.backoff
-        while True:
-            connects = self.connects
-            try:
-                await self._listen()
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                logger.warning(
-                    "the render queue listener is disconnected; workers poll until it is back",
-                    extra={"error": str(error)},
-                )
-            if self.connects != connects:
-                delay = self.backoff  # it had been up: a new outage starts short
-            await asyncio.sleep(delay * random.uniform(0.5, 1.0))
-            delay = min(delay * 2, self.max_backoff)
-
-    async def _listen(self) -> None:
-        conn = await AsyncConnection.connect(
-            self.conninfo,
-            autocommit=True,
-            connect_timeout=max(1, round(self.connect_timeout)),
-            application_name=LISTENER_APPLICATION_NAME,
-        )
-        async with conn:
-            await conn.execute(f"LISTEN {QUEUE_CHANNEL}".encode())
-            self.connects += 1
-            self.backend_pid = conn.info.backend_pid
-            self.on_state(True)
-            try:
-                self.on_notify()
-                while True:
-                    async for _ in conn.notifies(timeout=self.check_interval):
-                        self.on_notify()
-                    await conn.execute(b"SELECT 1")
-            finally:
-                self.backend_pid = None
-                self.on_state(False)
+#: The render queue's name for the process's shared LISTEN connection (#348).
+QueueListener = PgListener
