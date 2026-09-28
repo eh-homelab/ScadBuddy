@@ -46,6 +46,7 @@ import type {
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
 import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { mcpOidcHandlers, resetMcpOidcMock } from './mcpOidc'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -55,6 +56,7 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -93,6 +95,8 @@ const state = {
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
   settings: { ...fixtures.settings } as Settings,
+  /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
+  headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
   jobs: new Map<string, Job>(),
   /** #78 — per-model printer and spools, the store's `model_print_choices`. */
@@ -192,6 +196,8 @@ function runJob(jobId: string): void {
 
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
+  resetAiPluginMocks()
+  resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
   state.outputs = fixtures.outputs.map((o) => ({ ...o }))
@@ -202,6 +208,7 @@ export function resetMockState(): void {
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
   state.settings = { ...fixtures.settings }
+  state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
   state.modelChoices = {}
@@ -951,8 +958,11 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's plugin routes (#297), under /api/v1/ai.
+  ...aiPluginHandlers,
   // The agent service's routes (#251); the rest of this list is the backend.
   ...mcpTokenHandlers,
+  ...mcpOidcHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()
@@ -2445,6 +2455,20 @@ export const handlers = [
   }),
 
   http.get(`${base}/settings`, () => HttpResponse.json(state.settings)),
+
+  // #349 — served by the agent service, not the backend (agent/src/routes/headlessBrowser.ts).
+  http.get(`${base}/ai/settings/headless-browser`, () =>
+    HttpResponse.json({ enabled: state.headlessBrowser }),
+  ),
+
+  http.put(`${base}/ai/settings/headless-browser`, async ({ request }) => {
+    const body = (await request.json()) as { enabled?: unknown }
+    if (typeof body.enabled !== 'boolean') {
+      return HttpResponse.json({ detail: 'enabled: expected boolean' }, { status: 400 })
+    }
+    state.headlessBrowser = body.enabled
+    return HttpResponse.json({ enabled: state.headlessBrowser })
+  }),
 
   http.put(`${base}/settings`, async ({ request }) => {
     const body = (await request.json()) as {
