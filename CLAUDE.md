@@ -229,6 +229,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   only when every finding in the review for *this* commit is fixed or tracked in an
   open `pr-feedback` issue for the PR. Adding the `claude-make-follow-up-issues` label
   to the PR files those `pr-feedback` issues automatically.
+- When claude-code-action's workflow-validation guard skips the review (the PR's
+  `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
+  itself edits that file**. A PR merely branched before `main` changed it fails closed
+  (#487): merge `main` and re-dispatch the review.
 - The freshness job may push a `chore: regenerate committed generated files` commit to
   your branch; pull before pushing again.
 
