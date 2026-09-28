@@ -3,7 +3,9 @@
 Self-hosted OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. The design,
 and the measured facts it rests on, are in
 `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` (§3 is the verified-facts list);
-the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`.
+the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`; template-owned
+UIs and pipelines on Temporal, the blob store and Arrange are
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md`.
 Deployment is described in `README.md` ("Deploying").
 
 ## Commands (what CI runs)
