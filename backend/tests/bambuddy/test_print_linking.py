@@ -19,7 +19,7 @@ import respx
 
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.linking import link_by_hash
+from scadbuddy.bambuddy.linking import ARCHIVE_OVERLAP, ARCHIVE_PAGE, link_by_hash
 from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import progress_for
 from scadbuddy.bambuddy.projects import attach_results
@@ -265,7 +265,68 @@ async def test_the_hash_scan_pages_until_bambuddy_runs_out(
 
     await link_by_hash(bambuddy, uploads, links, meta())
 
-    assert [call.request.url.params.get("offset") for call in scan.calls] == [None, "100"]
+    assert [call.request.url.params.get("offset") for call in scan.calls] == [None, "90"]
+    assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
+
+
+def shifting_archives(rows: list[dict[str, Any]], shift: int) -> respx.Route:
+    """A live ``GET /archives/`` whose list moves by ``shift`` rows after the first
+    read: archives created at its head (``shift > 0``), or deleted from it."""
+    live = list(rows)
+    reads = 0
+
+    def page(request: httpx.Request) -> httpx.Response:
+        nonlocal live, reads
+        offset = int(request.url.params.get("offset", "0"))
+        limit = int(request.url.params["limit"])
+        body = live[offset : offset + limit]
+        reads += 1
+        if reads == 1:
+            if shift > 0:
+                live = [archive_row(9000 + n, "new") for n in range(shift)] + live
+            else:
+                live = live[-shift:]
+        return httpx.Response(200, json=body)
+
+    return respx.get(f"{API}/archives/").mock(side_effect=page)
+
+
+@respx.mock
+@pytest.mark.parametrize("shift", [1, ARCHIVE_OVERLAP])
+async def test_archives_created_between_page_reads_do_not_link_a_print_twice(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore, shift: int
+) -> None:
+    """The last row of the first page moves onto the second page and is read again."""
+    await _sliced(uploads)
+    await uploads.record_slice_hash(OUTPUT, 80, HASH)
+    rows = [archive_row(1000 + n, "x") for n in range(150)]
+    rows[ARCHIVE_PAGE - 1] = archive_row(18, HASH)
+    rows[140] = archive_row(19, HASH)
+    scan = shifting_archives(rows, shift)
+
+    found = await link_by_hash(bambuddy, uploads, links, meta())
+
+    assert scan.call_count == 2
+    assert [link.archive_id for link in found] == [18, 19]
+
+
+@respx.mock
+@pytest.mark.parametrize("shift", [1, ARCHIVE_OVERLAP])
+async def test_archives_deleted_between_page_reads_do_not_hide_a_print(
+    bambuddy: BambuddyClient, links: PrintLinkStore, uploads: BambuddyUploadStore, shift: int
+) -> None:
+    """The first row of the second page moves back onto the first page, which was
+    already read; stepping by a whole page would miss it."""
+    await _sliced(uploads)
+    await uploads.record_slice_hash(OUTPUT, 80, HASH)
+    rows = [archive_row(1000 + n, "x") for n in range(150)]
+    rows[ARCHIVE_PAGE] = archive_row(18, HASH)
+    scan = shifting_archives(rows, -shift)
+
+    found = await link_by_hash(bambuddy, uploads, links, meta())
+
+    assert scan.call_count == 2
+    assert [link.archive_id for link in found] == [18]
     assert [link.archive_id for link in await links.for_output(OUTPUT)] == [18]
 
 

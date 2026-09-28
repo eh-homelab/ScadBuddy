@@ -32,7 +32,13 @@ logger = logging.getLogger(__name__)
 
 #: One page of ``GET /archives/``; Bambuddy has no filter by hash, so the scan pages.
 ARCHIVE_PAGE = 100
-#: How many pages one scan reads at most: a thousand archives since the output was made.
+#: How many rows consecutive pages share. Bambuddy's order is not documented and the
+#: list can change between two page reads: an archive created or deleted ahead of the
+#: scan's position shifts every later row by one. Stepping the offset by less than a
+#: page keeps a row that moved by up to this many from falling between pages; a row
+#: read twice is matched once (#557).
+ARCHIVE_OVERLAP = 10
+#: How many pages one scan reads at most: 910 archives since the output was made.
 MAX_ARCHIVE_PAGES = 10
 #: Pipeline job stages whose queue entry can carry an archive: a copy cancelled
 #: mid-print has one too (queue 34 → archive 18 in the spike). Read through the progress
@@ -115,11 +121,15 @@ async def link_by_hash(
         return []
     since: date = meta.created_at.date()
     found: list[PrintLink] = []
+    seen: set[int] = set()
     for page in range(MAX_ARCHIVE_PAGES):
         rows = await client.archives(
-            date_from=since, limit=ARCHIVE_PAGE, offset=page * ARCHIVE_PAGE
+            date_from=since, limit=ARCHIVE_PAGE, offset=page * (ARCHIVE_PAGE - ARCHIVE_OVERLAP)
         )
         for row in rows:
+            if row.id in seen:
+                continue
+            seen.add(row.id)
             if row.content_hash in hashes:
                 link = PrintLink(
                     archive_id=row.id,
