@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from scadbuddy.tools.export_openapi import DEFAULT_OUTPUT, export
+from scadbuddy.tools.export_openapi import export
 
 EXPECTED_PATHS = {
     "/healthz",
@@ -48,6 +48,12 @@ EXPECTED_PATHS = {
     "/api/v1/print/outputs/{output_id}/choices",
     "/api/v1/print/outputs/{output_id}/progress",
     "/api/v1/print/outputs/{output_id}/run",
+    "/api/v1/analyzers",
+    "/api/v1/analyzers/run",
+    "/api/v1/analyzers/fixes/preview",
+    "/api/v1/analyzers/fixes/apply",
+    "/api/v1/analyzers/decisions",
+    "/api/v1/analyzers/decisions/{decision_id}",
     "/api/v1/settings",
     "/api/v1/settings/print-options",
     "/api/v1/settings/test",
@@ -85,11 +91,11 @@ def test_every_route_in_the_spec_is_published(tmp_path: Path) -> None:
     assert set(schema["paths"]) == EXPECTED_PATHS
 
 
-def test_the_committed_schema_is_up_to_date(tmp_path: Path) -> None:
-    """The frontend generates its client from the committed file; regenerate it with
-    ``uv run python -m scadbuddy.tools.export_openapi``."""
-    fresh = export(tmp_path / "openapi.json").read_text(encoding="utf-8")
-    assert DEFAULT_OUTPUT.read_text(encoding="utf-8") == fresh
+def test_the_export_is_deterministic(tmp_path: Path) -> None:
+    """The spec is generated, not committed (#492), so the frontend and agent clients and
+    CI's API diff all depend on two exports of one tree being byte-identical."""
+    first = export(tmp_path / "a.json").read_bytes()
+    assert export(tmp_path / "b.json").read_bytes() == first
 
 
 def test_the_pasted_source_body_is_a_named_schema(tmp_path: Path) -> None:

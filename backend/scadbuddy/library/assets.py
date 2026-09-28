@@ -44,7 +44,7 @@ from lxml import etree
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel
 
-from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
+from scadbuddy.core.paths import LEGACY_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
 from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
@@ -600,7 +600,7 @@ def referenced_asset_ids(
             found.update(_ids_in_archive(archive))
     for preset_file in paths.presets.glob("*.json"):
         scan(preset_file)
-    for pattern in (f"*/{TEMPLATE_PRESETS_NAME}", "*/model.json"):
+    for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
         for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
             scan(template_file)
     for values in params:

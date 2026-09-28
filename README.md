@@ -23,10 +23,11 @@ multi-colour rules, connecting Bambuddy and each feature.
   toggles, text limits, and `// color` / `// font` pickers.
 - **Presets**: save named parameter sets per template — built-ins too — and start
   from one, changing only what differs this time (a name, a colour, a size). A
-  preset keeps only the values that differ from the defaults. A template can ship
-  its own read-only presets in a `presets.json` beside `model.scad`
-  (`{"presets": [{"name": "…", "params": {…}}]}`); **Duplicate** copies one of
-  those, or any saved preset, to an editable preset of your own.
+  preset keeps only the values that differ from the defaults. A template defines its
+  own read-only presets in the `presets` list of its `model.json`
+  (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
+  same one when it is renamed or moved); **Duplicate** copies one of those, or any
+  saved preset, to an editable preset of your own.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -197,7 +198,11 @@ pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
-database at startup (migration 4 adds the `events` log). The event log's retention
+database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
+`events` log, and
+`20260928T0724Z_analyzer_decisions.sql` the print analyzers' `analyzer_decisions`;
+without a database those analyzers still run, but their decisions cannot be
+recorded). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
@@ -296,13 +301,13 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   and restart again. A row the old key cannot open is left as it is and
   counted in that log line.
 - `/healthz` reports `"ai": "enabled"` only when the database answers, its
-  `ai_*` migrations have applied (`agent/src/db/migrations.ts`, run at start
+  `ai_*` migrations have applied (`agent/src/db/migrations/`, run at start
   under an advisory lock with a lock timeout, retried on the next call), the
   key is loaded and a Claude credential is saved. Otherwise `ai` names the
   first missing piece; each database step is bounded (2 s), so a stuck lock
   shows as `"unavailable (database timed out)"` instead of a hung probe. An
   edited, already-applied migration stops the service at start with a message
-  naming it (each entry's sha256 is recorded).
+  naming it (each file's sha256 is recorded).
 - The Claude credential (an Anthropic API key, or a gateway base URL plus
   token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
   tested with `POST /api/v1/ai/credentials/test` (one test at a time, at most
@@ -405,11 +410,15 @@ what makes the running image knowable.
   `pnpm test`, `pnpm build`; see "The agent sidecar" above.
 - `models/` — bundled example models; `models/<name>/verify.sh` renders one
   against `openscad/openscad:dev` and checks the result.
-- `backend/openapi.json` and `frontend/public/mockServiceWorker.js` are
-  generated and checked for freshness in CI (`python -m
-  scadbuddy.tools.export_openapi`, `pnpm exec msw init public --save`).
+- `backend/openapi.json` and the frontend and agent `src/api/schema.d.ts`
+  are generated at build time and not committed: `pnpm gen:api` in either
+  package exports the spec (`python -m scadbuddy.tools.export_openapi`) and
+  writes the client. CI posts the API diff on each PR.
+  `frontend/public/mockServiceWorker.js` is committed and checked against
+  msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.

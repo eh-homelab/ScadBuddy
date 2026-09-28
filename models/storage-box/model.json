@@ -2,5 +2,17 @@
   "name": "Storage Box with Lid",
   "description": "A parametric box in four footprints (rectangle, rounded, hexagon, round) with optional grid dividers and a friction, sliding dovetail or snap-fit lid. Box and lid print side by side without supports; optional lid text is inlaid in a third colour. Defaults give an 80 x 60 x 40 mm inside rounded box with a friction lid.",
   "tags": ["box", "storage", "lid", "organiser"],
-  "source": "inspired by Printables Rugged Box (Parametric) and MakerWorld Parametric Box with Lid / Box with Slide Lid"
+  "source": "inspired by Printables Rugged Box (Parametric) and MakerWorld Parametric Box with Lid / Box with Slide Lid",
+  "presets": [
+    {
+      "id": "sd-card-box",
+      "name": "SD card box",
+      "params": { "inner_l": 40, "inner_w": 30, "inner_h": 15, "lid_type": "snap", "dividers_x": 1 }
+    },
+    {
+      "id": "sliding-lid-with-label",
+      "name": "Sliding lid with label",
+      "params": { "lid_type": "sliding", "lid_text": "PARTS", "lid_text_color": "#1A1A1A" }
+    }
+  ]
 }

@@ -60,7 +60,7 @@ connect sends none: nothing could have been missed by subscribers that did not e
 
 The replay log
 --------------
-``events`` (migration 4 in `pg_store.MIGRATIONS`) keeps each published event under a
+``events`` (migrations/20260928T0630Z_events.sql) keeps each published event under a
 monotonically increasing ``seq``. :meth:`replay` reads the events after a ``seq``,
 oldest first, with a limit, and says whether rows the caller has not seen were
 already pruned. It is pruned by age and by row count
@@ -133,7 +133,7 @@ logger = logging.getLogger(__name__)
 POSTGRES_NOTIFY_LIMIT = 8000
 MAX_PAYLOAD_BYTES = POSTGRES_NOTIFY_LIMIT // 2
 
-#: The log table (created by `pg_store.MIGRATIONS`).
+#: The log table (migrations/20260928T0630Z_events.sql).
 EVENTS_TABLE = "events"
 #: `pg_advisory_xact_lock` key serialising log appends ("SCADEVNT" in ASCII).
 EVENT_LOG_LOCK = 0x5343_4144_4556_4E54
