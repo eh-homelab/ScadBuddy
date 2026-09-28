@@ -10,7 +10,7 @@ choose from here. Bambuddy's own slicer pipelines are still what the send bar ru
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Literal, Protocol
 
 from fastapi import status
 from pydantic import BaseModel, Field
@@ -99,9 +99,9 @@ class PrintRunRequest(BaseModel):
     #: Every plate of the output, each sliced and queued as an item of its own, in place
     #: of ``plate_id`` alone (#83).
     all_plates: bool = False
-    #: The Bambuddy project this print belongs to (#79). Omitted means "the project the
-    #: last send went to"; an explicit ``null`` cannot be expressed and does not need to
-    #: be — a print with no project is simply one nobody filed.
+    #: The Bambuddy project this print belongs to (#79). Omitted means the remembered
+    #: one (``last_project_id``); an explicit ``null`` is "No project" and wins over it,
+    #: because the picker's PUT that remembers the choice may not have landed yet.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
     #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
@@ -204,6 +204,24 @@ async def _spool_colours(
     ]
 
 
+class ChoosesProject(Protocol):
+    """A request body with an optional ``project_id``."""
+
+    @property
+    def project_id(self) -> int | None: ...
+
+    @property
+    def model_fields_set(self) -> set[str]: ...
+
+
+def chosen_project(request: ChoosesProject, settings: StoredSettings) -> int | None:
+    """The request's ``project_id`` when it sent one, ``null`` included ("No project");
+    the remembered ``last_project_id`` only when it left the field out (#317)."""
+    if "project_id" in request.model_fields_set:
+        return request.project_id
+    return settings.last_project_id
+
+
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -273,7 +291,7 @@ async def run_for_output(
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
     # the copy is looked up by (folder, target): a project gets a copy of its own, and
     # one another project printed from is neither moved nor deleted (#316).
-    project_id = request.project_id or settings.last_project_id
+    project_id = chosen_project(request, settings)
     folder_id = await folder_for(client, project_id) if project_id is not None else None
     library_file_id = await ensure_uploaded(
         client, store, uploads, meta, settings, target=target, folder_id=folder_id, stem=stem

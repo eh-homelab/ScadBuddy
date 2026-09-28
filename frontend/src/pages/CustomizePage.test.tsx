@@ -1314,4 +1314,25 @@ describe('CustomizePage, project file (#317)', () => {
     await user.selectOptions(dialogPicker, '1')
     expect(pagePicker()).toHaveValue('1')
   })
+
+  it('prints with "No project" even while remembering it has not landed', async () => {
+    withLastProject(1)
+    // The PUT that remembers the choice never answers: the run alone must carry it.
+    server.use(http.put('/api/v1/print/projects/last', () => new Promise<never>(() => undefined)))
+    const ran = watchBodies('POST', '/run')
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await user.selectOptions(pagePicker(), '')
+    await generate(user)
+
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
+    await user.click(screen.getByTestId('print'))
+    const dialog = await screen.findByRole('dialog')
+    const print = await within(dialog).findByTestId('run-print')
+    await waitFor(() => expect(print).toBeEnabled())
+    await user.click(print)
+
+    await waitFor(() => expect(ran).toHaveLength(1))
+    expect(await ran[0]).toHaveProperty('project_id', null)
+  })
 })

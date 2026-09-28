@@ -290,7 +290,7 @@ export const printTools: Tool[] = [
         .catchall(presetRef)
         .optional()
         .describe('A filament preset per slot id, in place of the spool\'s own'),
-      project_id: z.number().int().optional(),
+      project_id: z.number().int().optional().describe('Omit to file under the remembered project'),
       options: printOptions,
     }),
     risk: 'outward',
@@ -382,7 +382,8 @@ export const printTools: Tool[] = [
                 bed_type: bedType,
                 filament_overrides: args.filament_overrides ?? {},
               },
-              project_id: args.project_id ?? null,
+              // Omitted, not null: null is "No project", omitted the remembered one (#317).
+              ...(args.project_id === undefined ? {} : { project_id: args.project_id }),
               options: args.options,
             },
           }),
@@ -471,7 +472,7 @@ export const printTools: Tool[] = [
         await ok(
           backend.POST('/api/v1/print/outputs/{output_id}/project', {
             params: { path: { output_id } },
-            body: { project_id: project_id ?? null, queue_item_ids },
+            body: { ...(project_id === undefined ? {} : { project_id }), queue_item_ids },
           }),
           `file ${output_id} under a project`,
         ),

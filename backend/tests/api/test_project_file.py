@@ -376,3 +376,77 @@ def test_the_customize_pages_choice_is_remembered_as_the_last_project(
     cleared = client.put("/api/v1/print/projects/last", json={"project_id": None})
     assert cleared.json() == {"project_id": None}
     assert last() is None
+
+
+def remember_project(client: TestClient, project_id: int | None) -> None:
+    assert (
+        client.put("/api/v1/print/projects/last", json={"project_id": project_id}).status_code
+        == 200
+    )
+
+
+@respx.mock
+def test_an_explicit_no_project_on_the_run_wins_over_the_remembered_one(
+    client: TestClient, model: str
+) -> None:
+    """The picker's "No project" is sent as ``project_id: null``. The PUT that remembers
+    it is fire-and-forget, so the run can arrive while ``last_project_id`` still names
+    the old project; the request's own choice is the one honoured (#540 review)."""
+    configure(client)
+    output_id = make_output(client, model)
+    remember_project(client, PROJECT)
+    folder = respx.get(f"{API}/library/folders/by-project/{PROJECT}").mock(
+        return_value=httpx.Response(
+            200, json=[{"id": FOLDER, "name": "Kids' room", "project_id": PROJECT}]
+        )
+    )
+    uploaded = uploads(41)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    ran = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json={**run_request(), "project_id": None}
+    )
+
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["project_id"] is None
+    assert uploaded.calls.last.request.url.params["folder_id"] == "2"
+    assert not folder.called
+
+
+@respx.mock
+def test_a_run_that_names_no_project_uses_the_remembered_one(
+    client: TestClient, model: str
+) -> None:
+    """Omitting ``project_id`` (an agent that has no opinion) still means the last one."""
+    configure(client)
+    output_id = make_output(client, model)
+    remember_project(client, PROJECT)
+    project_folder_routes()
+    uploaded = uploads(41)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+
+    assert ran.status_code == 200, ran.text
+    assert (ran.json()["project_id"], ran.json()["folder_id"]) == (PROJECT, FOLDER)
+    assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+
+
+def test_attaching_with_an_explicit_no_project_files_nothing(
+    client: TestClient, model: str
+) -> None:
+    """As on the run: ``null`` is "No project", not "the remembered one"."""
+    configure(client)
+    output_id = make_output(client, model)
+    remember_project(client, PROJECT)
+
+    response = client.post(
+        f"/api/v1/print/outputs/{output_id}/project",
+        json={"project_id": None, "queue_item_ids": [71]},
+    )
+
+    assert response.status_code == 409, response.text

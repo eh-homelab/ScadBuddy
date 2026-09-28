@@ -32,6 +32,7 @@ from scadbuddy.bambuddy.linking import owned_queue_items
 from scadbuddy.bambuddy.pipelines import (
     PrintRunRequest,
     PrintRunResult,
+    chosen_project,
     filament_options_for_output,
     run_for_output,
 )
@@ -72,6 +73,7 @@ class ProjectAttach(BaseModel):
     only one that knows them, and only once it has polled.
     """
 
+    #: Omitted means the remembered project; an explicit ``null`` is "No project" (#317).
     project_id: int | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
 
@@ -140,7 +142,7 @@ async def post_run(
     # A copy uploaded into a project's folder is named like the one Generate files (#317).
     stem = (
         await output_stem(meta, outputs, catalogue)
-        if (body.project_id or settings.last_project_id) is not None
+        if chosen_project(body, settings) is not None
         else None
     )
     async with client_for(settings) as client:
@@ -317,7 +319,7 @@ async def post_attach_project(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    project_id = body.project_id or settings.last_project_id
+    project_id = chosen_project(body, settings)
     if project_id is None:
         raise ApiError(
             status.HTTP_409_CONFLICT,

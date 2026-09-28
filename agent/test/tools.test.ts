@@ -239,9 +239,18 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
         bed_type: 'Textured PEI Plate',
         filament_overrides: { '1': { source: 'cloud', id: 'GFSA04' } },
       },
-      project_id: null,
       options: {},
     })
+    // Omitted, so the backend files it under the remembered project; null would be "No project".
+    expect(run.body).not.toHaveProperty('project_id')
+  })
+
+  it('passes a chosen project through', async () => {
+    const run: { body?: unknown } = {}
+    server.use(choicesView(), capturedRun(run))
+    const result = await tool('print_output').execute({ output_id: OUT, project_id: 7 }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(run.body).toMatchObject({ project_id: 7 })
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
