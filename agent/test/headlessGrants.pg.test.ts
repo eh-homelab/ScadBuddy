@@ -88,6 +88,14 @@ describe.skipIf(!TEST_DATABASE_URL)(`headless-browser grants${TEST_DATABASE_URL 
     expect(await recordGrant(context, INPUT)).toMatchObject({ ok: false })
   })
 
+  it('matches a trailing slash the way the gate allow-list does, and uses the grant once', async () => {
+    const { session, context } = await approvedInTurn()
+    expect((await recordGrant(context, INPUT)).ok).toBe(true)
+    expect(await backendUses(session.id, 'POST', `${RUN}//x`)).toBe(false)
+    expect(await backendUses(session.id, 'POST', `${RUN}/`)).toBe(true)
+    expect(await backendUses(session.id, 'POST', RUN)).toBe(false)
+  })
+
   it('refuses a grant without an approval, or for another input than the approved one', async () => {
     const pending = await approvedInTurn(INPUT, false)
     expect(await recordGrant(pending.context, INPUT)).toMatchObject({ ok: false })

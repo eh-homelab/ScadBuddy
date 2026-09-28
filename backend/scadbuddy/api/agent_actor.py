@@ -119,7 +119,9 @@ WHERE id = (
   SELECT g.id FROM ai_headless_grants g
   JOIN ai_sessions s ON s.id = g.session_id
   JOIN ai_approvals a ON a.id = g.approval_id
-  WHERE g.session_id = %(session)s AND g.method = %(method)s AND g.path = %(path)s
+  WHERE g.session_id = %(session)s AND g.method = %(method)s
+    -- The same optional trailing slash AgentActorGate.permits() allows (_compile).
+    AND rtrim(g.path, '/') = rtrim(%(path)s, '/')
     AND g.used_at IS NULL AND g.expires_at > now()
     AND s.turn_id = g.turn_id AND s.lease_until > now()
     AND a.session_id = g.session_id AND a.decision = 'approved' AND a.consumed_at IS NOT NULL

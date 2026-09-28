@@ -1,6 +1,5 @@
 import type {
   Asset,
-  HeadlessBrowserSetting,
   AssetUsage,
   AttachResult,
   BambuddyTargets,
@@ -12,6 +11,7 @@ import type {
   FilamentOptions,
   FontCatalogue,
   FontFamily,
+  HeadlessBrowserSetting,
   InstalledFamily,
   Job,
   CatalogueLibrary,
