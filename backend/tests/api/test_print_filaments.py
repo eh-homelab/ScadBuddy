@@ -84,6 +84,7 @@ def prepared(client: TestClient, model: str) -> str:
     return make_output(client, model)
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     client: TestClient, model: str
@@ -110,6 +111,7 @@ def test_the_filament_step_answers_with_the_inventory_and_a_suggestion(
     assert "global_tray_id" not in loaded[0]["loaded"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_without_a_printer_the_spools_are_still_listed(client: TestClient, model: str) -> None:
     """The inventory does not need a printer; only the reconciled weights do."""
@@ -134,6 +136,7 @@ def nozzle_routes(*diameters: str) -> respx.Route:
     return respx.get(f"{API}/printers/1/status").mock(return_value=httpx.Response(200, json=status))
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_filament_step_shows_the_mounted_nozzles_and_the_pipelines(
     client: TestClient, model: str
@@ -161,6 +164,7 @@ def test_the_filament_step_shows_the_mounted_nozzles_and_the_pipelines(
     assert not pipeline.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_nozzle_the_printer_has_not_mounted_is_warned_about_before_the_click(
     client: TestClient, model: str
@@ -179,6 +183,7 @@ def test_a_nozzle_the_printer_has_not_mounted_is_warned_about_before_the_click(
     assert "0.2 mm" in warning["message"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     client: TestClient, model: str
@@ -197,6 +202,7 @@ def test_a_class_target_with_no_printer_chosen_reads_no_nozzles(
     assert not status.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_run_without_a_plan_still_runs_the_pipeline(client: TestClient, model: str) -> None:
     """#86's behaviour is unchanged: no plan, no escalation, and Bambuddy still fans a
@@ -223,6 +229,7 @@ def test_a_run_without_a_plan_still_runs_the_pipeline(client: TestClient, model:
     assert not queued.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
     client: TestClient, model: str
@@ -280,6 +287,7 @@ def test_a_plan_is_sliced_and_queued_with_the_mapping_on_the_wire(
     assert slice_body["filament_colours"] == ["#688197", "#0047BB"]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_plan_carries_scadbuddys_own_warnings_back(client: TestClient, model: str) -> None:
     """A spool on the shelf is a legitimate choice; the answer says to load it rather
@@ -304,6 +312,7 @@ def test_the_plan_carries_scadbuddys_own_warnings_back(client: TestClient, model
     assert any(warning["kind"] == "not-loaded" for warning in body["warnings"])
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_failed_slice_reports_bambuddys_own_words(client: TestClient, model: str) -> None:
     output_id = prepared(client, model)
@@ -335,6 +344,7 @@ def test_a_failed_slice_reports_bambuddys_own_words(client: TestClient, model: s
     assert not queued.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_unknown_pipeline_says_so_rather_than_slicing_with_nothing(
     client: TestClient, model: str

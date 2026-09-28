@@ -33,7 +33,7 @@
 
 ## Shared contracts
 
-### #316: library copies (`backend/scadbuddy/library/outputs.py`)
+### #316: library copies (`backend/scadbuddy/bambuddy/uploads.py`, Postgres since #455)
 
 ```python
 class SlicedCopy(BaseModel):
@@ -42,21 +42,22 @@ class SlicedCopy(BaseModel):
 
 class LibraryCopy(BaseModel):
     id: int                       # Bambuddy library file id of the unsliced 3MF
-    folder_id: int | None         # None = library root; UNKNOWN only for migrated legacy rows
-    folder_known: bool = True     # False for a migrated legacy row until resolved
+    folder_id: int | None         # None = library root
     target_key: str               # Target.key (plate[@nozzle])
     sliced: list[SlicedCopy] = Field(default_factory=list)
 
-OutputMeta.library_files: list[LibraryCopy] = []
-# library_file_id / library_file_plate: kept as READ-ONLY legacy fields, migrated into
-# library_files on load (one row, folder_known=False), then never written again.
+# Stored by BambuddyUploadStore in output_bambuddy_uploads / output_bambuddy_slices
+# (render/pg_store.py migration 3), not in meta.json. The API's OutputDetail fills
+# library_files from it. No data migration (#455): library_file_id /
+# library_file_plate / library_files in an old meta.json are ignored, so that output's
+# next send uploads afresh.
 ```
 
 In `backend/scadbuddy/bambuddy/send.py`:
 
 ```python
-async def ensure_uploaded(client, store, meta, settings, *, target=None, folder_id=None) -> tuple[OutputMeta, int]
-# unchanged signature; folder_id None means the inbox (settings.library_folder_id).
+async def ensure_uploaded(client, store, uploads, meta, settings, *, target=None, folder_id=None) -> int
+# folder_id None means the inbox (settings.library_folder_id).
 # Rule: reuse the copy with (folder, target) equal; else upload a new copy there.
 # Delete only superseded copies whose folder is the inbox. Never call move_library_files.
 def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool

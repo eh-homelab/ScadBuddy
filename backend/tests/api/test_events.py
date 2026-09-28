@@ -344,6 +344,7 @@ def test_a_failed_render_publishes_job_failed(
     ]
 
 
+@pytest.mark.requires_postgres
 def test_saving_and_deleting_an_output_publish_their_events(
     client: TestClient, model: str, events: list[Event]
 ) -> None:
@@ -360,6 +361,7 @@ def test_saving_and_deleting_an_output_publish_their_events(
 # ── printing ─────────────────────────────────────────────────────────────────────
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_print_publishes_progress_and_then_settled_once(
     client: TestClient, model: str, events: list[Event]

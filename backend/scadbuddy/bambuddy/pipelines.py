@@ -65,14 +65,14 @@ from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     pipeline_slice_request,
-    record_sliced,
     request_scope,
     resolve_print_options,
     scope_printer,
     target_for,
 )
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend, SlicedCopy
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import ModelPrintChoices, StoredSettings
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.plate import bed_types_for, nozzle_diameter_of
@@ -487,6 +487,7 @@ async def create_pipeline(client: BambuddyClient, request: PipelineCreate) -> Pi
 async def check_pipelines(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     *,
@@ -525,7 +526,7 @@ async def check_pipelines(
     # If that enum ever grows a geometry issue, this has to become one upload per
     # distinct target instead.
     target = await target_for(client, settings, meta.slug)
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings, target=target)
+    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings, target=target)
     if pipeline_ids is None:
         pipeline_ids = [pipeline.id for pipeline in await client.pipelines()]
     request = EligibilityRequest(source_library_file_id=library_file_id)
@@ -570,6 +571,7 @@ def filament_preset_index(catalogue: _Catalogue) -> dict[str, PresetRef]:
 async def filament_options_for_output(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     *,
@@ -588,7 +590,7 @@ async def filament_options_for_output(
     so a mismatch is shown before the click (#78). A class target with no printer chosen
     yet has no nozzles to read.
     """
-    meta, library_file_id = await ensure_uploaded(client, store, meta, settings)
+    library_file_id = await ensure_uploaded(client, store, uploads, meta, settings)
     options = await gather_options(
         client,
         library_file_id=library_file_id,
@@ -609,6 +611,7 @@ async def filament_options_for_output(
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     settings: StoredSettings,
     request: PrintRunRequest,
@@ -660,8 +663,8 @@ async def run_for_output(
     # one another project printed from is neither moved nor deleted (#316).
     project_id = request.project_id or settings.last_project_id
     folder_id = await folder_for(client, project_id) if project_id is not None else None
-    meta, library_file_id = await ensure_uploaded(
-        client, store, meta, settings, target=target, folder_id=folder_id
+    library_file_id = await ensure_uploaded(
+        client, store, uploads, meta, settings, target=target, folder_id=folder_id
     )
 
     scope_printer_id, pipeline = await scope_printer(
@@ -693,8 +696,7 @@ async def run_for_output(
         )
         if run.sliced_library_file_id is not None:
             # Usually null on the 202; the progress read records it once it appears.
-            record_sliced(
-                store,
+            await uploads.record_sliced(
                 meta.id,
                 library_file_id,
                 SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
@@ -731,7 +733,9 @@ async def run_for_output(
                 project_id=project_id,
                 options=print_options,
             )
-            sent = _record_queued(store, meta, library_file_id, plate_id, outcome, project_id, sent)
+            sent = await _record_queued(
+                store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
+            )
             outcomes.append(outcome)
         warnings: list[FilamentWarning] = []
         target_model = outcomes[0].target_model
@@ -821,7 +825,9 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
-        sent = _record_queued(store, meta, library_file_id, plate_id, outcome, project_id, sent)
+        sent = await _record_queued(
+            store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
+        )
         outcomes.append(outcome)
         plate_options.append(options)
         for warning in check(options, request.filament_plan, copies=copies) + preset_warnings:
@@ -872,8 +878,9 @@ async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pip
     return pipeline
 
 
-def _record_queued(
+async def _record_queued(
     store: OutputStore,
+    uploads: BambuddyUploadStore,
     meta: OutputMeta,
     library_file_id: int,
     plate_id: int,
@@ -888,8 +895,7 @@ def _record_queued(
     carries every plate of this print, since the single ids hold only the last. The
     plate's sliced file is recorded against the copy it was sliced from (#316).
     """
-    record_sliced(
-        store,
+    await uploads.record_sliced(
         meta.id,
         library_file_id,
         SlicedCopy(id=outcome.sliced_library_file_id, preset_key=outcome.preset_key),

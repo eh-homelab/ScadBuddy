@@ -30,9 +30,10 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputStore, PrintRoute, SlicedCopy
+from scadbuddy.library.outputs import OutputMeta, PrintRoute
 
 QUEUE_PATH = "/queue"
 
@@ -341,7 +342,7 @@ def from_plates(
 
 
 async def progress_for(
-    client: BambuddyClient, meta: OutputMeta, *, store: OutputStore | None = None
+    client: BambuddyClient, meta: OutputMeta, *, uploads: BambuddyUploadStore | None = None
 ) -> PrintProgress | None:
     """Read the progress of whatever this output last printed, or ``None``.
 
@@ -352,7 +353,7 @@ async def progress_for(
     A read that 404s is reported as such rather than swallowed: an id ScadBuddy recorded
     and Bambuddy no longer has is a real thing to tell the user, not a blank panel.
 
-    With ``store``, a pipeline run's sliced file is recorded against its source copy
+    With ``uploads``, a pipeline run's sliced file is recorded against its source copy
     once the run reports one (#316). The run's 202 carries none — the slice happens in
     Bambuddy's background task — so this read is the first place it can be seen.
     """
@@ -370,11 +371,11 @@ async def progress_for(
             return None
         run = await client.pipeline_run(meta.pipeline_run_id)
         if (
-            store is not None
+            uploads is not None
             and run.sliced_library_file_id is not None
             and run.source_library_file_id is not None
         ):
-            store.record_sliced(
+            await uploads.record_sliced(
                 meta.id,
                 run.source_library_file_id,
                 SlicedCopy(

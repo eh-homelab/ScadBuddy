@@ -1732,7 +1732,7 @@
         "type": "object"
       },
       "LibraryCopy": {
-        "description": "One copy of the output's 3MF in Bambuddy's library (#316).\n\nKeyed by (``folder_id``, ``target_key``). The folder is what files it under a\nproject, and the target is what it was laid out for, so a copy is reusable only\nwhere both still hold. A copy in a project's folder is the user's record of what\nthat project printed and is never moved or deleted by ScadBuddy; only a copy in\nthe inbox (Settings' ``library_folder_id``) is ever replaced.",
+        "description": "One copy of the output's 3MF in Bambuddy's file library (#316).\n\nKeyed by (``folder_id``, ``target_key``). The folder is what files it under a\nproject, and the target is what it was laid out for, so a copy is reusable only\nwhere both still hold. A copy in a project's folder is the user's record of what\nthat project printed and is never moved or deleted by ScadBuddy; only a copy in\nthe inbox (Settings' ``library_folder_id``) is ever replaced.",
         "properties": {
           "folder_id": {
             "anyOf": [
@@ -1744,11 +1744,6 @@
               }
             ],
             "title": "Folder Id"
-          },
-          "folder_known": {
-            "default": true,
-            "title": "Folder Known",
-            "type": "boolean"
           },
           "id": {
             "title": "Id",

@@ -136,15 +136,15 @@ function lastCopy(output: Output): LibraryCopy | undefined {
 type CopyPlace = 'inbox' | 'project' | 'unknown'
 
 function placeOf(copy: LibraryCopy, inboxFolderId: number | null | undefined): CopyPlace {
-  if (copy.folder_known === false || inboxFolderId === undefined) return 'unknown'
+  if (inboxFolderId === undefined) return 'unknown'
   return (copy.folder_id ?? null) === inboxFolderId ? 'inbox' : 'project'
 }
 
 /**
  * #316 — deleting an output that has copies in Bambuddy's library. The copies in the
  * inbox folder can go with it; a copy in a project's folder is that project's record
- * of what it printed and always stays. A copy recorded before ScadBuddy tracked
- * folders is checked by the server, which deletes it only if it is in the inbox.
+ * of what it printed and always stays. While the inbox folder is not known yet, the
+ * server decides, and deletes a copy only if it is in the inbox.
  */
 function DeleteOutputDialog({
   output,

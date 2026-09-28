@@ -90,6 +90,8 @@ class Settings(BaseSettings):
 
     # SCADBUDDY_DATABASE_URL: a libpq URL or DSN. Set, the render queue lives in
     # Postgres (durable, shareable by replicas); unset, in files and this process.
+    # An output's Bambuddy upload records live only there (#455): without it, sending
+    # or reading an output fails (#401 makes the database required).
     # Server-side only, like the Bambuddy key.
     database_url: str | None = None
     database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE

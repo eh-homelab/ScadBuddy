@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import uuid
@@ -9,9 +10,9 @@ import zipfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
@@ -52,45 +53,6 @@ class PlateSend(BaseModel):
     slice_job_id: int
 
 
-class SlicedCopy(BaseModel):
-    """A sliced 3MF Bambuddy wrote beside one of this output's library copies (#316).
-
-    Bambuddy puts a slice in its source's folder, so it belongs to that copy's entry:
-    a slice made for project A is in A's folder, next to the file it was sliced from.
-    """
-
-    #: Bambuddy library file id of the sliced 3MF.
-    id: int
-    #: What it was sliced with: the pipeline's id on a pipeline run, or the presets,
-    #: plate and plate type on the slice-and-queue route (``SliceRequest.preset_key``).
-    #: ``None`` when the route did not say.
-    preset_key: str | None = None
-
-
-class LibraryCopy(BaseModel):
-    """One copy of the output's 3MF in Bambuddy's library (#316).
-
-    Keyed by (``folder_id``, ``target_key``). The folder is what files it under a
-    project, and the target is what it was laid out for, so a copy is reusable only
-    where both still hold. A copy in a project's folder is the user's record of what
-    that project printed and is never moved or deleted by ScadBuddy; only a copy in
-    the inbox (Settings' ``library_folder_id``) is ever replaced.
-    """
-
-    #: Bambuddy library file id of the unsliced 3MF.
-    id: int
-    #: ``None`` is the library root.
-    folder_id: int | None
-    #: ``False`` only for a copy migrated from the single-slot record written before
-    #: #316, which never said where the file was. Its folder is read from Bambuddy
-    #: once, the first time a send needs it, and recorded.
-    folder_known: bool = True
-    #: :attr:`~scadbuddy.bambuddy.send.Target.key` — the plate and nozzle it was laid
-    #: out for. Empty for a pre-#105 record, which matches no target.
-    target_key: str
-    sliced: list[SlicedCopy] = Field(default_factory=list)
-
-
 class OutputMeta(BaseModel):
     # #80 asks for the "model version"; pydantic reserves the "model_" prefix for
     # its own methods, so its guard is turned off rather than the field renamed.
@@ -112,10 +74,11 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    #: Every copy of ``model.3mf`` ScadBuddy has put in Bambuddy's library (#316), in
-    #: upload order. One per (folder, target): a project's folder keeps the file each of
-    #: its prints came from, whichever printer or project the output is sent to next.
-    library_files: list[LibraryCopy] = Field(default_factory=list)
+    # The output's uploads to Bambuddy's file library are in Postgres
+    # (`bambuddy.uploads`, #455), not here. The keys an older record carries for them
+    # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as
+    # pydantic ignores any unknown key, so such an output simply has no recorded copy
+    # and its next send uploads afresh.
     pipeline_run_id: int | None = None
     queue_item_id: int | None = None
     #: Which of Bambuddy's two routes the last print took (#87). Without it an output
@@ -130,45 +93,6 @@ class OutputMeta(BaseModel):
     #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on a
     #: pipeline run and on records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _migrate_single_slot(cls, data: Any) -> Any:
-        """Read a record written before #316 as a one-copy list.
-
-        Those carried one ``library_file_id`` and the ``library_file_plate`` it was laid
-        out for, but not the folder. The copy is kept rather than dropped — dropping it
-        would upload a duplicate and strand the old file — and marked
-        ``folder_known=False``, so the first send reads its folder from Bambuddy before
-        deciding anything about it. The two keys are consumed here, so the next write
-        of the record drops them.
-        """
-        if not isinstance(data, dict) or not (
-            "library_file_id" in data or "library_file_plate" in data
-        ):
-            return data
-        data = dict(data)
-        legacy_id = data.pop("library_file_id", None)
-        legacy_plate = data.pop("library_file_plate", None)
-        rows = list(data.get("library_files") or [])
-        if legacy_id is not None and not any(_row_id(row) == legacy_id for row in rows):
-            rows.append(
-                {
-                    "id": legacy_id,
-                    "folder_id": None,
-                    "folder_known": False,
-                    "target_key": legacy_plate or "",
-                }
-            )
-        data["library_files"] = rows
-        return data
-
-    def library_copy(self, library_file_id: int) -> LibraryCopy | None:
-        return next((row for row in self.library_files if row.id == library_file_id), None)
-
-
-def _row_id(row: Any) -> Any:
-    return row.id if isinstance(row, LibraryCopy) else row.get("id")
 
 
 @dataclass(frozen=True)
@@ -233,6 +157,18 @@ class OutputStore:
             for path in directory.glob(f"*/{META_NAME}")
         ]
         return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
+
+    def ids_for(self, slug: str) -> list[str]:
+        """The id of every output directory of ``slug``, readable record or not."""
+        try:
+            entries = list((self.paths.outputs / slug).iterdir())
+        except OSError:
+            return []
+        return [
+            entry.name
+            for entry in entries
+            if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
+        ]
 
     def create(
         self, job: Job, *, name: str | None = None, public_url: str | None = None
@@ -313,55 +249,6 @@ class OutputStore:
                     ("plates", plates),
                 )
                 if value is not None
-            }
-        )
-        self._write_meta(directory, updated)
-        return updated
-
-    def record_library_file(self, output_id: str, copy: LibraryCopy) -> OutputMeta:
-        """Add ``copy`` to the output's library copies, replacing any with the same id."""
-        directory = self._find_dir(output_id)
-        meta = self.get(output_id)
-        rows = [row for row in meta.library_files if row.id != copy.id] + [copy]
-        updated = meta.model_copy(update={"library_files": rows})
-        self._write_meta(directory, updated)
-        return updated
-
-    def forget_library_file(self, output_id: str, library_file_id: int) -> OutputMeta:
-        """Drop one library copy, once the file has actually gone.
-
-        Call this *after* the delete has come back — committed or 404 — never before
-        it. Clearing first looks safer and is not: a delete that fails for any other
-        reason (a 500, a timeout) leaves the file in Bambuddy with nothing pointing at
-        it, so nothing would ever delete it. A copy whose delete failed stays recorded
-        and is tried again the next time it is superseded.
-        """
-        directory = self._find_dir(output_id)
-        meta = self.get(output_id)
-        updated = meta.model_copy(
-            update={"library_files": [r for r in meta.library_files if r.id != library_file_id]}
-        )
-        self._write_meta(directory, updated)
-        return updated
-
-    def record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> OutputMeta:
-        """Record a slice against the copy it was sliced from.
-
-        A no-op — nothing written — when the slice is already recorded, which is what
-        lets the progress poll call this on every read, or when the copy is no longer
-        recorded (superseded and deleted since): a slice has nowhere to belong then.
-        """
-        directory = self._find_dir(output_id)
-        meta = self.get(output_id)
-        copy = meta.library_copy(library_file_id)
-        if copy is None or any(row.id == sliced.id for row in copy.sliced):
-            return meta
-        replaced = copy.model_copy(update={"sliced": [*copy.sliced, sliced]})
-        updated = meta.model_copy(
-            update={
-                "library_files": [
-                    replaced if row.id == library_file_id else row for row in meta.library_files
-                ]
             }
         )
         self._write_meta(directory, updated)

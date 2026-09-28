@@ -363,7 +363,7 @@ function copyIn(output: Output, folderId: number | null): number {
           ...o,
           library_files: [
             ...(o.library_files ?? []),
-            { id, folder_id: folder, folder_known: true, target_key: 'Bambu Lab H2C', sliced: [] },
+            { id, folder_id: folder, target_key: 'Bambu Lab H2C', sliced: [] },
           ],
         }
       : o,

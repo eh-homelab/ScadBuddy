@@ -467,7 +467,7 @@ export const outputs: Output[] = [
     colors: ['#1B6CA8', '#E8532F'],
     parts: [],
     warnings: [],
-    library_files: [{ id: 8812, folder_id: 2, folder_known: true, target_key: 'Bambu Lab H2C', sliced: [] }],
+    library_files: [{ id: 8812, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] }],
     queue_item_id: 4471,
   },
   {
@@ -499,11 +499,10 @@ export const outputs: Output[] = [
       {
         id: 8789,
         folder_id: 14,
-        folder_known: true,
         target_key: 'Bambu Lab H2C',
         sliced: [{ id: 8792, preset_key: '1' }],
       },
-      { id: 8790, folder_id: 2, folder_known: true, target_key: 'Bambu Lab H2C', sliced: [] },
+      { id: 8790, folder_id: 2, target_key: 'Bambu Lab H2C', sliced: [] },
     ],
   },
   {
