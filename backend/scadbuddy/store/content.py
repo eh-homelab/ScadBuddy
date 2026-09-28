@@ -162,7 +162,12 @@ class ContentStore:
                 extra={"key": key, "backend": previous.backend},
             )
             return
-        await self._release(previous)
+        try:
+            await self._release(previous)
+        except RefusedDeleteError:
+            # The new object is stored and indexed; the old one was moved out of a Work/
+            # folder, so it stays, untracked, as the sweep leaves a refused one.
+            logger.exception("the backend refused to delete a replaced blob", extra={"key": key})
 
     async def replace(
         self,

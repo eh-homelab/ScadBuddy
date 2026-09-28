@@ -80,13 +80,15 @@ def _retried(start_to_close: timedelta) -> timedelta:
 
 
 def _main_timeout() -> timedelta:
-    """`render_main`: the openscad run, then its piece published."""
-    return _openscad_timeout() + TRANSFER
+    """`render_main`: the render's uploads brought in (one transfer), the openscad run,
+    then its piece published (one transfer)."""
+    return _openscad_timeout() + 2 * TRANSFER
 
 
 def _solids_timeout() -> timedelta:
-    """`render_solids`: the piece fetched, the openscad runs, the piece published."""
-    return _openscad_timeout() + 2 * TRANSFER
+    """`render_solids`: the piece fetched (one transfer), the render's uploads brought
+    in (one transfer), the openscad runs, the piece published (one transfer)."""
+    return _openscad_timeout() + 3 * TRANSFER
 
 
 #: `cached_piece`: an index read and, on a miss, one download.
