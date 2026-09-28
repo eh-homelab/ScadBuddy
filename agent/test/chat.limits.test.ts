@@ -199,6 +199,30 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
+  it('refuses a flood of malformed frames past the queue cap with busy, like valid ones', async () => {
+    const fake = fakeManager()
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
+      log: () => {},
+      limits: { maxQueued: 8 },
+    })
+    await connection.open()
+    // None of these parse: not JSON, the wrong shape, and an empty message.
+    const malformed = ['', 'not json', JSON.stringify({ v: 1, type: 'nope' }), JSON.stringify({ v: 1, type: 'user.message', text: '', context: { route: '/' } })]
+    const handled = Array.from({ length: 100 }, (_, i) => connection.receive(malformed[i % malformed.length]!))
+    // Eight are answered from the queue; the rest are refused without being parsed.
+    expect(errors(out, 'busy')).toBe(92)
+    expect(errors(out, 'invalid')).toBe(0)
+    await Promise.all(handled)
+    expect(errors(out, 'invalid')).toBe(8)
+    expect(errors(out, 'busy')).toBe(92)
+    // The queue drained, so a malformed frame is answered as such again.
+    await connection.receive('still not json')
+    expect(errors(out, 'invalid')).toBe(9)
+    expect(fake.started()).toBe(0)
+    connection.close()
+  })
+
   it("passes the manager's new-session refusal (per owner, not per connection) on as rate_limited", async () => {
     const fake = fakeManager()
     const refusing = {

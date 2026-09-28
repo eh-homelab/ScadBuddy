@@ -205,24 +205,28 @@ export class ChatConnection {
   }
 
   receive(raw: string): Promise<void> {
-    const parsed = parseClientFrame(raw)
-    if (!parsed.ok) {
-      this.emit(event({ type: 'error', code: 'invalid', message: `ignored a malformed message: ${parsed.error}` }))
-      return Promise.resolve()
-    }
-    const message = parsed.value
-    const where = 'sessionId' in message && message.sessionId ? { sessionId: message.sessionId } : {}
+    // The cap is checked before the frame is parsed, so a flood of frames is
+    // refused with `busy` whether or not they parse: a malformed frame costs the
+    // process a parse and a reply, and that is the work the cap bounds.
     if (this.queued >= this.limits.maxQueued) {
       this.emit(
         event({
           type: 'error',
-          ...where,
           code: 'busy',
           message: 'too many messages waiting on this connection; send it again later',
         }),
       )
       return Promise.resolve()
     }
+    const parsed = parseClientFrame(raw)
+    if (!parsed.ok) {
+      // Answered through the queue, so it counts against the cap like any other frame.
+      const error = parsed.error
+      return this.enqueue(async () => {
+        this.emit(event({ type: 'error', code: 'invalid', message: `ignored a malformed message: ${error}` }))
+      })
+    }
+    const message = parsed.value
     // New sessions are rate-limited per owner by the manager (sessions/manager.ts
     // MAX_NEW_SESSIONS), not per connection, so reconnecting does not reset it;
     // a refusal comes back as an `error` frame with code `rate_limited`.
