@@ -3,7 +3,8 @@
 Every copy of an output's ``model.3mf`` ScadBuddy has put in Bambuddy's *file library*
 (not an OpenSCAD library), and every sliced 3MF Bambuddy wrote beside one. They are
 the only pointers ScadBuddy has to those files, so they live in the database rather
-than in the output's ``meta.json``. The tables are `render.pg_store` migration 5.
+than in the output's ``meta.json``. The tables are migration
+``20260928T0720Z_output_bambuddy_uploads``.
 
 The database is required (#401): without ``SCADBUDDY_DATABASE_URL`` there is no
 fallback, and every call raises `DatabaseRequiredError`.

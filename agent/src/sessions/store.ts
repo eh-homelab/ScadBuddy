@@ -4,7 +4,7 @@ import type { Sql } from 'postgres'
 // The Agent SDK `SessionStore` adapter on Postgres (#300, spec §6 "Storage"):
 // the SDK mirrors every transcript line here, so any replica can resume a
 // session and transcripts survive restarts. Table `ai_session_entries`
-// (db/migrations.ts, entry 2).
+// (db/migrations/20260928T0107Z_sessions.sql).
 //
 // The interface, as declared in the pinned SDK
 // (node_modules/@anthropic-ai/claude-agent-sdk/sdk.d.ts, 0.3.283,

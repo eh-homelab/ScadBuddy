@@ -50,7 +50,7 @@ def test_the_tables_are_created_on_a_fresh_database_and_reopening_changes_nothin
         store.open()
         store.close()
     with psycopg.connect(pg_conninfo) as conn:
-        versions = [row[0] for row in conn.execute("SELECT version FROM scadbuddy_migrations")]
+        ids = [row[0] for row in conn.execute("SELECT id FROM scadbuddy_migrations ORDER BY id")]
         tables = {
             row[0]
             for row in conn.execute(
@@ -58,7 +58,8 @@ def test_the_tables_are_created_on_a_fresh_database_and_reopening_changes_nothin
                 " WHERE table_schema = current_schema()"
             )
         }
-    assert versions == list(range(1, len(MIGRATIONS) + 1))
+    assert ids == [migration.id for migration in MIGRATIONS]
+    assert "20260928T0720Z_output_bambuddy_uploads" in ids
     assert {"output_bambuddy_uploads", "output_bambuddy_slices"} <= tables
 
 
