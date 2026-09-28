@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useSearchParams } from 'react-router'
 import { useLatest } from '../../lib/useLatest'
 import { api } from '../../api/client'
-import type { Output, PrintSummary } from '../../api/types'
+import type { Output, PrintPage, PrintSummary } from '../../api/types'
 import {
   apiFilters,
   clearPrintFilters,
@@ -36,6 +36,22 @@ interface Pages {
   more?: 'loading' | Error
 }
 
+/**
+ * How many pages one load reads past while they come back empty. The API examines at
+ * most 200 linked prints a request, so a page can be empty and still have a cursor
+ * (#308); past this many, Load more carries on.
+ */
+const EMPTY_PAGES_READ = 10
+
+/** The next page with prints in it, reading past empty ones that still have a cursor. */
+async function nonEmptyPage(filters: PrintFilters, cursor: string | null): Promise<PrintPage> {
+  let page = await api.listPrints(filters, { cursor, limit: PAGE_SIZE })
+  for (let read = 1; page.items.length === 0 && page.next_cursor !== null && read < EMPTY_PAGES_READ; read++) {
+    page = await api.listPrints(filters, { cursor: page.next_cursor, limit: PAGE_SIZE })
+  }
+  return page
+}
+
 function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
 }
@@ -51,7 +67,7 @@ function usePrintPages(filters: PrintFilters) {
 
   useEffect(() => {
     let cancelled = false
-    api.listPrints(filters, { limit: PAGE_SIZE }).then(
+    nonEmptyPage(filters, null).then(
       (page) => {
         if (!cancelled) setPages({ key, items: page.items, next: page.next_cursor })
       },
@@ -75,7 +91,7 @@ function usePrintPages(filters: PrintFilters) {
     setPages({ ...pages, more: 'loading' })
     const settle = (next: (was: Pages) => Pages) =>
       setPages((was) => (was.key === key && was.next === cursor ? next(was) : was))
-    api.listPrints(filters, { cursor, limit: PAGE_SIZE }).then(
+    nonEmptyPage(filters, cursor).then(
       (page) =>
         settle((was) => {
           const seen = new Set(was.items.map((item) => item.archive_id))
@@ -200,7 +216,7 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         </div>
       )}
 
-      {!pages.loading && !pages.error && pages.items.length === 0 && (
+      {!pages.loading && !pages.error && pages.items.length === 0 && pages.next === null && (
         <div className="rounded-[6px] border border-dashed border-line-strong bg-surface p-10 text-center">
           {filtered ? (
             <>
@@ -245,7 +261,9 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
         </ul>
       )}
 
-      {pages.next !== null && <MorePrints more={pages.more} onLoadMore={pages.loadMore} />}
+      {pages.next !== null && (
+        <MorePrints more={pages.more} onLoadMore={pages.loadMore} loaded={pages.items.length} />
+      )}
 
       <MediaLightbox
         slides={lightbox?.slides ?? []}
@@ -260,7 +278,17 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
  * The next page: loaded on its own as the end of the list scrolls into view, with the
  * button for when it does not (no IntersectionObserver, or a failed load).
  */
-function MorePrints({ more, onLoadMore }: { more: Pages['more']; onLoadMore: () => void }) {
+function MorePrints({
+  more,
+  onLoadMore,
+  loaded,
+}: {
+  more: Pages['more']
+  onLoadMore: () => void
+  /** How many prints are shown: observed afresh as it changes, so a page that left the
+   * end still in view loads the next one too. */
+  loaded: number
+}) {
   const sentinel = useRef<HTMLDivElement>(null)
   const latest = useLatest(onLoadMore)
   const failed = more instanceof Error
@@ -273,7 +301,7 @@ function MorePrints({ more, onLoadMore }: { more: Pages['more']; onLoadMore: () 
     })
     observer.observe(element)
     return () => observer.disconnect()
-  }, [failed, latest])
+  }, [failed, latest, loaded])
 
   return (
     <div ref={sentinel} className="mt-4 flex flex-col items-center gap-2">

@@ -221,6 +221,50 @@ describe('PrintsPage (#310): the global print history', () => {
     expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
   })
 
+  it('reads past an empty page that still has a cursor, on the first load', async () => {
+    const asked: (string | null)[] = []
+    server.use(
+      http.get('/api/v1/prints', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor')
+        asked.push(cursor)
+        if (cursor === null) return HttpResponse.json({ items: [], next_cursor: '90' } satisfies PrintPage)
+        return HttpResponse.json({ items: [summaryOf(35)], next_cursor: null } satisfies PrintPage)
+      }),
+    )
+    render()
+    await waitFor(async () => expect(await shown()).toEqual(['35']))
+    expect(asked).toEqual([null, '90'])
+    expect(screen.queryByText('No prints yet')).not.toBeInTheDocument()
+  })
+
+  it('reads past an empty page that still has a cursor, on Load more', async () => {
+    server.use(
+      http.get('/api/v1/prints', ({ request }) => {
+        const cursor = new URL(request.url).searchParams.get('cursor')
+        const pages: Record<string, PrintPage> = {
+          first: { items: [summaryOf(38)], next_cursor: '38' },
+          '38': { items: [], next_cursor: '20' },
+          '20': { items: [summaryOf(35)], next_cursor: null },
+        }
+        return HttpResponse.json(pages[cursor ?? 'first'])
+      }),
+    )
+    const { user } = render()
+    await waitFor(async () => expect(await shown()).toEqual(['38']))
+    await user.click(screen.getByRole('button', { name: 'Load more' }))
+    await waitFor(async () => expect(await shown()).toEqual(['38', '35']))
+    expect(screen.queryByRole('button', { name: 'Load more' })).not.toBeInTheDocument()
+  })
+
+  it('offers Load more, not "No prints", while empty pages still have a cursor', async () => {
+    server.use(
+      http.get('/api/v1/prints', () => HttpResponse.json({ items: [], next_cursor: '90' } satisfies PrintPage)),
+    )
+    render()
+    expect(await screen.findByRole('button', { name: 'Load more' })).toBeInTheDocument()
+    expect(screen.queryByText('No prints yet')).not.toBeInTheDocument()
+  })
+
   it('opens the print when the row is clicked', async () => {
     const { user } = render()
     const done = await item(35)
