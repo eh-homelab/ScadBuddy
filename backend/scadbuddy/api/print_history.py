@@ -357,13 +357,21 @@ class _Filters(BaseModel):
     q: str | None = None
 
 
+def _utc(when: datetime) -> datetime:
+    """``when`` in UTC. Bambuddy's times are naive and are UTC, and are read as such
+    here as in `bambuddy.hardware`; an aware one (Postgres's ``first_seen``, or a
+    Bambuddy that starts sending offsets) is converted. Mixing the two unconverted
+    would date one moment on two different days (#609 review)."""
+    return when.replace(tzinfo=UTC) if when.tzinfo is None else when.astimezone(UTC)
+
+
 def _day(link: LinkedPrint, archive: ArchiveDetail | None) -> date | None:
-    """The day the print started, else was dispatched; for a deleted archive, the day
-    ScadBuddy first saw it."""
+    """The UTC day the print started, else was dispatched; for a deleted archive, the
+    day ScadBuddy first saw it."""
     when = (archive.started_at or archive.created_at) if archive is not None else None
-    if when is not None:
-        return when.date()
-    return link.first_seen.astimezone(UTC).date() if link.first_seen is not None else None
+    if when is None:
+        when = link.first_seen
+    return _utc(when).date() if when is not None else None
 
 
 def _matches(

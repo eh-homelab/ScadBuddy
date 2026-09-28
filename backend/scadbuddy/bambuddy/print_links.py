@@ -47,7 +47,12 @@ class LinkedPrint(PrintLink):
     output_id: str
 
 
-#: One row per archive: the output that saw it first, as `output_for` answers.
+#: Which of an archive's links owns it: the first seen, the lower output id on a tie.
+#: Every lookup of an owner orders by this, so the proxy's gate, the list and the
+#: detail can never name different outputs (#609 review).
+_OWNER_ORDER = "first_seen, output_id"
+
+#: One row per archive: its owner, by `_OWNER_ORDER` after ``archive_id``.
 _LINKED = (
     "SELECT DISTINCT ON (archive_id)"
     " output_id, archive_id, matched_by, queue_item_id, plate_id, printer_id, first_seen"
@@ -153,7 +158,7 @@ class PrintLinkStore:
         with self._require().connection() as conn:
             row = conn.execute(
                 "SELECT output_id FROM output_bambuddy_prints WHERE archive_id = %s"
-                " ORDER BY first_seen LIMIT 1",
+                f" ORDER BY {_OWNER_ORDER} LIMIT 1",
                 (archive_id,),
             ).fetchone()
         return str(row["output_id"]) if row is not None else None
@@ -161,7 +166,7 @@ class PrintLinkStore:
     def _linked(self, archive_id: int) -> LinkedPrint | None:
         with self._require().connection() as conn:
             row = conn.execute(
-                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, first_seen, output_id",
+                f"{_LINKED} WHERE archive_id = %s ORDER BY archive_id, {_OWNER_ORDER}",
                 (archive_id,),
             ).fetchone()
         return LinkedPrint.model_validate(dict(row)) if row is not None else None
@@ -176,7 +181,7 @@ class PrintLinkStore:
                 # hand an archive to whichever filtered output saw it (#609 review).
                 f"SELECT * FROM ({_LINKED}"
                 " WHERE (%(before)s::bigint IS NULL OR archive_id < %(before)s)"
-                " ORDER BY archive_id DESC, first_seen, output_id) AS owners"
+                f" ORDER BY archive_id DESC, {_OWNER_ORDER}) AS owners"
                 " WHERE (%(outputs)s::text[] IS NULL OR output_id = ANY(%(outputs)s))"
                 " ORDER BY archive_id DESC LIMIT %(limit)s",
                 {
