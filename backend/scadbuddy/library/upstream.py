@@ -116,7 +116,8 @@ class UpstreamStatus(BaseModel):
         description="The upstream's current revision; None when it is gone"
     )
     preview: MergePreview | None = Field(
-        default=None, description="The merge a `POST …/upstream/merge` would make; on update only"
+        default=None,
+        description="The merge a `POST …/upstream/merge` would make; on update or dismissed",
     )
 
 

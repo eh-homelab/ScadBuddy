@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import type { Job, PipelineChoices, Plate } from '../api/types'
+import type { BoundingBox, Job, PipelineChoices, Plate } from '../api/types'
 import {
   BUILTIN_SLUG,
   keychainSchema,
@@ -13,6 +13,7 @@ import {
   targets,
   versionIds,
 } from '../mocks/fixtures'
+import { setMockPlates } from '../mocks/handlers'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, duplicateWithUpdate, theirs } from '../test/upstream'
@@ -808,6 +809,55 @@ describe('CustomizePage', () => {
     // Two colours, so the check is asked with the tower the send would add.
     expect(asked.at(-1)?.get('colours')).toBe('2')
     expect(asked.at(-1)?.get('x')).toBe('64.1')
+  })
+
+  it('checks a multi-plate render plate by plate, and names the plate that does not fit (#289)', async () => {
+    const box = (x: number, y: number, z: number): BoundingBox => ({
+      min: [0, 0, 0],
+      max: [x, y, z],
+      size: [x, y, z],
+    })
+    setMockPlates('name-keychain', [
+      { index: 1, bbox_mm: box(244, 244, 8.5), colors: ['#111111', '#222222'] },
+      { index: 2, bbox_mm: box(310, 248, 5.6), colors: ['#FFFFFF'] },
+    ])
+    const asked: URLSearchParams[] = []
+    server.use(
+      http.get('/api/v1/plate/fit', ({ request }) => {
+        const search = new URL(request.url).searchParams
+        asked.push(search)
+        const x = Number(search.get('x'))
+        return HttpResponse.json({
+          plate: {
+            model: null,
+            name: 'Default plate',
+            size: [256, 256],
+            height: 250,
+            usable: { min_x: 0, min_y: 0, max_x: 256, max_y: 256 },
+          },
+          overshoots: x > 256 ? [{ axis: 'X', size: x, limit: 256 }] : [],
+          problem: null,
+        })
+      }),
+    )
+    render()
+    await firstRender()
+    await waitFor(() =>
+      expect(screen.getByTestId('plate-fit')).toHaveTextContent(
+        'Does not fit: plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm).',
+      ),
+    )
+    // Each plate with its own box and colours; never the preview's box of both.
+    const checked = asked.map((search) => [search.get('x'), search.get('colours')])
+    expect(checked).toContainEqual(['244', '2'])
+    expect(checked).toContainEqual(['310', '1'])
+    expect(checked.map(([x]) => x)).not.toContain('64.1')
+    expect(screen.getByTestId('print')).toHaveTextContent('Too big on X')
+    // The Print button's tooltip names the plate too, not only the banner.
+    expect(screen.getByTestId('print')).toHaveAttribute(
+      'title',
+      'plate 2: X is 54.0 mm over the default plate (310.0 of 256.0 mm)',
+    )
   })
 
   it('counts changes against the model defaults', async () => {
