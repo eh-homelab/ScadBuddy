@@ -1,9 +1,11 @@
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import path from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { connectDatabase, type Database } from '../src/db.js'
 import { SettingsStore } from '../src/credentials.js'
 import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS } from '../src/harness/run.js'
 import { SETTING_HEADLESS_BROWSER } from '../src/harness/headlessBrowser.js'
-import { sessionBrowserDir, sessionWorkDir } from '../src/harness/stateDirs.js'
+import { sessionBrowserDir, sessionBrowserTmpDir, sessionWorkDir } from '../src/harness/stateDirs.js'
 import {
   listQuery,
   SessionError,
@@ -344,7 +346,15 @@ describe.skipIf(!TEST_DATABASE_URL)(
     it('gives a turn the headless browser only when the setting is on (#349, off by default)', async () => {
       const paths = await tempPaths()
       const settings = new SettingsStore(db.sql)
-      const { runner, runs } = scriptedRunner(() => ({ reply: 'ok' }))
+      // Stands in for the server writing a screenshot and Chromium its profile.
+      const { runner, runs } = scriptedRunner((run) => {
+        for (const dir of [run.headlessBrowser?.dir, run.headlessBrowser?.tmpDir]) {
+          if (!dir) continue
+          mkdirSync(path.join(dir, 'output'), { recursive: true })
+          writeFileSync(path.join(dir, 'output', 'page.png'), 'png')
+        }
+        return { reply: 'ok' }
+      })
       const backendUrl = 'http://127.0.0.1:8000'
       const m = manager({ sql: db.sql, paths, run: runner, settings, headlessBrowser: { backendUrl } })
       const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'look' })
@@ -357,9 +367,14 @@ describe.skipIf(!TEST_DATABASE_URL)(
         sessionId: session.id,
         backendUrl,
         dir: sessionBrowserDir(paths, session.id),
+        tmpDir: sessionBrowserTmpDir(session.id),
       })
       // Its directory is not the session's cwd, where named output files land.
       expect(runs[1]!.headlessBrowser!.dir).not.toBe(runs[1]!.cwd)
+      // Both are removed when the turn ends (review of #518), so screenshots and
+      // profiles do not pile up turn after turn.
+      expect(existsSync(sessionBrowserDir(paths, session.id))).toBe(false)
+      expect(existsSync(sessionBrowserTmpDir(session.id))).toBe(false)
 
       // Without the dependency (no backend URL wired), the setting alone does nothing.
       const bare = manager({ sql: db.sql, paths, run: runner, settings })

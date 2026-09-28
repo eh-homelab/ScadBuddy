@@ -11,7 +11,7 @@ import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { probeChromiumSandbox } from './harness/headlessSandbox.js'
-import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
+import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
@@ -42,6 +42,10 @@ try {
   console.error(err instanceof StateDirError ? err.message : err)
   process.exit(1)
 }
+// No turn runs here yet: headless-browser folders left now are from a crash.
+await sweepBrowserDirs({ stateDir: DEFAULT_STATE_DIR }).catch((err: unknown) =>
+  console.error(`cannot remove leftover headless-browser folders: ${String(err)}`),
+)
 
 // Read once at start: rotating the key means restarting the pod (spec §9).
 // A missing or malformed file is not fatal; /healthz and Settings say why

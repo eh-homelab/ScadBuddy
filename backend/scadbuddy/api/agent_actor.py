@@ -31,7 +31,14 @@ lets a marked request through when, in one statement that also marks the grant u
 - the turn that made it is still the session's live turn (``ai_sessions.turn_id``
   with an unexpired lease), so an interrupt, a handoff, a new turn or the turn's end
   voids it;
-- its approval is approved and consumed, in the same session.
+- its approval is approved, consumed and not revoked, in the same session.
+
+A grant covers the method and path only, not the body or query string, so a route
+whose body alone decides where something goes cannot be granted at all
+(:data:`UNGRANTABLE_PREFIXES`): approving ``PUT /api/v1/settings`` would otherwise let
+the page point ``bambuddy_url`` at any host, and the next Bambuddy call would send the
+API key there. The agent refuses to ask for such a grant too
+(``agent/src/harness/headlessGrants.ts``).
 
 Anything else, including a database that is unset, unreachable or has no ``ai_*``
 tables, is refused: the gate fails closed. ``agent/test/headlessGrants.pg.test.ts``
@@ -99,6 +106,20 @@ AGENT_ALLOWED_WRITES: tuple[str, ...] = (
 # agent-allowed-writes:end
 
 
+#: Path prefixes no grant can open, however it was approved (see the module docstring).
+#: A prefix covers itself and everything below it. The agent's ``UNGRANTABLE`` in
+#: ``agent/src/harness/headlessGrants.ts`` is the same list.
+UNGRANTABLE_PREFIXES: tuple[str, ...] = ("/api/v1/settings",)
+
+
+def grantable(path: str) -> bool:
+    """Whether a grant may name ``path``: an ``/api/v1/`` path outside
+    :data:`UNGRANTABLE_PREFIXES`."""
+    if not path.startswith("/api/v1/"):
+        return False
+    return not any(path == p or path.startswith(p + "/") for p in UNGRANTABLE_PREFIXES)
+
+
 def _compile(operations: Iterable[str]) -> list[tuple[str, re.Pattern[str]]]:
     compiled = []
     for operation in operations:
@@ -125,6 +146,7 @@ WHERE id = (
     AND g.used_at IS NULL AND g.expires_at > now()
     AND s.turn_id = g.turn_id AND s.lease_until > now()
     AND a.session_id = g.session_id AND a.decision = 'approved' AND a.consumed_at IS NOT NULL
+    AND a.revoked_at IS NULL
   ORDER BY g.created_at LIMIT 1
   FOR UPDATE OF g SKIP LOCKED)
   AND used_at IS NULL
@@ -250,9 +272,10 @@ class AgentActorGate:
 
     async def granted(self, marker: str, method: str, path: str) -> bool:
         # Cheap rejects first, no database work: a marker that is not a session id, and
-        # a path no grant can name (the agent's migration only allows /api/v1/...).
+        # a path no grant can name (the agent's migration only allows /api/v1/..., and
+        # settings are never grantable).
         session = _session_id(marker)
-        if session is None or self.grants is None or not path.startswith("/api/v1/"):
+        if session is None or self.grants is None or not grantable(path):
             return False
         return await self.grants(session, method, path)
 
@@ -269,18 +292,23 @@ class AgentActorGate:
         if await self.granted(session, method, path):
             await self.app(scope, receive, send)
             return
+        origin = (
+            f"{method} {path} came from the AI agent's headless browser (session "
+            f"{session[:64]}) and is an outward action"
+        )
+        detail = (
+            f"{origin}, which needs a human approval in the ScadBuddy UI. Ask for it with the "
+            f"tool mcp__scadbuddy_browser__authorize_request (method {method}, path {path}), "
+            "then repeat the click once."
+            if grantable(path)
+            else f"{origin} that no approval can grant; ask the human to make it in the UI."
+        )
         response = JSONResponse(
             {
                 "type": "about:blank",
                 "title": "Needs approval",
                 "status": 403,
-                "detail": (
-                    f"{method} {path} came from the AI agent's headless browser (session "
-                    f"{session[:64]}) and is an outward action, which needs a human approval "
-                    "in the ScadBuddy UI. Ask for it with the tool "
-                    f"mcp__scadbuddy_browser__authorize_request (method {method}, path {path}), "
-                    "then repeat the click once."
-                ),
+                "detail": detail,
                 "instance": path,
             },
             status_code=403,

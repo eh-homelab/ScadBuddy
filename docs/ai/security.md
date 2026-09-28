@@ -342,6 +342,11 @@ origins or files", as built. Details and measurements are in
   refused (a request without it is as trusted as today), and a forged marker cannot use
   a grant without knowing the session id, the grant's exact path, and landing inside its
   turn and two-minute window, for a request a human already approved.
+- **A grant binds method and path, not the body** (review of #518), so settings routes
+  (`/api/v1/settings` and below) are never grantable: a granted settings write could
+  point `bambuddy_url` at another host and send the API key there. Both the agent's
+  authorize tool and the backend gate refuse them. For print and send, the printer,
+  plate and options in the body are not shown to the approver.
 - **The grant check cannot be flooded** (review of #518): the marker is free for anyone
   to send, so the lookup it triggers is bounded. It runs on its own async pool of 2
   Postgres connections (`PostgresGrants`), at most 4 checks at once, and one more is

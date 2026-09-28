@@ -123,6 +123,29 @@ describe.skipIf(!TEST_DATABASE_URL)(`headless-browser grants${TEST_DATABASE_URL 
     expect(await backendUses(session.id, 'POST', RUN)).toBe(false)
   })
 
+  it('cannot have a revoked approval behind a usable grant', async () => {
+    // GRANT_SQL checks `revoked_at IS NULL` like recordGrant does (review of
+    // #518); the schema already forbids revoking the consumed approval a grant
+    // needs, so the check is belt and braces. The backend's own test runs it
+    // against a schema without that constraint (test_agent_actor_grants.py).
+    const { session, approval, context } = await approvedInTurn()
+    expect((await recordGrant(context, INPUT)).ok).toBe(true)
+    await expect(db.sql`UPDATE ai_approvals SET revoked_at = now() WHERE id = ${approval.id}`).rejects.toThrow(
+      /check constraint/,
+    )
+    expect(await backendUses(session.id, 'POST', RUN)).toBe(true)
+  })
+
+  it('never grants a settings route, even with an approval of it (review of #518)', async () => {
+    for (const path of ['/api/v1/settings', '/api/v1/settings/print-options']) {
+      const input = { method: 'PUT' as const, path }
+      const { context } = await approvedInTurn(input)
+      expect(await recordGrant(context, input)).toMatchObject({ ok: false, reason: expect.stringMatching(/cannot be granted/) })
+      const [{ n } = { n: -1 }] = await db.sql<{ n: number }[]>`SELECT count(*)::int AS n FROM ai_headless_grants`
+      expect(n).toBe(0)
+    }
+  })
+
   it('refuses a path the migration does not allow', async () => {
     const { context } = await approvedInTurn({ method: 'POST', path: '/api/v1/../admin' })
     await expect(recordGrant(context, { method: 'POST', path: '/api/v1/../admin' })).rejects.toThrow()

@@ -130,10 +130,20 @@ built:
 4. The model clicks again. The backend's `GRANT_SQL` lets the request through only if a
    grant matches the marker's session, the method and the exact path, is unused and
    unexpired, its turn is still the session's live turn (`ai_sessions.turn_id`, lease
-   not expired), and its approval is approved and consumed; it marks the grant used in
-   the same statement. A third click is refused again.
+   not expired), and its approval is approved, consumed and not revoked; it marks the
+   grant used in the same statement. A third click is refused again.
 
 So an interrupt, a handoff, a new turn or the end of the turn voids an unused grant.
+
+**A grant binds the method and path, not the body or query string** (review of #518).
+The approver sees only those two, so for print and send the printer, plate and options
+the page sends are not shown or checked. Routes where the body alone decides where
+something goes are therefore **never grantable**: `/api/v1/settings` and everything
+under it (a granted `PUT /api/v1/settings` could point `bambuddy_url` at another host,
+and the backend's next Bambuddy call would send the API key there). The agent refuses
+to ask (`UNGRANTABLE` in `headlessGrants.ts`) and the backend refuses the request even
+with a grant (`UNGRANTABLE_PREFIXES` in `agent_actor.py`); settings stay a human's job
+in the UI.
 Everything else fails closed: no database URL on the backend, the database down, or no
 `ai_*` tables all mean `403`. The backend reads the agent's tables through its own
 `SCADBUDDY_DATABASE_URL` (the shared #241 database; spec §3.2 named "a lookup in the
@@ -186,8 +196,13 @@ headless shell before the tests.
   plugin copy) is outside the cwd, so no named file can overwrite them.
 - **`TMPDIR` must be short.** Chromium's profile goes under it and its `SingletonSocket`
   is a Unix socket (path limit about 107 bytes); under the session directory the launch
-  fails with "Target page, context or browser has been closed". It is the service's own
-  `TMPDIR` (`/tmp` in the image).
+  fails with "Target page, context or browser has been closed". It is a folder per
+  session in the service's own `TMPDIR`: `/tmp/sb-browser-<session id>` in the image.
+- **Cleanup** (review of #518): every turn writes the browser directory and that
+  `TMPDIR` afresh, and the session manager removes both when the turn ends
+  (`removeSessionBrowserDirs` in `stateDirs.ts`), so screenshots and Chromium profiles
+  do not pile up on the volume. At start the agent removes any left by a process that
+  died mid-turn (`sweepBrowserDirs`).
 - **In the image** (`docker build --target agent`, then run as uid 10001 with
   `--read-only --network none --tmpfs /tmp --tmpfs /var/lib/scadbuddy-agent`):
   `chromium_headless_shell-1246` launches, types, clicks, screenshots, reports WebGL

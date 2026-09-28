@@ -20,7 +20,14 @@ import {
 import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import { headlessGrantServer } from '../harness/headlessGrants.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import { ensureSessionDir, isUuid, sessionBrowserDir, sessionWorkDir } from '../harness/stateDirs.js'
+import {
+  ensureSessionDir,
+  isUuid,
+  removeSessionBrowserDirs,
+  sessionBrowserDir,
+  sessionBrowserTmpDir,
+  sessionWorkDir,
+} from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -620,6 +627,8 @@ export class SessionManager {
     let secrets: string[] = []
     let forwarded: PluginsForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
+    /** Whether this turn wrote headless-browser folders, removed when it ends. */
+    let browserDirs = false
     try {
       // The credential first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log.
@@ -670,11 +679,13 @@ export class SessionManager {
               sessionId: id,
               backendUrl: this.deps.headlessBrowser.backendUrl,
               dir: sessionBrowserDir(this.deps.paths, id),
+              tmpDir: sessionBrowserTmpDir(id),
               ...(this.deps.headlessBrowser.executablePath
                 ? { executablePath: this.deps.headlessBrowser.executablePath }
                 : {}),
             }
           : undefined
+      browserDirs = browser !== undefined
       const run: HarnessRun = {
         paths: this.deps.paths,
         credential,
@@ -739,6 +750,13 @@ export class SessionManager {
       local.settling = true
       clearInterval(renew)
       await renewing
+      // The query has ended, and with it the playwright server and Chromium:
+      // its screenshots and profile go now, not when the volume fills.
+      if (browserDirs) {
+        await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
+          this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
+        )
+      }
     }
     // The loop has ended only after the SDK's last transcript append (measured:
     // `last-prompt` and `cost-state` entries arrive after the `result`

@@ -192,6 +192,13 @@ export type HeadlessBrowserOptions = {
   /** Where this session's plugin copy, config and output files go; created if missing. */
   dir: string
   /**
+   * The server's TMPDIR (Chromium's profile goes under it), created if missing.
+   * Defaults to this process's own; the session manager gives each session a
+   * short one of its own (stateDirs.ts `sessionBrowserTmpDir`) so it can
+   * remove it at the end of the turn.
+   */
+  tmpDir?: string
+  /**
    * PLAYWRIGHT_BROWSERS_PATH for the server. Defaults to this process's own,
    * which the image sets (Dockerfile `agent`); `env -i` would drop it otherwise.
    */
@@ -415,6 +422,7 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
   for (const d of [path.join(pluginDir, '.claude-plugin'), outputDir, home]) {
     mkdirSync(d, { recursive: true })
   }
+  if (options.tmpDir) mkdirSync(options.tmpDir, { recursive: true, mode: 0o700 })
 
   const manifest = readFileSync(path.join(VENDORED_PLUGIN_DIR, '.claude-plugin', 'plugin.json'), 'utf8')
   writeFileSync(path.join(pluginDir, '.claude-plugin', 'plugin.json'), manifest)
@@ -435,7 +443,12 @@ export function materializeHeadlessBrowser(options: HeadlessBrowserOptions): Hea
     ),
   )
   const browsersPath = options.browsersPath ?? process.env.PLAYWRIGHT_BROWSERS_PATH
-  const server = serverCommand({ configFile, home, ...(browsersPath ? { browsersPath } : {}) })
+  const server = serverCommand({
+    configFile,
+    home,
+    ...(browsersPath ? { browsersPath } : {}),
+    ...(options.tmpDir ? { tmpDir: options.tmpDir } : {}),
+  })
   writeFileSync(
     path.join(pluginDir, '.mcp.json'),
     JSON.stringify({ mcpServers: { [SERVER_NAME]: { type: 'stdio', ...server } } }, null, 2),

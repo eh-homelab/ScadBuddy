@@ -27,7 +27,7 @@ import { AUTHORIZE_TOOL, AUTHORIZE_TOOL_NAME, GRANT_SERVER } from './headlessBro
 //   - the grant is unused and not expired (GRANT_TTL_SECONDS);
 //   - its turn is still the session's live turn (so an interrupt, a handoff, a
 //     new turn or the end of the turn voids it);
-//   - its approval is approved and consumed for this session;
+//   - its approval is approved, consumed and not revoked for this session;
 // and it marks the grant used in the same statement: one request per grant.
 
 /** How long a grant waits to be used; the model clicks right after. */
@@ -38,6 +38,21 @@ const METHODS = ['POST', 'PUT', 'PATCH', 'DELETE'] as const
 const PATH = /^\/api\/v1\/[A-Za-z0-9._~%/-]+$/
 const DOT_SEGMENT = /\/\.\.?(\/|$)/
 
+/**
+ * Path prefixes no grant may name (review of #518). A grant covers the method
+ * and path, not the body: approving `PUT /api/v1/settings` would let the page
+ * send any settings body, e.g. point `bambuddy_url` at another host, and the
+ * backend's next Bambuddy call would send the API key there. The backend's
+ * `UNGRANTABLE_PREFIXES` (backend/scadbuddy/api/agent_actor.py) is the same
+ * list and refuses such a request even with a grant.
+ */
+export const UNGRANTABLE = ['/api/v1/settings'] as const
+
+/** Whether a grant may name `path` (the same rule as the backend's `grantable`). */
+export function grantable(path: string): boolean {
+  return !UNGRANTABLE.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+}
+
 export const AuthorizeInput = {
   method: z.enum(METHODS).describe('The HTTP method of the request the page will make'),
   path: z
@@ -45,6 +60,7 @@ export const AuthorizeInput = {
     .max(512)
     .regex(PATH, 'an /api/v1/... path with no query string')
     .refine((p) => !DOT_SEGMENT.test(p), 'no . or .. segments')
+    .refine(grantable, 'settings cannot be changed from the headless browser; ask the human to do it in the UI')
     .describe('The exact request path, e.g. /api/v1/print/outputs/<id>/run (no query string)'),
 }
 
@@ -64,6 +80,9 @@ export async function recordGrant(
   context: GrantContext,
   input: { method: (typeof METHODS)[number]; path: string },
 ): Promise<GrantResult> {
+  if (!grantable(input.path)) {
+    return { ok: false, reason: `${input.path} cannot be granted: a human has to make that change in the UI` }
+  }
   const hash = context.hash(AUTHORIZE_TOOL_NAME, input)
   const [approval] = await context.sql<{ id: string }[]>`
     SELECT a.id FROM ai_approvals a
@@ -92,8 +111,8 @@ export async function recordGrant(
 export function headlessGrantServer(context: GrantContext): McpSdkServerConfigWithInstance {
   const authorize = tool(
     AUTHORIZE_TOOL,
-    'Ask the human to allow ONE outward request from the headless browser: send, print, delete, or a ' +
-      'settings change. The backend refuses such requests from the headless browser (403 "Needs ' +
+    'Ask the human to allow ONE outward request from the headless browser: send, print or delete ' +
+      '(never a settings change, which only the human can make in the UI). The backend refuses such requests from the headless browser (403 "Needs ' +
       'approval"). Give the method and exact path the page uses (browser_network_requests shows them). ' +
       'When the human approves, repeat the click once, within two minutes and in this same turn.',
     AuthorizeInput,

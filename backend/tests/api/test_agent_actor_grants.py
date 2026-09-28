@@ -114,7 +114,7 @@ def test_allowed_and_unmarked_requests_never_consult_the_grant_store() -> None:
 MINI_SCHEMA = """
 CREATE TABLE ai_sessions (id uuid PRIMARY KEY, turn_id uuid, lease_until timestamptz);
 CREATE TABLE ai_approvals (id uuid PRIMARY KEY, session_id uuid, decision text,
-                           consumed_at timestamptz);
+                           consumed_at timestamptz, revoked_at timestamptz);
 CREATE TABLE ai_headless_grants (
   id uuid PRIMARY KEY, session_id uuid NOT NULL, turn_id uuid NOT NULL,
   approval_id uuid NOT NULL, method text NOT NULL, path text NOT NULL,
@@ -134,7 +134,9 @@ def _seed(
             "INSERT INTO ai_sessions VALUES (%s, %s, now() + %s::interval)", (SESSION, turn, lease)
         )
         conn.execute(
-            "INSERT INTO ai_approvals VALUES (%s, %s, %s, now())", (approval, SESSION, decision)
+            "INSERT INTO ai_approvals (id, session_id, decision, consumed_at)"
+            " VALUES (%s, %s, %s, now())",
+            (approval, SESSION, decision),
         )
         conn.execute(
             "INSERT INTO ai_headless_grants (id, session_id, turn_id, approval_id, method, path,"
@@ -188,6 +190,14 @@ async def test_a_postgres_grant_from_another_turn_is_refused(pg_conninfo: str) -
     _seed(pg_conninfo)
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         conn.execute("UPDATE ai_sessions SET turn_id = %s", (str(uuid.uuid4()),))
+    assert not await _check(pg_conninfo)
+
+
+@pytest.mark.requires_postgres
+async def test_a_postgres_grant_whose_approval_was_revoked_is_refused(pg_conninfo: str) -> None:
+    _seed(pg_conninfo)
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        conn.execute("UPDATE ai_approvals SET revoked_at = now()")
     assert not await _check(pg_conninfo)
 
 
@@ -250,3 +260,34 @@ def test_the_cheap_rejects_need_no_database() -> None:
     assert client.post("/not-api/x", headers=MARKED).status_code == 403
     assert client.delete("/", headers=MARKED).status_code == 403
     assert asked == []
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("PUT", "/api/v1/settings"),
+        ("PUT", "/api/v1/settings/"),
+        ("PUT", "/api/v1/settings/print-options"),
+        ("POST", "/api/v1/settings/register-sidebar"),
+    ],
+)
+def test_settings_are_never_grantable(method: str, path: str) -> None:
+    # A grant covers method and path, not the body: a granted PUT /api/v1/settings could
+    # point bambuddy_url anywhere and leak the API key (review of #518).
+    asked: list[str] = []
+
+    async def grants(session: str, method: str, path: str) -> bool:
+        asked.append(path)
+        return True
+
+    response = _gated(grants).request(method, path, headers=MARKED)
+    assert response.status_code == 403
+    assert "no approval can grant" in response.json()["detail"]
+    assert asked == []
+
+
+def test_a_path_that_only_starts_like_settings_is_still_grantable() -> None:
+    async def grants(session: str, method: str, path: str) -> bool:
+        return True
+
+    assert _gated(grants).post("/api/v1/settingsx", headers=MARKED).status_code == 200
