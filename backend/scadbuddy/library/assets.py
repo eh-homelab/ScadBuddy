@@ -276,6 +276,15 @@ class AssetStore:
     upload of the content (a re-upload included) and touched by every render or
     preset save that names it (`use`). The sweep removes only what was last used
     before its grace period.
+
+    How much it holds is a running total, not a directory scan (#390): the ledger
+    (`ledger_path`) is read and rewritten under the lock by every `put` that adds a
+    blob and every removal the sweep makes, so the quota check is O(1) and every
+    process sharing the volume sees the same numbers. A change marks the ledger
+    dirty before it touches a file and clean once it is counted, so one that dies
+    in between leaves a ledger the next read recounts from the directory. A
+    missing or unreadable ledger is recounted the same way, and the boot recounts
+    it unconditionally (`rebuild_usage`) for files changed behind the store's back.
     """
 
     def __init__(self, root: Path, *, max_total_bytes: int = 0, max_count: int = 0) -> None:
@@ -321,15 +330,60 @@ class AssetStore:
                 found[match.group(1)] = entry
         return found
 
-    def usage(self) -> AssetUsage:
+    @property
+    def ledger_path(self) -> Path:
+        """The running ``(count, bytes)`` total (#390), beside the store like the lock
+        (``data/.assets.usage.json``)."""
+        return self.root.with_name(f".{self.root.name}.usage.json")
+
+    def _scan(self) -> tuple[int, int]:
+        """``(count, bytes)`` from listing the store and ``stat``-ing every blob: O(n),
+        so only for rebuilding the ledger, never per upload."""
         count = 0
         total = 0
         for blob in self._blobs().values():
             try:
                 total += blob.stat().st_size
-            except FileNotFoundError:  # swept between the listing and the stat
+            except FileNotFoundError:  # removed between the listing and the stat
                 continue
             count += 1
+        return count, total
+
+    def _write_ledger(self, count: int, total: int, *, dirty: bool = False) -> None:
+        payload = {"count": count, "bytes": total, "dirty": dirty}
+        _write_atomically(self.ledger_path, (json.dumps(payload) + "\n").encode())
+
+    def _read_ledger(self) -> tuple[int, int] | None:
+        """The ledger's total, or None when it cannot be trusted: missing, unreadable,
+        or left dirty by a change that did not finish (a crash, a failed write)."""
+        try:
+            data = json.loads(self.ledger_path.read_bytes())
+            count, total, dirty = data["count"], data["bytes"], data["dirty"]
+        except (OSError, ValueError, TypeError, KeyError):
+            return None
+        valid = isinstance(count, int) and isinstance(total, int) and count >= 0 and total >= 0
+        if dirty is not False or not valid:
+            return None
+        return count, total
+
+    def _tracked(self) -> tuple[int, int]:
+        """The store's ``(count, bytes)``, from the ledger, rebuilt by a scan when the
+        ledger cannot be trusted. Under the lock."""
+        current = self._read_ledger()
+        if current is None:
+            current = self._scan()
+            self._write_ledger(*current)
+        return current
+
+    def rebuild_usage(self) -> AssetUsage:
+        """Recount the store from the directory and rewrite the ledger. Run at boot, so
+        a file added or removed behind the store's back is counted again from then."""
+        with self._locked():
+            count, total = self._scan()
+            self._write_ledger(count, total)
+        return self._usage(count, total)
+
+    def _usage(self, count: int, total: int) -> AssetUsage:
         return AssetUsage(
             count=count,
             bytes=total,
@@ -337,8 +391,12 @@ class AssetStore:
             max_total_bytes=self.max_total_bytes,
         )
 
-    def _require_room(self, size: int) -> None:
-        usage = self.usage()
+    def usage(self) -> AssetUsage:
+        """O(1): the ledger, read under the lock so no change is half-applied."""
+        with self._locked():
+            return self._usage(*self._tracked())
+
+    def _require_room(self, usage: AssetUsage, size: int) -> None:
         if self.max_count and usage.count + 1 > self.max_count:
             raise AssetQuotaError(
                 f"the upload store already holds {usage.count} files, the most "
@@ -404,15 +462,24 @@ class AssetStore:
             height=height,
         )
         with self._locked():
+            count, total = self._tracked()
+            had_blob = self.blob_path(meta).is_file()
             # Content already stored costs nothing, so a full store still takes it:
             # re-uploading a file an output uses must keep working at the cap.
-            if not (self.blob_path(meta).is_file() and self._meta_path(meta.id).is_file()):
-                self._require_room(len(stored))
+            if not (had_blob and self._meta_path(meta.id).is_file()):
+                self._require_room(self._usage(count, total), len(stored))
+            if not had_blob:
+                # Dirty until the blob is written and counted: a crash in between
+                # leaves a ledger the next read rebuilds rather than trusts.
+                self._write_ledger(count, total, dirty=True)
             _write_atomically(self.blob_path(meta), stored)
             _write_atomically(
                 self._meta_path(meta.id),
                 (json.dumps(meta.model_dump(), indent=2) + "\n").encode(),
             )
+            if not had_blob:
+                # The id is the content hash, so a blob already there is these bytes.
+                self._write_ledger(count + 1, total + len(stored))
         return meta
 
     def _last_used(self, asset_id: str, blob: Path) -> float | None:
@@ -448,12 +515,20 @@ class AssetStore:
                 last_used = self._last_used(asset_id, blob)
                 if last_used is None or last_used >= cutoff:
                     continue
+                count, total = self._tracked()
+                # Dirty until the removal is counted, as in `put`: a failure or a
+                # crash in between leaves the ledger to be rebuilt, not trusted.
+                self._write_ledger(count, total, dirty=True)
                 try:
+                    size = blob.stat().st_size
                     self._meta_path(asset_id).unlink(missing_ok=True)
-                    blob.unlink(missing_ok=True)
+                    blob.unlink()
                 except OSError:
+                    # A FileNotFoundError too: gone behind the store's back, so the
+                    # ledger stays dirty and the next read recounts.
                     logger.exception("could not remove an unused asset", extra={"asset": asset_id})
                     continue
+                self._write_ledger(count - 1, total - size)
             removed.append(asset_id)
         return removed
 
