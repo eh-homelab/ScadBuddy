@@ -70,7 +70,11 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     git_env,
 )
-from scadbuddy.library.url_import import ImportRefusedError, public_addresses
+from scadbuddy.library.url_import import (
+    ImportRefusedError,
+    ResolverUnavailableError,
+    public_addresses,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +174,11 @@ class LibraryError(RuntimeError):
 
 class LibraryFetchError(LibraryError):
     """git could not fetch it: an unknown ref, an unreachable URL, a timeout."""
+
+
+class LibraryResolverUnavailableError(LibraryError):
+    """The URL's host could not be looked up just now -- the resolver busy or slow --
+    which says nothing about whether it is public (#205)."""
 
 
 class LibraryTooLargeError(LibraryError):
@@ -833,6 +842,8 @@ class LibraryStore:
                 raise LibraryError(f"a library from {url} needs a ref to pin")
             assert known is not None
             ref = known.ref
+        # REF_PATTERN already refuses `..`; the explicit test is deliberate defence in
+        # depth, so a later edit to the pattern cannot let one through (#217).
         if not re.fullmatch(REF_PATTERN, ref) or ".." in ref:
             raise LibraryError(f"{ref!r} is not a usable branch or tag name")
         scheme = urlsplit(url).scheme.lower()
@@ -862,7 +873,11 @@ class LibraryStore:
         try:
             # `install` runs off the loop (the route hands it to a thread), so the
             # import's async lookup gets a loop of its own here.
-            addresses = asyncio.run(public_addresses(host, port))
+            addresses = asyncio.run(public_addresses(host, port, tell_unavailable=True))
+        except ResolverUnavailableError:
+            raise LibraryResolverUnavailableError(
+                f"could not resolve {host} just now; try again"
+            ) from None
         except ImportRefusedError as error:
             raise LibraryError(str(error)) from None
         try:

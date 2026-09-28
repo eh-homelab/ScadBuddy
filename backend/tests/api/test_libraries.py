@@ -33,6 +33,7 @@ from scadbuddy.api.deps import (
     get_libraries,
 )
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
@@ -404,6 +405,32 @@ def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
     assert "public" in response.json()["detail"]
 
 
+def test_a_url_whose_lookup_times_out_is_a_503_to_try_again(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#205: a resolver that did not answer in time is not the SSRF refusal."""
+    create_model(lib_client)
+
+    async def hangs(host: str, port: int) -> list[str]:
+        await asyncio.sleep(5)
+        return ["10.0.0.7"]
+
+    monkeypatch.setattr(url_import, "resolve_host", hangs)
+    monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 0.05)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    monkeypatch.setattr(store, "protocols", ("https",))
+    monkeypatch.setattr(store, "_git", lambda *args: pytest.fail(f"git ran: {args}"))
+
+    response = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://git.example/o/r.git", "ref": "v1"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "could not resolve git.example just now; try again"
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
+
+
 @respx.mock
 @pytest.mark.usefixtures("fake_dns")
 def test_an_imported_model_takes_pins_like_any_other(
@@ -519,6 +546,37 @@ def test_a_missing_checkout_is_fetched_at_its_commit_when_the_ref_has_moved(
     assert [commit for _, commit in state.libraries.installed()] == [commits["v1"]]
     fetched = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
     assert fetched.read_text(encoding="utf-8") == "module marker() cube(1);\n"
+
+
+def test_a_missing_checkout_is_a_409_when_the_upstream_refuses_its_commit(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """#459: the upstream answers -- the ref clones -- but refuses `fetch <commit>`
+    for the commit the pin records (a branch force-pushed and collected since): the
+    re-fetch in `_check_out` fails, and the user is told which commit and why."""
+    url, _ = upstream
+    # A real commit, from a repository this upstream has never had it from.
+    _, elsewhere = make_library_upstream(tmp_path / "elsewhere", {"v1": "module other();\n"})
+    gone = elsewhere["v1"]
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.catalogue.pin_library(SLUG, ModelLibrary(name="BOSL2", url=url, ref="main", commit=gone))
+
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
+
+    assert schema.status_code == 409
+    detail = schema.json()["detail"]
+    assert detail == (
+        f"'BOSL2' is pinned to {gone[:7]}, which is not on this volume, and fetching it "
+        f"again failed (could not fetch {gone[:7]} from {url}: no such ref, or the "
+        "repository could not be reached); pin it to this model again"
+    )
+    assert not (paths.libraries / "BOSL2" / gone).exists()
+    assert not [e for e in paths.libraries.iterdir() if e.name.startswith(STAGING_PREFIX)]
 
 
 def test_a_missing_checkout_is_held_to_the_size_cap_when_fetched_again(

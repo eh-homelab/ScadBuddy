@@ -22,6 +22,7 @@ from scadbuddy.library.libraries import (
     LibraryError,
     LibraryFetchError,
     LibraryNotFoundError,
+    LibraryResolverUnavailableError,
     LibraryStore,
     ModelLibrary,
 )
@@ -48,6 +49,8 @@ async def resolve_pin(
         ) from None
     except LibraryFetchError as error:
         raise ApiError(status.HTTP_502_BAD_GATEWAY, str(error)) from None
+    except LibraryResolverUnavailableError as error:
+        raise ApiError(status.HTTP_503_SERVICE_UNAVAILABLE, str(error)) from None
     except LibraryError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
