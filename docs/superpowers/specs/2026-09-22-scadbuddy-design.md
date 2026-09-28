@@ -610,7 +610,8 @@ string.
     never refused, so re-uploading what an output uses keeps working at the cap.
     The check and the insert happen in one transaction holding the store's advisory
     lock, so two uploads -- in one process or on two replicas -- cannot both take
-    the last slot; a re-upload of stored content needs no room and skips it. Sizes are of the stored bytes, after sanitising and downscaling.
+    the last slot; a re-upload of stored content needs no room and skips it.
+    Sizes are of the stored bytes, after sanitising and downscaling.
   - *Usage.* `count(*)` and `sum(size)` over the `assets` table (#591), not a
     directory scan and not a running total: the metadata is one row per asset
     (`id, name, kind, size, width, height, created_at, last_used_at`), so there is
@@ -637,9 +638,9 @@ string.
     match only keeps a file longer. An older revision's shipped `presets.json` in
     the models history is not read: shipped presets name samples, not uploads.
   - *Last use.* An asset's last use is its row's `last_used_at` (an orphan blob's is
-    its mtime). An upload (a re-upload included) sets it; every `file` value that a render submit,
-    a render's staging or a preset save validates is marked used (`AssetStore.use`,
-    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+    its mtime). An upload (a re-upload included) sets it; every `file` value that
+    a render submit, a render's staging or a preset save validates is marked used
+    (`AssetStore.use`, which `file_assets` calls). So a preset save now also refuses (422) a `file`
     value that is not an upload or a sample, as a render always did.
   - *The sweep* removes an asset nothing keeps whose last use is older than
     `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s): every row, and
