@@ -64,6 +64,7 @@ EXPECTED_PATHS = {
     "/api/v1/plate/fit",
     "/api/v1/plates",
     "/api/v1/libraries",
+    "/api/v1/assets/usage",
     "/api/v1/models/{slug}/assets",
     "/api/v1/models/{slug}/assets/{asset_id}",
     "/api/v1/models/{slug}/assets/{asset_id}/content",

@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/v1/assets/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How much the upload store holds
+         * @description The files stored for `// file` parameters: how many, their total bytes, and the caps an upload is refused past (0 is no limit). Files that no output, preset or render job references are removed by a sweep once nothing has uploaded or used them for SCADBUDDY_ASSET_SWEEP_GRACE.
+         */
+        get: operations["get_asset_usage_api_v1_assets_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/fonts": {
         parameters: {
             query?: never;
@@ -203,7 +223,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a file for a file parameter
-         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.
+         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422. A file not already stored that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries the store's `usage`; re-uploading stored content is never refused.
          */
         post: operations["upload_asset_api_v1_models__slug__assets_post"];
         delete?: never;
@@ -1349,6 +1369,20 @@ export interface components {
             size: number;
             /** Width */
             width?: number | null;
+        };
+        /**
+         * AssetUsage
+         * @description How much the upload store holds, against its caps (#296).
+         */
+        AssetUsage: {
+            /** Bytes */
+            bytes: number;
+            /** Count */
+            count: number;
+            /** Max Count */
+            max_count: number;
+            /** Max Total Bytes */
+            max_total_bytes: number;
         };
         /**
          * AttachResult
@@ -3507,6 +3541,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_asset_usage_api_v1_assets_usage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetUsage"];
+                };
+            };
+        };
+    };
     get_fonts_api_v1_fonts_get: {
         parameters: {
             query?: never;

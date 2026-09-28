@@ -55,6 +55,35 @@
         "title": "AssetMeta",
         "type": "object"
       },
+      "AssetUsage": {
+        "description": "How much the upload store holds, against its caps (#296).",
+        "properties": {
+          "bytes": {
+            "title": "Bytes",
+            "type": "integer"
+          },
+          "count": {
+            "title": "Count",
+            "type": "integer"
+          },
+          "max_count": {
+            "title": "Max Count",
+            "type": "integer"
+          },
+          "max_total_bytes": {
+            "title": "Max Total Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "count",
+          "bytes",
+          "max_count",
+          "max_total_bytes"
+        ],
+        "title": "AssetUsage",
+        "type": "object"
+      },
       "AttachResult": {
         "description": "What was attached, so the UI can say so rather than claiming more than happened.",
         "properties": {
@@ -6001,6 +6030,28 @@
   },
   "openapi": "3.1.0",
   "paths": {
+    "/api/v1/assets/usage": {
+      "get": {
+        "description": "The files stored for `// file` parameters: how many, their total bytes, and the caps an upload is refused past (0 is no limit). Files that no output, preset or render job references are removed by a sweep once nothing has uploaded or used them for SCADBUDDY_ASSET_SWEEP_GRACE.",
+        "operationId": "get_asset_usage_api_v1_assets_usage_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssetUsage"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "How much the upload store holds",
+        "tags": [
+          "assets"
+        ]
+      }
+    },
     "/api/v1/fonts": {
       "get": {
         "operationId": "get_fonts_api_v1_fonts_get",
@@ -6578,7 +6629,7 @@
     },
     "/api/v1/models/{slug}/assets": {
       "post": {
-        "description": "Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.",
+        "description": "Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422. A file not already stored that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries the store's `usage`; re-uploading stored content is never refused.",
         "operationId": "upload_asset_api_v1_models__slug__assets_post",
         "parameters": [
           {
