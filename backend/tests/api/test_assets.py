@@ -9,7 +9,6 @@ import time
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -460,7 +459,8 @@ def test_an_upload_the_blob_store_has_no_room_for_is_a_507(
             raise StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (10)")
 
     state = getattr(app.state, STATE_ATTR)
-    object.__setattr__(state, "store", SimpleNamespace(remote_assets=Full()))
+    # On the lifespan's own (local) bundle, which its shutdown closes.
+    state.store.remote_assets = Full()
     response = client.post(
         f"/api/v1/models/{MODEL_SLUG}/assets",
         files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
