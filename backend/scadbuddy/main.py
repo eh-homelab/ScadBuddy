@@ -287,6 +287,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
     try:
+        # Follows the prints a previous process was following (#268).
+        await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
@@ -322,6 +324,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        await state.print_watcher.aclose()
         await state.queue.aclose()
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)

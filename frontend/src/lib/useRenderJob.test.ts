@@ -2,7 +2,7 @@ import { act, renderHook } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { ApiError, api } from '../api/client'
 import type { Job, RenderAccepted } from '../api/types'
-import { getRealtime, type RealtimeListener, type RealtimeStatus } from './realtime'
+import { fakeRealtime } from './realtime.fake'
 import { useRenderJob } from './useRenderJob'
 
 const JOB_A = 'a'.repeat(32)
@@ -37,34 +37,6 @@ async function settle() {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(0)
   })
-}
-
-/**
- * The tab's realtime client, driven by the test: a subscription is confirmed at once
- * (the server's `subscribed`), and `signal` stands in for an event on a topic.
- */
-function fakeRealtime() {
-  const listeners = new Map<string, RealtimeListener>()
-  let status: RealtimeStatus = 'live'
-  const realtime = getRealtime()
-  vi.spyOn(realtime, 'status', 'get').mockImplementation(() => status)
-  vi.spyOn(realtime, 'subscribe').mockImplementation((topic, listener) => {
-    listeners.set(topic, listener)
-    queueMicrotask(() => listeners.get(topic)?.('resync'))
-    return () => listeners.delete(topic)
-  })
-  return {
-    following: () => [...listeners.keys()],
-    setStatus(next: RealtimeStatus) {
-      status = next
-    },
-    async signal(topic: string, kind = 'job.done', data: Record<string, unknown> = {}) {
-      await act(async () => {
-        listeners.get(topic)?.({ id: 'e', kind, topics: [topic], data })
-        await vi.advanceTimersByTimeAsync(0)
-      })
-    },
-  }
 }
 
 type Props = { slug: string; params: Record<string, number> | undefined; version?: string }

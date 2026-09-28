@@ -5,8 +5,10 @@ from __future__ import annotations
 import httpx
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR, get_print_watcher
 from tests.api.test_print import pipelines_route, printers_route, run_body
 from tests.api.test_print_filaments import queue_route, slice_routes
 from tests.api.test_print_run_choices import run_request, run_routes
@@ -16,13 +18,29 @@ from tests.bambuddy.conftest import recording
 API = f"{BASE}/api/v1"
 
 
+def recording_watcher(client: TestClient) -> list[str]:
+    """Swap the app's print watcher for one that records what it is asked to watch."""
+    watched: list[str] = []
+
+    class Recording:
+        def watch(self, output_id: str) -> None:
+            watched.append(output_id)
+
+    app = client.app
+    assert isinstance(app, FastAPI)
+    app.dependency_overrides[get_print_watcher] = Recording
+    return watched
+
+
 @respx.mock
 def test_an_output_that_has_never_printed_answers_null(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
+    watched = recording_watcher(client)
     response = client.get(f"/api/v1/print/outputs/{output_id}/progress")
     assert response.status_code == 200
     assert response.json() is None
+    assert watched == []
 
 
 @pytest.mark.requires_postgres
@@ -142,7 +160,10 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
             },
         )
     )
+    watched = recording_watcher(client)
     body = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
+    # Not settled: the read makes sure the backend follows it (#268).
+    assert watched == [output_id]
     assert body["route"] == "slice_queue"
     assert body["queue_item_id"] == 51
     assert body["slice_job_id"] == 9
@@ -150,3 +171,38 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     # Waiting is not failing.
     assert body["error_message"] is None
     assert body["copies_detail"][0]["waiting_reason"] == "No active H2C printers are idle"
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_send_starts_the_print_watcher(client: TestClient, model: str) -> None:
+    configure(client, pipeline_id=1)
+    output_id = make_output(client, model)
+    upload_route()
+    pipelines_route()
+    printers_route()
+    respx.post(f"{API}/slicer-pipelines/1/run").mock(
+        return_value=httpx.Response(200, json=run_body())
+    )
+    sent = client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
+    assert sent.status_code == 200, sent.text
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert output_id in state.print_watcher.watching
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
+    """#268: the backend follows the print itself from the moment it starts."""
+    configure(client)
+    output_id = make_output(client, model)
+    upload_route()
+    run_routes()
+    slice_routes()
+    queue_route()
+    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+    assert ran.status_code == 200, ran.text
+
+    state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
+    assert output_id in state.print_watcher.watching
