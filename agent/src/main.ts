@@ -3,6 +3,7 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
@@ -95,6 +96,12 @@ const database = config.databaseUrl
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
+// OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
+// its metadata and JWKS caches for the process.
+const oidcRepo = settings
+  ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
+  : undefined
+const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
@@ -200,10 +207,18 @@ const app = createApp({
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
-    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
     tokens,
-    authSettings: () => DEFAULT_MCP_AUTH,
+    // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
+    // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
+    // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
+    authSettings: async () => {
+      const oidc = await oidcRepo?.get()
+      return oidc?.enabled ? { ...DEFAULT_MCP_AUTH, mode: 'oidc', oidc } : DEFAULT_MCP_AUTH
+    },
+    oidc: oidcProvider,
+    publicUrl: config.publicUrl,
   },
+  mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {
