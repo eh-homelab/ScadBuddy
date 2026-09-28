@@ -1,5 +1,6 @@
 import type { Context, MiddlewareHandler } from 'hono'
 import { bodyLimit } from 'hono/body-limit'
+import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import {
   checkOrigin,
   effectiveRequest,
@@ -123,12 +124,15 @@ export function uiReadProblem(
 const LOOPBACK_HOSTNAMES = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 /**
- * The largest JSON body a UI write route reads: a session message is at most
- * 32 000 code units (sessions/clientProtocol.ts MESSAGE_MAX), up to ~128 KB as
- * UTF-8 in the worst case, and 64 KiB covers every realistic one with room for
- * the JSON around it. Nothing larger is buffered or parsed.
+ * The largest JSON body a UI write route reads. It is derived from the longest
+ * message the routes accept (sessions/clientProtocol.ts MESSAGE_MAX, in UTF-16
+ * code units) at its worst encoding: a BMP character is at most 3 bytes as
+ * UTF-8, and at most 6 as a JSON `\uXXXX` escape, so 6 bytes per code unit
+ * (192 000 bytes for 32 000), plus 64 KiB for the rest of the body (a title,
+ * the JSON around them). Any schema-valid message fits, whatever its script;
+ * nothing larger is buffered or parsed.
  */
-export const JSON_BODY_MAX = 64 * 1024
+export const JSON_BODY_MAX = MESSAGE_MAX * 6 + 64 * 1024
 
 /**
  * Refuses a body over `maxSize` with 413 before the route reads it: by
