@@ -49,7 +49,8 @@ export async function downloadBlob(
   embedded = isEmbedded(),
 ): Promise<void> {
   const popup = embedded ? openDownloadWindow() : null
-  if (embedded && !popup) throw new DownloadBlockedError()
+  // Blocked: no window, or (as some blockers do) one that is already closed.
+  if (embedded && (!popup || popup.closed)) throw new DownloadBlockedError()
   let url: string | null = null
   try {
     const blob = await load()

@@ -254,8 +254,17 @@ describe('CustomizePage', () => {
   it('says the download window was closed when it goes before the file is ready (#612)', async () => {
     const top = window.top
     Object.defineProperty(window, 'top', { value: {}, configurable: true })
-    // Closed by the time the 3MF has been fetched.
-    const open = vi.spyOn(window, 'open').mockReturnValue({ closed: true, document: null, close: () => {} } as unknown as Window)
+    // Open when the click asks for it, closed by the time the 3MF has been fetched.
+    let checks = 0
+    const popup = {
+      get closed() {
+        checks += 1
+        return checks > 1
+      },
+      document: null,
+      close: () => {},
+    }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup as unknown as Window)
     try {
       const { user } = render()
       await firstRender()
