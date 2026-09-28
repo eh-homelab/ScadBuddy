@@ -577,9 +577,9 @@ def referenced_asset_ids(
     - every output's records (``params.json`` and the rest of its JSON), and for an
       output whose ``params.json`` is gone, the root model of its 3MF, where the
       provenance "Edit in ScadBuddy" falls back to is stamped;
-    - every saved preset (``data/presets/``);
+    - ``params``: every saved preset's values (they are in Postgres) and every job's
+      in the render queue's store, finished or not;
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
-    - ``params``: the jobs in the render queue's store, finished or not.
 
     A source that exists but cannot be read raises OSError: a sweep that cannot see
     every reference must not remove anything, so the caller skips the whole sweep
@@ -598,8 +598,6 @@ def referenced_asset_ids(
         archive = directory / "model.3mf"
         if not (directory / "params.json").is_file() and archive.is_file():
             found.update(_ids_in_archive(archive))
-    for preset_file in paths.presets.glob("*.json"):
-        scan(preset_file)
     for pattern in (f"*/{LEGACY_PRESETS_NAME}", "*/model.json"):
         for template_file in (*paths.models.glob(pattern), *paths.builtins.glob(pattern)):
             scan(template_file)
