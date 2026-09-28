@@ -37,6 +37,8 @@ from scadbuddy.core.config import (
 )
 
 CONTAINER_SEED_MODELS_DIR = Path("/app/models")
+# The curated libraries the image bakes in (#169); no dev equivalent.
+CONTAINER_SEED_LIBRARIES_DIR = Path("/app/libraries")
 CONTAINER_FRONTEND_DIR = Path("/app/frontend/dist")
 
 # scadbuddy/core/settings.py -> scadbuddy -> backend -> repo root
@@ -85,6 +87,7 @@ class Settings(BaseSettings):
     fonts_catalogue_ttl: float = DEFAULT_FONTS_CATALOGUE_TTL
 
     seed_models_dir: Path | None = None
+    seed_libraries_dir: Path | None = None
     frontend_dir: Path | None = None
 
     # Initial values for the stored settings (`library.settings_store`, in Postgres);
@@ -168,6 +171,13 @@ class Settings(BaseSettings):
         if self.seed_models_dir is not None:
             return self.seed_models_dir if self.seed_models_dir.is_dir() else None
         return _first_directory(REPO_ROOT / "models", CONTAINER_SEED_MODELS_DIR)
+
+    def resolve_seed_libraries_dir(self) -> Path | None:
+        """The library checkouts bundled with the release: /app/libraries in the
+        container, none in dev."""
+        if self.seed_libraries_dir is not None:
+            return self.seed_libraries_dir if self.seed_libraries_dir.is_dir() else None
+        return _first_directory(CONTAINER_SEED_LIBRARIES_DIR)
 
     def resolve_frontend_dir(self) -> Path | None:
         """The built SPA to serve, or None when no bundle is present."""

@@ -81,7 +81,11 @@ for the project picker).
   fonts and caches. Back up the volume. Settings are in the database, not in
   `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
-  supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters.
+  supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
+  image carries BOSL2 at the catalogue's ref and copies it into
+  `/data/libraries` at start when it is not there, so a fresh install renders
+  BOSL2 models without network access (licence:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
   `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default

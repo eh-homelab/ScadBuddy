@@ -227,3 +227,18 @@ Known limitation: the deployed web UI renders a library row's filename, tags and
 count, and only ever `PUT`s `{"filename": …}` — it does not render `notes` today. The
 link is attached to the file in Bambuddy's own data model and readable over its API;
 showing it as an **Edit in ScadBuddy** action is a change on the Bambuddy side.
+
+Added for #307 on 2026-09-28, from Bambuddy **1.2.5.6** over the ingress (auth off,
+every request a `GET`):
+
+| File | Source |
+|---|---|
+| `archive-detail.json` | `GET /api/v1/archives/35` |
+| `archive-runs.json` | `GET /api/v1/archives/35/runs` |
+| `timelapse-info.json` | `GET /api/v1/archives/35/timelapse/info` |
+| `timelapse-thumbnails.json` | `GET /api/v1/archives/35/timelapse/thumbnails`, cut to 3 frames of 64 base64 characters (the real ones are about 4.5 KB each) |
+| `printer-media.json` | `GET /api/v1/archives/35/printer-media` |
+
+`GET /archives/35/timelapse` and `/photos/{name}` with `Range: bytes=100-199` answered
+`206` with `Content-Range: bytes 100-199/<size>` and `Accept-Ranges: bytes`: Bambuddy's
+`FileResponse` serves ranges itself, so the proxy passes the header through.

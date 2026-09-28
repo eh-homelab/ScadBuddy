@@ -7,7 +7,9 @@ revision of the model. Another model declaring the same library keeps its own pi
 
 The checkouts themselves are a cache on the volume: ``GET /libraries/installed``
 lists them and ``DELETE /libraries/{name}`` removes them, refused while any model
-still pins one.
+still pins one. A pinned checkout missing from the volume is cloned again at its
+commit when a render or create needs it (``CheckoutFetcher``), and the boot sweep
+removes the ones no revision of any model pins (``sweep_library_checkouts``).
 """
 
 from __future__ import annotations
@@ -303,7 +305,7 @@ async def list_installed_libraries(
         "with a 409 naming the models while any model's live pin still reads one, and "
         "with a 409 naming the jobs while a running render reads one. "
         "Older revisions are not counted: rendering one that pinned a removed checkout "
-        "is the 409 that asks for the library to be pinned again."
+        "clones it again at that commit, and is a 409 only when that fails."
     ),
 )
 async def remove_library(

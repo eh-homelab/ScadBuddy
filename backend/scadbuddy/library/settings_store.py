@@ -1,6 +1,6 @@
 """The settings, in Postgres (``SCADBUDDY_DATABASE_URL``; formerly data/settings.json).
 
-Three tables, all in `scadbuddy.render.pg_store.MIGRATIONS` (3):
+Three tables, all in `scadbuddy.render.pg_store.MIGRATIONS` (4):
 
 - ``settings``: one row per setting, ``name -> value`` (jsonb). No row is "never set":
   the environment's value for an :data:`ENV_SEEDED` field, else the default. A JSON
