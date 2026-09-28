@@ -4,7 +4,7 @@ import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
 import { DEFAULT_SOURCE, markUntrusted } from '../safety/untrusted.js'
-import { type PendingActionStore, PendingStoreFullError } from './pending.js'
+import { type OutwardActions, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -32,7 +32,12 @@ export type Progress = (progress: number, total?: number, message?: string) => P
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
-  pending: PendingActionStore
+  /**
+   * Where a gated outward call is prepared and later confirmed (spec §8.2):
+   * `ai_approvals` through approvals/mcp.ts when there is a database, else
+   * the in-memory store in pending.ts, whose actions can never be confirmed.
+   */
+  pending: OutwardActions
   /** How often a render is polled while `render_model` waits. */
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
@@ -47,6 +52,8 @@ export type ToolContext = ToolServices & {
   principal: Principal
   progress: Progress
   signal: AbortSignal
+  /** The projection's own tools by name, so `confirm_action` can run the approved one. */
+  lookup?: (name: string) => Tool | undefined
 }
 
 export type ToolSpec<S extends z.ZodRawShape> = {
@@ -91,6 +98,8 @@ export type Tool = {
   /** Where its content comes from (ToolSpec.source). */
   readonly source: string
   summarize(args: unknown): string
+  /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
+  parse(args: unknown): Record<string, unknown>
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
   execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
 }
@@ -118,6 +127,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     summarize(args) {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
+    },
+    parse(args) {
+      return spec.input.parse(args) as Record<string, unknown>
     },
     execute(args, ctx) {
       return spec.handler(spec.input.parse(args), ctx)
@@ -177,12 +189,9 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   }
   try {
     if (tool.gated) {
-      const action = ctx.pending.prepare({
-        tool: tool.name,
-        args,
-        summary: tool.summarize(args),
-        principalId: ctx.principal.id,
-      })
+      // The prepare half of spec §8.2's prepare/confirm: record, do not act.
+      const input = tool.parse(args)
+      const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })
       return {
         result: json({
           status: 'pending_approval',
@@ -190,8 +199,9 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
           summary: action.summary,
           expires_at: action.expiresAt.toISOString(),
           next:
-            'Outward actions need a human approval in the ScadBuddy UI. That approval flow is not ' +
-            'available yet (#258), so confirm_action refuses for now; nothing was sent.',
+            'Nothing was sent. Outward actions need a human approval in the ScadBuddy UI. Once the user has ' +
+            'approved it there, call confirm_action with this pending_action_id and exactly the same arguments; ' +
+            'until then confirm_action answers pending_approval.',
         }),
         outcome: 'refused',
         detail: `waiting for approval (pending action ${action.id}); nothing was sent`,
