@@ -148,6 +148,18 @@ class Settings(BaseSettings):
     # scadbuddy.worker` as its own Deployment and leaves this off.
     temporal_worker_inprocess: bool = False
 
+    @field_validator("temporal_address", "temporal_namespace", "temporal_task_queue_render")
+    @classmethod
+    def _temporal_without_whitespace(cls, value: str, info: ValidationInfo) -> str:
+        # As `database_url`: a value that is only whitespace would read as "set" (the
+        # Temporal path) with a garbage address. Only the address may be empty.
+        name = f"SCADBUDDY_{(info.field_name or '').upper()}"
+        if value != value.strip():
+            raise ValueError(f"{name} must not start or end with whitespace: {value!r}")
+        if not value and info.field_name != "temporal_address":
+            raise ValueError(f"{name} must not be empty")
+        return value
+
     # SCADBUDDY_EVENT_LOG_RETENTION_SECONDS / _ROWS, Postgres only: how much of the
     # event log (Last-Event-ID replay, spec §7) each replica's pruning keeps. 0 is no
     # limit on that dimension.
