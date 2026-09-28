@@ -67,8 +67,11 @@ Both `gen:api` steps read the exported spec, so export first. `--save` is requir
 (without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
-`shellcheck .github/scripts/*.sh models/*/verify.sh`, and the `.github/scripts/*.test.sh`
-suites.
+`shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
+`.github/scripts/*.test.sh` suites. Every `docker run` in a `verify.sh` must carry
+`--label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}"` (Python:
+`"--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local")`) on
+the same line: `verify-models.sh` reaps a timed-out template's containers by it (#302).
 
 Template checks (the `models` job): each `models/<slug>/verify.sh` the PR touches, or all
 of them when the Dockerfile, `ci.yml` or the selector/runner scripts change, and always on

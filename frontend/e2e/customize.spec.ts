@@ -194,6 +194,19 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('bbox-readout')).toBeVisible()
     await expect(page.getByTestId('render-log')).toHaveCount(0)
   })
+
+  test("shows ScadBuddy's own job warnings on a successful render (#383)", async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await expect(page.getByTestId('render-warnings')).toHaveCount(0)
+
+    await page.getByRole('textbox', { name: 'Name on the tag' }).fill('nopic')
+    const warnings = page.getByRole('region', { name: 'Render warnings' })
+    await expect(warnings).toContainText('OpenSCAD could not open pic.svg')
+    await expect(warnings).toContainText('From ScadBuddy')
+    await expect(page.getByTestId('render-notes')).toHaveCount(0)
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+  })
 })
 
 test.describe('font picker', () => {
