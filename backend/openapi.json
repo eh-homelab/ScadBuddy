@@ -435,7 +435,7 @@
             "anyOf": [
               {
                 "maxLength": 108,
-                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
                 "type": "string"
               },
               {
@@ -6092,7 +6092,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6139,7 +6139,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6181,7 +6181,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6236,7 +6236,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6290,7 +6290,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6344,7 +6344,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6396,7 +6396,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6441,7 +6441,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6496,7 +6496,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6551,7 +6551,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6616,7 +6616,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6683,7 +6683,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6729,7 +6729,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6784,7 +6784,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6831,7 +6831,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6886,7 +6886,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6932,7 +6932,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -6997,7 +6997,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7062,7 +7062,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7104,7 +7104,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7147,7 +7147,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7201,7 +7201,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7259,7 +7259,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7327,7 +7327,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7371,7 +7371,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7410,7 +7410,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7496,7 +7496,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7539,7 +7539,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7597,7 +7597,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7652,7 +7652,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7697,7 +7697,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7742,7 +7742,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7787,7 +7787,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7834,7 +7834,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7894,7 +7894,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7965,7 +7965,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8019,7 +8019,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8073,7 +8073,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8820,7 +8820,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
