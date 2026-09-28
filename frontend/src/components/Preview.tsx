@@ -185,8 +185,9 @@ export function RenderNotes({ notes }: { notes: string[] }) {
     >
       <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
       <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
-        {notes.map((note) => (
-          <li key={note}>{note}</li>
+        {/* An index key: a display-only list, and its text need not be unique. */}
+        {notes.map((note, index) => (
+          <li key={index}>{note}</li>
         ))}
       </ul>
     </section>
@@ -211,8 +212,8 @@ export function RenderWarnings({ warnings, inline = false }: { warnings: string[
     >
       <h3 className="text-[10px] tracking-wide text-warn">From ScadBuddy</h3>
       <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-[12px] leading-snug text-warn">
-        {warnings.map((warning) => (
-          <li key={warning}>{warning}</li>
+        {warnings.map((warning, index) => (
+          <li key={index}>{warning}</li>
         ))}
       </ul>
     </section>
