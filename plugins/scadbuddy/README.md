@@ -10,7 +10,7 @@ Claude Code (issue #299;
 |---|---|---|
 | `skills/authoring/` | `/scadbuddy:authoring` | Writing `.scad` templates: customizer annotations, `// color` and `// font`, per-colour solids, the verified OpenSCAD facts, `verify.sh` |
 | `skills/customize/` | `/scadbuddy:customize` | Driving the customizer: schema, presets, render, preview, plate fit, outputs |
-| `skills/print/` | `/scadbuddy:print` | The print flow through Bambuddy: pipeline or slice-then-queue, the filament plan, approvals, progress |
+| `skills/print/` | `/scadbuddy:print` | The print flow through Bambuddy: spools, nozzle, quality and plate, then slice-then-queue; approvals, progress |
 | `agents/model-author.md` | `scadbuddy:model-author` | Subagent for the edit → render → inspect loop (#252) |
 | `agents/print-analyst.md` | `scadbuddy:print-analyst` | Subagent that runs a print-analyzer session (#284) |
 | `.mcp.json` | server `plugin:scadbuddy:scadbuddy` | ScadBuddy's `/mcp` endpoint, for installs outside ScadBuddy |

@@ -99,7 +99,12 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
     """,
-    # 3: when each output's last print was started (#268), so the print watcher finds
+    # 3: ScadBuddy's own job warnings (#408), on the row for the same reason: a
+    # failed render has no result to carry them.
+    """
+    ALTER TABLE render_jobs ADD COLUMN warnings jsonb NOT NULL DEFAULT '[]'::jsonb;
+    """,
+    # 4: when each output's last print was started (#268), so the print watcher finds
     # the prints to follow again after a restart (`bambuddy/watcher.py` `PgPrintLog`).
     """
     CREATE TABLE print_watches (
@@ -124,6 +129,7 @@ JOB_COLUMNS = (
     "result",
     "diagnostics",
     "diagnostics_dropped",
+    "warnings",
 )
 
 TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identical render is queued"
@@ -243,7 +249,8 @@ class PostgresJobStore:
                             back = conn.execute(
                                 "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
                                 " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
-                                " diagnostics_dropped = 0 WHERE id = %s RETURNING *",
+                                " diagnostics_dropped = 0, warnings = '[]'::jsonb"
+                                " WHERE id = %s RETURNING *",
                                 (row["id"],),
                             ).fetchone()
                     except UniqueViolation:
@@ -361,7 +368,7 @@ class PostgresJobStore:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, started_at = %s, finished_at = %s,"
                 " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL,"
-                " diagnostics = %s, diagnostics_dropped = %s"
+                " diagnostics = %s, diagnostics_dropped = %s, warnings = %s"
                 " WHERE id = %s AND state = 'running' AND attempts = %s",
                 (
                     job.state,
@@ -372,6 +379,7 @@ class PostgresJobStore:
                     Jsonb(job.result.model_dump(mode="json")) if job.result is not None else None,
                     Jsonb([diagnostic.model_dump(mode="json") for diagnostic in job.diagnostics]),
                     job.diagnostics_dropped,
+                    Jsonb(job.warnings),
                     job.id,
                     job.attempt,
                 ),

@@ -49,7 +49,8 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 
 The Agent SDK is used under Anthropic's Commercial Terms ("Use of the Claude Agent
 SDK is governed by Anthropic's Commercial Terms of Service", [overview][sdk-overview]).
-ScadBuddy stays MIT. Nothing from the SDK is vendored into the repo; it is an npm
+ScadBuddy is Apache-2.0 (`LICENSE`; it switched from MIT in #301). Nothing from the
+SDK is vendored into the repo; it is an npm
 dependency of `agent/`.
 
 ## 3. Facts this design rests on
@@ -308,8 +309,10 @@ when an operation in `backend/openapi.json` has neither a tool nor an explicit a
 entry.
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
-render and streams progress until it settles, and `print_output` wraps
-eligibility → send → run behind a single approval.
+render and streams progress until it settles, and `print_output` fills any omitted
+choice the way the print dialog opens, then slices and queues behind a single approval.
+(It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
+pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
 ### 5.2 Browser tools
 
@@ -435,7 +438,7 @@ Print progress comes from **one server-side watcher per active print** (#268,
 `backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
 back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
 socket can't replace the read (§3.1). When each print started is kept in Postgres
-(`print_watches`, backend migration 3; nothing on disk), so the watcher resumes recent
+(`print_watches`, a backend migration; nothing on disk), so the watcher resumes recent
 prints after a restart; a settled print is forgotten. A session advisory lock per print
 means one replica follows each print. Reading a print's progress re-arms its watcher,
 and an open dialog reads at least every 30 s while the socket is up, so it never waits

@@ -8,8 +8,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, get_print_watcher
-from tests.api.test_print import pipelines_route, presets_routes, printers_route, run_body
-from tests.api.test_print_filaments import inventory_routes, queue_route, slice_routes
+from tests.api.test_print import pipelines_route, printers_route, run_body
+from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.bambuddy.conftest import recording
 
@@ -43,7 +44,8 @@ def test_an_output_that_has_never_printed_answers_null(client: TestClient, model
 
 @respx.mock
 def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, model: str) -> None:
-    configure(client)
+    # The send bar is what still runs a pipeline; the picker slices and queues.
+    configure(client, pipeline_id=1)
     output_id = make_output(client, model)
     upload_route()
     # A send resolves the target printer's plate before uploading, to lay the 3MF out
@@ -55,7 +57,7 @@ def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, mod
     )
     assert (
         client.post(
-            f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1, "copies": 2}
+            f"/api/v1/outputs/{output_id}/send", json={"mode": "queue", "copies": 2}
         ).status_code
         == 200
     )
@@ -104,7 +106,7 @@ def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
 ) -> None:
     """The recorded run: still ``in_progress`` by its own status, with a slice failure.
     A send bar that waited for the status to move would spin over it forever."""
-    configure(client)
+    configure(client, pipeline_id=1)
     output_id = make_output(client, model)
     upload_route()
     # A send resolves the target printer's plate before uploading, to lay the 3MF out
@@ -114,7 +116,7 @@ def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
     respx.post(f"{API}/slicer-pipelines/1/run").mock(
         return_value=httpx.Response(200, json=run_body(1))
     )
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    client.post(f"/api/v1/outputs/{output_id}/send", json={"mode": "queue"})
     respx.get(f"{API}/pipeline-runs/1").mock(
         return_value=httpx.Response(200, json=recording("pipeline-run.json"))
     )
@@ -135,21 +137,11 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     configure(client)
     output_id = make_output(client, model)
     upload_route()
-    pipelines_route()
-    printers_route()
-    presets_routes()
-    inventory_routes()
+    run_routes()
     slice_routes()
     queue_route()
 
-    ran = client.post(
-        f"/api/v1/print/outputs/{output_id}/run",
-        json={
-            "pipeline_id": 1,
-            "printer_id": 1,
-            "filament_plan": {"slots": [{"slot_id": 1, "spool_id": 9}]},
-        },
-    ).json()
+    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()).json()
     assert ran["route"] == "slice_queue"
 
     respx.get(f"{API}/queue/51").mock(
@@ -183,12 +175,11 @@ def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     configure(client)
     output_id = make_output(client, model)
     upload_route()
-    pipelines_route()
-    printers_route()
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
-    client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1})
+    run_routes()
+    slice_routes()
+    queue_route()
+    ran = client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request())
+    assert ran.status_code == 200, ran.text
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
     # No database here, so nothing is recorded; the watcher follows it all the same.

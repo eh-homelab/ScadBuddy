@@ -43,7 +43,7 @@ Lifecycle
   follows the print. A UI on another replica still sees the print move through the
   dialog's 30 s backstop read (``frontend/src/lib/usePrintProgress.ts``).
 - With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
-  (``render/pg_store.py`` migration 3) and a Postgres session advisory lock makes
+  (a ``render/pg_store.py`` migration) and a Postgres session advisory lock makes
   sure one replica follows each print (:class:`WatchLock`). There is no other store
   (#401 makes the database required): without it, a print is followed from the send
   that started it, and a restart forgets it.

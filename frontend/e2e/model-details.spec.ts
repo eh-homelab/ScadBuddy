@@ -10,6 +10,18 @@ test.describe('model details', () => {
     'msw-backed; the real stack is covered by real-backend.spec.ts',
   )
 
+  test('shows a model with no thumbnail and no output by its default-render preview', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    const card = page.getByRole('listitem').filter({ hasText: 'Keychain Template' })
+    const image = card.getByRole('img', { name: 'Keychain Template' })
+
+    await expect(image).toBeVisible()
+    // Keyed on which render it is, so a re-render after a source edit refetches.
+    await expect(image).toHaveAttribute('src', /\/thumbnail\?v=[^"]*5eed0f00d5eed0f0/)
+  })
+
   test('adds a model from its files, with its metadata, thumbnail and README', async ({
     page,
   }) => {
