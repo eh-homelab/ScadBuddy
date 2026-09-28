@@ -17,6 +17,7 @@ import asyncio
 import logging
 import zipfile
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 from scadbuddy.analyzers.context import (
     AnalysisContext,
@@ -153,22 +154,31 @@ async def _read_bambuddy(
         context.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
         return
     # An all-plates print needs each slot's total over every plate, as the filament
-    # step reads it (`pipelines.filament_options_for_output`).
+    # step reads it (`pipelines.filament_options_for_output`). A 3MF whose plates
+    # cannot be listed makes the inventory unavailable, as `_read_geometry` treats the
+    # same file, rather than failing the run.
     plate_ids = [request.plate_id]
-    if request.all_plates and context.model_3mf is not None:
-        plates = await asyncio.to_thread(plates_of, context.model_3mf)
-        plate_ids = [plate.index for plate in plates] or [1]
     try:
-        read = [
-            await gather_options(
-                client,
-                library_file_id=library_file_id,
-                printer_id=context.printer.id if context.printer else None,
-                plate_id=plate,
-                fallback_colours=list(meta.colors) if meta is not None else None,
+        if request.all_plates and context.model_3mf is not None:
+            plates = await asyncio.to_thread(plates_of, context.model_3mf)
+            plate_ids = [plate.index for plate in plates] or [1]
+    except (KeyError, ValueError, zipfile.BadZipFile, ET.ParseError) as error:
+        context.unavailable["inventory"] = f"the 3MF's plates cannot be read: {error}"
+        return
+    try:
+        # One read per plate, concurrently: each is an independent Bambuddy read.
+        read = await asyncio.gather(
+            *(
+                gather_options(
+                    client,
+                    library_file_id=library_file_id,
+                    printer_id=context.printer.id if context.printer else None,
+                    plate_id=plate,
+                    fallback_colours=list(meta.colors) if meta is not None else None,
+                )
+                for plate in plate_ids
             )
-            for plate in plate_ids
-        ]
+        )
         context.filament_options = read[0] if len(read) == 1 else every_plate(read)
     except ApiError as error:
         context.unavailable["inventory"] = error.detail
