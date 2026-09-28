@@ -27,7 +27,8 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own.
+  saved preset, to an editable preset of your own. Saved presets are kept in the
+  database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -56,8 +57,14 @@ multi-colour rules, connecting Bambuddy and each feature.
 
 ```bash
 docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
+  -e SCADBUDDY_DATABASE_URL=postgresql://scadbuddy:secret@db:5432/scadbuddy \
   ghcr.io/eh-homelab/scadbuddy:main
 ```
+
+**A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
+the backend refuses to start and says so. Settings and the render queue live
+there; the schema is created and migrated at startup, so an empty database is
+enough.
 
 Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 [Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
@@ -72,14 +79,21 @@ for the project picker).
   Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, saved presets (`presets/`, outside the git repository), settings,
-  downloaded fonts and caches. Back up the volume. The image carries BOSL2 at the
-  catalogue's ref and copies it into `/data/libraries` at start when it is not
-  there, so a fresh install renders BOSL2 models without network access (licence:
+  outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
+  database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
+  (it used to be a 0600 file on the volume), so it is in every database backup;
+  supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
+  image carries BOSL2 at the catalogue's ref and copies it into
+  `/data/libraries` at start when it is not there, so a fresh install renders
+  BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-- **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
-  `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
-  for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
+- **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
+  `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
+  1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
+  from the UI it wins; a field the UI never saved keeps following the variable,
+  and one it cleared stays cleared (the upload limit instead goes back to the
+  variable). `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
   (default 120 s), `SCADBUDDY_RENDER_CONCURRENCY` (2),
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
@@ -140,17 +154,22 @@ for the project picker).
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
-  requests share one job.
+  requests share one job. A finished render is kept under its template
+  (`models/<slug>/.renders/<key>/`, beside the source like its media) and a
+  later request for the same parameters at the same revision is answered from it
+  without running OpenSCAD; an entry with a file missing is rendered again, and
+  entries unused for `SCADBUDDY_JOB_TTL` are removed with the jobs. Installing a
+  font or moving a library pin does not change the key, so a render kept before
+  that is served until it expires or the template is edited.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.
-  - `SCADBUDDY_DATABASE_URL` (libpq URL): keep the queue in Postgres. Accepted
-    renders then survive a restart. Unset, it lives in `/data/jobs` and this
-    process, and a restart fails what was unfinished. Several replicas can share
-    one queue only if they also share `/data` (a ReadWriteMany volume): a job's
-    files are written there by whichever replica renders it. On a ReadWriteOnce
-    PVC run one replica, as the design does.
-    `SCADBUDDY_DATABASE_POOL_SIZE` (10). The schema is created and migrated at
+  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the queue is in Postgres, so
+    accepted renders survive a restart. Several replicas can share one queue only
+    if they also share `/data` (a ReadWriteMany volume): a job's files are written
+    there by whichever replica renders it. On a ReadWriteOnce PVC run one replica,
+    as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
+    and the settings each hold one). The schema is created and migrated at
     startup.
   - With `SCADBUDDY_DATABASE_URL` set, the **event bus** (spec §7) moves to
     Postgres too: each change is appended to an `events` table and sent with
@@ -206,14 +225,20 @@ ScadBuddy runs on the homelab cluster from
 pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
-With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
-database at startup (`backend/scadbuddy/migrations/20260928T0630Z_events.sql` adds the
-`events` log, and
-`20260928T0724Z_analyzer_decisions.sql` the print analyzers' `analyzer_decisions`;
-without a database those analyzers still run, but their decisions cannot be
-recorded). The event log's retention
-is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
-(see the render queue settings above); the defaults need no manifest change.
+The backend needs its database (#401): the manifest must set
+`SCADBUDDY_DATABASE_URL` (the cluster's `scadbuddy-db`), or the pod never
+becomes ready and its log names the missing variable. The settings live in that
+database, so the Bambuddy connection a deployment needs from the first start
+comes from `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY` (from a Secret)
+and `SCADBUDDY_PUBLIC_URL`.
+
+A deploy that rolls the pod also migrates the database at startup
+(`backend/scadbuddy/migrations/`: `20260928T0630Z_events.sql` adds the `events`
+log, `20260928T0724Z_analyzer_decisions.sql` the print analyzers'
+`analyzer_decisions`, and `20260928T0840Z_settings.sql` the settings tables). The
+event log's retention is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` /
+`SCADBUDDY_EVENT_LOG_RETENTION_ROWS` (see the render queue settings above); the
+defaults need no manifest change.
 
 ```mermaid
 flowchart LR

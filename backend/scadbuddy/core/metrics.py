@@ -65,6 +65,11 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
+        self.render_cached = Counter(
+            "scadbuddy_render_jobs_cached",
+            "Render requests answered with a finished render kept under the template.",
+            registry=r,
+        )
         self.store_info = Gauge(
             "scadbuddy_render_store_info",
             'Which job store holds the render queue: backend="postgres" when '

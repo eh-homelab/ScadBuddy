@@ -13,10 +13,34 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **The agent service has no authentication.** Its credential writes are *gated*, but
   not authenticated (see [Origin gate](#dns-rebinding-defence)). The limitation is
   stated in the header of [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts).
-- **No `/mcp`, no tool registry, no approvals** exist on `main`. Those are open PRs
-  #368 and #471. The only tool paths today are the harness's in-process MCP servers
-  (none registered in `main.ts`) and the browser bridge in the user's own tab
-  ([browser-bridge.md](browser-bridge.md)).
+- **`/mcp` and the tool registry** are on `main` (#368, [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts),
+  [`agent/src/tools/`](../../agent/src/tools/)), authenticated by bearer tokens (see
+  [MCP bearer tokens](#mcp-bearer-tokens)). **Approvals are not built** (open PR #471).
+  The other tool paths are the harness's in-process MCP servers and the browser bridge
+  in the user's own tab ([browser-bridge.md](browser-bridge.md)).
+
+## MCP bearer tokens
+
+Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
+(hashed)" live in the database). The implementation is `PostgresTokenStore` in
+[`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
+([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
+
+- **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
+  makes a leaked token recognisable to secret scanners.
+- **Hash only.** The row holds `token_hash`, the SHA-256 (hex) of the token, and never
+  the plaintext; a `CHECK` rejects anything that is not 64 hex characters. An unsalted
+  fast hash is enough because the token is 256 random bits: there is nothing to
+  brute-force that a slow KDF would protect (comment on `hashToken()`). A read of the
+  table therefore yields no usable token. The plaintext is returned once, by `mint`.
+- **Verify** is a single `UPDATE … RETURNING` that matches the hash, skips revoked and
+  expired rows, and stamps `last_used_at` (only forwards, with `GREATEST`). Revoking on
+  one replica takes effect on every replica at the next request.
+- **No other store.** There is no file or in-memory persistence. Without a database,
+  `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
+  `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
+  the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
+- **Not built:** the Settings routes and UI to mint, list and revoke tokens (#251).
 
 ## Risk tiers and the permission seam
 
@@ -251,7 +275,6 @@ merged code.
 |---|---|
 | Whether `canUseTool` can wait on an asynchronous human decision, or a `PreToolUse` hook must deny and the session resume after approval | #255, #258 |
 | Bambuddy 1.2.5.5 routes for print archive outcomes and stats | #251 |
-| Whether the #241 Postgres needs anything for `LISTEN/NOTIFY` across replicas | #264 |
 | Bambu Studio's "Open in Bambu Studio" hand-off | #284 |
 | Keys accepted by `filament_overrides` on `PrintQueueItemCreate` | #284 |
 | Whether `/local-presets/` can create a derived process preset | #284 |
@@ -265,6 +288,11 @@ merged code.
 | Whether `outputDir` confines every write | #349 |
 | How the backend matches the agent-actor marker to an approved outward action | #349 |
 | Chromium on the agent image: install, non-root, read-only root, size | #349 |
+
+The `LISTEN/NOTIFY` across replicas item is answered by #264 (spec §3.2): connect to
+the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
+([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
+see [mcp-resources.md](mcp-resources.md#the-event-source).
 
 The headless browser (spec §5.3, merged as a spec in #363) stays off until its rows are
 verified (spec §8.2).
