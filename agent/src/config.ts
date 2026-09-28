@@ -10,7 +10,7 @@ export type Config = {
   databaseUrl: string | undefined
   /** Where the Python backend listens; the sidecar reaches it over the pod's localhost (spec §4.3). */
   backendUrl: string
-  /** Key-encryption key file for envelope encryption (spec §9). Read by #255, not yet. */
+  /** Key-encryption key file for envelope encryption (spec §9); format and loading in secrets.ts. */
   secretKeyFile: string | undefined
 }
 

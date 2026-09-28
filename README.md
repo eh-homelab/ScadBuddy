@@ -104,7 +104,15 @@ for the project picker).
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
     than this for a worker, unrendered.
   - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
-    jobs it was not woken for (another replica's).
+    jobs it was not woken for. With Postgres, only while the listener below is
+    disconnected.
+  - `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s), Postgres only: each process
+    `LISTEN`s on `scadbuddy_render_queue`, and a submit or requeue on any replica
+    sends `NOTIFY` in the same transaction, so an idle worker starts the job at
+    once. While that connection is up, idle workers still check this often, to
+    catch a notification missed around a reconnect. The listener reconnects with
+    back-off; `scadbuddy_render_queue_listener_connected` and
+    `scadbuddy_render_queue_listener_reconnects_total` show its state.
   - `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s) and `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2),
     Postgres only: a running job whose worker stops heartbeating for a lease is
     requeued, and failed after its last attempt.
@@ -192,6 +200,34 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   `http://127.0.0.1:8080`) and `SCADBUDDY_SECRET_KEY_FILE`
   (`agent/src/config.ts`; spec §9). With no database URL it still runs and
   `/healthz` reports `"ai": "disabled (no database)"`.
+- **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
+  credential, which is stored encrypted in the database (envelope encryption,
+  spec §9; `agent/src/secrets.ts`). The file holds exactly 32 random bytes,
+  base64-encoded; mount it from a Kubernetes Secret:
+
+  ```bash
+  openssl rand -base64 32 > scadbuddy-secret.key
+  kubectl -n scadbuddy create secret generic scadbuddy-agent-kek \
+    --from-file=secret.key=scadbuddy-secret.key
+  # container: volumeMount at /etc/scadbuddy/kek, readOnly;
+  # env SCADBUDDY_SECRET_KEY_FILE=/etc/scadbuddy/kek/secret.key
+  ```
+
+  It is read once at start. Without it (or with a malformed one) the service
+  still runs, but saving a credential answers `503` naming the reason and
+  `/healthz` reports `"ai": "disabled (no key-encryption key: …)"`. Keep a
+  copy: a credential sealed under a lost key cannot be decrypted and must be
+  entered again (`/healthz` then says it was sealed with a different key).
+- `/healthz` reports `"ai": "enabled"` only when the database answers, its
+  `ai_*` migrations have applied (`agent/src/db/migrations.ts`, run at start
+  under an advisory lock), the key is loaded and a Claude credential is saved.
+  Otherwise `ai` names the first missing piece.
+- The Claude credential (an Anthropic API key, or a gateway base URL plus
+  token) is managed through `GET/PUT/DELETE /api/v1/ai/credentials` and
+  tested with `POST /api/v1/ai/credentials/test`. No route returns the secret.
+  Writes are accepted only over the HTTPS ingress (`X-Forwarded-Proto: https`)
+  or loopback, from the UI's own origin (`agent/src/routes/guard.ts`); that is
+  not authentication, and the human approval spec §8.2 asks for comes with #258.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it

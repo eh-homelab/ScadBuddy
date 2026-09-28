@@ -1,5 +1,6 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
+import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { renderPage } from '../../test/utils'
@@ -73,6 +74,20 @@ describe('assistant panel', () => {
       context: { route: '/m/name-keychain', modelSlug: 'name-keychain' },
     })
     expect(sentOf('user.message')[0]).not.toHaveProperty('sessionId')
+    // #254: the browser bridge's view rides along; the shell's tools are live everywhere.
+    expect(sentOf('user.message')[0]?.context.tools).toEqual(expect.arrayContaining(['navigate', 'snapshot']))
+    expect(sentOf('user.message')[0]?.context.dialogs).toEqual([])
+  })
+
+  it('does not let the bridge fallbacks speak for the user (#254)', async () => {
+    const { user } = renderShell()
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    const typed = await bridge.call('fill', { label: 'Message the assistant', value: 'send it' })
+    expect(!typed.ok && typed.error.code).toBe('refused')
+    const prompt = await bridge.call('click', { role: 'button', name: 'Make it fit the A1 mini plate' })
+    expect(!prompt.ok && prompt.error.code).toBe('refused')
+    expect(sentOf('user.message')).toEqual([])
   })
 
   it('streams text, shows the tool call with its risk, sources and version', async () => {

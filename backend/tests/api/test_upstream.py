@@ -15,8 +15,11 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.catalogue import Catalogue, ModelMeta, ModelPatch
+from scadbuddy.library import catalogue as catalogue_module
+from scadbuddy.library import upstream as upstream_module
+from scadbuddy.library.catalogue import MERGE_ATTEMPTS, Catalogue, ModelMeta, ModelPatch
 from scadbuddy.library.history import GitUnavailableError, ModelHistory
+from scadbuddy.library.upstream import MergePlan, UpstreamStateError
 from scadbuddy.main import create_app
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.api.conftest import PNG_BYTES
@@ -434,6 +437,55 @@ def test_upstream_changes_and_metadata_edits_racing_both_land(
         assert raw["upstream"]["dismissed"] == revision
     else:
         assert raw["upstream"]["base"] == revision
+
+
+def _edit_after_planning(
+    monkeypatch: pytest.MonkeyPatch, catalogue: Catalogue, edits: list[str]
+) -> None:
+    """Each time a merge is worked out, the next of ``edits`` lands before it is written."""
+    plan = upstream_module.plan_merge
+
+    def plan_then_edit(*args: Any) -> MergePlan:
+        planned = plan(*args)
+        if edits:
+            catalogue.write_source("copy", edits.pop(0))
+        return planned
+
+    monkeypatch.setattr(catalogue_module, "plan_merge", plan_then_edit)
+
+
+def test_a_merge_is_worked_out_again_when_the_template_moves_before_it_is_written(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#228: planned outside the write lock, a merge the template has moved under
+    must not write its stale result over the edit."""
+    catalogue = _racing(paths)
+    edited = SOURCE.replace('layout = "row";', 'layout = "column";')
+    _edit_after_planning(monkeypatch, catalogue, [edited])
+
+    _, plan = catalogue.merge_upstream("copy")
+
+    both = edited.replace("width = 40;", "width = 50;")
+    assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == both
+    assert plan.preview.merged == both
+    upstream = catalogue.record("copy").upstream
+    assert upstream is not None and upstream.base == plan.revision
+
+
+def test_a_merge_the_template_keeps_moving_under_is_refused(
+    paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalogue = _racing(paths)
+    base = catalogue.upstream_status("copy").upstream.base
+    edits = [SOURCE.replace('layout = "row";', f'layout = "{n}";') for n in range(MERGE_ATTEMPTS)]
+    _edit_after_planning(monkeypatch, catalogue, list(edits))
+
+    with pytest.raises(UpstreamStateError):
+        catalogue.merge_upstream("copy")
+
+    assert catalogue.paths.model_source("copy").read_text(encoding="utf-8") == edits[-1]
+    upstream = catalogue.record("copy").upstream
+    assert upstream is not None and upstream.base == base
 
 
 # ── #179's details through an upstream merge ─────────────────────────────────
