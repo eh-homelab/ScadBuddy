@@ -2179,9 +2179,38 @@ export const handlers = [
     const printerId = search.get('printer_id')
     // #78 — no printer, no hardware to read.
     const hardware = printerId === null ? { nozzles: [] } : {}
+    // #480 — like the server, each plate uses only some of the slots (here plate N uses
+    // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
+    const every = fixtures.filamentOptions.slots ?? []
+    const slots =
+      search.get('all_plates') === 'true'
+        ? every
+        : every.filter((slot) => slot.slot_id === plateId)
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
+      slots,
+      suggested: (fixtures.filamentOptions.suggested ?? []).filter((choice) =>
+        slots.some((slot) => slot.slot_id === choice.slot_id),
+      ),
+      // The server recomputes warnings for the slots it answers with, so a warning
+      // never names a slot that isn't there; one about no slot in particular stays.
+      warnings: (fixtures.filamentOptions.warnings ?? []).filter(
+        (warning) =>
+          warning.slot_id === null ||
+          warning.slot_id === undefined ||
+          slots.some((slot) => slot.slot_id === warning.slot_id),
+      ),
       library_file_id:
         output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
