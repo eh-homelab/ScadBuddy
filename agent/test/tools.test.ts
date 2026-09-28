@@ -610,3 +610,68 @@ describe('invalid arguments', () => {
     expect(firstText(result)).toContain('invalid arguments')
   })
 })
+
+describe('print media (#307)', () => {
+  it('fetches a print photo by its Bambuddy file name, as an image', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints/35/photos/finish_1790488620_ab12.jpg`, () =>
+        new HttpResponse(new Uint8Array(8), { headers: { 'content-type': 'image/jpeg' } }),
+      ),
+    )
+    const result = await runTool(tool('get_print_image'), { archive_id: 35, photo: 'finish_1790488620_ab12.jpg' }, ctx())
+    expect(result.content[0]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+  })
+
+  it('fetches a plate image, or the thumbnail with neither photo nor plate', async () => {
+    const hit: string[] = []
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints/35/plates/2/thumbnail`, ({ request }) => {
+        hit.push(new URL(request.url).pathname)
+        return new HttpResponse(new Uint8Array(8), { headers: { 'content-type': 'image/png' } })
+      }),
+      http.get(`${BACKEND}/api/v1/prints/35/thumbnail`, ({ request }) => {
+        hit.push(new URL(request.url).pathname)
+        return new HttpResponse(new Uint8Array(8), { headers: { 'content-type': 'image/png' } })
+      }),
+    )
+    await runTool(tool('get_print_image'), { archive_id: 35, plate: 2 }, ctx())
+    await runTool(tool('get_print_image'), { archive_id: 35 }, ctx())
+    expect(hit).toEqual(['/api/v1/prints/35/plates/2/thumbnail', '/api/v1/prints/35/thumbnail'])
+  })
+
+  it('refuses both a photo and a plate at once', async () => {
+    const result = await runTool(tool('get_print_image'), { archive_id: 35, photo: 'a.jpg', plate: 1 }, ctx())
+    expect(result.isError).toBe(true)
+  })
+
+  it('links the timelapse rather than inlining a video over the cap', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints/35/timelapse`, () =>
+        new HttpResponse(new Uint8Array(64), { headers: { 'content-type': 'video/mp4', 'content-length': '64' } }),
+      ),
+    )
+    const result = await runTool(
+      tool('get_print_timelapse'),
+      { archive_id: 35 },
+      ctx({ maxInlineBytes: 16, publicBaseUrl: 'https://scadbuddy.example/' }),
+    )
+    expect(result.content[0]).toMatchObject({
+      type: 'resource_link',
+      uri: 'https://scadbuddy.example/api/v1/prints/35/timelapse',
+      mimeType: 'video/mp4',
+    })
+  })
+
+  it('downloads the sliced or the source 3MF', async () => {
+    server.use(
+      http.get(`${BACKEND}/api/v1/prints/35/files/source`, () =>
+        new HttpResponse(new Uint8Array([1, 2, 3, 4]), { headers: { 'content-type': 'model/3mf' } }),
+      ),
+    )
+    const result = await runTool(tool('download_print_file'), { archive_id: 35, file: 'source' }, ctx({ maxInlineBytes: 16 }))
+    expect(result.content).toEqual([
+      { type: 'resource', resource: { uri: 'scadbuddy://prints/35/files/source', mimeType: 'model/3mf', blob: 'AQIDBA==' } },
+    ])
+    expect(tool('download_print_file').risk).toBe('read')
+  })
+})
