@@ -27,6 +27,15 @@ describe('SettingsPage', () => {
     expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
   })
 
+  it('offers the AI headless browser switch, off by default (#349)', async () => {
+    renderPage(<SettingsPage />)
+    expect(
+      await screen.findByRole('checkbox', {
+        name: 'Let AI sessions use ScadBuddy in a headless browser',
+      }),
+    ).not.toBeChecked()
+  })
+
   it('says when no key is stored yet', async () => {
     server.use(
       http.get('/api/v1/settings', () =>
