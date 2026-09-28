@@ -195,12 +195,17 @@ def build_state(settings: Settings) -> AppState:
     # stand in behind them. Off, the catalogue serves no preview at all -- including
     # ones rendered while it was on, which stay stored until their model goes.
     # The media list (#274) shares the render queue's pool, opened in the lifespan.
+    # Nothing connects here either: the lifespan opens it.
+    presets = PresetStore(
+        paths, settings.database_url, pool_size=min(4, settings.database_pool_size)
+    )
     catalogue = Catalogue(
         paths,
         history,
         outputs,
         preview_store,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        presets=presets,
         wrapper_prefix=WRAPPER_PREFIX,
         serve_previews=settings.preview_renders,
         media_store=(
@@ -263,7 +268,7 @@ def build_state(settings: Settings) -> AppState:
         outputs=outputs,
         uploads=uploads,
         print_links=print_links,
-        presets=PresetStore(paths),
+        presets=presets,
         settings_store=settings_store,
         fonts=FontService(
             paths.root,

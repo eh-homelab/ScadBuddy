@@ -81,7 +81,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.outputs import OutputStore
-from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
+from scadbuddy.library.presets import PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -880,8 +880,6 @@ async def patch_model(
             f"{slug!r} already has a saved preset named {name!r}",
             name=name,
         ) from None
-    except InvalidPresetsFileError as error:
-        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
