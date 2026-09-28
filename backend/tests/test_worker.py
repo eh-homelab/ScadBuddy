@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import socket
+import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -31,7 +32,7 @@ from scadbuddy.render.job_models import Job
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from scadbuddy.worker import _poll, _wait_drained, run_worker
+from scadbuddy.worker import _poll, _wait_drained, run_inprocess_worker, run_worker
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
 from scadbuddy.workflows.models import piece_key
@@ -246,3 +247,67 @@ async def test_the_in_process_worker_stops_without_draining(
     stop.set()
     async with temporal_client() as client:
         await asyncio.wait_for(_poll(settings, deps, client, stop, drain=False), 30)
+
+
+@pytest.mark.requires_temporal
+async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def never(*_: object, **__: object) -> bool:
+        raise AssertionError("the in-process worker must not drain")
+
+    monkeypatch.setattr(worker_module, "drained", never)
+    started: list[str] = []
+    marked = threading.Event()
+
+    class _Projection:
+        """Only what the pipeline's first activity needs: the `project` activity's
+        `mark_started`, which proves the worker polled and ran it."""
+
+        def mark_started(self, job_id: str) -> None:
+            started.append(job_id)
+            marked.set()
+
+    settings = Settings(
+        database_url=UNUSED_DATABASE_URL,
+        data_dir=tmp_path,
+        revision=f"test-{uuid.uuid4().hex[:8]}",
+        temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
+    )
+    deps = WorkerDeps(
+        config=Config(openscad="openscad", data_dir=tmp_path),
+        paths=DataPaths(tmp_path),
+        assets=None,  # type: ignore[arg-type]
+        blobs=None,  # type: ignore[arg-type]
+        refs=None,  # type: ignore[arg-type]
+        projection=_Projection(),  # type: ignore[arg-type]
+    )
+    job = Job(
+        id=uuid.uuid4().hex,
+        slug="m",
+        params={},
+        inputs={"params": {}},
+        model_version=None,
+        created_at=datetime.now(UTC),
+    )
+    stop = asyncio.Event()
+    async with temporal_client() as client:
+        worker = asyncio.create_task(run_inprocess_worker(settings, deps, client, stop))
+        handle = await client.start_workflow(
+            TemplatePipeline.run,
+            job,
+            id=workflow_id_for(job.id),
+            task_queue=settings.temporal_task_queue_render,
+        )
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(marked.wait, 60), 65)
+            assert started == [job.id]
+            # The workflow is still running (its next activity cannot succeed on these
+            # deps): the worker ends on `stop` all the same, without draining.
+            stop.set()
+            await asyncio.wait_for(worker, 30)
+        finally:
+            stop.set()
+            await handle.terminate()
+            if not worker.done():
+                worker.cancel()
