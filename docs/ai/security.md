@@ -16,12 +16,34 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **`/mcp`, the tool registry and approvals are on `main`** (#251's registry in
   [`agent/src/tools/`](../../agent/src/tools/) and
   [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts); #258's approval store in
-  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `main.ts`
-  still gives `/mcp` a token store that verifies nothing, so in production it answers
-  `401` until the Postgres token store lands (the `TODO(#251 follow-up)` there). The
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
+  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)). The
   other tool paths are the harness's in-process MCP servers (none registered in
   `main.ts`) and the browser bridge in the user's own tab
   ([browser-bridge.md](browser-bridge.md)).
+
+## MCP bearer tokens
+
+Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
+(hashed)" live in the database). The implementation is `PostgresTokenStore` in
+[`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts), over `ai_mcp_tokens`
+([`agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql`](../../agent/src/db/migrations/20260928T0734Z_mcp_tokens.sql)).
+
+- **Format.** `sbmcp_` plus 32 bytes from `crypto.randomBytes`, base64url. The prefix
+  makes a leaked token recognisable to secret scanners.
+- **Hash only.** The row holds `token_hash`, the SHA-256 (hex) of the token, and never
+  the plaintext; a `CHECK` rejects anything that is not 64 hex characters. An unsalted
+  fast hash is enough because the token is 256 random bits: there is nothing to
+  brute-force that a slow KDF would protect (comment on `hashToken()`). A read of the
+  table therefore yields no usable token. The plaintext is returned once, by `mint`.
+- **Verify** is a single `UPDATE … RETURNING` that matches the hash, skips revoked and
+  expired rows, and stamps `last_used_at` (only forwards, with `GREATEST`). Revoking on
+  one replica takes effect on every replica at the next request.
+- **No other store.** There is no file or in-memory persistence. Without a database,
+  `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
+  `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
+  the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
+- **Not built:** the Settings routes and UI to mint, list and revoke tokens (#251).
 
 ## Risk tiers and the permission seam
 

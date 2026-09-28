@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
-import { FailClosedTokenStore, hashToken, InMemoryTokenStore, TOKEN_PREFIX } from '../src/auth/tokens.js'
+import { FailClosedTokenStore, hashToken, TOKEN_PREFIX } from '../src/auth/tokens.js'
 import { BoundedEventStore } from '../src/mcp/eventStore.js'
 import { PendingActionStore, PendingStoreFullError } from '../src/tools/pending.js'
+import { InMemoryTokenStore } from './support/memoryTokens.js'
 
 describe('tiers', () => {
   it('include every lower tier', () => {
@@ -12,7 +13,7 @@ describe('tiers', () => {
   })
 })
 
-describe('InMemoryTokenStore', () => {
+describe('InMemoryTokenStore (the /mcp tests’ stand-in; Postgres is test/tokens.pg.test.ts)', () => {
   it('stores only a hash, verifies to the token tier, and records last use', async () => {
     const store = new InMemoryTokenStore()
     const { token, record } = await store.mint({ name: 'ci', tier: 'write' })
@@ -37,11 +38,11 @@ describe('InMemoryTokenStore', () => {
   })
 })
 
-describe('FailClosedTokenStore (production until #255)', () => {
+describe('FailClosedTokenStore (no database configured)', () => {
   it('verifies nothing and cannot mint', async () => {
     const store = new FailClosedTokenStore()
     expect(await store.verify()).toBeNull()
-    await expect(store.mint()).rejects.toThrow(/#255/)
+    await expect(store.mint()).rejects.toThrow(/SCADBUDDY_DATABASE_URL/)
     expect(await store.list()).toEqual([])
     expect(await store.revoke()).toBe(false)
   })

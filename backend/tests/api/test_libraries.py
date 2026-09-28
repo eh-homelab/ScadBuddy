@@ -31,17 +31,19 @@ from scadbuddy.api.deps import (
     STATE_ATTR,
     AppState,
     get_libraries,
+    get_presets,
 )
 from scadbuddy.core.paths import DataPaths, model_path
+from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.libraries import (
-    LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
     CheckoutGate,
     LibraryStore,
     ModelLibrary,
 )
+from scadbuddy.library.presets import PresetStore
 from scadbuddy.main import sweep_library_checkouts
 from tests.api.conftest import set_fake_env
 from tests.conftest import make_library_upstream
@@ -129,7 +131,6 @@ def test_pinning_a_library_records_it_in_that_model_alone(
     assert record["libraries"] == [pinned]
     assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == [pinned]
     assert lib_client.get("/api/v1/models/gadget").json()["libraries"] == []
-    assert not (paths.models / LOCKFILE_NAME).exists()
 
 
 def test_two_models_render_one_library_at_two_refs(
@@ -404,6 +405,32 @@ def test_a_url_on_the_cluster_network_is_a_422_without_a_clone(
     assert "public" in response.json()["detail"]
 
 
+def test_a_url_whose_lookup_times_out_is_a_503_to_try_again(
+    lib_client: TestClient, libraries_app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#205: a resolver that did not answer in time is not the SSRF refusal."""
+    create_model(lib_client)
+
+    async def hangs(host: str, port: int) -> list[str]:
+        await asyncio.sleep(5)
+        return ["10.0.0.7"]
+
+    monkeypatch.setattr(url_import, "resolve_host", hangs)
+    monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 0.05)
+    store = libraries_app.dependency_overrides[get_libraries]()
+    monkeypatch.setattr(store, "protocols", ("https",))
+    monkeypatch.setattr(store, "_git", lambda *args: pytest.fail(f"git ran: {args}"))
+
+    response = lib_client.put(
+        f"/api/v1/models/{SLUG}/libraries/mylib",
+        json={"url": "https://git.example/o/r.git", "ref": "v1"},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json()["detail"] == "could not resolve git.example just now; try again"
+    assert lib_client.get(f"/api/v1/models/{SLUG}").json()["libraries"] == []
+
+
 @respx.mock
 @pytest.mark.usefixtures("fake_dns")
 def test_an_imported_model_takes_pins_like_any_other(
@@ -521,6 +548,37 @@ def test_a_missing_checkout_is_fetched_at_its_commit_when_the_ref_has_moved(
     assert fetched.read_text(encoding="utf-8") == "module marker() cube(1);\n"
 
 
+def test_a_missing_checkout_is_a_409_when_the_upstream_refuses_its_commit(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """#459: the upstream answers -- the ref clones -- but refuses `fetch <commit>`
+    for the commit the pin records (a branch force-pushed and collected since): the
+    re-fetch in `_check_out` fails, and the user is told which commit and why."""
+    url, _ = upstream
+    # A real commit, from a repository this upstream has never had it from.
+    _, elsewhere = make_library_upstream(tmp_path / "elsewhere", {"v1": "module other();\n"})
+    gone = elsewhere["v1"]
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.catalogue.pin_library(SLUG, ModelLibrary(name="BOSL2", url=url, ref="main", commit=gone))
+
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
+
+    assert schema.status_code == 409
+    detail = schema.json()["detail"]
+    assert detail == (
+        f"'BOSL2' is pinned to {gone[:7]}, which is not on this volume, and fetching it "
+        f"again failed (could not fetch {gone[:7]} from {url}: no such ref, or the "
+        "repository could not be reached); pin it to this model again"
+    )
+    assert not (paths.libraries / "BOSL2" / gone).exists()
+    assert not [e for e in paths.libraries.iterdir() if e.name.startswith(STAGING_PREFIX)]
+
+
 def test_a_missing_checkout_is_held_to_the_size_cap_when_fetched_again(
     lib_client: TestClient,
     libraries_app: FastAPI,
@@ -574,11 +632,20 @@ def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
     assert (checkout / "BOSL2").is_dir()
 
 
+@pytest.mark.requires_postgres
 def test_a_preset_save_fetches_a_checkout_that_is_gone(
-    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    pg_conninfo: str,
 ) -> None:
     """Create, update and duplicate check the values against the schema, which reads
     the pins: each fetches a missing checkout again, as a render does."""
+    # Saved presets are rows in Postgres (#332).
+    presets_store = PresetStore(paths, pg_conninfo)
+    presets_store.open()
+    libraries_app.dependency_overrides[get_presets] = lambda: presets_store
     _, commits = upstream
     create_model(lib_client)
     pin(lib_client, "BOSL2")
@@ -598,6 +665,7 @@ def test_a_preset_save_fetches_a_checkout_that_is_gone(
     duplicated = lib_client.post(f"{preset}/duplicate", json={"name": "Copy"})
     assert duplicated.status_code == 201, duplicated.text
     assert (checkout / "BOSL2").is_dir()
+    presets_store.close()
 
 
 def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
@@ -668,42 +736,6 @@ def test_restoring_a_revision_restores_its_pins_and_no_others(
     assert [lib["commit"] for lib in gadget["libraries"]] == [commits["v2"]]
 
 
-# ── pins from before they moved into each model ───────────────────────────────
-
-
-def test_boot_moves_the_lockfile_into_the_models(
-    app: FastAPI, paths: DataPaths, tmp_path: Path
-) -> None:
-    history: ModelHistory = getattr(app.state, STATE_ATTR).history
-    url, commits = make_library_upstream(tmp_path / "legacy", {"v1": "cube(1);\n"})
-    lock = {"BOSL2": {"url": url, "ref": "v1", "commit": commits["v1"]}}
-    (paths.model_dir(SLUG)).mkdir(parents=True)
-    (paths.model_source(SLUG)).write_text(SOURCE, encoding="utf-8")
-    paths.model_meta(SLUG).write_text(
-        json.dumps({"name": "Widget", "libraries": ["BOSL2"]}), encoding="utf-8"
-    )
-    history.ensure_repo()
-    (paths.models / LOCKFILE_NAME).write_text(json.dumps(lock), encoding="utf-8")
-    assert history.commit("legacy", LOCKFILE_NAME, SLUG) is not None
-
-    with TestClient(app) as client:
-        record = client.get(f"/api/v1/models/{SLUG}").json()
-
-    assert record["libraries"] == [{"name": "BOSL2", **lock["BOSL2"]}]
-    assert not (paths.models / LOCKFILE_NAME).exists()
-
-
-def test_a_failed_migration_does_not_stop_the_boot(
-    app: FastAPI, caplog: pytest.LogCaptureFixture
-) -> None:
-    with (
-        patch("scadbuddy.main.migrate_lockfile", side_effect=OSError("EIO")),
-        TestClient(app) as client,
-    ):
-        assert client.get("/healthz").status_code == 200
-    assert "could not migrate the library lockfile" in caplog.text
-
-
 # ── a dropped model.json's pins (#179) ────────────────────────────────────────
 
 
@@ -721,11 +753,11 @@ def _upload_with_meta(client: TestClient, meta: dict[str, Any]) -> httpx.Respons
 def test_a_dropped_model_json_cannot_name_a_library_without_a_pin(
     lib_client: TestClient,
 ) -> None:
-    """A bare name has no shared lockfile left to resolve it; nothing is created."""
+    """A bare name is not a pin: nothing is created."""
     refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": ["BOSL2"]})
 
     assert refused.status_code == 422
-    assert refused.json()["libraries"] == ["BOSL2"]
+    assert "'BOSL2' without a pin" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
 
 
@@ -955,24 +987,24 @@ def test_every_checkout_goes_once_nothing_pins_the_library(
 def test_a_name_only_declaration_counts_as_a_pin_of_every_commit(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
-    """A bare name from before per-model pins, or an unreadable model.json, cannot say
+    """A hand-edited entry with no commit, or an unreadable model.json, cannot say
     which checkout it needs, so it keeps them all."""
     _, commits = upstream
     create_model(lib_client)
-    create_model(lib_client, "legacy")
+    create_model(lib_client, "edited")
     create_model(lib_client, "broken")
     pin(lib_client, "BOSL2")
     assert lib_client.delete(f"/api/v1/models/{SLUG}/libraries/BOSL2").status_code == 200
-    meta = json.loads(paths.model_meta("legacy").read_text(encoding="utf-8"))
-    paths.model_meta("legacy").write_text(
-        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+    meta = json.loads(paths.model_meta("edited").read_text(encoding="utf-8"))
+    paths.model_meta("edited").write_text(
+        json.dumps({**meta, "libraries": [{"name": "BOSL2"}]}), encoding="utf-8"
     )
     paths.model_meta("broken").write_text('{"libraries": ["BOSL2"', encoding="utf-8")
 
     refused = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
 
     assert refused.status_code == 409
-    assert refused.json()["models"] == ["broken", "legacy"]
+    assert refused.json()["models"] == ["broken", "edited"]
 
 
 def test_a_removal_refuses_what_is_not_a_checkout(lib_client: TestClient) -> None:
@@ -1155,11 +1187,12 @@ def test_the_sweep_keeps_a_checkout_a_live_edit_names(
     libraries_app: FastAPI,
     paths: DataPaths,
 ) -> None:
-    """Named by a bare name only, uncommitted: every checkout of it stays."""
+    """Named by a hand-edited entry with no commit, uncommitted: every checkout of
+    it stays."""
     create_model(lib_client)
     meta = json.loads(paths.model_meta(SLUG).read_text(encoding="utf-8"))
     paths.model_meta(SLUG).write_text(
-        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+        json.dumps({**meta, "libraries": [{"name": "BOSL2"}]}), encoding="utf-8"
     )
     kept = _fake_checkout(paths, "BOSL2", "c" * 40)
     state: AppState = getattr(libraries_app.state, STATE_ATTR)
