@@ -384,12 +384,19 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
     return state.print_watcher
 
 
-def get_print_runs(state: StateDep) -> PrintRuns:
-    return state.print_runs
-
-
 #: Problem ``type`` for a route that needs the database when none is configured.
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
+
+
+def require_print_runs(state: StateDep) -> PrintRuns:
+    """The print runs, or a 503 naming what is missing: runs live only in Postgres."""
+    if not state.print_runs.store.available:
+        raise ApiError(
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+            "print runs are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
+            type_=DATABASE_REQUIRED_PROBLEM,
+        )
+    return state.print_runs
 
 
 def get_decisions(state: StateDep) -> DecisionStore | None:
@@ -434,7 +441,7 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-PrintRunsDep = Annotated[PrintRuns, Depends(get_print_runs)]
+PrintRunsDep = Annotated[PrintRuns, Depends(require_print_runs)]
 OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]

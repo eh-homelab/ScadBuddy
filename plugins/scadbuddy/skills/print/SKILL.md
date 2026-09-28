@@ -123,7 +123,10 @@ retry of it. The same request (same `request_id`) for the same output again
 answers **200** with that run (`repeated: true`) while it is in flight, or for
 ten minutes after it succeeded, and queues nothing more; a new `request_id` with
 the same choices is a new print (`backend/openapi.json`; #470). `print_output`
-makes a new one per call. A `failed` run with `may_have_queued: true` had already
+makes a new one per call, and re-sends that call's POST with the same id when no
+answer from ScadBuddy arrived. If it still reports no answer, or names a run it
+started but could not read, follow that run or check Bambuddy's queue rather
+than calling `print_output` again. A `failed` run with `may_have_queued: true` had already
 tried to queue (a queue call that timed out, or a later plate failing after an
 earlier one was queued): tell the user to check Bambuddy's queue, and do not
 print again until they have, since another print would be a second one.

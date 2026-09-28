@@ -5,6 +5,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import { tiersUpTo } from '../src/auth/principal.js'
 import { ALL_TOOLS } from '../src/tools/index.js'
 import { PendingActionStore } from '../src/tools/pending.js'
+import { RUN_REATTEMPTS } from '../src/tools/print.js'
 import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
@@ -264,6 +265,83 @@ describe('print_output (as it will run once approved, #258): spool-first, #335',
     expect(first.body?.request_id).toBeTruthy()
     expect(second.body?.request_id).toBeTruthy()
     expect(second.body?.request_id).not.toBe(first.body?.request_id)
+  })
+
+  describe('a POST or poll that ScadBuddy never answered (#470)', () => {
+    const args = { output_id: OUT, printer_id: 2, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' }
+    function posts(answers: Array<() => Response>) {
+      const ids: string[] = []
+      const handler = http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+        ids.push(((await request.json()) as { request_id: string }).request_id)
+        const answer = answers[Math.min(ids.length, answers.length) - 1]!
+        return answer()
+      })
+      return { ids, handler }
+    }
+    const done = http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.json({ ...running, status: 'succeeded', result: RESULT }))
+
+    it('re-sends a dropped POST with the same request_id and follows the run it started', async () => {
+      const { ids, handler } = posts([() => HttpResponse.error(), () => HttpResponse.json(running, { status: 202 })])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(firstText(result)).toMatchObject({ id: RUN, status: 'succeeded' })
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it("re-sends after a proxy's own 504 page, with the same request_id", async () => {
+      const { ids, handler } = posts([
+        () => new HttpResponse('<html>upstream timed out</html>', { status: 504, headers: { 'content-type': 'text/html' } }),
+        () => HttpResponse.json(running, { status: 202 }),
+      ])
+      server.use(handler, done)
+      const result = await tool('print_output').execute(args, ctx())
+      expect(result.isError).toBeFalsy()
+      expect(ids).toHaveLength(2)
+      expect(ids[1]).toBe(ids[0])
+    })
+
+    it("never re-sends a problem the backend wrote, even a 503", async () => {
+      const { ids, handler } = posts([
+        () => HttpResponse.json({ title: 'Service Unavailable', detail: 'Bambuddy is not reachable.' }, { status: 503 }),
+      ])
+      server.use(handler)
+      const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain('Bambuddy is not reachable.')
+      expect(ids).toHaveLength(1)
+    })
+
+    it('gives up after the re-sends and says the print may have started', async () => {
+      const { ids, handler } = posts([() => HttpResponse.error()])
+      server.use(handler)
+      const result = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(result.isError).toBe(true)
+      expect(firstText(result)).toContain("may still have started: check Bambuddy's queue")
+      expect(ids).toHaveLength(RUN_REATTEMPTS + 1)
+      expect(new Set(ids).size).toBe(1)
+    })
+
+    it('re-reads an unanswered poll, and a poll that stays unanswered names the run', async () => {
+      const { ids, handler } = posts([() => HttpResponse.json(running, { status: 202 })])
+      let reads = 0
+      server.use(
+        handler,
+        http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () =>
+          ++reads === 1 ? HttpResponse.error() : HttpResponse.json({ ...running, status: 'succeeded', result: RESULT }),
+        ),
+      )
+      expect(firstText(await tool('print_output').execute(args, ctx()))).toMatchObject({ status: 'succeeded' })
+      expect(reads).toBe(2)
+
+      server.use(http.get(`${BACKEND}/api/v1/print/runs/${RUN}`, () => HttpResponse.error()))
+      const lost = await runTool({ ...tool('print_output'), gated: false }, args, ctx())
+      expect(lost.isError).toBe(true)
+      expect(firstText(lost)).toContain(`print run ${RUN} was started`)
+      expect(firstText(lost)).toContain('get_print_run')
+      expect(ids).toHaveLength(2)
+    })
   })
 
   it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {

@@ -22,11 +22,13 @@ import httpx
 import psycopg
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import DATABASE_REQUIRED_PROBLEM, STATE_ATTR
 from scadbuddy.bambuddy.errors import UNAVAILABLE_PROBLEM
 from scadbuddy.bambuddy.pipelines import PrintRunRequest
-from scadbuddy.bambuddy.runs import LOST_DETAIL, LOST_UNQUEUED_DETAIL, run_key
+from scadbuddy.bambuddy.runs import LOST_DETAIL, LOST_UNQUEUED_DETAIL, PrintRunStore, run_key
 from scadbuddy.core.paths import DataPaths
 from tests.api.test_print_filaments import prepared, queue_route
 from tests.api.test_print_run_choices import (
@@ -492,3 +494,27 @@ def test_an_unknown_run_is_a_404(client: TestClient) -> None:
     response = client.get(f"/api/v1/print/runs/{uuid.uuid4().hex}")
     assert response.status_code == 404
     assert client.get("/api/v1/print/runs/not-a-run").status_code == 422
+
+
+@respx.mock
+def test_without_a_database_both_routes_are_a_503_and_nothing_is_uploaded(
+    client: TestClient, model: str, app: FastAPI
+) -> None:
+    """Runs live only in Postgres: the established 503, not a 500 naming an exception."""
+    output_id = prepared(client, model)
+    run_routes()
+    uploaded = upload_route()
+    runs = getattr(app.state, STATE_ATTR).print_runs
+    store, runs.store = runs.store, PrintRunStore(None)
+    try:
+        for response in (
+            start(client, output_id, body()),
+            client.get(f"/api/v1/print/runs/{uuid.uuid4().hex}"),
+        ):
+            assert response.status_code == 503, response.text
+            problem = response.json()
+            assert problem["type"] == DATABASE_REQUIRED_PROBLEM
+            assert "Error" not in problem["detail"]
+    finally:
+        runs.store = store
+    assert not uploaded.called

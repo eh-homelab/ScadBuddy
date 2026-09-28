@@ -36,6 +36,54 @@ const runId = z
 
 type PrintRun = Awaited<ReturnType<typeof getRun>>
 
+type FetchResult<T> = { data?: T; error?: unknown; response: Response }
+
+/** How many more times a print run request no ScadBuddy answer described is sent (#470). */
+export const RUN_REATTEMPTS = 3
+
+/**
+ * The request never got the backend's own answer: a 502/503/504 from something in
+ * between, whose body is not one of the backend's problems (they always carry a `detail`).
+ */
+function unanswered(result: FetchResult<unknown>): boolean {
+  const { error, response } = result
+  const detail = typeof error === 'object' && error !== null && typeof (error as { detail?: unknown }).detail === 'string'
+  return [502, 503, 504].includes(response.status) && !detail
+}
+
+/**
+ * `send`, again while it goes unanswered (a dropped connection, fetch's `TypeError`, or
+ * a proxy's own 502/503/504), as the browser client's `reattach` does. Safe only for a
+ * request keyed to its run: the POST's `request_id` makes a re-send the same run, never a
+ * second print, and the GET only reads. A problem the backend wrote is never re-sent.
+ */
+async function reattach<T>(
+  ctx: ToolContext,
+  send: () => Promise<FetchResult<T>>,
+  what: string,
+  gaveUp = '',
+): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    let result: FetchResult<T>
+    try {
+      result = await send()
+    } catch (caught) {
+      if (ctx.signal.aborted || !(caught instanceof TypeError)) throw caught
+      if (tries >= RUN_REATTEMPTS) throw new ToolError(`${what}: ScadBuddy did not answer (${caught.message}).${gaveUp}`)
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      continue
+    }
+    if (unanswered(result)) {
+      if (tries >= RUN_REATTEMPTS) {
+        throw new ToolError(`${what}: ScadBuddy did not answer (HTTP ${result.response.status}).${gaveUp}`)
+      }
+      await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
+      continue
+    }
+    return ok(Promise.resolve(result), what)
+  }
+}
+
 async function getRun(ctx: ToolContext, id: string) {
   return ok(
     ctx.backend.GET('/api/v1/print/runs/{run_id}', { params: { path: { run_id: id } }, signal: ctx.signal }),
@@ -46,13 +94,28 @@ async function getRun(ctx: ToolContext, id: string) {
 /**
  * `POST .../run` answers 202 and slices in the background (#470): follow the
  * run until it ends or `renderWaitMs` passes, as render_model follows a render.
+ * A read that stays unanswered names the run, so it is followed, not printed again.
  */
 async function waitForRun(ctx: ToolContext, run: PrintRun): Promise<PrintRun> {
   const deadline = Date.now() + ctx.renderWaitMs
   for (let step = 1; run.status === 'running' && Date.now() < deadline; step++) {
     await ctx.progress(step, undefined, 'print run: slicing and queueing')
     await sleep(ctx.pollIntervalMs, undefined, { signal: ctx.signal })
-    run = await getRun(ctx, run.id)
+    const id = run.id
+    try {
+      run = await reattach(
+        ctx,
+        () => ctx.backend.GET('/api/v1/print/runs/{run_id}', { params: { path: { run_id: id } }, signal: ctx.signal }),
+        `get print run ${id}`,
+      )
+    } catch (caught) {
+      if (ctx.signal.aborted) throw caught
+      const reason = caught instanceof Error ? caught.message : String(caught)
+      throw new ToolError(
+        `print run ${id} was started, but reading it failed: ${reason}. ` +
+          'Follow it with get_print_run; calling print_output again would be a second print.',
+      )
+    }
   }
   return run
 }
@@ -413,9 +476,15 @@ export const printTools: Tool[] = [
           slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
       }
-      const started = await ok(
-          backend.POST('/api/v1/print/outputs/{output_id}/run', {
+      // One per call (#470): a call is a deliberate print, so the same choices again are
+      // a new one rather than the last call's run. Every re-send below reuses it, so a
+      // POST whose answer was lost re-attaches to its run instead of printing twice.
+      const requestId = randomUUID()
+      const started = await reattach(
+          ctx,
+          () => backend.POST('/api/v1/print/outputs/{output_id}/run', {
             params: { path },
+            signal: ctx.signal,
             body: {
               printer_id: printerId ?? null,
               copies: args.copies ?? null,
@@ -431,12 +500,11 @@ export const printTools: Tool[] = [
               },
               project_id: args.project_id ?? null,
               options: args.options,
-              // One per call (#470): a call is a deliberate print, so the same choices
-              // again are a new one rather than the last call's run.
-              request_id: randomUUID(),
+              request_id: requestId,
             },
           }),
           `print ${args.output_id}`,
+          " The print may still have started: check Bambuddy's queue before printing again.",
         )
       return runOutcome(await waitForRun(ctx, started))
     },

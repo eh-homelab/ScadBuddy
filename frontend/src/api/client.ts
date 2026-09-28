@@ -643,12 +643,11 @@ export const api = {
         type: error?.type,
         title: error?.title ?? 'Print failed',
         status: error?.status ?? 500,
-        // The run had already tried to queue (a queue call that timed out, or a later
-        // plate failing after an earlier one was queued): another Print is a new
-        // print, so say where to look first.
-        detail: run.may_have_queued && !detail.includes("Bambuddy's queue")
-          ? `${detail} ${MAY_HAVE_QUEUED}`
-          : detail,
+        // The run had already tried to queue (a queue call that timed out, a later
+        // plate failing after an earlier one was queued, or a run lost while queueing):
+        // another Print is a new print, so say where to look first. The flag alone
+        // decides; the backend's detail never carries this advice itself.
+        detail: run.may_have_queued ? `${detail} ${MAY_HAVE_QUEUED}` : detail,
         may_have_queued: run.may_have_queued,
       })
     }

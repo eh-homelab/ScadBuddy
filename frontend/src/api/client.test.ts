@@ -247,6 +247,26 @@ describe('runPrint follows the run the server answers with 202 (#470)', () => {
     })
   })
 
+  it('adds the queue advice to a run lost while queueing once, from the flag', async () => {
+    const lost =
+      'ScadBuddy restarted while it was preparing this print, after it had started queueing it, ' +
+      'so it cannot tell whether the print was queued.'
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          may_have_queued: true,
+          repeated: true,
+          error: { status: 500, title: 'Internal Server Error', detail: lost, extensions: {} },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect((error as ApiError).detail).toBe(`${lost} ${MAY_HAVE_QUEUED}`)
+  })
+
   it('re-sends the same request when its answer never arrived, and re-attaches to the run', async () => {
     printRunPoll.intervalMs = 1
     const result = { queue_item_ids: [7], warnings: [] }

@@ -91,8 +91,8 @@ RETENTION = timedelta(days=7)
 RUN_LOCK_CLASS = 0x5342_5052
 
 LOST_DETAIL = (
-    "ScadBuddy restarted while it was preparing this print, so it cannot tell whether "
-    "the print was queued. Check Bambuddy's queue before printing again."
+    "ScadBuddy restarted while it was preparing this print, after it had started "
+    "queueing it, so it cannot tell whether the print was queued."
 )
 LOST_UNQUEUED_DETAIL = (
     "ScadBuddy stopped while it was preparing this print, before it queued anything. "
@@ -140,6 +140,7 @@ class PrintRun(BaseModel):
     #: A ``failed`` run that had already tried to queue the print: it may be on
     #: Bambuddy's queue anyway, so check there before printing again. A repeat of the
     #: request answers with this run rather than queueing again, for ``REPEAT_WINDOW``.
+    #: ``error.detail`` does not say so itself: clients add that advice from this flag.
     may_have_queued: bool = False
     #: Only on a ``POST .../run`` answered 200: this is an earlier run with the same key,
     #: and the POST started nothing.
@@ -201,6 +202,11 @@ class PrintRunStore:
         #: The runs this process is running (:class:`PrintRuns` keeps it): never
         #: expired here, however late their heartbeat.
         self.live: set[str] = set()
+
+    @property
+    def available(self) -> bool:
+        """False without a database: the routes answer 503 before touching the store."""
+        return self._pool is not None
 
     def _require(self) -> ConnectionPool[Connection[DictRow]]:
         if self._pool is None:

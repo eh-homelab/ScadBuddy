@@ -3,7 +3,7 @@ import { HttpResponse, delay, http } from 'msw'
 import { useState } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, MAY_HAVE_QUEUED } from '../api/client'
 import type { Output, PrintRunResult } from '../api/types'
 import { choicesView, queuedResult } from '../mocks/choices'
 import * as fixtures from '../mocks/fixtures'
@@ -326,7 +326,7 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
         type: 'https://scadbuddy.dev/problems/bambuddy-unavailable',
         title: 'Gateway Timeout',
         status: 504,
-        detail: "Bambuddy did not answer in time. Check Bambuddy's queue before printing again.",
+        detail: `Bambuddy did not answer in time. ${MAY_HAVE_QUEUED}`,
         may_have_queued: true,
       }),
     )
@@ -334,7 +334,7 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
     await loaded()
 
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    expect(await screen.findByRole('alert')).toHaveTextContent("Check Bambuddy's queue")
+    expect(await screen.findByRole('alert')).toHaveTextContent("check Bambuddy's queue")
     expect(screen.getByRole('button', { name: /^Print$/ })).toBeDisabled()
   })
 })
