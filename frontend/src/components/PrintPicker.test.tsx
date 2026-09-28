@@ -314,6 +314,96 @@ describe('PrintPicker · Advanced and refusals (fix round 1)', () => {
   })
 })
 
+describe('PrintPicker · A run that got no answer (#470)', () => {
+  function runAnswers(answer: () => Response) {
+    const calls = watch('POST', '/run')
+    server.use(http.post('/api/v1/print/outputs/:id/run', answer))
+    return calls
+  }
+
+  it('says a proxy timeout may still have queued the print, and points at the queue', async () => {
+    const opened = vi.spyOn(window, 'open').mockReturnValue(null)
+    const { bodies } = runAnswers(
+      () =>
+        new HttpResponse('<html>upstream request timeout</html>', {
+          status: 504,
+          headers: { 'Content-Type': 'text/html' },
+        }),
+    )
+    const onRan = vi.fn()
+    const { user } = renderPicker({ onRan })
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The server took too long to answer (HTTP 504).')
+    expect(alert).toHaveTextContent(
+      "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice.",
+    )
+    expect(alert).not.toHaveTextContent('Request failed')
+    // No Print to press again: the way back to it is closing and reopening the dialog.
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    await user.click(await screen.findByRole('button', { name: "Open Bambuddy's queue" }))
+    expect(opened).toHaveBeenCalledWith(
+      `${fixtures.settings.bambuddy_url}/queue`,
+      expect.any(String),
+      'noopener',
+    )
+    expect(bodies).toHaveLength(1)
+    expect(onRan).not.toHaveBeenCalled()
+  })
+
+  it('says the same when the connection drops after sending', async () => {
+    runAnswers(() => HttpResponse.error())
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(
+      'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+    )
+    expect(alert).toHaveTextContent('The print may still have been queued.')
+    expect(screen.queryByRole('button', { name: /^Print$/ })).toBeNull()
+    expect(await screen.findByRole('button', { name: "Open Bambuddy's queue" })).toBeInTheDocument()
+  })
+
+  it('offers Print again once the dialog is reopened', async () => {
+    runAnswers(() => new HttpResponse('timeout', { status: 524 }))
+    const onClose = vi.fn()
+    const { user } = renderPage(
+      <PrintPicker
+        open
+        slug="name-keychain"
+        output={{ ...output, library_files: [], pipeline_run_id: undefined }}
+        onClose={onClose}
+        onRan={vi.fn()}
+      />,
+    )
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByRole('button', { name: "Open Bambuddy's queue" })
+
+    await user.click(screen.getByRole('button', { name: 'Close' }))
+    expect(onClose).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('keeps Print for a 503, which nothing upstream took', async () => {
+    runAnswers(() => new HttpResponse('no healthy upstream', { status: 503 }))
+    const { user } = renderPicker()
+    await loaded()
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('The server is not answering right now (HTTP 503).')
+    expect(alert).not.toHaveTextContent('may still have been queued')
+    expect(screen.getByRole('button', { name: /^Print$/ })).toBeEnabled()
+    expect(screen.queryByRole('button', { name: "Open Bambuddy's queue" })).toBeNull()
+  })
+})
+
 describe('PrintPicker · Printer', () => {
   it('asks which printer only when there is more than one, and re-reads for the one chosen', async () => {
     const { urls } = watch('GET', '/choices')

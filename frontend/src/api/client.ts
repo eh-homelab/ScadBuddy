@@ -96,7 +96,7 @@ export class ApiError extends Error {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
+  const response = await send(`${API_BASE}${path}`, {
     ...init,
     headers: {
       Accept: 'application/json',
@@ -122,41 +122,114 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
  * (`GET /models/{slug}/readme`, text/markdown).
  */
 async function requestText(path: string): Promise<string> {
-  const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
+  const response = await send(`${API_BASE}${path}`, { headers: { Accept: 'text/plain' } })
   if (!response.ok) {
     throw new ApiError(await readProblem(response))
   }
   return await response.text()
 }
 
-async function readProblem(response: Response): Promise<Problem> {
-  try {
-    const body = (await response.json()) as Partial<Problem>
-    // Spread first so the standard members win, but the extensions survive.
-    return {
-      ...body,
-      title: body.title ?? response.statusText,
-      status: body.status ?? response.status,
-      detail: body.detail,
-    }
-  } catch {
-    return { title: response.statusText || 'Request failed', status: response.status }
+/**
+ * The `type` of a problem the client wrote itself because ScadBuddy's server never
+ * described the failure: a proxy's own error page in front of it (Envoy's 504 at 15 s,
+ * Cloudflare's 524 at ~100 s), or no answer at all (#470).
+ */
+export const UNANSWERED = 'urn:scadbuddy:unanswered'
+/** The `type` of the problem for a request the offline browser could not send. */
+export const OFFLINE = 'urn:scadbuddy:offline'
+
+/**
+ * The failure no problem body explained, said by its status. The detail is what the
+ * person reads; the status stays on the problem, and in the sentence, for a bug report.
+ * Over HTTP/2 there is no status text, so the title falls back to the code.
+ */
+function unansweredProblem(status: number, statusText: string): Problem {
+  const code = `HTTP ${status}`
+  const detail =
+    status === 504 || status === 524 || status === 408
+      ? `The server took too long to answer (${code}).`
+      : status === 502 || status === 503
+        ? `The server is not answering right now (${code}).`
+        : status === 413
+          ? `That is too large for the server to accept (${code}).`
+          : status >= 500
+            ? `The server hit an error it did not describe (${code}).`
+            : `The server refused the request without saying why (${code}).`
+  return { type: UNANSWERED, title: statusText || code, status, detail }
+}
+
+/** A body is a problem when it says something: a `title` or a `detail`. */
+function parsedProblem(body: unknown, status: number, statusText: string): Problem {
+  if (typeof body !== 'object' || body === null) return unansweredProblem(status, statusText)
+  const problem = body as Partial<Problem>
+  if (problem.title === undefined && problem.detail === undefined) {
+    return unansweredProblem(status, statusText)
   }
+  // Spread first so the standard members win, but the extensions survive.
+  return {
+    ...problem,
+    title: problem.title ?? (statusText || `HTTP ${status}`),
+    status: problem.status ?? status,
+    detail: problem.detail,
+  }
+}
+
+async function readProblem(response: Response): Promise<Problem> {
+  let body: unknown
+  try {
+    body = await response.json()
+  } catch {
+    return unansweredProblem(response.status, response.statusText)
+  }
+  return parsedProblem(body, response.status, response.statusText)
 }
 
 /** `readProblem` for an `XMLHttpRequest` that has finished. */
 function xhrProblem(xhr: XMLHttpRequest): Problem {
+  let body: unknown
   try {
-    const body = JSON.parse(xhr.responseText) as Partial<Problem>
-    return {
-      ...body,
-      title: body.title ?? xhr.statusText,
-      status: body.status ?? xhr.status,
-      detail: body.detail,
-    }
+    body = JSON.parse(xhr.responseText)
   } catch {
-    return { title: xhr.statusText || 'Request failed', status: xhr.status }
+    return unansweredProblem(xhr.status, xhr.statusText)
   }
+  return parsedProblem(body, xhr.status, xhr.statusText)
+}
+
+/** `fetch`, with a request that got no answer as an `ApiError`. An abort is passed through. */
+async function send(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init)
+  } catch (cause) {
+    if (init?.signal?.aborted) throw cause
+    throw new ApiError(
+      navigator.onLine === false
+        ? {
+            type: OFFLINE,
+            title: 'Offline',
+            status: 0,
+            detail: 'This browser is offline, so ScadBuddy could not reach its server.',
+          }
+        : {
+            type: UNANSWERED,
+            title: 'No answer',
+            status: 0,
+            detail:
+              'ScadBuddy could not reach its server, or the connection dropped before it answered.',
+          },
+    )
+  }
+}
+
+/**
+ * Whether a failed request may still have done its work: the server's own answer never
+ * arrived, because a proxy gave up waiting (502/504/524) or the connection dropped. A
+ * problem the backend wrote, a 503 (nothing upstream took it) and an offline browser
+ * all mean it did not. For a request with a physical effect (a print), retrying one of
+ * these blind can do it twice.
+ */
+export function mayHaveRun(error: unknown): boolean {
+  if (!(error instanceof ApiError) || error.problem.type !== UNANSWERED) return false
+  return [0, 502, 504, 524].includes(error.status)
 }
 
 const seg = encodeURIComponent
