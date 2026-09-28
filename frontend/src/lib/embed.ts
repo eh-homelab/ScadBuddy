@@ -30,6 +30,13 @@ export function triggerDownload(url: string, filename: string, embedded = isEmbe
   anchor.remove()
 }
 
+/**
+ * An anchor's props for a page that is not ScadBuddy's, such as a cited source (#284).
+ * A same-frame navigation would replace the app, embedded or not; `_blank` escapes the
+ * sandbox (`allow-popups-to-escape-sandbox`, CLAUDE.md "Bambuddy iframe facts").
+ */
+export const NEW_TAB = { target: '_blank', rel: 'noopener noreferrer' } as const
+
 /** Opens a Bambuddy deep link, escaping the sandbox when embedded. */
 export function openExternal(url: string, embedded = isEmbedded()): void {
   window.open(url, embedded ? '_blank' : '_self', 'noopener')

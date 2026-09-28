@@ -1,5 +1,6 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
+  AnalysisRun,
   Asset,
   AssetUsage,
   AttachResult,
@@ -53,6 +54,7 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { analysisReport } from './analyzers'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -2235,6 +2237,19 @@ export const handlers = [
       folder_id: folderId,
       bambuddy_url: `${state.settings.bambuddy_url}/queue`,
     } satisfies PrintRunResult)
+  }),
+
+  // --- #284 print analyzers (#461) ---------------------------------------------------
+
+  /**
+   * `POST /analyzers/run` on an output: the keychain's two findings (`mocks/analyzers.ts`).
+   * A configuration target (`slug` + `params`) is not something the dialog sends.
+   */
+  http.post(`${base}/analyzers/run`, async ({ request }) => {
+    const body = (await request.json()) as AnalysisRun
+    const output = state.outputs.find((o) => o.id === body.target.output_id)
+    if (!output) return problem(404, 'Output not found')
+    return HttpResponse.json(analysisReport(output, body.request ?? { plate_id: 1 }))
   }),
 
   // --- #79 projects -----------------------------------------------------------------
