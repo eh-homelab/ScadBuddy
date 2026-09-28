@@ -234,6 +234,31 @@ def test_a_print_the_filters_drop_costs_no_schema_read(
     assert set(asked) == {model}
 
 
+@respx.mock
+def test_a_selective_filter_scans_a_bounded_number_of_prints_per_request(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #609 review: a filter that matches little must not sweep the whole history (and
+    # read every archive from Bambuddy) in one request; the cursor carries on.
+    monkeypatch.setattr(print_history, "MAX_SCANNED", 2)
+    configure(client)
+    output_id = make_output(client, model)
+    for archive_id in (16, 17, 23):
+        link(client, output_id, archive_id)
+        mock_archive(archive_id, status="failed" if archive_id == 16 else "completed")
+
+    first = client.get("/api/v1/prints", params={"status": "failed"}).json()
+
+    assert first == {"items": [], "next_cursor": "17"}
+    assert not respx.routes["runs-16"].called
+    assert len([call for call in respx.calls if call.request.url.path.endswith("/16")]) == 0
+
+    second = client.get("/api/v1/prints", params={"status": "failed", "cursor": "17"}).json()
+
+    assert [item["archive_id"] for item in second["items"]] == [16]
+    assert second["next_cursor"] is None
+
+
 @pytest.mark.parametrize("params", [{"limit": 0}, {"limit": 101}, {"cursor": "nope"}])
 def test_a_bad_limit_or_cursor_is_rejected(client: TestClient, params: dict[str, Any]) -> None:
     configure(client)

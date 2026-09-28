@@ -17,7 +17,8 @@ export const printHistoryTools: Tool[] = [
       "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
       'parameters that differ from the template defaults. Filter by template (`slug`), Bambuddy `status` ' +
       '(completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day (`from`/`to`, inclusive) and ' +
-      'text `q` (output or print name, parameter values). Pass `next_cursor` back as `cursor` for the next page.',
+      'text `q` (output or print name, parameter values). Pass `next_cursor` back as `cursor` for the next page: ' +
+      'with a narrow filter a page can be short or empty and still have one, so keep going until it is null.',
     input: z.object({
       slug: slug.optional(),
       status: z.string().min(1).max(64).optional(),
