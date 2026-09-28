@@ -165,6 +165,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.libraries.sweep_staging)
     except OSError:
         logger.exception("could not sweep library staging clones")
+    # The upload store's running total, recounted once (#390): uploads and sweeps
+    # keep it from here, but a file added or removed while the process was down is
+    # only counted by a scan.
+    try:
+        await asyncio.to_thread(state.assets.rebuild_usage)
+    except OSError:
+        logger.exception("could not recount the upload store")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()

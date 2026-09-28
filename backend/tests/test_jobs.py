@@ -235,7 +235,9 @@ async def test_the_model_hash_is_taken_off_the_event_loop(paths: DataPaths) -> N
         raise OpenSCADError("far enough", [])
 
     with mock.patch.object(jobs, "source_version", record), pytest.raises(OpenSCADError):
-        await jobs.render_job(_job("h"), config=CONFIG, paths=paths)
+        await jobs.render_job(
+            _job("h"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert ran_on and threading.main_thread().name not in ran_on
 
@@ -443,7 +445,9 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("j"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("j"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert [(p.extruder, p.colour) for p in result.parts] == [(1, "#0047BB"), (2, "#FF1493")]
     assert result.colors == ["#0047BB", "#FF1493"]
@@ -484,7 +488,9 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     with zipfile.ZipFile(paths.root / result.model_3mf) as archive:
         root = archive.read("3D/3dmodel.model").decode()
@@ -553,7 +559,9 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     stored = AssetStore(paths.assets).blob_path(asset).read_bytes()
     assert seen["main"] == seen["solids"]
@@ -582,7 +590,12 @@ async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None
         mock.patch.object(jobs, "cached_schema", cached_schema),
         pytest.raises(OpenSCADError),
     ):
-        await jobs.render_job(_job("f", params={"overlay": asset.id}), config=CONFIG, paths=paths)
+        await jobs.render_job(
+            _job("f", params={"overlay": asset.id}),
+            config=CONFIG,
+            paths=paths,
+            assets=AssetStore(paths.assets),
+        )
 
     assert [p.name for p in model_dir.iterdir()] == ["model.scad"]
 
@@ -610,7 +623,9 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("m"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]
 
@@ -644,7 +659,9 @@ async def test_the_main_render_diagnostics_are_the_results(paths: DataPaths) -> 
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("d"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("d"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.diagnostics == [WARNING]
 
@@ -744,7 +761,9 @@ async def test_a_render_holds_the_checkouts_it_resolved(paths: DataPaths) -> Non
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        await jobs.render_job(_job("l"), config=CONFIG, paths=paths, checkouts=gate)
+        await jobs.render_job(
+            _job("l"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets), checkouts=gate
+        )
 
     assert seen == [["l"], ["l"]]
     assert gate.leased(checkout) == []
@@ -764,7 +783,13 @@ async def test_a_render_that_waited_out_a_removal_fails_cleanly(paths: DataPaths
     with mock.patch.object(jobs, "cached_schema", cached_schema):
         async with gate.removing():
             task = asyncio.create_task(
-                jobs.render_job(_job("w"), config=CONFIG, paths=paths, checkouts=gate)
+                jobs.render_job(
+                    _job("w"),
+                    config=CONFIG,
+                    paths=paths,
+                    assets=AssetStore(paths.assets),
+                    checkouts=gate,
+                )
             )
             await asyncio.sleep(0.2)
             shutil.rmtree(checkout)
@@ -802,7 +827,13 @@ async def test_each_attempt_at_a_job_holds_its_own_lease(paths: DataPaths) -> No
 
     def attempt(number: int) -> asyncio.Task[tuple[JobResult, list[str]]]:
         return asyncio.create_task(
-            jobs.render_job(_job("r").claimed(number), config=CONFIG, paths=paths, checkouts=gate)
+            jobs.render_job(
+                _job("r").claimed(number),
+                config=CONFIG,
+                paths=paths,
+                assets=AssetStore(paths.assets),
+                checkouts=gate,
+            )
         )
 
     with (
@@ -843,7 +874,13 @@ async def test_a_cancelled_render_releases_its_lease(paths: DataPaths) -> None:
         mock.patch.object(jobs, "cached_schema", cached_schema),
     ):
         task = asyncio.create_task(
-            jobs.render_job(_job("c"), config=CONFIG, paths=paths, checkouts=gate)
+            jobs.render_job(
+                _job("c"),
+                config=CONFIG,
+                paths=paths,
+                assets=AssetStore(paths.assets),
+                checkouts=gate,
+            )
         )
         await asyncio.wait_for(started.wait(), 5)
         assert gate.leased(checkout) == ["c"]
@@ -881,6 +918,8 @@ async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+        result, _ = await jobs.render_job(
+            _job("m"), config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
+        )
 
     assert result.notes == ["letter_size reduced"]
