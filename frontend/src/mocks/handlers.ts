@@ -101,7 +101,7 @@ const state = {
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
@@ -1926,7 +1926,6 @@ export const handlers = [
       bambuddy_api_key?: string
       public_url?: string | null
       library_folder_id?: number | null
-      pipeline_id?: number | null
       printer_id?: number | null
       display_unit?: Settings['display_unit'] | null
     }

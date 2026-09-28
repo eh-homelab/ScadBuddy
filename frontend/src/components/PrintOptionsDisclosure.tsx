@@ -24,9 +24,8 @@ interface Props {
   /** The model being sent — the key the per-model scope is remembered under. */
   slug: string
   /**
-   * The printer the send will reach, when the caller already knows it — #86's picker
-   * will. Left undefined the server says which one the per-printer scope keys on,
-   * resolving a configured pipeline's target the same way the send does.
+   * The printer the print will reach, when the caller already knows it. Left undefined,
+   * the server says which one the per-printer scope keys on: the printer set in Settings.
    */
   printerId?: number | null
   /** Per-send overrides. Owned by the parent, which is what puts them on the wire. */
@@ -86,9 +85,8 @@ export function PrintOptionsDisclosure({
     }
   }, [slug])
 
-  // The per-printer scope only applies once the printer is known; with a printer-class
-  // pipeline and no configured printer nothing knows it, and saving there would go
-  // nowhere — hence the disabled option and the note below.
+  // The per-printer scope only applies once the printer is known; with none chosen and
+  // none in Settings, saving there would go nowhere — hence the disabled option and the note below.
   const resolvedPrinterId = printerId ?? serverPrinterId
   const printerKey = resolvedPrinterId === null ? null : String(resolvedPrinterId)
   // A `<select>` keeps a disabled option as its value, so "This printer" can still be
