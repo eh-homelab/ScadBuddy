@@ -78,6 +78,15 @@ class ResolverUnavailableError(Exception):
     `RESOLVE_TIMEOUT` -- so it says nothing about the host either way."""
 
 
+class ResolverBusyError(ResolverUnavailableError):
+    """Every resolver thread on this replica was busy, so the lookup never started.
+
+    Decided before the host is looked up, so unlike a timeout it cannot depend on
+    the host: an import may say it (a retryable 503) instead of the refusal. Library
+    installs vet their clone URLs on the same threads, so they can cause it too.
+    """
+
+
 class UnreachableError(ImportRefusedError):
     """What :func:`unreachable` raises, so `fetch_model` can name the hop it was on."""
 
@@ -146,7 +155,7 @@ def _getaddrinfo(host: str, port: int) -> list[str]:
 
 async def resolve_host(host: str, port: int) -> list[str]:
     if not _RESOLVER_SLOTS.acquire(blocking=False):
-        raise ResolverUnavailableError(f"could not resolve {host}: every resolver thread is busy")
+        raise ResolverBusyError(f"could not resolve {host}: every resolver thread is busy")
     return await asyncio.get_running_loop().run_in_executor(_RESOLVER, _getaddrinfo, host, port)
 
 
@@ -157,7 +166,9 @@ async def public_addresses(host: str, port: int, *, tell_unavailable: bool = Fal
     They pass ``tell_unavailable``: a lookup that did not finish (the threads busy,
     or a timeout) is then :class:`ResolverUnavailableError` rather than the refusal,
     so an install can say "try again" instead of calling the host private (#205).
-    An import keeps the one answer for both.
+    An import keeps the refusal for a timeout, which could depend on the host. Busy
+    threads (:class:`ResolverBusyError`) are raised as they are for both: the lookup
+    never started, so an import can answer that with its retryable 503 too.
     """
     try:
         addresses = await asyncio.wait_for(resolve_host(host, port), RESOLVE_TIMEOUT)
@@ -165,10 +176,8 @@ async def public_addresses(host: str, port: int, *, tell_unavailable: bool = Fal
         if tell_unavailable:
             raise ResolverUnavailableError(f"could not resolve {host} in time") from None
         raise unreachable(host) from None
-    except ResolverUnavailableError:
-        if tell_unavailable:
-            raise
-        raise unreachable(host) from None
+    except ResolverBusyError:
+        raise
     except OSError:
         raise unreachable(host) from None
     if not addresses or not all(is_public(address) for address in addresses):

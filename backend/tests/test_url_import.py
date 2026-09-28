@@ -17,6 +17,7 @@ from scadbuddy.library import url_import
 from scadbuddy.library.url_import import (
     ImportRefusedError,
     PublicOnlyBackend,
+    ResolverBusyError,
     fetch_model,
     is_public,
     unreachable,
@@ -453,9 +454,10 @@ async def test_with_every_resolver_thread_busy_a_lookup_is_refused_not_queued(
     # out this whole deadline before it gave up.
     monkeypatch.setattr(url_import, "RESOLVE_TIMEOUT", 3.0)
     started = time.monotonic()
-    with pytest.raises(ImportRefusedError) as caught:
+    # Busy, not the refusal: the lookup never started, so it says nothing about the
+    # host, and the route turns it into its retryable 503.
+    with pytest.raises(ResolverBusyError):
         await fetch_model("https://third.invalid/model.scad", limit=LIMIT)
-    assert str(caught.value) == str(unreachable("third.invalid"))
     assert time.monotonic() - started < 1
 
     # Once the two threads are free: a queued third lookup would run now.

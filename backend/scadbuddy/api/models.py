@@ -107,6 +107,7 @@ from scadbuddy.library.upstream import (
 from scadbuddy.library.url_import import (
     IMPORT_TIMEOUT,
     ImportRefusedError,
+    ResolverBusyError,
     fetch_model,
 )
 from scadbuddy.render.jobs import RenderQueue, resolve_source
@@ -733,6 +734,15 @@ async def _create(
 IMPORT_RETRY_AFTER = 5
 
 
+def _import_busy(why: str) -> ApiError:
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"{why}; try again in {IMPORT_RETRY_AFTER} s",
+        headers={"Retry-After": str(IMPORT_RETRY_AFTER)},
+        retry_after=IMPORT_RETRY_AFTER,
+    )
+
+
 class UrlImport(BaseModel):
     url: str = Field(max_length=2048, description="An https URL to the model's source")
     name: str | None = Field(
@@ -758,8 +768,9 @@ class UrlImport(BaseModel):
     responses={
         status.HTTP_503_SERVICE_UNAVAILABLE: {
             "description": (
-                f"{IMPORT_CONCURRENCY} imports are already fetching; retry after "
-                "`Retry-After` seconds"
+                f"{IMPORT_CONCURRENCY} imports are already fetching on this replica, or "
+                "its resolver threads are all busy (library installs share them); retry "
+                "after `Retry-After` seconds"
             )
         }
     },
@@ -776,18 +787,17 @@ async def import_model(
     # between (as in `api/lsp.py`). Refused rather than queued: a queued fetch would
     # spend its wait against the client's patience, not the import's deadline.
     if imports.locked():
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            f"{IMPORT_CONCURRENCY} imports are already fetching; "
-            f"try again in {IMPORT_RETRY_AFTER} s",
-            headers={"Retry-After": str(IMPORT_RETRY_AFTER)},
-            retry_after=IMPORT_RETRY_AFTER,
-        )
+        raise _import_busy(f"{IMPORT_CONCURRENCY} imports are already fetching on this replica")
     async with imports:
         try:
             imported = await fetch_model(body.url, limit=MAX_TEXT_BODY_BYTES)
         except ImportRefusedError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+        except ResolverBusyError:
+            # Library installs vet clone URLs on the same resolver threads. None free
+            # is decided before the host is looked up, so it says nothing about the
+            # host: the same retry as a full import budget, not the refusal.
+            raise _import_busy("every resolver thread on this replica is busy") from None
     _require_within_cap(imported.source, "the imported file")
     name = body.name or imported.name
     return await _create(

@@ -53,8 +53,10 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
-#: URL imports fetching at once (#178). As many as the import resolver has threads:
-#: a third fetch could not resolve its host anyway.
+#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
+#: N x this. As many as the resolver has threads. Library installs share those
+#: threads; an import that finds none free is the same retryable 503.
 IMPORT_CONCURRENCY = 2
 
 
@@ -106,7 +108,8 @@ class AppState:
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
     )
-    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once. Held for the
+    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
+    #: replica. Held for the
     #: fetch only -- the parse check after it takes `checks` like any create -- and
     #: an import that finds it full is refused at once, not queued.
     imports: asyncio.Semaphore = field(
