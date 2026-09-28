@@ -120,7 +120,8 @@ _Handler = Callable[..., Awaitable[Response]]
 def _media_route(path: str, summary: str) -> Callable[[_Handler], _Handler]:
     """A GET, and a HEAD with the same handler left out of the schema. One route with
     both methods takes its ``operationId`` from whichever method its set yields first,
-    which changes with the hash seed, and gives both operations that one id."""
+    which changes with the hash seed, and gives both operations that one id. Register
+    every route here that answers HEAD through this, not ``api_route``."""
 
     def register(handler: _Handler) -> _Handler:
         router.head(path, include_in_schema=False)(handler)

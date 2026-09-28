@@ -114,6 +114,9 @@ class PrintLinkStore:
         return [PrintLink.model_validate(dict(row)) for row in rows]
 
     def _output_for(self, archive_id: int) -> str | None:
+        # Nothing here makes an archive unique to one output: two outputs whose sliced
+        # files hash the same (the same parameters rendered twice) can both match it by
+        # hash. The earliest link then owns it for the proxy.
         with self._require().connection() as conn:
             row = conn.execute(
                 "SELECT output_id FROM output_bambuddy_prints WHERE archive_id = %s"

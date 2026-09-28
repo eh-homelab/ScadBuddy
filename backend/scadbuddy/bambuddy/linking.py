@@ -79,7 +79,8 @@ async def owned_queue_items(client: BambuddyClient, meta: OutputMeta) -> set[int
 
     Only these may be linked from outside a progress read. An id a caller names is
     otherwise any queue item in Bambuddy, and linking its archive would open the media
-    proxy to a print ScadBuddy never made (#522 review).
+    proxy to a print ScadBuddy never made (#522 review). A pipeline-routed output
+    costs one pipeline-run read per call; attaching is a single user action, not a poll.
     """
     owned = {plate.queue_item_id for plate in meta.plates}
     if meta.queue_item_id is not None:
