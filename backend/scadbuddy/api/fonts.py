@@ -119,10 +119,9 @@ async def install_font(
     except GoogleFontsError as exc:
         raise ApiError(502, f"{body.family!r} could not be downloaded: {exc}") from exc
     emit(events, FontInstalled(family=installed.family))
-    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
-    if store is not None and store.fonts is not None:
+    if state.store.fonts is not None:
         try:
-            await store.fonts.publish(body.family)
+            await state.store.fonts.publish(body.family)
         except Exception:
             # The family is installed here; the next boot's `backfill` publishes it, so
             # a Bambuddy error does not fail an install that worked.

@@ -277,6 +277,9 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 - `openscad --version` writes to stderr.
 - Fonts: there is no family "Lobster" in the image, only "Lobster Two"; a missing
   family silently falls back to DejaVu and changes the geometry.
+  Fonts named only inside a library checkout are not mirrored to render workers on
+  the bambuddy store (`store/fonts.py` `wanted_families`); pass such a font as a
+  parameter or name it in the template's own source.
 - Bambu Studio only reads `project_settings.config` if the 3MF claims
   `Application: BambuStudio-…`, and then segfaults unless five options are present
   (spec §3). Keep them.

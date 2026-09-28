@@ -16,7 +16,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store.content import ContentStore
-from scadbuddy.store.fonts import FontMirror, font_key, wanted_families
+from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_families
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
@@ -208,3 +208,14 @@ async def test_a_worker_syncs_only_the_families_its_template_names(
     mirror = FontMirror(content, FontService(tmp_path / "worker"))
     assert await mirror.sync(wanted) == ["lobstertwo"]
     assert await mirror.sync(wanted) == []
+
+
+def test_a_piece_in_a_subdirectory_scans_the_templates_root_files(tmp_path: Path) -> None:
+    source = tmp_path / "src"
+    (source / "parts").mkdir(parents=True)
+    (source / "model.scad").write_text('label_font = "Lobster Two"; // font\n')
+    (source / "parts" / "roof.scad").write_text("include <../model.scad>\ncube(1);\n")
+    root = model_dir(source / "parts" / "roof.scad", "parts/roof.scad")
+    assert root == source
+    assert "lobstertwo" in wanted_families(root, {})
+    assert model_dir(source / "model.scad", "model.scad") == source

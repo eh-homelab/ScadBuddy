@@ -27,6 +27,12 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(
             "task_queue": settings.temporal_task_queue_render,
             "worker_inprocess": True,
         },
+        "store": {
+            "backend": "local",
+            "configured_backend": "local",
+            "render_key_fallback": False,
+            "multi_worker": False,
+        },
     }
 
 

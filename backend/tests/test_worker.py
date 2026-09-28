@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import socket
 import threading
 import uuid
@@ -102,7 +103,17 @@ async def test_the_worker_renders_a_job_and_serves_health_and_metrics(
             try:
                 async with httpx.AsyncClient(base_url=f"http://127.0.0.1:{port}") as http:
                     health = await _healthy(http, worker)
-                    assert health == {"ok": True, "build_id": build_id, "task_queue": queue}
+                    assert health == {
+                        "ok": True,
+                        "build_id": build_id,
+                        "task_queue": queue,
+                        "store": {
+                            "backend": "local",
+                            "configured_backend": "local",
+                            "render_key_fallback": False,
+                            "multi_worker": False,
+                        },
+                    }
 
                     projection.submit(job, render_key(model, params, revision))
                     await asyncio.wait_for(
@@ -341,3 +352,30 @@ async def test_a_lazy_client_connects_on_its_first_call() -> None:
     async with temporal_client() as server:
         client = connect_lazily(current_address(server), server.namespace)
         assert (await client.count_workflows("WorkflowId = 'nothing-here'")).count == 0
+
+
+class _Cache:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def evict(self) -> list[str]:
+        self.calls += 1
+        if self.calls == 1:
+            raise OSError("a transient disk error")
+        return ["k"]
+
+
+async def test_the_worker_evicts_its_piece_cache_on_each_sweep_and_survives_a_failure() -> None:
+    cache = _Cache()
+    evicting = asyncio.create_task(
+        worker_module._evict_periodically(cache, 0.01)  # type: ignore[arg-type]
+    )
+    try:
+        async with asyncio.timeout(5):
+            while cache.calls < 3:
+                await asyncio.sleep(0.01)
+    finally:
+        evicting.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await evicting
+    assert cache.calls >= 3

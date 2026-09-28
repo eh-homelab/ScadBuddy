@@ -109,10 +109,9 @@ async def upload_asset(
         ) from None
     # A failed mirror (Bambuddy unreachable) fails the upload with Bambuddy's problem:
     # a file a worker could not read must not look uploaded.
-    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
-    if store is not None and store.remote_assets is not None:
+    if state.store.remote_assets is not None:
         title = template_title(state.paths.model_source(slug).parent, slug)
-        await store.remote_assets.mirror(assets, meta, slug=slug, title=title)
+        await state.store.remote_assets.mirror(assets, meta, slug=slug, title=title)
     return meta
 
 

@@ -1,0 +1,133 @@
+"""Which store a process runs on, built once at start (spec 2026-09-27 §6.2)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+from pydantic import BaseModel
+
+from scadbuddy.core.config import Config, StoreBackend
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.fonts import FontService
+from scadbuddy.library.history import ModelHistory
+from scadbuddy.library.settings_store import RenderStoreSettings, StoreNotReadyError
+from scadbuddy.store import BlobStore
+from scadbuddy.store.assets import RemoteAssets
+from scadbuddy.store.bambuddy import BambuddyContentBackend, RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import ContentStore, StoreUsage
+from scadbuddy.store.fonts import FontMirror
+from scadbuddy.store.index import BlobIndex, Pool
+from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store.locks import KeyLocks
+from scadbuddy.store.snapshots import SnapshotStore
+
+if TYPE_CHECKING:
+    from scadbuddy.core.metrics import Metrics
+
+
+@dataclass
+class StoreBundle:
+    backend: StoreBackend
+    blobs: BlobStore
+    content: ContentStore | None
+    snapshots: SnapshotStore | None
+    remote_assets: RemoteAssets | None
+    fonts: FontMirror | None
+    source: RenderSettingsSource
+    remote: BambuddyContentBackend | None = None
+
+    async def aclose(self) -> None:
+        if self.remote is not None:
+            await self.remote.aclose()
+
+
+def build_store(
+    *,
+    backend: StoreBackend,
+    current: RenderStoreSettings,
+    config: Config,
+    paths: DataPaths,
+    pool: Pool,
+    source: RenderSettingsSource,
+    history: ModelHistory | None,
+    fonts: FontService,
+    metrics: Metrics | None,
+) -> StoreBundle:
+    local = LocalBlobStore(paths.blobs)
+    if backend == "local":
+        return StoreBundle("local", local, None, None, None, None, source)
+    # From any source, the environment's seed included: a Bambuddy store without a URL
+    # or an inbox could store nothing, so the process does not start on it.
+    if not current.bambuddy_url or current.library_folder_id is None:
+        raise StoreNotReadyError(
+            "store_backend is bambuddy, but the Bambuddy store needs a Bambuddy URL and a"
+            " library folder (its inbox); set both in Settings, or run on the local store"
+        )
+    remote = BambuddyContentBackend(source.target, pool)
+    content = ContentStore(
+        remote,
+        BlobIndex(pool),
+        max_total_bytes=config.store_max_total_bytes,
+        max_count=config.store_max_count,
+        metrics=metrics,
+    )
+    blobs = CachedBlobStore(
+        local,
+        content,
+        max_bytes=config.worker_cache_max_bytes,
+        min_age=config.activity_timeout,
+        metrics=metrics,
+    )
+    locks = KeyLocks()
+    return StoreBundle(
+        "bambuddy",
+        blobs,
+        content,
+        SnapshotStore(content, paths, history, locks=locks),
+        RemoteAssets(content),
+        FontMirror(content, fonts, locks=locks),
+        source,
+        remote,
+    )
+
+
+def store_usage(bundle: StoreBundle, config: Config) -> StoreUsage:
+    if bundle.content is not None:
+        return bundle.content.usage()
+    blobs = bundle.blobs
+    assert isinstance(blobs, LocalBlobStore)
+    keys = blobs.keys()  # a list of blob keys, not a dict view
+    total = sum(
+        p.stat().st_size for key in keys for p in (blobs.root / key).rglob("*") if p.is_file()
+    )
+    return StoreUsage(
+        backend="local",
+        count=len(keys),
+        bytes=total,
+        max_count=config.store_max_count,
+        max_total_bytes=config.store_max_total_bytes,
+        by_kind={"piece": total},
+    )
+
+
+class StoreHealth(BaseModel):
+    #: The backend this process runs on (read at start).
+    backend: StoreBackend
+    #: The backend stored in Settings; differs from `backend` until a restart.
+    configured_backend: StoreBackend
+    #: Render workers hold the full Bambuddy key (spec §9): template code can print.
+    render_key_fallback: bool
+    #: The render worker Deployment may run more than one replica (spec §3.1).
+    multi_worker: bool
+
+
+async def store_health(bundle: StoreBundle) -> StoreHealth:
+    current = await bundle.source.current()
+    return StoreHealth(
+        backend=bundle.backend,
+        configured_backend=current.store_backend,
+        render_key_fallback=current.key_is_fallback and bool(current.api_key),
+        multi_worker=bundle.backend != "local",
+    )

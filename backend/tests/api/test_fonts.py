@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI
@@ -228,8 +227,8 @@ class _Mirror:
 
 
 def _with_store(app: FastAPI, mirror: _Mirror) -> None:
-    # Task 8's StoreBundle, as far as `install_font` reads it.
-    getattr(app.state, STATE_ATTR).store = SimpleNamespace(fonts=mirror)
+    # The lifespan's own (local) StoreBundle, with a mirror as `install_font` reads it.
+    getattr(app.state, STATE_ATTR).store.fonts = mirror
 
 
 def test_an_installed_family_is_published_to_the_store(
