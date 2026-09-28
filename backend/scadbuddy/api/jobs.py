@@ -32,6 +32,7 @@ from scadbuddy.library.history import (
     GitError,
     RevisionNotFoundError,
 )
+from scadbuddy.render.backend import RenderBackend
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
 from scadbuddy.render.jobs import (
@@ -41,7 +42,6 @@ from scadbuddy.render.jobs import (
     PartInfo,
     PlateInfo,
     QueueFullError,
-    RenderQueue,
 )
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import (
@@ -170,7 +170,7 @@ async def _resolve_version(history: HistoryDep, slug: str, version: str | None) 
         raise ApiError(status.HTTP_500_INTERNAL_SERVER_ERROR, str(error)) from None
 
 
-def require_job(queue: RenderQueue, job_id: str) -> Job:
+def require_job(queue: RenderBackend, job_id: str) -> Job:
     try:
         return queue.store.read(job_id)
     except JobNotFoundError:

@@ -44,6 +44,11 @@ async def temporal_client() -> AsyncIterator[Client]:
         await env.shutdown()
 
 
+def current_address(client: Client) -> str:
+    """The host:port `client` is connected to: the dev server's, when one was started."""
+    return client.service_client.config.target_host
+
+
 class WorkerThread:
     """Run a Temporal `Worker` on its own loop in a thread, for sync TestClient tests."""
 

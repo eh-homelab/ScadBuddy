@@ -108,7 +108,8 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
-from scadbuddy.render.jobs import RenderQueue, resolve_source
+from scadbuddy.render.backend import RenderBackend
+from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -979,7 +980,7 @@ async def delete_model(
 
 
 def _delete_model(
-    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+    slug: str, catalogue: Catalogue, queue: RenderBackend, outputs: OutputStore, force: bool
 ) -> list[str]:
     """The blocking part of :func:`delete_model`; returns the ids of the outputs it
     removed, read before their directories go."""

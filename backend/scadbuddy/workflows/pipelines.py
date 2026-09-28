@@ -141,6 +141,24 @@ class RenderPiece:
                 await job.signal(TemplatePipeline.piece_finished, outcome)
 
 
+@workflow.defn(name="RenderPreview")
+class RenderPreview:
+    """A template's default-render preview (`render.previews`), on the worker that has
+    the openscad budget. Id ``preview-<slug>``: a second request joins the first."""
+
+    @workflow.run
+    async def run(self, slug: str) -> bytes:
+        png: bytes = await workflow.execute_activity(
+            "render_preview_png",
+            slug,
+            result_type=bytes,
+            start_to_close_timeout=_openscad_timeout(),
+            heartbeat_timeout=timedelta(seconds=30),
+            retry_policy=RetryPolicy(maximum_attempts=1),
+        )
+        return png
+
+
 @workflow.defn(name="TemplatePipeline")
 class TemplatePipeline:
     def __init__(self) -> None:
