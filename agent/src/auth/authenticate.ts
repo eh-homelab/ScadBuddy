@@ -1,5 +1,5 @@
 import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
-import { mcpResourceUri, type OidcConfig, type OidcProvider, resourceMetadataUrl } from './oidc.js'
+import { mcpResourceUri, type OidcConfig, type OidcConfigRepo, type OidcProvider, resourceMetadataUrl } from './oidc.js'
 import { type Principal, type Tier, TIERS, tiersUpTo } from './principal.js'
 import { TOKEN_PREFIX, type TokenStore } from './tokens.js'
 
@@ -7,11 +7,17 @@ import { TOKEN_PREFIX, type TokenStore } from './tokens.js'
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md) and issues
 // #251 (bearer, disabled) and #262 (oidc).
 //
-// The mode and the anonymous cap are database settings edited in Settings
-// (spec D4, §8.3). Today only the OIDC part is stored (`ai_settings.mcp_oidc`,
-// src/auth/oidc.ts): `main.ts` runs `oidc` when it is enabled and `bearer`
-// otherwise. `disabled` and the anonymous cap are still plain config handed
-// to `createApp` (TODO(#251 follow-up)).
+// The mode and the anonymous cap are database settings (spec D4, §8.3, §9: "MCP
+// auth mode" is AI state in the `ai_*` tables, and there are "no
+// AI-configuration env vars"). They are read on every /mcp request by
+// `mcpAuthSettings` below, so a change applies to the next request on every
+// replica:
+//   - `oidc` is on while the OIDC configuration (`ai_settings.mcp_oidc`,
+//     src/auth/oidc.ts, #262) is enabled, whatever the mode key says;
+//   - otherwise the `mcp_auth_mode` key picks `bearer` (the default) or
+//     `disabled`, and `mcp_anonymous_cap` caps `disabled`.
+// An unset key is the default; a value that is not one of the allowed ones
+// fails closed.
 
 export type McpAuthMode = 'bearer' | 'disabled' | 'oidc'
 
@@ -54,6 +60,79 @@ export function quoted(value: string): string {
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
   mode: 'bearer',
   anonymousCap: 'outward',
+}
+
+/** ai_settings key: `"bearer"` (the default), `"disabled"` or `"oidc"`. */
+export const SETTING_MCP_AUTH_MODE = 'mcp_auth_mode'
+/** ai_settings key: `"read"`, `"write"` or `"outward"` (the default), the anonymous cap in `disabled` mode. */
+export const SETTING_MCP_ANONYMOUS_CAP = 'mcp_anonymous_cap'
+
+const MODES: readonly string[] = ['bearer', 'disabled', 'oidc'] satisfies McpAuthMode[]
+
+/** Reads ai_settings; credentials.ts SettingsStore is one. */
+export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
+
+/**
+ * The `authSettings` reader /mcp calls per request (mcp/http.ts), over
+ * `ai_settings`; the defaults when there is no settings store. A read that
+ * throws is left to throw: mcp/http.ts `resolveAuth` then fails closed
+ * (`bearer` with no token that verifies).
+ *
+ * An enabled OIDC configuration (`oidc`, #262) wins over the mode key, even
+ * over `disabled`: of two explicit choices the stricter one is kept. A stored
+ * `oidc` mode without an enabled configuration is `bearer` (what `oidc` mode
+ * would do without one: only bearer tokens verify).
+ *
+ * A value that is not allowed is not guessed at: an unknown mode is `bearer`
+ * and an unknown cap is `read`. `disabled` mode, and each bad or overridden
+ * value, is logged through `warn` when it is first seen, and again whenever it
+ * changes, rather than on every request.
+ */
+export function mcpAuthSettings(
+  settings: SettingsReader | undefined,
+  warn: (message: string) => void,
+  oidc?: OidcConfigRepo,
+): () => Promise<McpAuthSettings> {
+  let lastWarning = ''
+  return async () => {
+    if (!settings) return DEFAULT_MCP_AUTH
+    const [mode, cap, oidcConfig] = await Promise.all([
+      settings.get<unknown>(SETTING_MCP_AUTH_MODE),
+      settings.get<unknown>(SETTING_MCP_ANONYMOUS_CAP),
+      oidc?.get(),
+    ])
+    const warnings: string[] = []
+    const resolved: McpAuthSettings = { ...DEFAULT_MCP_AUTH }
+    if (oidcConfig?.enabled) {
+      resolved.mode = 'oidc'
+      resolved.oidc = oidcConfig
+      if (mode === 'disabled') {
+        warnings.push(`ai_settings ${SETTING_MCP_AUTH_MODE} is "disabled", but OIDC is enabled (ai_settings mcp_oidc); using oidc`)
+      }
+    } else if (mode === 'oidc') {
+      warnings.push(`ai_settings ${SETTING_MCP_AUTH_MODE} is "oidc", but no OIDC configuration is enabled; using bearer`)
+    } else if (typeof mode === 'string' && MODES.includes(mode)) resolved.mode = mode as McpAuthMode
+    else if (mode !== undefined) {
+      warnings.push(`ai_settings ${SETTING_MCP_AUTH_MODE} is ${JSON.stringify(mode)}, not one of ${MODES.join(', ')}; using bearer`)
+    }
+    if (typeof cap === 'string' && (TIERS as readonly string[]).includes(cap)) resolved.anonymousCap = cap as Tier
+    else if (cap !== undefined) {
+      resolved.anonymousCap = 'read'
+      warnings.push(`ai_settings ${SETTING_MCP_ANONYMOUS_CAP} is ${JSON.stringify(cap)}, not one of ${TIERS.join(', ')}; using read`)
+    }
+    if (resolved.mode === 'disabled') {
+      warnings.push(
+        `MCP auth is DISABLED (ai_settings ${SETTING_MCP_AUTH_MODE}): /mcp serves any HTTPS caller that can reach it ` +
+          `as "anonymous", up to the "${resolved.anonymousCap}" tier (spec §8.3). Outward actions still need a human approval.`,
+      )
+    }
+    const warning = warnings.join('\n')
+    if (warning !== lastWarning) {
+      lastWarning = warning
+      for (const w of warnings) warn(w)
+    }
+    return resolved
+  }
 }
 
 export type AuthResult = { ok: true; principal: Principal } | { ok: false; response: Response }
