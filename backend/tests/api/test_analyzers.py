@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers.component import DECISIONS
 from scadbuddy.analyzers.context import AnalysisContext
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
@@ -282,10 +283,10 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
 ) -> None:
     # Nothing listens on port 1: every connect is refused, and the store gives up
     # within its connect timeout instead of hanging the request.
-    state = getattr(app.state, STATE_ATTR)
-    state.decisions = PostgresDecisionStore(
-        "postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0
-    )
+    components = getattr(app.state, STATE_ATTR).components
+    built = components.get(DECISIONS)
+    unreachable = PostgresDecisionStore("postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0)
+    components.override(DECISIONS, unreachable)
     try:
         output_id = make_output(client, model)
         report = _run(client, output_id)
@@ -302,8 +303,8 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
         events.settle()
         assert [event for event in events if event.kind == "analyzer.decision"] == []
     finally:
-        state.decisions.close()
-        state.decisions = None
+        unreachable.close()
+        components.override(DECISIONS, built)
 
 
 @respx.mock

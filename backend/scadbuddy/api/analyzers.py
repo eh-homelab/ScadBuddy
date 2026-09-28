@@ -29,6 +29,7 @@ from psycopg_pool import PoolTimeout
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from scadbuddy.analyzers import builtin
+from scadbuddy.analyzers.component import DecisionsDep, OptionalDecisionsDep
 from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest
 from scadbuddy.analyzers.decisions import DecisionStore, new_decision_id, valid_scope
 from scadbuddy.analyzers.gather import gather_context
@@ -52,9 +53,7 @@ from scadbuddy.analyzers.runner import (
 )
 from scadbuddy.api.deps import (
     CatalogueDep,
-    DecisionsDep,
     EventsDep,
-    OptionalDecisionsDep,
     OutputsDep,
     SettingsStoreDep,
     UploadsDep,

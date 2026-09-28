@@ -343,8 +343,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.print_watcher.aclose()
         await components.aclose()
         await state.queue.aclose()
-        if state.decisions is not None:
-            await asyncio.to_thread(state.decisions.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
         await asyncio.to_thread(state.settings_store.close)

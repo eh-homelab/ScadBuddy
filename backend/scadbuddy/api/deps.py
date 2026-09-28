@@ -7,10 +7,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Annotated
 
-from fastapi import Depends, Path, status
+from fastapi import Depends, Path
 from starlette.requests import HTTPConnection
 
-from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
@@ -27,7 +26,6 @@ from scadbuddy.core.events import (
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
-from scadbuddy.core.problems import ApiError
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
@@ -88,9 +86,6 @@ class AppState:
     #: Follows each started print until it settles (#268).
     print_watcher: PrintWatcher
     metrics: Metrics
-    #: Print-analyzer decisions (#284), in Postgres only. ``None`` without a database
-    #: (until #401 makes one required): the routes that persist answer 503.
-    decisions: DecisionStore | None
     #: Caps the openscad runs that do NOT go through the render queue — the editor's
     #: parse check and the schema derivation behind it. Its own budget, not the render
     #: one: the queue's cap is N worker tasks, so there is no semaphore to share, and
@@ -184,9 +179,6 @@ def _build_core(settings: Settings) -> AppState:
     else:
         # No database: the UI keeps working, events reach this process only.
         store, events = JobStore(paths), InProcessEventBus()
-    decisions: DecisionStore | None = (
-        PostgresDecisionStore(settings.database_url) if settings.database_url else None
-    )
     outputs = OutputStore(paths)
     uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
     checkouts = CheckoutGate()
@@ -280,7 +272,6 @@ def _build_core(settings: Settings) -> AppState:
         queue=queue,
         previews=previews,
         metrics=metrics,
-        decisions=decisions,
         events=events,
         print_progress=print_progress,
         print_watcher=PrintWatcher(
@@ -393,21 +384,6 @@ def get_print_watcher(state: StateDep) -> PrintWatcher:
 DATABASE_REQUIRED_PROBLEM = "https://scadbuddy.dev/problems/database-required"
 
 
-def get_decisions(state: StateDep) -> DecisionStore | None:
-    return state.decisions
-
-
-def require_decisions(state: StateDep) -> DecisionStore:
-    """The decision store, or a 503 naming what is missing. There is no file fallback."""
-    if state.decisions is None:
-        raise ApiError(
-            status.HTTP_503_SERVICE_UNAVAILABLE,
-            "analyzer decisions are stored in Postgres, and SCADBUDDY_DATABASE_URL is not set",
-            type_=DATABASE_REQUIRED_PROBLEM,
-        )
-    return state.decisions
-
-
 def get_checks(state: StateDep) -> asyncio.Semaphore:
     return state.checks
 
@@ -435,8 +411,6 @@ QueueDep = Annotated[RenderQueue, Depends(get_queue)]
 EventsDep = Annotated[EventBus, Depends(get_events)]
 PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 PrintWatcherDep = Annotated[PrintWatcher, Depends(get_print_watcher)]
-OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
-DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]

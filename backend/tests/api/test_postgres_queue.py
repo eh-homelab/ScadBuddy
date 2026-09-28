@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from psycopg_pool import PoolTimeout
 
+from scadbuddy.analyzers.component import DECISIONS
 from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.core.events import Event, SettingsChanged
 from scadbuddy.core.pg_events import PgNotifyEventBus
@@ -130,7 +131,7 @@ def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo
         assert created.status_code == 201, created.text
         listed = client.get("/api/v1/analyzers/decisions").json()
 
-    assert isinstance(app.state.scadbuddy.decisions, PostgresDecisionStore)
+    assert isinstance(app.state.scadbuddy.components.get(DECISIONS), PostgresDecisionStore)
     assert [row["id"] for row in listed] == [created.json()["id"]]
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT kind FROM analyzer_decisions").fetchone()
