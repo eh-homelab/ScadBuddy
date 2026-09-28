@@ -248,9 +248,13 @@ class JobProjection:
     def mark_started(self, job_id: str) -> Job | None:
         with self._pool.connection() as conn, conn.transaction():
             row = conn.execute(
+                # A legacy pending row the reconciler adopted has no workflow_id; it
+                # gets one here, so `fail_legacy_running` never takes it for the
+                # legacy queue's.
                 "UPDATE render_jobs SET state = 'running', started_at = now(),"
-                " attempts = attempts + 1 WHERE id = %s AND state = 'pending' RETURNING *",
-                (job_id,),
+                " attempts = attempts + 1, workflow_id = coalesce(workflow_id, %s)"
+                " WHERE id = %s AND state = 'pending' RETURNING *",
+                (workflow_id_for(job_id), job_id),
             ).fetchone()
             if row is not None:
                 self._announce(conn, row["id"], row["slug"], "job.running")

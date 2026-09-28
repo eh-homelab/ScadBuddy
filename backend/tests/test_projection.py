@@ -21,6 +21,7 @@ from scadbuddy.render.projection import (
     CANCELLED_ERROR,
     LEGACY_INTERRUPTED_ERROR,
     JobProjection,
+    workflow_id_for,
 )
 from scadbuddy.render.schema import ParamValue
 
@@ -464,3 +465,22 @@ def test_legacy_boot_adopts_temporal_pending_rows_and_fails_running_ones(
     assert (stored.state, stored.error) == ("failed", TEMPORAL_INTERRUPTED_ERROR)
     # The pending one is the legacy queue's now: its claim takes it.
     assert claimed is not None and claimed.id == waiting.id
+
+
+def test_a_legacy_row_a_workflow_adopted_is_not_failed_as_a_legacy_running_row(
+    projection: JobProjection, pg_conninfo: str, paths: DataPaths
+) -> None:
+    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    legacy.open()
+    try:
+        adopted = _job(n=5)
+        legacy.submit(adopted, render_key("demo", adopted.params, None))
+    finally:
+        legacy.close()
+
+    # The reconciler started `render-<id>` for it, and the workflow marked it running.
+    started = projection.mark_started(adopted.id)
+
+    assert started is not None and started.workflow_id == workflow_id_for(adopted.id)
+    assert projection.fail_legacy_running(LEGACY_INTERRUPTED_ERROR) == []
+    assert projection.read(adopted.id).state == "running"
