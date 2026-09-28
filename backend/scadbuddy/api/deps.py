@@ -16,7 +16,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
-from scadbuddy.core.config import Config
+from scadbuddy.core.config import INSTALL_CONCURRENCY, Config
 from scadbuddy.core.events import (
     EventBus,
     InProcessEventBus,
@@ -51,9 +51,6 @@ logger = logging.getLogger(__name__)
 STATE_ATTR = "scadbuddy"
 VERSION_TIMEOUT = 10.0
 JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
-
-
-INSTALL_CONCURRENCY = 2
 
 
 @dataclass

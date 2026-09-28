@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import timedelta
 
-from temporalio.api.workflowservice.v1 import SetWorkerDeploymentCurrentVersionRequest
+from temporalio.api.workflowservice.v1 import (
+    CountWorkflowExecutionsRequest,
+    SetWorkerDeploymentCurrentVersionRequest,
+)
 from temporalio.client import Client
 from temporalio.common import VersioningBehavior
 from temporalio.contrib.pydantic import pydantic_data_converter
@@ -13,6 +16,7 @@ from scadbuddy.workflows.pipelines import RenderPiece, TemplatePipeline
 
 RENDER_TASK_QUEUE_DEFAULT = "render"
 DEPLOYMENT_NAME = "scadbuddy-render"
+RPC_TIMEOUT = timedelta(seconds=10)
 
 
 async def connect(address: str, namespace: str) -> Client:
@@ -57,14 +61,33 @@ async def make_current(client: Client, *, namespace: str, build_id: str) -> None
             build_id=build_id,
             ignore_missing_task_queues=True,
             allow_no_pollers=True,
-        )
+        ),
+        timeout=RPC_TIMEOUT,
     )
+
+
+async def drained(client: Client, *, namespace: str, build_id: str) -> bool:
+    """Whether no workflow pinned to `build_id` is still running. A visibility count,
+    not `DescribeWorkerDeploymentVersion`'s drainage status: that one is absent while
+    the version is current and still says DRAINING well after its last run has ended."""
+    response = await client.workflow_service.count_workflow_executions(
+        CountWorkflowExecutionsRequest(
+            namespace=namespace,
+            query=(
+                f'TemporalWorkerDeploymentVersion="{DEPLOYMENT_NAME}:{build_id}"'
+                ' AND ExecutionStatus="Running"'
+            ),
+        ),
+        timeout=RPC_TIMEOUT,
+    )
+    return response.count == 0
 
 
 __all__ = [
     "DEPLOYMENT_NAME",
     "RENDER_TASK_QUEUE_DEFAULT",
     "connect",
+    "drained",
     "make_current",
     "pydantic_data_converter",
     "render_worker",

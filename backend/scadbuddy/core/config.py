@@ -56,6 +56,9 @@ DEFAULT_TEMPORAL_TASK_QUEUE_RENDER = "render"
 # tunes (§3.4): the subprocess is killed at render_timeout, and Temporal gives up on
 # the attempt this much later, so the two can never invert.
 ACTIVITY_TIMEOUT_MARGIN = 60.0
+
+#: Library clones at once, in the API and the render worker alike.
+INSTALL_CONCURRENCY = 2
 # The event log (Postgres only) is for Last-Event-ID replay after a short disconnect,
 # not an audit trail: a day of events, and never more than this many rows. 0 is no
 # limit on that dimension.
