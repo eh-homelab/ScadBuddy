@@ -25,6 +25,11 @@ import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } 
 // Browsers send `Origin` on every POST, PUT and DELETE (Fetch standard), so a
 // write without one did not come from a page.
 //
+// The approval decisions (routes/approvals.ts, #258) use the same check: a
+// request that passes it is treated as the browser user, the one principal
+// that approves outward actions in the UI (spec §8.1, §8.2). The limitation
+// below applies to them unchanged.
+//
 // LIMITATION, stated plainly: this is not an approval and not authentication.
 // Anything that can open a TCP connection to port 8081 can set Host and Origin
 // to the allowed values; what it cannot do from a non-trusted peer is claim
@@ -41,21 +46,26 @@ export function requestFacts(c: Context, remoteAddress: RemoteAddress): RequestF
 }
 
 /** Returns why the request is refused, or undefined when it may proceed. */
-export function uiRequestProblem(c: Context, policy: OriginPolicy, remoteAddress: RemoteAddress): string | undefined {
+export function uiRequestProblem(
+  c: Context,
+  policy: OriginPolicy,
+  remoteAddress: RemoteAddress,
+  what = 'credential changes',
+): string | undefined {
   const facts = requestFacts(c, remoteAddress)
   if (!isSecureTransport(facts, policy)) {
-    return 'credential changes must come through the HTTPS ingress'
+    return `${what} must come through the HTTPS ingress`
   }
   const verdict = checkOrigin(facts, policy)
   if (!verdict.ok) {
     switch (verdict.reason) {
       case 'no-origin':
-        return 'credential changes must come from the ScadBuddy UI (no Origin header)'
+        return `${what} must come from the ScadBuddy UI (no Origin header)`
       case 'malformed-origin':
-        return 'credential changes must come from the ScadBuddy UI (malformed Origin header)'
+        return `${what} must come from the ScadBuddy UI (malformed Origin header)`
       case 'not-allowed':
         return (
-          'credential changes must come from the ScadBuddy UI at its public URL ' +
+          `${what} must come from the ScadBuddy UI at its public URL ` +
           '(SCADBUDDY_PUBLIC_URL; Origin or Host is not on the allowlist)'
         )
     }

@@ -1,15 +1,18 @@
 import { Hono } from 'hono'
+import type { ApprovalService } from './approvals/service.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
+import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming, which the later /mcp and /api/v1/ai/* routes need.
-// /healthz, and the Claude credential routes (#255, routes/credentials.ts).
+// /healthz, the Claude credential routes (#255, routes/credentials.ts) and the
+// approval routes (#258, routes/approvals.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -33,6 +36,8 @@ export type AppDeps = {
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
+  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+  approvals?: ApprovalService
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -142,6 +147,13 @@ export function createApp(deps: AppDeps): Hono {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+  })
+
+  registerApprovalRoutes(app, {
+    approvals: deps.approvals,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   return app

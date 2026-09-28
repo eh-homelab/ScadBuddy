@@ -26,8 +26,9 @@ import type { Sql } from 'postgres'
 //     sealed by src/secrets.ts). Tokens that are only ever compared (MCP bearer
 //     tokens, #251) are stored hashed instead, per spec §8.1.
 //
-// Entry 2 is #300's sessions. #251's `ai_mcp_tokens` (PR #368) goes after
-// whatever is last on main when it merges (entry 3 if nothing else lands first).
+// Entry 2 is #300's sessions, entry 3 #258's approvals. #251's `ai_mcp_tokens`
+// (PR #368) and #297's plugins (PR #464) go after whatever is last on main
+// when they merge.
 
 /** `pg_advisory_xact_lock` key ("SCADAGNT" in ASCII); distinct from the backend's "SCADBDDY". */
 export const MIGRATION_LOCK = 0x5343_4144_4147_4e54n
@@ -140,6 +141,50 @@ export const MIGRATIONS: readonly Migration[] = [
         created_at timestamptz NOT NULL DEFAULT now(),
         PRIMARY KEY (session_id, seq)
       );
+    `,
+  },
+  {
+    // 3 — #258: approvals of outward tool calls (spec §8.2). See src/approvals/.
+    story: '#258',
+    sql: `
+      -- One row per outward call that waited for a human. Pending while
+      -- decision IS NULL; a pending row outlives a restart, and is decided,
+      -- expired or cancelled later (src/approvals/service.ts).
+      CREATE TABLE ai_approvals (
+        id                 uuid PRIMARY KEY,
+        -- NULL for an approval outside a session (#251's MCP prepare/confirm).
+        session_id         uuid REFERENCES ai_sessions (id) ON DELETE CASCADE,
+        -- The turn that parked on it; NULL when none did.
+        turn_id            uuid,
+        -- The tool_use block's id (the panel's tool.call id).
+        tool_use_id        text NOT NULL,
+        tool               text NOT NULL,
+        -- The input as the event log shows it: scrubbed (sessions/sdkEvents.ts
+        -- scrubForLog). The full input is never stored here.
+        input_summary      text NOT NULL,
+        -- sha256 of the tool name and the canonical JSON of the full input; a
+        -- decision applies to this exact input only.
+        input_hash         text NOT NULL,
+        tier               text NOT NULL CHECK (tier IN ('read', 'write', 'outward')),
+        requested_by_kind  text NOT NULL,
+        requested_by_id    text NOT NULL,
+        requested_by_label text NOT NULL,
+        created_at         timestamptz NOT NULL DEFAULT now(),
+        expires_at         timestamptz NOT NULL,
+        decision           text CHECK (decision IN ('approved', 'denied', 'expired', 'cancelled')),
+        decided_by_kind    text,
+        decided_by_id      text,
+        decided_by_label   text,
+        decided_at         timestamptz,
+        -- Why it was cancelled or expired, for the audit trail.
+        reason             text,
+        -- Set once the approved call ran: an approval is used at most once.
+        consumed_at        timestamptz,
+        CHECK ((decision IS NULL) = (decided_at IS NULL)),
+        CHECK (consumed_at IS NULL OR decision = 'approved')
+      );
+      CREATE INDEX ai_approvals_session ON ai_approvals (session_id, created_at);
+      CREATE INDEX ai_approvals_pending ON ai_approvals (expires_at) WHERE decision IS NULL;
     `,
   },
 ]

@@ -49,6 +49,10 @@ export type ServerEvent = V &
     | { type: 'assistant.text.done'; sessionId: string; messageId: string }
     | { type: 'tool.call'; sessionId: string; id: string; name: string; input: Record<string, unknown>; risk: Risk }
     | { type: 'tool.result'; sessionId: string; id: string; ok: boolean; summary: string }
+    /** `tool` is the tool.call id the approval gates; only outward calls wait (spec §8.2). */
+    | { type: 'approval.required'; sessionId: string; id: string; tool: string; summary: string; risk: 'outward' }
+    /** Expired and cancelled approvals resolve as not approved, without `by`. */
+    | { type: 'approval.resolved'; sessionId: string; id: string; approved: boolean; by?: Owner }
     | { type: 'session.status'; sessionId: string; status: SessionStatus }
     | { type: 'session.result'; sessionId: string; costUsd?: number; turns: number }
     | { type: 'error'; sessionId?: string; code?: string; message: string }
@@ -67,3 +71,21 @@ export function event(body: DistributiveOmit<ServerEvent, 'v'>): ServerEvent {
 export function sameOwner(a: Pick<Owner, 'kind' | 'id'>, b: Pick<Owner, 'kind' | 'id'>): boolean {
   return a.kind === b.kind && a.id === b.id
 }
+
+/**
+ * Spec §6 visibility: the browser user sees every session (with a "controlled
+ * by …" badge); any other principal sees the sessions it owns or started.
+ */
+export function canSee(
+  principal: Owner,
+  session: { owner: Pick<Owner, 'kind' | 'id'>; creator: Pick<Owner, 'kind' | 'id'> },
+): boolean {
+  return principal.kind === 'browser' || sameOwner(principal, session.owner) || sameOwner(principal, session.creator)
+}
+
+/**
+ * The panel's `approval.decision` client message (frontend protocol.ts
+ * `ClientMessageSchema`), the one client message the agent consumes today
+ * (#258; the socket that carries it is #266's).
+ */
+export type ApprovalDecisionMessage = V & { type: 'approval.decision'; sessionId: string; id: string; approve: boolean }

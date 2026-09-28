@@ -11,12 +11,15 @@ import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { loadKek } from './secrets.js'
+import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
 // spec §9 keeps the environment surface to the infrastructure variables in config.ts.
 const PORT = 8081
+/** How often approvals nobody is waiting on are expired (approvals/service.ts). */
+const APPROVAL_SWEEP_MS = 30_000
 
 const config = loadConfig()
 
@@ -73,6 +76,29 @@ const settings = database ? new SettingsStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
+// Sessions (#300) and their approvals (#258). Nothing starts a session over
+// HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
+// expiry sweep are live so that approvals left pending by a restart can be
+// seen, decided or expired.
+const sessions =
+  database && credentials
+    ? new SessionManager({
+        sql: database.sql,
+        paths,
+        ...(settings ? { settings } : {}),
+        credential: async () => {
+          if (!kek.ok) throw new Error(`no key-encryption key: ${kek.reason}`)
+          const credential = await credentials.reveal(kek.kek)
+          if (!credential) throw new Error('no Claude credential is configured')
+          return credential
+        },
+      })
+    : undefined
+const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
+  ...(database ? { ready: database.ready } : {}),
+  onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
+})
+
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
@@ -83,6 +109,7 @@ const app = createApp({
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies),
+  ...(sessions ? { approvals: sessions.approvals } : {}),
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -104,6 +131,9 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 // then exit: non-zero when the drain timed out and requests were cut.
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
+    stopSweeper?.()
+    // Running turns stop; their pending approvals stay pending (approvals/service.ts).
+    sessions?.abortAll()
     void shutdown({
       closeServer: () =>
         new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),

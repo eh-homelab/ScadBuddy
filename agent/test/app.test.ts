@@ -495,3 +495,16 @@ describe('POST /test is single-flight with a cooldown (finding 7)', () => {
     expect(testConnection).toHaveBeenCalledTimes(2)
   })
 })
+
+describe('/api/v1/ai/approvals (#258; the store is covered in test/approvals.pg.test.ts)', () => {
+  const id = '00000000-0000-4000-8000-000000000001'
+
+  it('answers 503 without the database, and guards the writes first', async () => {
+    const app = createApp(deps({ database: undefined, credentials: undefined }))
+    expect((await app.request('/api/v1/ai/approvals')).status).toBe(503)
+    const bare = await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST' })
+    expect(bare.status).toBe(403)
+    expect(await bare.json()).toEqual({ detail: 'approval decisions must come through the HTTPS ingress' })
+    expect((await app.request(`/api/v1/ai/approvals/${id}/approve`, { method: 'POST', headers: UI })).status).toBe(503)
+  })
+})

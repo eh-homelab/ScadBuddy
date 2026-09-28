@@ -119,7 +119,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
   top of it (credential via the per-query `env` only, `maxTurns`, `maxBudgetUsd`,
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
-  `PreToolUse` hook; outward → denied as "needs approval" until #258);
+  `PreToolUse` hook; outward calls in a session PARK in `canUseTool` until a human
+  decides, via `src/approvals/service.ts` and the `ai_approvals` table, #258; outside
+  a session they are denied as "needs approval");
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
   `src/api/schema.d.ts`.
   - Database: the agent owns the `ai_*` tables. Schema changes are appended to
