@@ -71,6 +71,12 @@ EXPECTED_PATHS = {
     "/api/v1/models/{slug}/diagnostics",
     "/api/v1/jobs/{job_id}/views/{view}.png",
     "/api/v1/outputs/{output_id}/views/{view}.png",
+    "/api/v1/prints/{archive_id}/timelapse",
+    "/api/v1/prints/{archive_id}/photos/{filename}",
+    "/api/v1/prints/{archive_id}/thumbnail",
+    "/api/v1/prints/{archive_id}/plates/{index}/thumbnail",
+    "/api/v1/prints/{archive_id}/files/sliced",
+    "/api/v1/prints/{archive_id}/files/source",
 }
 
 
