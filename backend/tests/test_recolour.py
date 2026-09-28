@@ -140,3 +140,10 @@ def test_pinning_leaves_the_covers_alone(tmp_path: Path) -> None:
 def test_an_extruder_list_of_the_wrong_length_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="2 filament"):
         pin_extruders_3mf(_written(tmp_path), [RIGHT])
+
+
+def test_a_file_map_without_the_extruder_is_a_clear_error(tmp_path: Path) -> None:
+    """Review #4: a bare ``list.index`` ValueError surfaced as an unhandled 500."""
+    payload = _with_settings(_written(tmp_path), physical_extruder_map=["0"])
+    with pytest.raises(ValueError, match="has no extruder 1"):
+        pin_extruders_3mf(payload, [RIGHT, LEFT])

@@ -271,7 +271,15 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     if target.colours is not None:
         payload = recolour_3mf(payload, target.colours)
     # On the extruders the spools feed, so no filament is sliced for the other nozzle (#469).
-    return pin_extruders_3mf(payload, target.extruders) if target.extruders is not None else payload
+    if target.extruders is None:
+        return payload
+    try:
+        return pin_extruders_3mf(payload, target.extruders)
+    except ValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"ScadBuddy can't pin this 3MF's filaments to their extruders: {error}.",
+        ) from error
 
 
 def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:

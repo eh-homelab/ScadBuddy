@@ -119,6 +119,11 @@ def pin_extruders_3mf(payload: bytes, extruders: Sequence[int]) -> bytes:
         str(value) for value in settings.get("physical_extruder_map") or H2C_PHYSICAL_EXTRUDER_MAP
     ]
     settings["filament_map_mode"] = "Manual"
+    missing = sorted({str(extruder) for extruder in extruders} - set(physical))
+    if missing:
+        raise ValueError(
+            f"the 3MF's physical_extruder_map {physical} has no extruder {', '.join(missing)}"
+        )
     settings["filament_map"] = [str(physical.index(str(extruder)) + 1) for extruder in extruders]
     return _archive(
         [
