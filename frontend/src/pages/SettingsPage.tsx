@@ -186,6 +186,8 @@ export function SettingsPage() {
   const setField = (name: FieldName, next: string) => {
     setDraft((current) => ({ ...current, [name]: next }))
     setErrors((current) => ({ ...current, [name]: undefined }))
+    // A key typed after Remove key replaces the stored one rather than clearing it.
+    if (isSecret(name) && next !== '') setClearing((current) => current.filter((secret) => secret !== name))
   }
 
   const changed = (name: FieldName): boolean => {

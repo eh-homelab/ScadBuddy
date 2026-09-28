@@ -263,6 +263,28 @@ describe('SettingsPage sections (#322)', () => {
   })
 })
 
+describe('SettingsPage secrets (#322)', () => {
+  it('typing a key after Remove key replaces it instead of clearing it', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+    const key = screen.getByLabelText('API key')
+    const remove = screen.getByRole('button', { name: 'Remove key' })
+    await user.click(remove)
+    expect(key).toHaveAttribute('placeholder', 'Cleared when you save.')
+    expect(remove).toBeDisabled()
+
+    await user.type(key, 'n')
+    expect(remove).toBeEnabled()
+    // Emptied again, the field is back to leaving the stored key alone.
+    await user.clear(key)
+    expect(key).toHaveAttribute('placeholder', 'A key is stored. Paste a new one to replace it.')
+    expect(screen.getByRole('button', { name: 'Save Connection' })).toBeDisabled()
+    expect(put).not.toHaveBeenCalled()
+    put.mockRestore()
+  })
+})
+
 describe('SettingsPage remembered choices (#322)', () => {
   it('forgets one remembered choice and leaves the rest', async () => {
     setMockRemembered({
