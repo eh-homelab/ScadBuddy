@@ -2,10 +2,12 @@ import { randomBytes } from 'node:crypto'
 import { request as httpRequest } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { serve } from '@hono/node-server'
-import type { UpgradeWebSocket } from 'hono/ws'
+import { Hono } from 'hono'
+import type { UpgradeWebSocket, WSContext, WSEvents } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
 import { type AiStatusView, type AppDeps, createApp, statusReason } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
+import { MAX_QUEUED_FRAMES, registerChatRoute } from '../src/routes/chat.js'
 import { JSON_BODY_MAX } from '../src/routes/guard.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import {
@@ -148,6 +150,71 @@ describe('the chat socket route', () => {
       headers: { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', upgrade: 'websocket' },
     })
     expect(res.status).toBe(503)
+  })
+})
+
+describe('the chat socket handlers', () => {
+  /** The route's handlers on a socket that records what it is sent, with the manager's snapshot answered. */
+  async function openSocket(log: (m: string) => void) {
+    let events: WSEvents | undefined
+    const capture = ((create: (c: unknown) => WSEvents | Promise<WSEvents>) => async (c: unknown) => {
+      events = await create(c)
+      return new Response()
+    }) as unknown as UpgradeWebSocket
+    const app = new Hono()
+    const sessions = {
+      snapshot: () => Promise.resolve({ v: 1, type: 'sessions.snapshot', sessions: [] }),
+    } as unknown as SessionManager
+    registerChatRoute(app, {
+      sessions,
+      ready: () => Promise.resolve(true),
+      remoteAddress: () => '10.0.0.7',
+      origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+      upgradeWebSocket: capture,
+      log,
+    })
+    const res = await app.request('/api/v1/ai/chat', {
+      headers: { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', upgrade: 'websocket' },
+    })
+    expect(res.status).toBe(200)
+    const sent: { type: string; code?: string; message?: string }[] = []
+    let closed: [number | undefined, string | undefined] | undefined
+    const ws = {
+      raw: { bufferedAmount: 0 },
+      send: (data: string) => sent.push(JSON.parse(data) as (typeof sent)[number]),
+      close: (code?: number, reason?: string) => {
+        closed = [code, reason]
+      },
+    } as unknown as WSContext
+    events!.onOpen?.(new Event('open'), ws)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(sent.map((f) => f.type)).toEqual(['sessions.snapshot'])
+    return { events: events!, ws, sent, closed: () => closed }
+  }
+
+  it('runs a binary frame through the connection, so the queue cap covers it', async () => {
+    const { events, ws, sent } = await openSocket(() => {})
+    for (let i = 0; i < MAX_QUEUED_FRAMES + 10; i++) {
+      events.onMessage?.(new MessageEvent('message', { data: new ArrayBuffer(4) }), ws)
+    }
+    await new Promise((r) => setTimeout(r, 20))
+    const codes = sent.filter((f) => f.type === 'error').map((f) => f.code)
+    expect(codes.filter((c) => c === 'invalid')).toHaveLength(MAX_QUEUED_FRAMES)
+    expect(codes.filter((c) => c === 'busy')).toHaveLength(10)
+    expect(sent.find((f) => f.code === 'invalid')?.message).toBe('frames must be JSON text')
+  })
+
+  it('logs a transport error, then closes the connection', async () => {
+    const logged: string[] = []
+    const { events, ws } = await openSocket((m) => logged.push(m))
+    const evt = Object.assign(new Event('error'), { error: new Error('ECONNRESET: peer went away') })
+    events.onError?.(evt, ws)
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toMatch(/^chat: socket error: Error: ECONNRESET: peer went away/)
+    // Closed: a frame after the error is dropped rather than handled.
+    events.onMessage?.(new MessageEvent('message', { data: 'not json' }), ws)
+    await new Promise((r) => setTimeout(r, 20))
+    expect(logged).toHaveLength(1)
   })
 })
 

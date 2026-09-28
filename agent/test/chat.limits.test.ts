@@ -223,6 +223,24 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
+  it('refuses a binary frame as invalid through the queue, so a flood of them is busy past the cap too', async () => {
+    const fake = fakeManager()
+    const out: ServerEvent[] = []
+    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
+      log: () => {},
+      limits: { maxQueued: 8 },
+    })
+    await connection.open()
+    await connection.receive(new Uint8Array([123, 125]).buffer)
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'invalid', message: 'frames must be JSON text' })
+    const handled = Array.from({ length: 100 }, () => connection.receive(new ArrayBuffer(8)))
+    expect(errors(out, 'busy')).toBe(92)
+    await Promise.all(handled)
+    expect(errors(out, 'invalid')).toBe(9)
+    expect(fake.started()).toBe(0)
+    connection.close()
+  })
+
   it("passes the manager's new-session refusal (per owner, not per connection) on as rate_limited", async () => {
     const fake = fakeManager()
     const refusing = {

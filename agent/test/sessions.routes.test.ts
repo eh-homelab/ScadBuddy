@@ -149,6 +149,21 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(resumed).toMatch(/^data: .*"status":"idle".*\nid: 8\n\n$/s)
   })
 
+  it('refuses a resume point that is not a seq with 400, rather than replaying from the start', async () => {
+    const { session } = await m.start(browser, { origin: 'chat', title: 'x' })
+    for (const after of ['abc', '-1', '1.5', '']) {
+      const res = await app.request(`/api/v1/ai/sessions/${session.id}/events?after=${after}`, { headers: UI_READ })
+      expect(res.status, `after=${after}`).toBe(400)
+      expect(await res.json()).toEqual({ detail: 'after must be a non-negative integer' })
+    }
+    // Last-Event-ID is read first, so a bad one is refused even beside a good ?after=.
+    const header = await app.request(`/api/v1/ai/sessions/${session.id}/events?after=2`, {
+      headers: { ...UI_READ, 'last-event-id': 'seven' },
+    })
+    expect(header.status).toBe(400)
+    expect(await header.json()).toEqual({ detail: 'Last-Event-ID must be a non-negative integer' })
+  })
+
   it("limits new sessions per owner across the routes and the manager (the chat socket's path), with 429", async () => {
     m.abortAll()
     const { runner } = scriptedRunner(() => next)
