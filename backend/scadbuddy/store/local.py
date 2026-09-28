@@ -3,9 +3,10 @@ from __future__ import annotations
 import os
 import re
 import shutil
+from contextlib import suppress
 from pathlib import Path
 
-_KEY = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+_KEY = re.compile(r"[A-Za-z0-9._-]{1,128}")
 
 
 class LocalBlobStore:
@@ -15,7 +16,8 @@ class LocalBlobStore:
         self.root = root
 
     def _path(self, key: str) -> Path:
-        if not _KEY.match(key) or key in (".", ".."):
+        # fullmatch: `$` would also accept a key ending in a newline.
+        if not _KEY.fullmatch(key) or key in (".", ".."):
             raise ValueError(f"not a blob key: {key!r}")
         return self.root / key
 
@@ -29,7 +31,10 @@ class LocalBlobStore:
         return self._path(key).is_dir()
 
     def remove(self, key: str) -> None:
-        shutil.rmtree(self._path(key), ignore_errors=True)
+        """Already gone is fine; any other failure raises, so a sweep never counts a
+        blob still on disk as removed."""
+        with suppress(FileNotFoundError):
+            shutil.rmtree(self._path(key))
 
     def keys(self) -> list[str]:
         if not self.root.is_dir():
