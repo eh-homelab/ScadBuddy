@@ -2,9 +2,16 @@ import { useEffect, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
 import type { Job } from '../api/types'
 import type { ParamValues } from './params'
+import { getRealtime } from './realtime'
 
 export const RENDER_DEBOUNCE_MS = 400
+/** Only while the realtime socket is unavailable (#267): otherwise events drive the reads. */
 const POLL_MS = 400
+
+/** A render's steps, as `job.progress` names them (backend `core/metrics.py` `RenderStage`). */
+export type RenderStage = 'source' | 'render' | 'split' | 'solids' | 'thumbnail' | 'write'
+
+const STAGES: readonly string[] = ['source', 'render', 'split', 'solids', 'thumbnail', 'write']
 
 /** A submit this hook made: what it rendered, and the job id it was answered with. */
 interface Submission {
@@ -33,6 +40,8 @@ export interface RenderState {
    * Not an error: the preview is still coming.
    */
   busy: number | undefined
+  /** #267 — the step the current render is on, while it is running and the socket says. */
+  stage: RenderStage | undefined
 }
 
 /** How long a refused render asks to wait: only a queue-full 503 carries it. */
@@ -45,8 +54,9 @@ function retryAfterSeconds(cause: unknown): number | undefined {
 const STALE_CHECK_MS = 250
 
 /**
- * Submits a render for `params` and polls until it settles (spec §5.3: the preview
- * *is* the render). A newer submission supersedes an older one — its result is
+ * Submits a render for `params` and follows it until it settles (spec §5.3: the preview
+ * *is* the render). #267: the job is followed on the realtime socket (`job:<id>`) and
+ * read once per event; `GET /jobs/:id` is polled only while the socket is unavailable. A newer submission supersedes an older one — its result is
  * dropped rather than shown out of order, and the server is told: each submit names the
  * previous one of the same model and revision as the job it `supersedes`, which the
  * server drops if no worker has started it.
@@ -62,6 +72,7 @@ export function useRenderJob(
   const [error, setError] = useState<Error | undefined>(undefined)
   const [settledFor, setSettledFor] = useState<ParamValues | undefined>(undefined)
   const [busy, setBusy] = useState<number | undefined>(undefined)
+  const [stage, setStage] = useState<RenderStage | undefined>(undefined)
   const generation = useRef(0)
   const last = useRef<Submission | undefined>(undefined)
 
@@ -70,11 +81,13 @@ export function useRenderJob(
 
     const mine = ++generation.current
     let timer: ReturnType<typeof setTimeout> | undefined
+    let unfollow: (() => void) | undefined
     let stopped = false
 
     const isStale = () => stopped || generation.current !== mine
 
     setRendering(true)
+    setStage(undefined)
     setError(undefined)
     setBusy(undefined)
 
@@ -86,23 +99,69 @@ export function useRenderJob(
       }
     }
 
-    async function poll(jobId: string) {
-      try {
-        const next = await api.getJob(jobId)
-        if (isStale()) return
-        setJob(next)
-        if (next.status === 'done' || next.status === 'failed') {
-          setRendering(false)
-          setSettledFor(params)
-          return
-        }
-        timer = setTimeout(() => void poll(jobId), POLL_MS)
-      } catch (cause) {
-        if (isStale()) return
-        setError(cause instanceof Error ? cause : new Error(String(cause)))
+    /** Reads the job on every signal for it until it settles; one read at a time. */
+    function follow(jobId: string) {
+      const realtime = getRealtime()
+      let reading = false
+      let again = false
+      let settled = false
+
+      const finish = () => {
+        settled = true
+        setStage(undefined)
+        unfollow?.()
+        unfollow = undefined
+        if (timer) clearTimeout(timer)
         setRendering(false)
         setSettledFor(params)
       }
+
+      const read = async () => {
+        if (settled || isStale()) return
+        if (reading) {
+          again = true
+          return
+        }
+        reading = true
+        try {
+          const next = await api.getJob(jobId)
+          if (isStale()) return
+          setJob(next)
+          if (next.status === 'done' || next.status === 'failed') finish()
+        } catch (cause) {
+          if (isStale()) return
+          setError(cause instanceof Error ? cause : new Error(String(cause)))
+          finish()
+        } finally {
+          reading = false
+          if (again) {
+            again = false
+            void read()
+          }
+        }
+      }
+
+      // The subscription's confirmation is the first read, so a job that settled
+      // before it was followed is still seen.
+      unfollow = realtime.subscribe(`job:${jobId}`, (signal) => {
+        // A step starting changes nothing a read would show: take it from the event.
+        if (signal !== 'resync' && signal.kind === 'job.progress') {
+          const next = signal.data['stage']
+          if (!isStale() && typeof next === 'string' && STAGES.includes(next)) {
+            setStage(next as RenderStage)
+          }
+          return
+        }
+        void read()
+      })
+      const fallback = () => {
+        timer = setTimeout(() => {
+          if (settled || isStale()) return
+          if (realtime.status === 'unavailable') void read()
+          fallback()
+        }, POLL_MS)
+      }
+      fallback()
     }
 
     // Awaited even when the previous effect has gone stale by the time its answer
@@ -134,7 +193,7 @@ export function useRenderJob(
     submitted
       .then((job_id) => {
         if (isStale()) return
-        void poll(job_id)
+        follow(job_id)
       })
       .catch((cause: unknown) => {
         if (isStale()) return
@@ -146,9 +205,10 @@ export function useRenderJob(
 
     return () => {
       stopped = true
+      unfollow?.()
       if (timer) clearTimeout(timer)
     }
   }, [slug, params, version])
 
-  return { job, rendering, error, busy, settledFor }
+  return { job, rendering, error, busy, settledFor, stage }
 }

@@ -62,4 +62,9 @@ describe('Preview', () => {
     expect(screen.queryByTestId('render-notes')).not.toBeInTheDocument()
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
+
+  it('names the step a running render is on (#267)', () => {
+    render(<Preview job={undefined} rendering stage="solids" />)
+    expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')
+  })
 })

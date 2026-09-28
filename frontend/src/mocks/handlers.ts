@@ -46,7 +46,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
-import { realtimeHandler } from './realtime'
+import { emitRealtime, realtimeHandler } from './realtime'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -103,6 +103,49 @@ const state = {
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
+}
+
+/** Milliseconds a mock render spends pending, then running. */
+export const MOCK_JOB_STEP_MS = 15
+
+/**
+ * #267 — a mock render moves on by itself, as a real one does, and announces each
+ * state over the mock socket (`emitRealtime`), as `render/jobs.py` publishes it.
+ * `GET /jobs/:id` only reports; `polls` counts those reads.
+ */
+function runJob(jobId: string): void {
+  const announce = (kind: string) => {
+    const job = state.jobs.get(jobId)
+    if (job) emitRealtime(kind, [`job:${jobId}`], { job_id: jobId, slug: job.slug })
+  }
+  setTimeout(() => {
+    const job = state.jobs.get(jobId)
+    if (!job || job.status !== 'pending') return
+    job.status = 'running'
+    job.log_tail = ['Compiling design (CSG Tree generation)...']
+    announce('job.running')
+    emitRealtime('job.progress', [`job:${jobId}`], { job_id: jobId, slug: job.slug, stage: 'render' })
+    setTimeout(() => {
+      if (state.jobs.get(jobId) !== job || job.status !== 'running') return
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
+        job.status = 'failed'
+        job.error = 'openscad exited with 1'
+        job.log_tail = fixtures.OPENSCAD_LOG_TAIL
+        announce('job.failed')
+        return
+      }
+      job.status = 'done'
+      job.bbox_mm = bboxOf(job.params ?? {})
+      job.colors = colorsOf(job.slug, job.params ?? {})
+      job.preview_url = `${base}/jobs/${job.id}/preview.glb`
+      job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
+      job.notes =
+        String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME
+          ? fixtures.TEMPLATE_NOTES
+          : []
+      announce('job.done')
+    }, MOCK_JOB_STEP_MS)
+  }, MOCK_JOB_STEP_MS)
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -1313,6 +1356,7 @@ export const handlers = [
       log_tail: [],
       polls: 0,
     })
+    runJob(jobId)
     return HttpResponse.json(
       { job_id: jobId, status_url: `${base}/jobs/${jobId}` },
       { status: 202 },
@@ -1373,28 +1417,7 @@ export const handlers = [
   http.get(`${base}/jobs/:id`, ({ params }) => {
     const job = state.jobs.get(String(params['id']))
     if (!job) return problem(404, 'Job not found')
-
     job.polls += 1
-    if (job.polls === 1) {
-      job.status = 'running'
-      job.log_tail = ['Compiling design (CSG Tree generation)...']
-      return HttpResponse.json(jobView(job))
-    }
-
-    if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.FAILING_NAME) {
-      job.status = 'failed'
-      job.error = 'openscad exited with 1'
-      job.log_tail = fixtures.OPENSCAD_LOG_TAIL
-      return HttpResponse.json(jobView(job))
-    }
-
-    job.status = 'done'
-    job.bbox_mm = bboxOf(job.params ?? {})
-    job.colors = colorsOf(job.slug, job.params ?? {})
-    job.preview_url = `${base}/jobs/${job.id}/preview.glb`
-    job.log_tail = ['Geometries in cache: 12', 'Total rendering time: 0:00:00.412']
-    job.notes =
-      String(job.params?.['name'] ?? '').toLowerCase() === fixtures.NOTED_NAME ? fixtures.TEMPLATE_NOTES : []
     return HttpResponse.json(jobView(job))
   }),
 

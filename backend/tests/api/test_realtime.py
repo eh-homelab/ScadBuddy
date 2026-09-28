@@ -19,6 +19,7 @@ from scadbuddy.core.events import (
     FontInstalled,
     InProcessEventBus,
     JobEvent,
+    JobProgress,
     LibraryRemoved,
     ModelEvent,
     OutputEvent,
@@ -203,6 +204,7 @@ def test_origin_allowed(origin: str | None, public_url: str | None, allowed: boo
     ("event", "topics"),
     [
         (JobEvent(kind="job.running", job_id=JOB_ID, slug="demo"), [f"job:{JOB_ID}"]),
+        (JobProgress(job_id=JOB_ID, slug="demo", stage="solids"), [f"job:{JOB_ID}"]),
         (
             PrintEvent(kind="print.progress", output_id=OUTPUT_ID, slug="demo"),
             [f"print:{OUTPUT_ID}"],
