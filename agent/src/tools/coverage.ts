@@ -22,6 +22,33 @@ export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [
       "Uploads the 3D viewer's canvas capture. An agent has no canvas; a browser_* tool driving the open tab " +
       'can (#254, #266).',
   },
+  // #477's media proxy: each route streams a Bambuddy archive's bytes (with
+  // Range) to the browser. An agent reads the archive's metadata through the
+  // print tools; the media itself is for the UI to display, not tool output.
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/thumbnail',
+    reason: "Streams the print's thumbnail image to the browser (#477 media proxy); not tool output.",
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/plates/{index}/thumbnail',
+    reason: "Streams one plate's slicer image to the browser (#477 media proxy); not tool output.",
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/photos/{filename}',
+    reason: 'Streams a photo of the print to the browser (#477 media proxy); not tool output.',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/timelapse',
+    reason: 'Streams the timelapse video with Range support to the browser (#477 media proxy); not tool output.',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/files/sliced',
+    reason: 'Streams the sliced file that was printed to the browser as a download (#477 media proxy).',
+  },
+  {
+    operation: 'GET /api/v1/prints/{archive_id}/files/source',
+    reason: 'Streams the slicer project 3MF to the browser as a download (#477 media proxy).',
+  },
 ]
 
 /**
