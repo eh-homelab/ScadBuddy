@@ -16,8 +16,10 @@
 #     bed) is at least half its height wide in every direction, and the empty
 #     cup's centre of mass sits over it with at least 25 degrees of tip
 #     margin
-#   - the name is flush: its text part reaches the front face exactly, and
-#     `NOTE:` lines report every clamp
+#   - the name is flush: its text part reaches the front face exactly; it
+#     is centred on the piece and at text_z, fits inside the face box
+#     (face_w x face_h) and fills it in one direction; `NOTE:` lines report
+#     every clamp
 #
 # The checking runs on the host with python3 and the standard library.
 set -euo pipefail
@@ -369,6 +371,29 @@ for line in open(os.path.join(OUT, "cases.txt")):
             mine = [v for v in tv if abs(v[0] - cx) <= (cup_x if kind == "cup" else L) / 2 + 1 and abs(v[1] - cy) <= front + 1]
             check(name, len(mine) > 0 and abs(min(v[1] for v in mine) - (cy - front)) <= 1e-3,
                   "%s name flush with the front face (y %.3f == %.3f)" % (kind, min(v[1] for v in mine) if mine else 0, cy - front))
+            if not mine:
+                continue
+            # Fitted to the face (face_w / face_h / text_z in model.scad):
+            # centred on the piece and on text_z, never wider than face_w or
+            # taller than face_h, and filling one of the two.
+            h = cup_h if kind == "cup" else tray_h
+            if kind == "cup":
+                fwid = (W / math.sqrt(3) * 0.8 if p["shape"] == "hex" else (W - 8) * 0.9 if p["shape"] == "square" else W * 0.6)
+            else:
+                c = min(TW / 2 * math.tan(math.radians(30)), L / 4)
+                fwid = ((L - 2 * c) * 0.85 if p["shape"] == "hex" else (L - 8) * 0.9 if p["shape"] == "square"
+                        else max((L - TW) * 0.9, TW * 0.6))
+            fhgt = min(p["text_size"], 0.8 * p["ring_height"] if rings else h * (0.4 if kind == "cup" else 0.6))
+            tz = rr + (ring_count(h) // 2) * p["ring_height"] if rings else h / 2
+            x0, x1 = min(v[0] for v in mine), max(v[0] for v in mine)
+            z0, z1 = min(v[2] for v in mine), max(v[2] for v in mine)
+            # valign=center centres the glyphs' box, and the fit bar is centred
+            # on it, so the text's middle is text_z; allow for glyph asymmetry.
+            check(name, abs((x0 + x1) / 2 - cx) <= 0.05 * fwid and abs((z0 + z1) / 2 - tz) <= 0.15 * fhgt,
+                  "%s name centred at x %.1f z %.1f (piece x %.1f, text_z %.1f)" % (kind, (x0 + x1) / 2, (z0 + z1) / 2, cx, tz))
+            check(name, x1 - x0 <= fwid + 0.05 and z1 - z0 <= fhgt + 0.05
+                  and (x1 - x0 >= 0.97 * fwid or z1 - z0 >= 0.6 * fhgt),
+                  "%s name %.1f x %.1f mm fits the %.1f x %.1f mm face" % (kind, x1 - x0, z1 - z0, fwid, fhgt))
 
 if failures:
     print("\nFAILED: %d check(s)" % len(failures))
