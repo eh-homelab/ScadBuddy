@@ -1272,6 +1272,7 @@ The page keeps `values` (params) exactly as today and gains `extra`, which holds
   // api/client.ts
   api.render(slug: string, inputs: JsonObject, version?: string, supersedes?: string)
   api.createOutput(slug: string, jobId: string, name?: string, inputs?: JsonObject)
+  // phase 4 (#427, Task 8) appends `index?: number` (a pipeline job's Nth output), sent only when defined
   api.uiFileUrl(slug: string, version: string | undefined, path: string): string
   // lib/useRenderJob.ts
   useRenderJob(slug, params, version, extra: InputsExtra = NO_EXTRA): RenderState
@@ -3747,6 +3748,8 @@ Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 12. **CSP.** §9 decides that template code is not sandboxed and names no CSP. The brief asks for one, so the plan adds only two things. (a) The page policy stops cross-origin script loading and fetch/XHR/subresource beacons, except Google Fonts style and font files, which the font picker needs. (b) `default-src 'none'; sandbox` on served `ui/` files means none can run as a document. Neither stops same-origin API calls with the user's session (settings, printing, `/api/v1/ai/credentials`), reading the DOM through `root.host`, or exfiltration by navigation, `window.open` or WebRTC. There is no `frame-ancestors`, because Bambuddy's framing origin is not known.
 13. **Phase 1 addendum's "phase 2 migration that drops `params`".** Phase 2 does not drop `render_jobs.params`. `JobStatus.inputs` falls back to `{"params": job.params}` for rows the legacy queue inserted with `inputs = '{}'`, so no second backfill is needed.
 14. **The agent writes inputs (§4.3).** The service tool `render_model` writes full inputs (Task 11). The in-page browser agent reads them (`get_params.inputs`, Task 8) but writes only `params` through its existing tools. An in-page tool that writes UI state is left out, because no phase 2 template needs one.
+
+15. **`createOutput` gains a trailing `index?` in phase 4.** Phase 4's pipelines can write several outputs per job; its Task 8 appends `index?: number` to this signature (sent in the body only when defined), so every phase 2 call stays as written here.
 
 ## Self-review notes
 
