@@ -88,8 +88,25 @@ class MemoryPrintLog:
     async def since(self, cutoff: datetime) -> list[str]:
         return [output_id for output_id, at in self._at.items() if at >= cutoff]
 
+    async def forget(self, output_id: str) -> None:
+        self._at.pop(output_id, None)
+
     async def aclose(self) -> None:
         return None
+
+
+class FlakyLog(MemoryPrintLog):
+    """A log whose database drops out for the first ``failures`` reads."""
+
+    def __init__(self, failures: int, at: dict[str, datetime]) -> None:
+        super().__init__(at)
+        self.failures = failures
+
+    async def printed_at(self, output_id: str) -> datetime | None:
+        if self.failures > 0:
+            self.failures -= 1
+            raise OSError("connection lost")
+        return await super().printed_at(output_id)
 
 
 @pytest.fixture
@@ -223,22 +240,80 @@ def test_an_unexpected_error_does_not_end_the_watch(paths: DataPaths) -> None:
     assert asyncio.run(scenario()).reads == 2
 
 
-@pytest.mark.parametrize(
-    "printed_at", [None, NOW - timedelta(hours=25)], ids=["never-printed", "too-old"]
-)
-def test_a_print_that_is_not_live_is_not_read(
-    paths: DataPaths, printed_at: datetime | None
-) -> None:
+def test_a_watch_on_an_unrecorded_print_reads_it(paths: DataPaths) -> None:
+    """Sent before the watcher existed, or recorded without a database: a watch (from
+    a send or from someone reading its progress) still follows it."""
+
     async def scenario() -> Script:
         write_output(paths)
-        read = Script(progress("running"))
-        log = MemoryPrintLog({OUTPUT: printed_at} if printed_at else {})
-        watcher, _ = watcher_for(paths, read, prints=log)
+        read = Script(progress("done", settled=True))
+        watcher, _ = watcher_for(paths, read, prints=MemoryPrintLog())
         watcher.watch(OUTPUT)
         await until_idle(watcher)
         return read
 
-    assert asyncio.run(scenario()).reads == 0
+    assert asyncio.run(scenario()).reads == 1
+
+
+def test_a_print_started_too_long_ago_is_not_resumed(paths: DataPaths) -> None:
+    async def scenario() -> frozenset[str]:
+        write_output(paths)
+        log = MemoryPrintLog({OUTPUT: NOW - timedelta(hours=25)})
+        watcher, _ = watcher_for(paths, Script(progress("running")), prints=log)
+        await watcher.start()
+        watching = watcher.watching
+        await watcher.aclose()
+        return watching
+
+    assert asyncio.run(scenario()) == frozenset()
+
+
+def test_a_long_print_that_keeps_moving_is_followed_past_the_age_limit(
+    paths: DataPaths,
+) -> None:
+    async def scenario() -> Script:
+        write_output(paths)
+        clock = [NOW]
+        stages = [progress("running", done=n) for n in range(4)]
+        read = Script(*stages, progress("done", settled=True, done=4))
+
+        async def reading(meta: OutputMeta) -> PrintProgress | None:
+            clock[0] += timedelta(hours=10)  # each read is ten hours later
+            return await read(meta)
+
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, _ = watcher_for(paths, reading, prints=log, max_age=timedelta(hours=24))
+        watcher.now = lambda: clock[0]
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return read
+
+    # 50 hours after it started, still followed: it moved at every read.
+    assert asyncio.run(scenario()).reads == 5
+
+
+def test_a_database_blip_does_not_end_the_watch(paths: DataPaths) -> None:
+    async def scenario() -> Script:
+        write_output(paths)
+        read = Script(progress("done", settled=True))
+        watcher, _ = watcher_for(paths, read, prints=FlakyLog(2, {OUTPUT: NOW}))
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return read
+
+    assert asyncio.run(scenario()).reads == 1
+
+
+def test_a_settled_print_is_forgotten_so_no_rescan_reads_it_again(paths: DataPaths) -> None:
+    async def scenario() -> list[str]:
+        write_output(paths)
+        log = MemoryPrintLog({OUTPUT: NOW})
+        watcher, _ = watcher_for(paths, Script(progress("done", settled=True)), prints=log)
+        watcher.watch(OUTPUT)
+        await until_idle(watcher)
+        return await log.since(NOW - timedelta(hours=24))
+
+    assert asyncio.run(scenario()) == []
 
 
 def test_a_deleted_output_ends_the_watch(paths: DataPaths) -> None:
@@ -431,18 +506,21 @@ def test_the_postgres_print_log_keeps_the_latest_start(pg_conninfo: str) -> None
     with psycopg.connect(pg_conninfo, autocommit=True) as conn:
         migrate(conn)
 
-    async def scenario() -> tuple[datetime | None, datetime | None, list[str]]:
+    async def scenario() -> tuple[datetime | None, datetime | None, list[str], list[str]]:
         log = PgPrintLog(pg_conninfo)
         try:
             await log.record(OUTPUT, NOW - timedelta(hours=30))
             await log.record(OUTPUT, NOW)
             await log.record("e" * 32, NOW - timedelta(hours=30))
+            recent = await log.since(NOW - timedelta(hours=24))
+            await log.forget(OUTPUT)
             return (
                 await log.printed_at(OUTPUT),
                 await log.printed_at("f" * 32),
+                recent,
                 await log.since(NOW - timedelta(hours=24)),
             )
         finally:
             await log.aclose()
 
-    assert asyncio.run(scenario()) == (NOW, None, [OUTPUT])
+    assert asyncio.run(scenario()) == (None, None, [OUTPUT], [])

@@ -315,6 +315,7 @@ async def get_progress(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     observer: PrintProgressDep,
+    watcher: PrintWatcherDep,
 ) -> PrintProgress | None:
     """Follow whichever of Bambuddy's two routes this output last took (#89).
 
@@ -331,6 +332,11 @@ async def get_progress(
     async with client_for(store.load()) as client:
         progress = await progress_for(client, meta)
     observer.observe(meta, progress)
+    # Someone is looking at a print that is still moving: make sure it is followed
+    # (#268). The watcher may not be, after a restart without a database, for a print
+    # sent before the watcher existed, or once it gave up on a quiet print.
+    if progress is not None and not progress.settled:
+        watcher.watch(meta.id)
     return progress
 
 

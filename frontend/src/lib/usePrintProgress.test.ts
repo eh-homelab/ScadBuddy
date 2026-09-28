@@ -119,7 +119,7 @@ describe('usePrintProgress', () => {
   })
 
   describe('following a print (#268)', () => {
-    it('reads again on each event for the print, and never on a timer while the socket is up', async () => {
+    it('reads again on each event for the print, and not on the 2 s timer while the socket is up', async () => {
       read.mockResolvedValue(fixtures.pipelineProgress)
       const { result } = renderHook(() => usePrintProgress(OUTPUT_A, true))
       await settle()
@@ -133,6 +133,16 @@ describe('usePrintProgress', () => {
       expect(read).toHaveBeenCalledTimes(2)
       expect(result.current.polling).toBe(false)
       expect(realtime.following()).toEqual([])
+    })
+
+    it('reads every 30 s while the socket is up, in case no event is coming', async () => {
+      read.mockResolvedValue(fixtures.pipelineProgress)
+      renderHook(() => usePrintProgress(OUTPUT_A, true))
+      await settle()
+      await tick(29_000)
+      expect(read).toHaveBeenCalledTimes(1)
+      await tick(2_000)
+      expect(read).toHaveBeenCalledTimes(2)
     })
 
     it('polls every 2 s while the socket is unavailable', async () => {

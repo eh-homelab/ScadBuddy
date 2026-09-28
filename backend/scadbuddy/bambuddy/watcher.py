@@ -31,7 +31,17 @@ Lifecycle
 - :meth:`PrintWatcher.start` resumes every output printed within ``MAX_AGE`` (from
   the log), so a restart does not lose a print. It rescans every
   ``RESCAN_INTERVAL``, so a print another replica was watching when it died is
-  picked up.
+  picked up. A print that settles, 404s or whose output is deleted is forgotten, so
+  no rescan reads it again.
+- The progress route calls :meth:`PrintWatcher.watch` for a print that has not
+  settled, so someone looking at a print brings its watcher back: one sent before
+  the watcher existed, one a restart without a database forgot, one that went quiet.
+- ``MAX_AGE`` counts from the latest of the print's start, the watch or its last
+  poke, and the last change seen: a long print that keeps moving is followed to the
+  end, and a forgotten quiet one is not followed for ever.
+- Until the Postgres event bus (#374), ``print.*`` events stay in the process that
+  follows the print. A UI on another replica still sees the print move through the
+  dialog's 30 s backstop read (``frontend/src/lib/usePrintProgress.ts``).
 - With ``SCADBUDDY_DATABASE_URL`` set, the log is the ``print_watches`` table
   (``render/pg_store.py`` migration 3) and a Postgres session advisory lock makes
   sure one replica follows each print (:class:`WatchLock`). There is no other store
@@ -93,6 +103,8 @@ class PrintLog(Protocol):
     async def printed_at(self, output_id: str) -> datetime | None: ...
 
     async def since(self, cutoff: datetime) -> list[str]: ...
+
+    async def forget(self, output_id: str) -> None: ...
 
     async def aclose(self) -> None: ...
 
@@ -158,6 +170,11 @@ class PgPrintLog:
             )
             rows = await cursor.fetchall()
         return [row[0] for row in rows]
+
+    async def forget(self, output_id: str) -> None:
+        async with self._session.lock:
+            conn = await self._session.connection()
+            await conn.execute("DELETE FROM print_watches WHERE output_id = %s", (output_id,))
 
     async def aclose(self) -> None:
         await self._session.aclose()
@@ -353,22 +370,44 @@ class PrintWatcher:
             with contextlib.suppress(Exception):
                 await asyncio.shield(self.lock.release(output_id))
 
+    async def _done(self, output_id: str) -> None:
+        """The print is over (settled, gone, or never was): stop resuming it."""
+        if self.prints is None:
+            return
+        try:
+            await self.prints.forget(output_id)
+        except Exception:
+            # The next rescan reads it once more and forgets it then.
+            logger.exception("could not forget a finished print", extra={"output_id": output_id})
+
     async def _loop(self, output_id: str) -> None:
         interval = self.min_interval
         last_failure: tuple[int, str] | None = None
-        # With no log, the print's age counts from the watch (or the last new print).
-        began = self.now()
+        # The age limit counts from the latest of: the print's start, this watch or its
+        # last poke (a new print, or someone reading its progress), and the last change
+        # seen. A long print that keeps moving, or one someone is looking at, is
+        # followed to the end; a forgotten quiet one is not followed forever.
+        active = self.now()
         while True:
             # Waits first: the send or run that started the print answered with its
             # own state, and the UI reads once when it subscribes.
             if await self._wait(output_id, interval):
-                began = self.now()
-            printed_at = began if self.prints is None else await self.prints.printed_at(output_id)
-            if printed_at is None or self.now() - printed_at > self.max_age:
+                active = self.now()
+            printed_at: datetime | None = None
+            if self.prints is not None:
+                try:
+                    printed_at = await self.prints.printed_at(output_id)
+                except Exception:
+                    # The database is briefly away: keep watching, slowly.
+                    logger.exception("could not read the print log", extra={"output_id": output_id})
+                    interval = self.error_interval
+                    continue
+            if self.now() - max(active, printed_at or active) > self.max_age:
                 return
             try:
                 meta = await asyncio.to_thread(self.outputs.get, output_id)
             except OutputNotFoundError:
+                await self._done(output_id)
                 return
             try:
                 progress = await self.read(meta)
@@ -381,6 +420,7 @@ class PrintWatcher:
                         PrintEvent(kind="print.progress", output_id=meta.id, slug=meta.slug),
                     )
                 if error.status == 404:
+                    await self._done(output_id)
                     return
                 interval = self.error_interval
                 continue
@@ -392,5 +432,8 @@ class PrintWatcher:
             last_failure = None
             changed = self.observer.observe(meta, progress)
             if progress is None or progress.settled:
+                await self._done(output_id)
                 return
+            if changed:
+                active = self.now()
             interval = self.min_interval if changed else min(self.max_interval, interval * 2)

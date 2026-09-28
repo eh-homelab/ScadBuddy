@@ -5,6 +5,13 @@ import { getRealtime } from './realtime'
 
 /** Only while the realtime socket is unavailable (#268): otherwise events drive the reads. */
 const POLL_MS = 2000
+/**
+ * While the socket is up, one read at least this often anyway: the watcher's longest
+ * wait (`MAX_INTERVAL`). A dialog then never freezes on a print no watcher here is
+ * following (another replica holds it and, until #374, its events stay there; or the
+ * watcher stopped), and each read re-arms the watcher (the progress route).
+ */
+const LIVE_BACKSTOP_MS = 30_000
 
 export interface PrintProgressState {
   /** The last answer for this output, or `null` when it has never been printed. */
@@ -18,7 +25,8 @@ export interface PrintProgressState {
  * Follows a print to its queue entries (#89) until the backend says it has settled.
  * #268: the backend's own watcher (`bambuddy/watcher.py`) follows the print and
  * publishes `print.*` on `print:<output id>`; this reads once now and once per
- * event, and polls every 2 s only while the realtime socket is unavailable. A
+ * event, polls every 2 s while the realtime socket is unavailable, and reads every
+ * 30 s regardless (`LIVE_BACKSTOP_MS`). A
  * sibling of `useRenderJob`, superseded by generation, cleared on unmount.
  *
  * Three things about the backend's answer decide when this stops, and none of them can
@@ -53,6 +61,7 @@ export function usePrintProgress(
     let unfollow: (() => void) | undefined
     let stopped = false
     let finished = false
+    let lastRead = 0
     let reading = false
     let again = false
 
@@ -80,6 +89,7 @@ export function usePrintProgress(
         return
       }
       reading = true
+      lastRead = Date.now()
       try {
         const next = await api.getPrintProgress(id)
         if (isStale()) return
@@ -105,7 +115,9 @@ export function usePrintProgress(
     const fallback = () => {
       timer = setTimeout(() => {
         if (finished || isStale()) return
-        if (realtime.status === 'unavailable') void read(id)
+        if (realtime.status === 'unavailable' || Date.now() - lastRead >= LIVE_BACKSTOP_MS) {
+          void read(id)
+        }
         fallback()
       }, POLL_MS)
     }
