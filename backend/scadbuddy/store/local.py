@@ -50,6 +50,19 @@ class LocalBlobStore:
     def touched_at(self, key: str) -> float:
         return self._path(key).stat().st_mtime
 
+    async def fetch(self, key: str) -> bool:
+        # One volume: the directory is the blob.
+        return self.exists(key)
+
+    async def publish(self, key: str, *, scope: BlobScope) -> None:
+        return None
+
+    async def indexed_sha(self, key: str) -> str | None:
+        return None
+
+    async def publish_fresh(self, key: str, *, scope: BlobScope, expected: str | None) -> None:
+        return None
+
 
 _OBJECT = re.compile(r"(piece|snapshot|asset|font)/[0-9a-f]{64}")
 _CHUNK = 1 << 20
