@@ -3,18 +3,22 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
-import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { DEFAULT_STATE_DIR, pluginCacheDir } from './harness/options.js'
 import { probeChromiumSandbox } from './harness/headlessSandbox.js'
 import { ensureStateDirs, StateDirError, sweepBrowserDirs } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
+import { GitFetcher } from './plugins/packages/git.js'
+import { loadPackagesForRun, PackageInstaller } from './plugins/packages/install.js'
+import { PackageStore } from './plugins/packages/store.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
@@ -95,6 +99,12 @@ const database = config.databaseUrl
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
+// OIDC for /mcp (#262): the configuration in `ai_settings`, one verifier with
+// its metadata and JWKS caches for the process.
+const oidcRepo = settings
+  ? new SettingsOidcConfigRepo(settings, (detail) => console.error(`mcp auth: ${detail}`))
+  : undefined
+const oidcProvider = new OidcProvider()
 const plugins = database ? new PluginStore(database.sql) : undefined
 // Plugin traffic (connection tests, and each session turn's enabled plugins)
 // goes through this loopback forwarder (plugins/forwarder.ts).
@@ -107,6 +117,13 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
+// files under <state dir>/plugins are a cache, rebuilt from the pin and
+// verified against its content hash before each load (plugins/packages/).
+// Each session turn loads the enabled ones (`packagePlugins` below).
+const pluginPackages = database ? new PackageStore(database.sql) : undefined
+const packageInstaller = new PackageInstaller({ fetcher: new GitFetcher(), cacheRoot: pluginCacheDir(paths) })
+
 // One store for Settings (routes/mcpTokens.ts) and /mcp.
 const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
@@ -146,6 +163,8 @@ const sessions =
                 forwardForRun(await loadEnabledPlugins(plugins, kek.ok ? kek.kek : undefined), pluginForwarder),
             }
           : {}),
+        // Enabled plugin packages (#297), materialised from their pins, per turn.
+        ...(pluginPackages ? { packagePlugins: () => loadPackagesForRun(pluginPackages, packageInstaller) } : {}),
         // The headless browser (#349): on for a turn only when the
         // `headless_browser_enabled` setting is true (routes/headlessBrowser.ts).
         // It may open only this origin, which serves the SPA.
@@ -170,6 +189,8 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  pluginPackages,
+  packageInstaller,
   settings,
   tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
@@ -200,10 +221,18 @@ const app = createApp({
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
-    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
     tokens,
-    authSettings: () => DEFAULT_MCP_AUTH,
+    // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
+    // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
+    // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
+    authSettings: async () => {
+      const oidc = await oidcRepo?.get()
+      return oidc?.enabled ? { ...DEFAULT_MCP_AUTH, mode: 'oidc', oidc } : DEFAULT_MCP_AUTH
+    },
+    oidc: oidcProvider,
+    publicUrl: config.publicUrl,
   },
+  mcpOidc: { repo: oidcRepo, provider: oidcProvider, publicUrl: config.publicUrl },
 })
 
 const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {

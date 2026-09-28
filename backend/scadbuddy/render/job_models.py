@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
@@ -11,7 +11,18 @@ from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox
 from scadbuddy.render.schema import ParamValue
 
-JobState = Literal["pending", "running", "done", "failed"]
+JobState = Literal["pending", "running", "done", "failed", "cancelled"]
+JobTableKind = Literal["render", "arrange"]
+StepState = Literal["pending", "running", "done", "failed"]
+
+
+class StepInfo(BaseModel):
+    """One row of `render_jobs.steps`: what `ctx.progress` writes (spec §3.2)."""
+
+    name: str
+    state: StepState = "pending"
+    done: int | None = None
+    total: int | None = None
 
 
 class PartInfo(BaseModel):
@@ -87,6 +98,17 @@ class Job(BaseModel):
     #: result to live on. Stored beside `diagnostics`, for the same reason.
     warnings: list[str] = Field(default_factory=list)
     result: JobResult | None = None
+    #: Which workflow `render-<id>` runs (spec §3.4): a render, or (phase 5) an arrange.
+    kind: JobTableKind = "render"
+    #: Template-owned inputs (spec §4.3). For a params-only template, `{"params": …}`;
+    #: `params` is kept beside it through phase 1 and dropped by phase 2's migration.
+    inputs: dict[str, Any] = Field(default_factory=dict)
+    #: sha256 of the pipeline source `load_pipeline` recorded, or "default" (§3.2).
+    pipeline_version: str = "default"
+    steps: list[StepInfo] = Field(default_factory=list)
+    workflow_id: str | None = None
+    #: Submitters still waiting on this job (coalesced identical requests).
+    claims: int = 1
     #: Which try this is, as the store that handed the job to a worker numbered it.
     #: Not on the wire: it is how `finish` tells the attempt that still holds a job
     #: from one whose lease was reaped and retried.

@@ -339,7 +339,8 @@ in one image. That is not recommended, and is left out unless someone needs it.
 
 ### 4.2 Routing: at the ingress (recommended)
 
-The ingress routes `/mcp` and `/api/v1/ai/*` to the agent container, and everything
+The ingress routes `/mcp`, `/api/v1/ai/*` and `/.well-known/oauth-protected-resource`
+(with its sub-paths; `oidc` mode's metadata, #262) to the agent container, and everything
 else, including the UI's realtime socket `/api/v1/ws`, to the backend. `/api/v1/ai/*`
 is a sub-path of the backend's `/api/v1/*`, so **the agent's paths must take precedence**:
 longest-prefix match, or explicit rule priority. A "first rule starting with `/api/v1/`"
@@ -678,7 +679,40 @@ settings write, so it needs approval.
 - **`oidc` (#262).** `/mcp` becomes an OAuth 2.1 resource server per the
   [MCP authorization spec][mcp-auth]: protected-resource metadata, and JWTs validated
   against the IdP's JWKS. Bearer tokens keep working alongside it. The mode can't be
-  switched to `oidc` until a discovery test against the issuer passes.
+  switched to `oidc` until a discovery test against the issuer passes. As built
+  (`agent/src/auth/oidc.ts`), following the revision the pinned MCP SDK implements
+  ([2025-11-25][mcp-auth-2025-11-25]; `@modelcontextprotocol/sdk` 1.30.x,
+  `LATEST_PROTOCOL_VERSION`):
+  - **Discovery.** Protected Resource Metadata ([RFC 9728][rfc9728]) at
+    `/.well-known/oauth-protected-resource` and at the path-inserted
+    `/.well-known/oauth-protected-resource/mcp` (§3.1), naming the configured issuer
+    as the only authorization server. Every 401 carries
+    `WWW-Authenticate: Bearer realm="scadbuddy", resource_metadata="…"` (RFC 9728
+    §5.1). In `bearer` and `disabled` mode neither is served nor named.
+  - **Resource and audience.** The resource URI is the origin of `SCADBUDDY_PUBLIC_URL`
+    plus `/mcp`, never the request's `Host`. A token's `aud` must contain it
+    ([RFC 8707][rfc8707]), or an operator-set audience for IdPs that cannot put a URL
+    there. Without a public URL, JWTs are refused and OIDC can't be enabled.
+  - **Validation.** Signature by a key of the issuer's JWKS; `alg` on an allowlist
+    (default `RS256`, `ES256`; `none` and HMAC can never be allowed) checked before
+    any key is fetched; `iss` equal to the configured issuer; `exp` required, `nbf` and
+    `iat` checked, 30 s leeway; `sub` required; `typ`, when present, `at+jwt` or `JWT`
+    ([RFC 9068][rfc9068]). Errors per [RFC 6750][rfc6750] §3.1: `invalid_token` → 401,
+    `insufficient_scope` → 403 naming the scopes. An IdP that can't be reached is 503,
+    not 401. The token is never passed on: tools call the Python API without it.
+  - **Fetching.** Issuer metadata (RFC 8414 then OIDC Discovery, in the MCP spec's
+    order) and the JWKS go through the egress check of #255 on the connection itself
+    (the socket's DNS lookup returns only the checked addresses), https only (http for
+    loopback), no redirects, 512 KiB, 5 s. Cached 10 minutes; an unknown `kid` forces
+    a JWKS refetch at most every 30 s; a failure is remembered 30 s.
+  - **Scopes to tiers.** `scadbuddy:read|write|outward` by default, renameable, read
+    from `scope`, `scp`, and optionally one more claim (e.g. `groups`). The highest
+    granted tier includes those below it, as for bearer tokens. The principal is
+    `oidc:<sub>`.
+  - **Config** lives in `ai_settings` under `mcp_oidc` (issuer, audience, client ID,
+    scope map, extra claim, algorithms, enabled), edited through
+    `/api/v1/ai/mcp/oidc` and the Settings section "MCP sign-in (OIDC)". Saving with
+    `enabled: true` runs the discovery test first and saves nothing if it fails.
 
 **Stated plainly:** ScadBuddy's UI has no login of its own. Until it does, anyone who
 can reach Settings can change the MCP auth mode, mint tokens or approve actions. MCP
@@ -855,6 +889,11 @@ Each of these is in §3.2 until verified.
 [sdk-hooks]: https://code.claude.com/docs/en/agent-sdk/hooks
 [gateways]: https://code.claude.com/docs/en/llm-gateway
 [mcp-auth]: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+[mcp-auth-2025-11-25]: https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization
+[rfc9728]: https://www.rfc-editor.org/rfc/rfc9728
+[rfc8707]: https://www.rfc-editor.org/rfc/rfc8707
+[rfc6750]: https://www.rfc-editor.org/rfc/rfc6750
+[rfc9068]: https://www.rfc-editor.org/rfc/rfc9068
 [mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
 [mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject

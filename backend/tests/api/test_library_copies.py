@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -386,7 +387,7 @@ def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
 
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
+    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1", "file_hash": None}]]
 
 
 # --- deleting an output --------------------------------------------------------------
@@ -462,3 +463,29 @@ def test_deleting_a_model_forgets_its_outputs_upload_records(
 
     assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
     assert not delete.called
+
+
+@respx.mock
+def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The files are gone by then, so the delete answers 204 and the records are left
+    for a later cleanup rather than a 500 that says the output survived (#522 review)."""
+    output_id = set_up(client, model)
+
+    async def fail(_ids: object) -> None:
+        raise psycopg.OperationalError("the database went away")
+
+    monkeypatch.setattr(upload_store(client), "delete_outputs", fail)
+    links = getattr(client.app.state, STATE_ATTR).print_links  # type: ignore[attr-defined]
+    forgotten: list[object] = []
+
+    async def forget(ids: object) -> None:
+        forgotten.append(ids)
+
+    monkeypatch.setattr(links, "delete_outputs", forget)
+
+    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+    # The upload records' failure does not keep the links serving its archives.
+    assert forgotten == [[output_id]]

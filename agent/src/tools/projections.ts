@@ -1,6 +1,7 @@
 import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkTool } from '@anthropic-ai/claude-agent-sdk'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
+import { z } from 'zod'
 import type { Principal } from '../auth/principal.js'
 import { errorResult, type Progress, runTool, type Tool, type ToolServices } from './registry.js'
 
@@ -73,7 +74,19 @@ export function createHarnessServer(
       sdkTool(
         t.name,
         t.description,
-        t.shape,
+        // A whole z.object, not the raw shape the SDK's types ask for. Given a
+        // raw shape, the server bundled in @anthropic-ai/claude-agent-sdk
+        // 0.3.283 rebuilds the object with its own copy of zod, and that copy
+        // refuses an omitted `.default()` field ("expected nonoptional,
+        // received undefined") instead of filling the default, so e.g.
+        // update_source without `force` never ran. Measured 2026-09-28 by the
+        // eval harness (evals/, test/evals.test.ts); test/projections.test.ts
+        // keeps it fixed. The server accepts any zod schema at runtime
+        // (it validates with the schema's own `safeParseAsync`), and the
+        // listed JSON Schema is unchanged (same test). The cast hides that
+        // from the types, so the same file pins the SDK version: a bump fails
+        // there until someone re-checks this (and drops it if fixed).
+        z.object(t.shape) as unknown as typeof t.shape,
         (args, extra) =>
           runTool(t, args, {
             ...services,
