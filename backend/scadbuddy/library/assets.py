@@ -482,6 +482,30 @@ class AssetStore:
                 self._write_ledger(count + 1, total + len(stored))
         return meta
 
+    def adopt(self, meta: AssetMeta, data: bytes) -> None:
+        """Keep an asset fetched from the blob store exactly as it was stored elsewhere.
+
+        No caps: the upload that created it was checked against them. The bytes must be
+        the id, so a damaged or substituted download never becomes a render's input.
+        """
+        if hashlib.sha256(data).hexdigest() != meta.id or len(data) != meta.size:
+            raise AssetRejectedError(f"the fetched file does not match asset {meta.id}")
+        with self._locked():
+            count, total = self._tracked()
+            had_blob = self.blob_path(meta).is_file()
+            if not had_blob:
+                self._write_ledger(count, total, dirty=True)
+            _write_atomically(self.blob_path(meta), data)
+            _write_atomically(
+                self._meta_path(meta.id),
+                (json.dumps(meta.model_dump(), indent=2) + "\n").encode(),
+            )
+            if not had_blob:
+                self._write_ledger(count + 1, total + len(data))
+
+    def ids(self) -> list[str]:
+        return sorted(self._blobs())
+
     def _last_used(self, asset_id: str, blob: Path) -> float | None:
         """The later of the blob's and the metadata's mtime; None once both are gone."""
         stamps: list[float] = []
@@ -549,6 +573,11 @@ def _write_atomically(path: Path, payload: bytes) -> None:
 
 def _ids_in(data: bytes) -> set[str]:
     return {match.decode("ascii") for match in _ID_IN_TEXT.findall(data)}
+
+
+def asset_ids_in(params: Mapping[str, object]) -> set[str]:
+    """Every asset id a render's parameters could name (as loose as the sweep's scan)."""
+    return _ids_in(json.dumps(params, sort_keys=True).encode())
 
 
 def _ids_in_archive(archive: Path) -> set[str]:

@@ -371,3 +371,16 @@ def test_the_catalogue_thumbnail_is_never_a_sample(model_dir: Path) -> None:
     _ship(model_dir, THUMBNAIL_NAME, "sample-cat.svg")
     assert THUMBNAIL_NAME in NOT_SAMPLES
     assert sample_files(model_dir) == ["sample-cat.svg"]
+
+
+def test_an_adopted_asset_is_stored_as_it_was_and_listed(tmp_path: Path) -> None:
+    from scadbuddy.library.assets import asset_ids_in
+
+    source = AssetStore(tmp_path / "api")
+    meta = source.put(HEART_SVG, "heart.svg")
+    worker = AssetStore(tmp_path / "worker")
+    worker.adopt(meta, source.blob_path(meta).read_bytes())
+    assert worker.get(meta.id) == meta
+    assert worker.ids() == [meta.id]
+    assert worker.usage().count == 1
+    assert asset_ids_in({"logo": meta.id, "n": 2}) == {meta.id}
