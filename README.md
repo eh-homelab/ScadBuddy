@@ -27,7 +27,9 @@ multi-colour rules, connecting Bambuddy and each feature.
   own read-only presets in the `presets` list of its `model.json`
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
-  saved preset, to an editable preset of your own.
+  saved preset, to an editable preset of your own. Saved presets are kept in the
+  database (`SCADBUDDY_DATABASE_URL`); without one, a template's own presets still
+  list but saving one is refused.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -78,9 +80,8 @@ for the project picker).
   Keep it on a trusted network, as you would Bambuddy's slicer sidecar. Do not
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
-  outputs, saved presets (`presets/`, outside the git repository), downloaded
-  fonts and caches. Back up the volume. Settings are in the database, not in
-  `/data`: back that up too. The Bambuddy API key is stored there as plain text
+  outputs, downloaded fonts and caches. Back up the volume. Settings and saved presets are in the
+  database, not in `/data`: back that up too. The Bambuddy API key is stored there as plain text
   (it used to be a 0600 file on the volume), so it is in every database backup;
   supply it with `SCADBUDDY_BAMBUDDY_API_KEY` from a secret if that matters. The
   image carries BOSL2 at the catalogue's ref and copies it into
