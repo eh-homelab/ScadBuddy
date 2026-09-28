@@ -1,8 +1,12 @@
 import { randomBytes } from 'node:crypto'
+import { request as httpRequest } from 'node:http'
+import type { AddressInfo } from 'node:net'
+import { serve } from '@hono/node-server'
 import type { UpgradeWebSocket } from 'hono/ws'
 import { describe, expect, it } from 'vitest'
 import { type AiStatusView, type AppDeps, createApp, statusReason } from '../src/app.js'
 import { originPolicy } from '../src/http/origins.js'
+import { JSON_BODY_MAX } from '../src/routes/guard.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import {
   CONTEXT_MAX,
@@ -144,5 +148,92 @@ describe('the chat socket route', () => {
       headers: { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https', upgrade: 'websocket' },
     })
     expect(res.status).toBe(503)
+  })
+})
+
+describe('body limits on the UI write routes', () => {
+  // Every method throws: a refused body must never reach the manager or the approvals.
+  const untouchable = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error('the route ran')
+      },
+    },
+  ) as SessionManager
+  const UI_WRITE = {
+    host: 'scadbuddy.example',
+    origin: 'https://scadbuddy.example',
+    'x-forwarded-proto': 'https',
+    'content-type': 'application/json',
+  }
+  const big = JSON.stringify({ text: 'x'.repeat(JSON_BODY_MAX) })
+  const paths = [
+    '/api/v1/ai/sessions',
+    '/api/v1/ai/sessions/00000000-0000-4000-8000-000000000000/messages',
+    '/api/v1/ai/sessions/00000000-0000-4000-8000-000000000000/interrupt',
+    '/api/v1/ai/approvals/a1/approve',
+  ]
+
+  it('answers 413 to an oversized body by Content-Length, unread', async () => {
+    const app = createApp(deps({ sessions: untouchable, approvals: untouchable as never }))
+    for (const path of paths) {
+      const res = await app.request(path, {
+        method: 'POST',
+        headers: { ...UI_WRITE, 'content-length': String(big.length) },
+        body: big,
+      })
+      expect(res.status, path).toBe(413)
+      expect(await res.json()).toEqual({ detail: `request body is larger than ${JSON_BODY_MAX} bytes` })
+    }
+  })
+
+  it('answers 413 to a chunked body with no Content-Length once it passes the cap', async () => {
+    const app = createApp(deps({ sessions: untouchable, approvals: untouchable as never }))
+    for (const path of paths) {
+      const chunk = new TextEncoder().encode('x'.repeat(16 * 1024))
+      let sent = 0
+      const body = new ReadableStream<Uint8Array>({
+        pull(controller) {
+          // An endless body: the limit must stop reading it.
+          sent += chunk.length
+          controller.enqueue(chunk)
+        },
+      })
+      const res = await app.request(path, { method: 'POST', headers: UI_WRITE, body, duplex: 'half' } as RequestInit)
+      expect(res.status, path).toBe(413)
+      expect(sent).toBeLessThan(JSON_BODY_MAX * 2)
+    }
+  })
+
+  it('refuses a real chunked upload over HTTP with 413', async () => {
+    const app = createApp(deps({ sessions: untouchable, approvals: untouchable as never }))
+    const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 })
+    await new Promise<void>((resolve) => server.once('listening', () => resolve()))
+    const { port } = server.address() as AddressInfo
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        // No Content-Length: node sends Transfer-Encoding: chunked.
+        const req = httpRequest(
+          { host: '127.0.0.1', port, method: 'POST', path: '/api/v1/ai/sessions', headers: UI_WRITE },
+          (res) => {
+            res.resume()
+            resolve(res.statusCode ?? 0)
+          },
+        )
+        req.on('error', (err) => {
+          // The server may close after answering while we are still writing.
+          if ((err as NodeJS.ErrnoException).code !== 'EPIPE' && (err as NodeJS.ErrnoException).code !== 'ECONNRESET') reject(err)
+        })
+        for (let i = 0; i < 8; i++) req.write('x'.repeat(16 * 1024))
+        req.end()
+      })
+      expect(status).toBe(413)
+    } finally {
+      await new Promise<void>((resolve) => {
+        if ('closeAllConnections' in server) server.closeAllConnections()
+        server.close(() => resolve())
+      })
+    }
   })
 })

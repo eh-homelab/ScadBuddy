@@ -6,7 +6,7 @@ import { MESSAGE_MAX } from '../sessions/clientProtocol.js'
 import { type SessionManager, SessionError, type SessionRecord } from '../sessions/manager.js'
 import { SESSION_STATUSES } from '../sessions/protocol.js'
 import { BROWSER_USER } from './approvals.js'
-import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 // /api/v1/ai/sessions (#300): the same sessions as the chat socket
 // (routes/chat.ts), over plain HTTP, for anything that is not the panel: a
@@ -155,8 +155,12 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     }),
   )
 
+  // Bodies are capped before they are read (guard.ts JSON_BODY_MAX): 413.
+  const limit = jsonBodyLimit()
+
   app.post(
     base,
+    limit,
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, StartBody, {})
       if (!body.ok) return body.response
@@ -176,6 +180,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post(
     `${base}/:id/messages`,
+    limit,
     route('write', async (c, sessions) => {
       const body = await jsonBody(c, SendBody, undefined)
       if (!body.ok) return body.response
@@ -186,6 +191,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post(
     `${base}/:id/interrupt`,
+    limit,
     route('write', async (c, sessions) =>
       c.json({ interrupted: await sessions.interrupt(idOf(c), BROWSER_USER) }),
     ),
@@ -193,6 +199,7 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
 
   app.post(
     `${base}/:id/handoff`,
+    limit,
     route('write', async (c, sessions) =>
       c.json(sessionView(await sessions.handoff(idOf(c), BROWSER_USER, BROWSER_USER))),
     ),

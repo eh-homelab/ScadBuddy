@@ -440,7 +440,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
   | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `?after=` or `Last-Event-ID`, then live |
 
-  Approvals are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  A write body over 64 KiB gets `413` before it is read (`JSON_BODY_MAX`,
+  `agent/src/routes/guard.ts`; the socket caps a frame at 256 KiB). Approvals
+  are decided on the socket or through `/api/v1/ai/approvals`. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
