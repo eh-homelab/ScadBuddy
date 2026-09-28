@@ -828,11 +828,13 @@ export interface paths {
         };
         /**
          * Mesh geometry analysis
-         * @description Printability measurements of the output's closed per-colour solids (#284):
-         *     open and non-manifold edges with their locations, bounding box, bed contact,
-         *     height-to-base ratio, overhang area by angle, and estimates of the thinnest
-         *     wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
-         *     the preview. Computed on first ask and cached beside the output.
+         * @description Printability measurements of the closed per-colour solids on one plate of the
+         *     output (#284): open and non-manifold edges with their locations, bounding box,
+         *     bed contact, height-to-base ratio, overhang area by angle, and estimates of the
+         *     thinnest wall and smallest feature. Coordinates are the model's own (mm, Z up),
+         *     as in the preview. A 3MF with more than one plate (#289) is measured a plate at
+         *     a time; ``plates`` in the result says how many there are. Computed on first ask
+         *     and cached beside the output.
          */
         get: operations["get_output_geometry_api_v1_outputs__output_id__geometry_get"];
         put?: never;
@@ -870,7 +872,7 @@ export interface paths {
         /**
          * The 3MF's plates
          * @description What the print picker offers as ``plate_id`` (#83). ScadBuddy's own renders are
-         *     always one plate, which the picker does not ask about.
+         *     one plate unless the template asks for more (#289).
          */
         get: operations["get_output_plates_api_v1_outputs__output_id__plates_get"];
         put?: never;
@@ -1985,11 +1987,21 @@ export interface components {
             overhangs: components["schemas"]["OverhangBucket"][];
             /** Parts */
             parts: components["schemas"]["PartGeometry"][];
+            /**
+             * Plate
+             * @default 1
+             */
+            plate: number;
+            /**
+             * Plates
+             * @default 1
+             */
+            plates: number;
             smallest_feature?: components["schemas"]["FeatureEstimate"] | null;
             thinnest_wall?: components["schemas"]["WallEstimate"] | null;
             /**
              * Version
-             * @default 1
+             * @default 2
              */
             version: number;
         };
@@ -5478,7 +5490,10 @@ export interface operations {
     };
     get_output_geometry_api_v1_outputs__output_id__geometry_get: {
         parameters: {
-            query?: never;
+            query?: {
+                /** @description The plate to measure (1-based) */
+                plate?: number;
+            };
             header?: never;
             path: {
                 output_id: string;

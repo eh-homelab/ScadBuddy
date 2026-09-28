@@ -608,7 +608,7 @@ def _vertex_bounds(archive: zipfile.ZipFile, names: Sequence[str]) -> np.ndarray
 
 
 @dataclass(frozen=True)
-class _LaidOutPlate:
+class LaidOutPlate:
     """What :func:`replate_3mf` needs of one plate of a written archive."""
 
     index: int
@@ -616,7 +616,7 @@ class _LaidOutPlate:
     object_files: tuple[str, ...]
 
 
-def _laid_out_plates(archive: zipfile.ZipFile) -> list[_LaidOutPlate]:
+def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
     """Each plate of a ScadBuddy archive: its index, its build item's assembly and
     the object files that assembly is made of.
 
@@ -654,9 +654,9 @@ def _laid_out_plates(archive: zipfile.ZipFile) -> list[_LaidOutPlate]:
         # Not a layout this writer produced plate by plate: one plate, placed by its
         # first build item, holding every object file.
         every = tuple(sorted(name for name in names if name.startswith("3D/Objects/")))
-        return [_LaidOutPlate(1, items[0], every)]
+        return [LaidOutPlate(1, items[0], every)]
     return [
-        _LaidOutPlate(index, object_id, components.get(object_id, ()))
+        LaidOutPlate(index, object_id, components.get(object_id, ()))
         for index, object_id in sorted(plates)
     ]
 
@@ -680,7 +680,7 @@ def replate_3mf(
     """
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
-        laid_out = _laid_out_plates(archive)
+        laid_out = laid_out_plates(archive)
         bounds = {
             each.assembly_id: _vertex_bounds(archive, each.object_files)
             for each in laid_out

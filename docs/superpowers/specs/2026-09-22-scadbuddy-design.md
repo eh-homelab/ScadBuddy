@@ -874,6 +874,11 @@ nothing moves (`shrink_to_new_bed == 0`). So:
   value, which it never reads.
 - `replate_3mf` re-places every item on the chosen printer with that printer's
   plate stride, and a `PlateFitError` names the plate that does not fit.
+- The mesh analysis (#284, `GET /outputs/{id}/geometry?plate=k`) measures one
+  plate at a time, reading the plate's parts from its assembly. Every plate is
+  drawn at the model origin, so measuring them together would superimpose
+  geometry that is never on one bed. The result's `plate` and `plates` say which
+  plate it is and how many there are.
 
 Not verified end to end: no Bambu Studio or Bambuddy runs in CI, so the layout
 rests on the source above, and slicing a multi-plate ScadBuddy file through

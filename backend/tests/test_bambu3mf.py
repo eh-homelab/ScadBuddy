@@ -674,11 +674,13 @@ class TestMultiplePlates:
             replate_3mf(path.read_bytes(), plate_for("A1 mini"))
 
     def test_the_geometry_reader_gives_each_part_its_extruders_colour(self, tmp_path: Path) -> None:
-        parts = parts_from_3mf(_write_plates(tmp_path / "maze.3mf", covers=False))
-        assert [(part.name, part.colour) for part in parts] == [
-            ("Color 1", "#FF6AC1"),
-            ("Color 2", "#1F6FEB"),
-            ("Lid", LID),
+        path = _write_plates(tmp_path / "maze.3mf", covers=False)
+        assert [(p.material_index, p.name, p.colour) for p in parts_from_3mf(path)] == [
+            (1, "Color 1", "#FF6AC1"),
+            (2, "Color 2", "#1F6FEB"),
+        ]
+        assert [(p.material_index, p.name, p.colour) for p in parts_from_3mf(path, 2)] == [
+            (3, "Lid", LID),
         ]
 
     def test_cover_images_are_one_set_per_plate_or_none(self, tmp_path: Path) -> None:
