@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import io
 import json
+import os
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -12,8 +14,11 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
+from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
 from tests.api.conftest import MODEL_SLUG, wait_for_job
 
@@ -305,3 +310,135 @@ def test_a_render_refuses_a_file_that_is_not_a_listed_sample(
     response = client.post(f"/api/v1/models/{MODEL_SLUG}/render", json={"params": {"label": value}})
     assert response.status_code == 422, response.text
     assert "label" in response.json()["detail"]
+
+
+# -- caps, usage and the sweep (#296) ----------------------------------------------
+
+
+def _svg(n: int) -> bytes:
+    return (
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{n + 1}" height="10">'
+        f'<path d="M0 0 L{n + 1} 0 L0 10 Z"/></svg>'
+    ).encode()
+
+
+def _age(paths: DataPaths, asset_id: str, seconds: float) -> None:
+    then = time.time() - seconds
+    for path in paths.assets.glob(f"{asset_id}.*"):
+        os.utime(path, (then, then))
+
+
+@pytest.fixture
+def capped_client(settings: Settings, file_model: str) -> Iterator[TestClient]:
+    capped = settings.model_copy(update={"asset_max_count": 1})
+    with TestClient(create_app(capped)) as test_client:
+        yield test_client
+
+
+def test_an_upload_past_the_cap_is_a_problem_naming_the_setting(
+    capped_client: TestClient,
+) -> None:
+    first = _upload(capped_client, _svg(1))
+    refused = capped_client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("b.svg", _svg(2), "image/svg+xml")},
+    )
+    assert refused.status_code == 413, refused.text
+    assert refused.headers["content-type"] == "application/problem+json"
+    problem = refused.json()
+    assert problem["title"] == "Content Too Large"
+    assert "SCADBUDDY_ASSET_MAX_COUNT" in problem["detail"]
+    assert problem["usage"]["count"] == 1
+    assert problem["usage"]["max_count"] == 1
+    # The stored content again is never refused, however full the store is.
+    assert _upload(capped_client, _svg(1), "again.svg")["id"] == first["id"]
+    assert "scadbuddy_assets_rejected_total 1.0" in capped_client.get("/metrics").text
+
+
+def test_usage_is_reported_by_the_api_and_the_metrics(client: TestClient) -> None:
+    assert client.get("/api/v1/assets/usage").json()["count"] == 0
+    stored = _upload(client, _svg(1))
+    size = stored["size"]
+    assert isinstance(size, int)
+    assert client.get("/api/v1/assets/usage").json() == {
+        "count": 1,
+        "bytes": size,
+        "max_count": 10_000,
+        "max_total_bytes": 1_000_000_000,
+    }
+    text = client.get("/metrics").text
+    assert "scadbuddy_assets_stored 1.0" in text
+    assert f"scadbuddy_assets_bytes {float(size)}" in text
+    assert "scadbuddy_assets_max_count 10000.0" in text
+
+
+def test_a_preset_refuses_a_file_value_that_is_not_an_upload(client: TestClient) -> None:
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/presets",
+        json={"name": "Ghost", "params": {"label": "f" * 64}},
+    )
+    assert response.status_code == 422, response.text
+    assert "label" in response.json()["detail"]
+
+
+def test_the_sweep_keeps_what_outputs_presets_and_jobs_use(
+    app: FastAPI, client: TestClient, paths: DataPaths
+) -> None:
+    in_output, in_preset, in_job, unused = (str(_upload(client, _svg(n))["id"]) for n in range(4))
+    render = f"/api/v1/models/{MODEL_SLUG}/render"
+    accepted = client.post(render, json={"params": {"label": in_output}})
+    job = wait_for_job(client, accepted.json()["job_id"])
+    saved = client.post(f"/api/v1/models/{MODEL_SLUG}/outputs", json={"job_id": job["id"]})
+    assert saved.status_code == 201, saved.text
+    preset = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/presets",
+        json={"name": "Heart", "params": {"label": in_preset}},
+    )
+    assert preset.status_code == 201, preset.text
+    # The job and the output are the same render: drop the job, so only the output
+    # keeps `in_output`, and leave a second job as the only thing keeping `in_job`.
+    paths.job_file(job["id"]).unlink()
+    other = client.post(render, json={"params": {"label": in_job}})
+    wait_for_job(client, other.json()["job_id"])
+    for asset_id in (in_output, in_preset, in_job, unused):
+        _age(paths, asset_id, 30 * 86400)
+
+    assert sweep_assets(getattr(app.state, STATE_ATTR)) == [unused]
+
+    for asset_id in (in_output, in_preset, in_job):
+        assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code == 200
+    assert client.get(f"/api/v1/models/{MODEL_SLUG}/assets/{unused}").status_code == 404
+    assert "scadbuddy_assets_swept_total 1.0" in client.get("/metrics").text
+
+
+@pytest.mark.parametrize(("interval", "swept"), [(86400.0, True), (0.0, False)])
+def test_the_boot_sweeps_unless_the_sweep_is_off(
+    settings: Settings, paths: DataPaths, file_model: str, interval: float, swept: bool
+) -> None:
+    with TestClient(create_app(settings)) as first:
+        asset_id = str(_upload(first, _svg(1))["id"])
+    _age(paths, asset_id, 30 * 86400)
+
+    booted = settings.model_copy(update={"asset_sweep_interval": interval})
+    with TestClient(create_app(booted)) as second:
+        found = second.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code
+    assert found == (404 if swept else 200)
+
+
+def test_the_boot_recounts_the_upload_store(
+    app: FastAPI, paths: DataPaths, file_model: str
+) -> None:
+    """A ledger left stale by files changed while the process was down (#390)."""
+    state = getattr(app.state, STATE_ATTR)
+    state.assets.ledger_path.write_text(
+        json.dumps({"count": 42, "bytes": 4242, "dirty": False}), encoding="utf-8"
+    )
+    with TestClient(app) as test_client:
+        usage = test_client.get("/api/v1/assets/usage").json()
+    assert (usage["count"], usage["bytes"]) == (0, 0)
+
+
+def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
+    """One store for the routes and the renders, caps and all (#390)."""
+    state = getattr(app.state, STATE_ATTR)
+    assert state.queue.assets is state.assets

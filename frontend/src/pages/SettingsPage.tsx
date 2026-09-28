@@ -20,6 +20,24 @@ function idValue(id: number | null | undefined): string {
   return id === null || id === undefined ? '' : String(id)
 }
 
+/** Decimal units, as the server's caps are written (1 GB = 1 000 000 000 bytes). */
+function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} B`
+  const units = ['kB', 'MB', 'GB', 'TB']
+  let value = bytes / 1000
+  let unit = 0
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000
+    unit += 1
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`
+}
+
+/** #296 — `used` of `limit`, where a limit of 0 means none. */
+function ofLimit(used: string, limit: number, format: (n: number) => string): string {
+  return limit > 0 ? `${used} of ${format(limit)}` : `${used} (no limit)`
+}
+
 export function SettingsPage() {
   const settingsState = useAsync(() => api.getSettings(), [])
 
@@ -45,6 +63,7 @@ export function SettingsPage() {
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
+  const usage = useAsync(() => api.getAssetUsage(), []).data
   const plateNames = (platesState.data?.plates ?? []).map((plate) => plate.name)
 
   // The pickers need a live Bambuddy, so they are only fetched once one is configured.
@@ -420,6 +439,32 @@ export function SettingsPage() {
             </div>
           </div>
         </section>
+
+        {usage && (
+          <section className="mt-4 rounded-[6px] border border-line bg-surface">
+            <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
+              Uploaded files
+            </h2>
+            <div className="p-4">
+              <dl
+                className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]"
+                data-testid="asset-usage"
+              >
+                <dt className="text-muted">Files</dt>
+                <dd className="sb-num">{ofLimit(String(usage.count), usage.max_count, String)}</dd>
+                <dt className="text-muted">Size</dt>
+                <dd className="sb-num">
+                  {ofLimit(formatBytes(usage.bytes), usage.max_total_bytes, formatBytes)}
+                </dd>
+              </dl>
+              <p className="mt-1.5 text-[12px] text-muted">
+                The SVGs and PNGs attached to file parameters. One that no saved output, preset
+                or render uses is removed once it has gone unused for the sweep&rsquo;s grace
+                period (a week by default). Past either limit, a new upload is refused.
+              </p>
+            </div>
+          </section>
+        )}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">

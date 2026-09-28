@@ -113,6 +113,10 @@ if (overlay_file != "")
   side, because `surface()` gets slow with large images. Other files are refused.
 - The render records the file's SHA-256 with the output's parameters, so
   re-rendering an output uses the same picture.
+- An uploaded file is kept while a saved output, a preset or a render uses it. One
+  that nothing uses is removed after a week (the server's
+  `SCADBUDDY_ASSET_SWEEP_GRACE`). The server also caps how many uploaded files it
+  keeps and their total size; **Settings → Uploaded files** shows both.
 - If OpenSCAD can't open the file, the model still renders without it, and the
   render shows a warning.
 - OpenSCAD itself sees an ordinary string, so the model still works in the OpenSCAD

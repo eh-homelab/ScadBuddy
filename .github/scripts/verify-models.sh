@@ -34,18 +34,28 @@ fi
 
 echo "Verifying ${#slugs[@]} template(s), $JOBS at a time: ${slugs[*]}"
 
-# Force-remove every running container with a bind mount inside $1.
+# Force-remove every running container that template $1's verify.sh started.
 #
 # `timeout` kills verify.sh and its process group, which includes the `docker
 # run` CLI blocked on a render — but killing the CLI does not stop the
 # container: it lives on the daemon, and `--rm` only fires once IT exits. A
 # hung render would keep burning the runner's cores under the templates still
-# running beside it. The scripts start their containers anonymously, so they
-# are found by what they mount: every render bind-mounts the template's own
-# directory (or a directory under it), and no two templates share one. The
-# trailing `/` keeps `name-sign` from matching `name-sign-foo`.
+# running beside it.
+#
+# Every `docker run` in a models/*/verify.sh carries
+# `--label scadbuddy-verify=$SCADBUDDY_VERIFY_LABEL`, which run_one sets to the
+# slug (#302; lint-verify-labels.sh fails CI on an unlabelled one). The label
+# finds the containers that mount nothing, such as the `fc-list` font probe.
+# The bind-mount match after it is a fallback for a container the label
+# missed: every render bind-mounts the template's own directory (or one under
+# it), and no two templates share one. The trailing `/` keeps `name-sign` from
+# matching `name-sign-foo`.
 reap_containers() {
-  local dir="$1" id src
+  local slug="$1" dir="$PWD/models/$1" id src
+  for id in $(docker ps -q --filter "label=scadbuddy-verify=$slug"); do
+    echo "reaping container $id (label scadbuddy-verify=$slug)"
+    docker rm -f "$id" >/dev/null 2>&1 || true
+  done
   for id in $(docker ps -q); do
     while read -r src; do
       case "$src/" in
@@ -65,9 +75,10 @@ run_one() {
   start=$(date +%s)
   rc=0
   # -k: SIGKILL a script that ignores the TERM, so the guard is a hard one.
-  timeout -k 30s "$TIMEOUT" "models/$slug/verify.sh" >"$LOG_DIR/$slug.log" 2>&1 || rc=$?
+  SCADBUDDY_VERIFY_LABEL="$slug" timeout -k 30s "$TIMEOUT" "models/$slug/verify.sh" \
+    >"$LOG_DIR/$slug.log" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ]; then
-    reap_containers "$PWD/models/$slug" >>"$LOG_DIR/$slug.log" 2>&1
+    reap_containers "$slug" >>"$LOG_DIR/$slug.log" 2>&1
   fi
   echo "$rc $(($(date +%s) - start))" >"$LOG_DIR/$slug.result"
   if [ "$rc" -eq 0 ]; then
