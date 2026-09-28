@@ -30,6 +30,7 @@ from scadbuddy.core.config import (
     DEFAULT_RENDER_QUEUE_MAX,
     DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
+    DEFAULT_SOLID_CONCURRENCY,
     Config,
 )
 
@@ -49,6 +50,7 @@ class Settings(BaseSettings):
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
@@ -115,6 +117,7 @@ class Settings(BaseSettings):
             data_dir=self.data_dir,
             render_timeout=self.render_timeout,
             render_concurrency=self.render_concurrency,
+            solid_concurrency=self.solid_concurrency,
             render_queue_max=self.render_queue_max,
             render_queue_timeout=self.render_queue_timeout,
             render_poll_interval=self.render_poll_interval,
