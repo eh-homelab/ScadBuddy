@@ -368,8 +368,18 @@ so a change applies to the next request on every replica, with no restart:
 
 A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
 `disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
-this once, and again after any change to either key. Settings has no route or UI for
-these keys yet (#255), so set them in the database for now. Each value is a JSON
+this once, and again after any change to either key.
+
+Change them in Settings → **MCP authentication** (shown where AI is available, beside
+the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
+choice is "Require an access token" (`bearer`) or "Allow calls without a token"
+(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token
+asks for a confirmation first. `PUT` writes both keys in one transaction, logs
+`mcp auth: set to mode … (was …; from <peer>)`, and is guarded like the other Settings
+writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
+switched on with its own configuration once the discovery check passes (#262). The
+database still works when the UI does not, e.g. to recover. Each value is a JSON
 string:
 
 ```sql

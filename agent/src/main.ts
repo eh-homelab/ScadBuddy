@@ -163,6 +163,7 @@ const app = createApp({
   plugins,
   pluginForwarder,
   tokens: database ? tokens : undefined,
+  aiSettings: settings,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })

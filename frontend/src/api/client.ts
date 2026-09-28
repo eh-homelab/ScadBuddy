@@ -55,7 +55,13 @@ import type {
   UrlImport,
   VersionDiff,
 } from './types'
-import type { McpTokenCreate, McpTokenList, MintedMcpToken } from './mcpTokens'
+import type {
+  McpAuthSetting,
+  McpAuthUpdate,
+  McpTokenCreate,
+  McpTokenList,
+  MintedMcpToken,
+} from './mcpTokens'
 
 export const API_BASE = '/api/v1'
 
@@ -697,4 +703,10 @@ export const api = {
 
   revokeMcpToken: (id: string) =>
     request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
+
+  /** #251 — the /mcp auth mode and anonymous cap (AI design spec §8.3). */
+  getMcpAuth: () => request<McpAuthSetting>('/ai/mcp/auth'),
+
+  setMcpAuth: (body: McpAuthUpdate) =>
+    request<McpAuthSetting>('/ai/mcp/auth', { method: 'PUT', body: JSON.stringify(body) }),
 }

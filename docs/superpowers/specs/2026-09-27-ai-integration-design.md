@@ -619,7 +619,11 @@ applies on every replica without a restart. An unknown value fails closed, to `b
 or a `read` cap, and a failed read serves `bearer` with no verifiable token. The agent
 logs a warning while the mode is `disabled`, once per change of the settings (the
 banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettings`.
-There is no Settings route for them yet, so no approval applies yet either.
+Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
+(`agent/src/routes/mcpAuthMode.ts`, #251), behind the interim gate for settings writes
+(`routes/guard.ts`) until approvals cover settings writes. Both keys change in one
+transaction. `PUT` does not set `oidc`, and the UI confirms before allowing calls
+without a token.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.

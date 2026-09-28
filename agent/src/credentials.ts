@@ -317,4 +317,18 @@ export class SettingsStore {
       INSERT INTO ai_settings (key, value) VALUES (${key}, ${this.sql.json(value as never)})
       ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
   }
+
+  /**
+   * Sets several keys in one transaction, so a reader on any replica sees all
+   * of them change or none (e.g. the MCP auth mode with its anonymous cap).
+   */
+  async setMany(values: Record<string, unknown>): Promise<void> {
+    await this.sql.begin(async (tx) => {
+      for (const [key, value] of Object.entries(values)) {
+        await tx`
+          INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+      }
+    })
+  }
 }

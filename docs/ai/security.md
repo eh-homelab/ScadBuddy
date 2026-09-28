@@ -123,8 +123,26 @@ warning in the log. A read that fails makes `/mcp` answer as `bearer` with no to
 verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
 While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
 and again whenever the settings change, not on every request. Outward calls still stop
-at the approval gate in every mode. There is no Settings route or UI for these keys yet
-(#255); [operating.md](operating.md#9-mcp-auth-mode) shows how to set them.
+at the approval gate in every mode.
+
+Settings changes them through `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)):
+
+- `PUT` is a settings write, so outward tier (spec §8.1). It passes the same interim gate
+  as the credential and token writes (`uiRequestProblem` in
+  [`guard.ts`](../../agent/src/routes/guard.ts): the UI's origin through the HTTPS
+  ingress, JSON only), and `GET` passes `uiReadProblem`. The limitation stated there
+  applies: this is not an approval, and anyone who can reach Settings can change the
+  mode (spec §8.3, "Stated plainly").
+- It sets `bearer` or `disabled` and the cap. `oidc` is refused, since the mode may
+  become `oidc` only after a discovery check (#262).
+- Both keys are written in one transaction, so no request sees the new mode with the
+  old cap. Each change is logged with the peer address.
+- `GET` answers through the same `mcpAuthSettings()` reader `/mcp` uses, so it shows
+  what `/mcp` applies (a stored unknown value shows as its fail-closed value).
+- The UI asks for an explicit confirmation before it allows calls without a token, and
+  shows a warning in the section while they are allowed. [operating.md](operating.md#9-mcp-auth-mode)
+  shows how to set the keys in the database instead.
 
 ## Prepare and confirm over `/mcp`
 

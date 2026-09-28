@@ -1,6 +1,8 @@
 import { HttpResponse, http } from 'msw'
 import type {
   McpAuthMode,
+  McpAuthSetting,
+  McpAuthUpdate,
   McpToken,
   McpTokenCreate,
   McpTokenTier,
@@ -47,11 +49,14 @@ const state = {
   /** Newest first, as the service lists them. */
   tokens: seed(),
   authMode: 'bearer' as McpAuthMode | null,
+  /** `/api/v1/ai/mcp/auth`'s cap; its mode is `authMode`. */
+  anonymousCap: 'outward' as McpTokenTier,
 }
 
 export function resetMcpTokens(): void {
   state.tokens = seed()
   state.authMode = 'bearer'
+  state.anonymousCap = 'outward'
 }
 
 /** For tests: the mode GET reports (spec §8.3). */
@@ -86,7 +91,47 @@ function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): stri
   return undefined
 }
 
+const authBase = '/api/v1/ai/mcp/auth'
+
+function authView(): McpAuthSetting {
+  return { mode: state.authMode ?? 'bearer', anonymous_cap: state.anonymousCap }
+}
+
+/** As `agent/src/routes/mcpAuthMode.ts`: the same validation and answers. */
+function authProblems(body: Record<string, unknown>): string | undefined {
+  if (body.mode === 'oidc') {
+    return 'mode: "oidc" cannot be set here; it is switched on with the OIDC configuration once its discovery check passes (#262)'
+  }
+  const extra = Object.keys(body).filter((key) => !['mode', 'anonymous_cap'].includes(key))
+  if (extra.length > 0) return `body: unrecognized key(s) ${extra.join(', ')}`
+  if (body.mode !== 'bearer' && body.mode !== 'disabled') return 'mode: must be bearer or disabled'
+  if (!TIERS.includes(body.anonymous_cap as McpTokenTier)) {
+    return 'anonymous_cap: must be read, write or outward'
+  }
+  return undefined
+}
+
 export const mcpTokenHandlers = [
+  http.get(authBase, () =>
+    HttpResponse.json(authView(), { headers: { 'Cache-Control': 'no-store' } }),
+  ),
+
+  http.put(authBase, async ({ request }) => {
+    let body: Record<string, unknown>
+    try {
+      body = (await request.json()) as Record<string, unknown>
+    } catch {
+      return detail(400, 'body is not valid JSON')
+    }
+    if (body === null || typeof body !== 'object') return detail(400, 'body: expected an object')
+    const problem = authProblems(body)
+    if (problem) return detail(400, problem)
+    const update = body as unknown as McpAuthUpdate
+    state.authMode = update.mode
+    state.anonymousCap = update.anonymous_cap
+    return HttpResponse.json(authView())
+  }),
+
   http.get(base, () =>
     HttpResponse.json(
       { auth_mode: state.authMode, tokens: state.tokens },

@@ -39,3 +39,16 @@ export interface MintedMcpToken {
   token: string
   record: McpToken
 }
+
+/** `/api/v1/ai/mcp/auth` (`agent/src/routes/mcpAuthMode.ts`): what `/mcp` applies. */
+export interface McpAuthSetting {
+  mode: McpAuthMode
+  /** The most an anonymous caller may do while the mode is `disabled`. */
+  anonymous_cap: McpTokenTier
+}
+
+/** What Settings may save; `oidc` is switched on with its own configuration (#262). */
+export interface McpAuthUpdate {
+  mode: Exclude<McpAuthMode, 'oidc'>
+  anonymous_cap: McpTokenTier
+}
