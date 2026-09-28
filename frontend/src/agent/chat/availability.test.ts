@@ -1,5 +1,8 @@
+import { http, HttpResponse } from 'msw'
+import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
-import { fetchAiAvailability } from './availability'
+import { server } from '../../mocks/server'
+import { AI_STATUS_PATH, fetchAiAvailability, recheckAiAvailability, resetAiAvailability, useAiAvailability } from './availability'
 
 function answer(body: unknown, init: ResponseInit = {}, type = 'application/json'): typeof fetch {
   return () =>
@@ -31,6 +34,21 @@ describe('fetchAiAvailability', () => {
       available: false,
       state: 'not_configured',
       reason: 'No Claude credential is configured yet.',
+    })
+  })
+
+  it('is unavailable, with the reason, when the chat socket would refuse this page', async () => {
+    const body = {
+      available: false,
+      state: 'enabled',
+      ai: 'enabled',
+      chat: 'refused',
+      reason: 'The assistant must come through the HTTPS ingress. Open ScadBuddy at its public HTTPS address to use it.',
+    }
+    expect(await fetchAiAvailability(answer(body))).toEqual({
+      available: false,
+      state: 'unavailable',
+      reason: body.reason,
     })
   })
 
@@ -84,5 +102,31 @@ describe('fetchAiAvailability', () => {
       })
     expect(await fetchAiAvailability(listening, 50)).toMatchObject({ state: 'unreachable' })
     expect(aborted).toBe(true)
+  })
+})
+
+describe('resetAiAvailability', () => {
+  it('drops a status read that was still in flight', async () => {
+    let answerNow: () => void = () => {}
+    const gate = new Promise<void>((resolve) => {
+      answerNow = resolve
+    })
+    server.use(
+      http.get(AI_STATUS_PATH, async () => {
+        await gate
+        return HttpResponse.json({ available: true, state: 'enabled', ai: 'enabled' })
+      }),
+    )
+    const stale = recheckAiAvailability()
+    resetAiAvailability({ available: false, state: 'not_configured', reason: 'reset' })
+    answerNow()
+    await stale
+    // What the stale read found is not published over the reset.
+    const { result } = renderHook(() => useAiAvailability())
+    expect(result.current).toEqual({ available: false, state: 'not_configured', reason: 'reset' })
+    // And it no longer blocks a fresh read.
+    server.use(http.get(AI_STATUS_PATH, () => HttpResponse.json({ available: true, state: 'enabled', ai: 'enabled' })))
+    await act(() => recheckAiAvailability())
+    expect(result.current).toEqual({ available: true, state: 'configured' })
   })
 })

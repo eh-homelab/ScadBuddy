@@ -119,11 +119,32 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
   switch (event.type) {
     case 'sessions.snapshot': {
       // Sent on connect and again whenever the list changes (the agent re-reads it
-      // while the socket is open), so a session started elsewhere shows up live.
-      // Sessions new to the panel go first, newest first as the server lists them.
-      const next = event.sessions.reduce(upsertSummary, state)
-      const fresh = next.order.filter((id) => !(id in state.sessions))
-      return { ...next, order: [...fresh, ...state.order] }
+      // while the socket is open), so a session started elsewhere shows up live and
+      // one deleted elsewhere goes. The list replaces the panel's: what the snapshot
+      // leaves out is dropped, except the open session, and sessions already known
+      // keep their transcripts. The open session's live events are newer than a
+      // list read before them, so its status is not taken from the list.
+      const listed = new Set(event.sessions.map((s) => s.sessionId))
+      const sessions: Record<string, SessionState> = {}
+      for (const s of event.sessions) {
+        const existing = state.sessions[s.sessionId]
+        sessions[s.sessionId] = existing
+          ? {
+              ...existing,
+              title: s.title,
+              origin: s.origin,
+              owner: s.owner,
+              status: s.sessionId === state.activeId ? existing.status : s.status,
+            }
+          : blankSession({ id: s.sessionId, ...s })
+      }
+      const active = state.activeId ? state.sessions[state.activeId] : undefined
+      if (active && !listed.has(active.id)) sessions[active.id] = active
+      // Sessions new to the panel go first, newest first as the server lists them;
+      // the rest keep their place.
+      const fresh = event.sessions.map((s) => s.sessionId).filter((id) => !(id in state.sessions))
+      const kept = state.order.filter((id) => id in sessions)
+      return { ...state, sessions, order: [...fresh, ...kept] }
     }
 
     case 'session.started': {
@@ -237,13 +258,30 @@ function applyServer(state: ChatState, event: ServerEvent): ChatState {
       }))
 
     case 'error': {
+      const message = errorMessage(event.code, event.message)
       if (event.sessionId && state.sessions[event.sessionId]) {
         return patchSession(state, event.sessionId, (s) =>
-          push(s, { kind: 'error', id: `error-${s.items.length}`, message: event.message }),
+          push(s, { kind: 'error', id: `error-${s.items.length}`, message }),
         )
       }
-      return { ...state, notice: event.message, awaitingStart: false }
+      return { ...state, notice: message, awaitingStart: false }
     }
+  }
+}
+
+/**
+ * The words for an agent `error` frame. The connection limits (agent
+ * `src/routes/chat.ts`) get the panel's own wording, since what was refused is the
+ * message the user just sent and they need to know to send it again.
+ */
+function errorMessage(code: string | undefined, message: string): string {
+  switch (code) {
+    case 'busy':
+      return 'The assistant is still working through the messages already sent, so this one was not taken. Wait a moment, then send it again.'
+    case 'rate_limited':
+      return 'Too many new chats started in a short time, so this one was not started. Wait a minute, then send it again.'
+    default:
+      return message
   }
 }
 

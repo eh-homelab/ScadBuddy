@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { clientMessage } from './protocol'
-import { createSocketTransport, MAX_QUEUED } from './socketTransport'
+import { createSocketTransport, MAX_QUEUED, REFUSED_AFTER, REFUSED_MESSAGE } from './socketTransport'
 
 /** Just enough of a browser WebSocket for the transport. */
 class FakeSocket {
@@ -115,5 +115,51 @@ describe('createSocketTransport', () => {
     ws.open()
     expect(ws.sent.slice(0, 2)).toEqual([JSON.stringify(decision), JSON.stringify(stop)])
     expect(ws.sent).toHaveLength(MAX_QUEUED + 2)
+  })
+
+  it('lets the re-attach go out before anything queued, so a replay is not doubled', () => {
+    const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10 })
+    const reattach = clientMessage({ type: 'session.attach', sessionId: 's9' })
+    let opens = 0
+    t.connect({
+      onFrame: () => {},
+      onOpen: () => {
+        opens += 1
+        if (opens > 1) expect(t.send(reattach)).toBe('sent')
+      },
+    })
+    FakeSocket.instances[0]!.open()
+    FakeSocket.instances[0]!.drop()
+    const message = clientMessage({ type: 'user.message', sessionId: 's9', text: 'hi', context: { route: '/' } })
+    const decision = clientMessage({ type: 'approval.decision', sessionId: 's9', id: 'a1', approve: false })
+    t.send(message)
+    t.send(decision)
+    vi.advanceTimersByTime(10)
+    const ws = FakeSocket.instances[1]!
+    ws.open()
+    expect(ws.sent).toEqual([JSON.stringify(reattach), JSON.stringify(decision), JSON.stringify(message)])
+  })
+
+  it('says the connection is refused after repeated failed handshakes, and asks the status again', () => {
+    const onRefused = vi.fn()
+    const onClose = vi.fn()
+    const t = createSocketTransport({ WebSocketImpl: Impl, baseMs: 10, maxMs: 10, onRefused })
+    t.connect({ onFrame: () => {}, onClose })
+    for (let i = 0; i < REFUSED_AFTER - 1; i++) {
+      FakeSocket.instances.at(-1)!.drop()
+      vi.advanceTimersByTime(10)
+    }
+    expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
+    expect(onRefused).not.toHaveBeenCalled()
+    FakeSocket.instances.at(-1)!.drop()
+    expect(onClose).toHaveBeenLastCalledWith(REFUSED_MESSAGE)
+    expect(onRefused).toHaveBeenCalledTimes(1)
+    // Still retrying; once a connection opens, the count starts over.
+    vi.advanceTimersByTime(10)
+    FakeSocket.instances.at(-1)!.open()
+    FakeSocket.instances.at(-1)!.drop()
+    expect(onClose).toHaveBeenLastCalledWith('Lost the connection to the assistant; reconnecting…')
+    expect(onRefused).toHaveBeenCalledTimes(1)
+    t.close()
   })
 })

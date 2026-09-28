@@ -12,7 +12,9 @@ import { useEffect, useSyncExternalStore } from 'react'
  * - `not_configured`: the agent answered but is switched off for a setup reason: no
  *   Claude credential yet, no key-encryption key, no database.
  * - `unavailable`: the agent answered but cannot serve, for example because its
- *   database is down.
+ *   database is down, or because this page would be refused by the chat socket's
+ *   gate (`chat: 'refused'`: opened by LAN address or over plain HTTP rather than at
+ *   the public HTTPS URL).
  * - `unreachable`: nothing answered as the agent. Either the service is down, or
  *   `/api/v1/ai/*` is not routed to it, in which case the backend's SPA fallback
  *   answers with the app page.
@@ -39,6 +41,8 @@ interface StatusBody {
   state: 'enabled' | 'disabled' | 'unavailable'
   ai: string
   reason?: string
+  /** The chat socket's gate would refuse this page's connection. */
+  chat?: 'refused'
 }
 
 function isStatusBody(value: unknown): value is StatusBody {
@@ -112,7 +116,7 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
   if (!isStatusBody(body)) return { available: false, state: 'unreachable', reason: NOT_ROUTED }
   if (body.available) return { available: true, state: 'configured' }
   const reason = body.reason ?? body.ai
-  if (body.state === 'unavailable') return { available: false, state: 'unavailable', reason }
+  if (body.state === 'unavailable' || (body.state === 'enabled' && body.chat === 'refused')) return { available: false, state: 'unavailable', reason }
   return { available: false, state: 'not_configured', reason }
 }
 
@@ -120,6 +124,8 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
 let current: AiAvailability & { state: AiState } = { available: false, state: 'checking' }
 let inflight: Promise<void> | null = null
 let lastRead = 0
+/** Bumped by `resetAiAvailability`, so a read started before it is dropped. */
+let generation = 0
 const listeners = new Set<() => void>()
 
 function publish(next: AiAvailability & { state: AiState }) {
@@ -129,19 +135,24 @@ function publish(next: AiAvailability & { state: AiState }) {
 
 /** Asks the agent again (Settings' "Check again"; also on focus and on a timer while off). */
 export function recheckAiAvailability(): Promise<void> {
-  inflight ??= fetchAiAvailability()
+  if (inflight) return inflight
+  const started = generation
+  const read: Promise<void> = fetchAiAvailability()
     .then((next) => {
+      if (started !== generation) return
       lastRead = Date.now()
       publish(next)
     })
     .finally(() => {
-      inflight = null
+      if (inflight === read) inflight = null
     })
-  return inflight
+  inflight = read
+  return read
 }
 
-/** Tests: forget the shared answer. */
+/** Tests: forget the shared answer. A read still in flight is ignored when it lands. */
 export function resetAiAvailability(next: AiAvailability & { state: AiState } = { available: false, state: 'checking' }) {
+  generation += 1
   current = next
   inflight = null
   lastRead = 0

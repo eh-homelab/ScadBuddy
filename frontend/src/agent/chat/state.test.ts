@@ -141,9 +141,43 @@ describe('chatReducer', () => {
     )
     expect(state.order).toEqual(['x', 's1'])
     expect(state.activeId).toBe('s1')
-    expect(state.sessions.s1).toMatchObject({ title: 'Mine', status: 'idle' })
+    // The open session's status comes from its live events, which are newer than
+    // a list read before them; the rest of its summary is refreshed.
+    expect(state.sessions.s1).toMatchObject({ title: 'Mine', status: 'running' })
     // The transcript already on screen is kept.
     expect(state.sessions.s1?.items).toHaveLength(1)
+    const later = run(
+      [
+        server({
+          type: 'sessions.snapshot',
+          sessions: [
+            { sessionId: 'x', title: 'Bin', origin: 'mcp', owner: desktop, status: 'idle' },
+            { sessionId: 's1', title: 'Mine', origin: 'chat', owner: you, status: 'idle' },
+          ],
+        }),
+      ],
+      state,
+    )
+    expect(later.sessions.x?.status).toBe('idle')
+  })
+
+  it('drops the sessions a later snapshot leaves out, but never the open one', () => {
+    const withOther = run(
+      [server({ type: 'session.started', sessionId: 'x', origin: 'mcp', owner: desktop })],
+      started,
+    )
+    const state = run(
+      [
+        server({
+          type: 'sessions.snapshot',
+          sessions: [{ sessionId: 'y', title: 'New', origin: 'mcp', owner: desktop, status: 'idle' }],
+        }),
+      ],
+      withOther,
+    )
+    expect(state.order).toEqual(['y', 's1'])
+    expect(Object.keys(state.sessions).sort()).toEqual(['s1', 'y'])
+    expect(state.activeId).toBe('s1')
   })
 
   it('records a handoff', () => {
@@ -163,5 +197,20 @@ describe('chatReducer', () => {
     )
     expect(state.sessions.s1?.items).toEqual([{ kind: 'error', id: 'error-0', message: 'busy' }])
     expect(state.notice).toBe('down')
+  })
+
+  it('says plainly when the agent turned a message away for its connection limits', () => {
+    const state = run(
+      [
+        server({ type: 'error', sessionId: 's1', code: 'busy', message: 'too many messages waiting' }),
+        { type: 'started-new' },
+        server({ type: 'error', code: 'rate_limited', message: 'too many new chats' }),
+      ],
+      started,
+    )
+    const [busy] = state.sessions.s1?.items ?? []
+    expect(busy).toMatchObject({ kind: 'error', message: expect.stringMatching(/still working.*send it again/) })
+    expect(state.notice).toMatch(/Too many new chats.*Wait a minute/)
+    expect(state.awaitingStart).toBe(false)
   })
 })
