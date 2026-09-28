@@ -189,7 +189,10 @@ An outside MCP client authenticates to `/mcp` with a bearer token (`bearer` auth
 spec §8.3). Tokens are managed in Settings → **MCP access tokens**, which calls the
 routes in `registerMcpTokenRoutes()` in
 [`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts). Tokens are
-stored in `ai_mcp_tokens` (§7).
+stored in `ai_mcp_tokens` (§7). The Settings section renders only where
+`useAiAvailability()` ([`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts))
+reports AI available, which today is the msw-mocked build: nothing routes
+`/api/v1/ai/*` to the sidecar yet. Until then, the routes below are the interface.
 
 | Route | Guarded | What it does |
 |---|---|---|

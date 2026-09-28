@@ -40,7 +40,8 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
-- **Minting, listing and revoking** are Settings → "MCP access tokens"
+- **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
+  where `useAiAvailability()` says AI is available, so not in a production build yet)
   ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
   over `/api/v1/ai/mcp-tokens`
   ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
@@ -53,7 +54,7 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
     no-store`. The route never logs it. `DELETE /:id` sets `revoked_at`; a revoked
     token stays listed and never verifies again.
   - Both writes pass `uiRequestProblem()`, as credential writes do: minting a
-    credential is an outward write (spec §8.1). `POST` also needs `Content-Type:
+    token is an outward write (spec §8.1). `POST` also needs `Content-Type:
     application/json` (`415` otherwise). The same limitation applies: this is a gate, not
     authentication (spec §8.3, "Stated plainly").
   - In the browser, the plaintext is held only in the section's React state until
