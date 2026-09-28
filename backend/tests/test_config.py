@@ -6,6 +6,26 @@ import pytest
 
 from scadbuddy.core.config import available_cpus, default_solid_concurrency, load_config
 from scadbuddy.core.settings import Settings
+from tests.conftest import UNUSED_DATABASE_URL
+
+
+@pytest.fixture(autouse=True)
+def _database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every `Settings` needs one (#401); these tests are about the other fields."""
+    monkeypatch.setenv("SCADBUDDY_DATABASE_URL", UNUSED_DATABASE_URL)
+
+
+@pytest.mark.parametrize("value", [None, "", "  "])
+def test_settings_refuse_to_start_without_a_database_url(
+    value: str | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Named, so the log of a pod that will not start says what to set (#401)."""
+    if value is None:
+        monkeypatch.delenv("SCADBUDDY_DATABASE_URL")
+    else:
+        monkeypatch.setenv("SCADBUDDY_DATABASE_URL", value)
+    with pytest.raises(ValueError, match="SCADBUDDY_DATABASE_URL is required"):
+        Settings()
 
 
 @pytest.mark.parametrize("value", ["0", "-1"])
