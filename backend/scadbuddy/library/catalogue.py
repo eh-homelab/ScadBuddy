@@ -21,6 +21,7 @@ from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import (
     BUILTIN_DIR,
     BUILTIN_PREFIX,
+    LEGACY_PRESETS_NAME,
     MODEL_META_NAME,
     SOURCE_NAME,
     DataPaths,
@@ -636,6 +637,12 @@ class Catalogue:
             raw = self.read_raw_meta(slug)
             raw.update(patch.model_dump(exclude_none=True))
             self.write_raw_meta(slug, raw)
+            if patch.presets is not None:
+                # The list written is the template's presets whole: a legacy file left
+                # beside it would add its entries back (they are read below model.json),
+                # so `[]` could never clear them. A client edits the merged list it
+                # read, so what it keeps of the legacy file is in the list it wrote.
+                (self.paths.model_dir(slug) / LEGACY_PRESETS_NAME).unlink(missing_ok=True)
 
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)

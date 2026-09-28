@@ -403,6 +403,22 @@ def test_a_template_preset_edit_is_checked(client: TestClient, model: str) -> No
     assert _ids(client, model) == []
 
 
+def test_a_template_preset_edit_replaces_a_legacy_file_too(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    legacy = {"presets": [{"name": "Wide", "params": {"width": 40}}, {"name": "Narrow"}]}
+    (paths.model_dir(model) / LEGACY_PRESETS_NAME).write_text(json.dumps(legacy), "utf-8")
+    assert _ids(client, model) == ["template-wide", "template-narrow"]
+    # Keeping one of what was read keeps it, under the same id; the other goes.
+    kept = [{"id": "wide", "name": "Wide", "params": {"width": 40}}]
+    assert _patch_presets(client, model, kept).status_code == 200
+    assert _ids(client, model) == ["template-wide"]
+    assert not (paths.model_dir(model) / LEGACY_PRESETS_NAME).exists()
+    # And an empty list leaves none at all.
+    assert _patch_presets(client, model, []).status_code == 200
+    assert _ids(client, model) == []
+
+
 @pytest.mark.requires_git
 def test_a_built_in_s_presets_cannot_be_edited(client: TestClient) -> None:
     assert _patch_presets(client, BUILTIN, []).status_code == 403
