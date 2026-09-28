@@ -21,12 +21,13 @@ from scadbuddy.core.events import (
 )
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.core.pg_events import EventLogRetention, PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
-from scadbuddy.library.libraries import CheckoutGate, LibraryStore
+from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -65,8 +66,8 @@ class AppState:
     queue: RenderQueue
     #: Default-render previews: the thumbnail of a model with none and no output.
     previews: PreviewScheduler
-    #: Where every state change is published (spec §7). In-process today; the
-    #: ``pg_notify`` backend on #241's database replaces it behind the same protocol.
+    #: Where every state change is published (spec §7): `PgNotifyEventBus` on
+    #: #241's database when one is configured, `InProcessEventBus` otherwise.
     events: EventBus
     #: Publishes ``print.*`` from the progress reads the backend makes.
     print_progress: ProgressObserver
@@ -126,18 +127,39 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 def build_state(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
-    events = InProcessEventBus()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
     metrics = Metrics()
     metrics.build_info.labels(settings.version, settings.revision).set(1)
-    # Nothing connects here: the pool opens in `RenderQueue.start`, from the lifespan.
-    store: JobBackend = (
-        PostgresJobStore(settings.database_url, paths, pool_size=settings.database_pool_size)
-        if settings.database_url
-        else JobStore(paths)
-    )
+    # Nothing connects here: the job pool opens in `RenderQueue.start` and the event
+    # bus's in `PgNotifyEventBus.start`, both from the lifespan.
+    store: JobBackend
+    events: EventBus
+    if settings.database_url:
+        pg_store = PostgresJobStore(
+            settings.database_url, paths, pool_size=settings.database_pool_size
+        )
+        # One LISTEN connection per process: the bus shares the render queue's.
+        pg_events = PgNotifyEventBus(
+            settings.database_url,
+            listener=pg_store.pg_listener,
+            metrics=metrics,
+            retention=EventLogRetention(
+                seconds=settings.event_log_retention_seconds,
+                rows=settings.event_log_retention_rows,
+            ),
+        )
+        # Job events commit with the job change that they describe.
+        pg_store.events = pg_events
+        store, events = pg_store, pg_events
+    else:
+        # No database: the UI keeps working, events reach this process only.
+        store, events = JobStore(paths), InProcessEventBus()
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
+    installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
+    libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
+    # The render queue's: a route builds its own over its `LibrariesDep`.
+    fetcher = CheckoutFetcher(libraries, installs, checkouts)
     assets = AssetStore(
         paths.assets,
         max_total_bytes=config.asset_max_total_bytes,
@@ -164,6 +186,7 @@ def build_state(settings: Settings) -> AppState:
         metrics=metrics,
         events=events,
         checkouts=checkouts,
+        fetcher=fetcher,
         assets=assets,
     )
     previews = PreviewScheduler(
@@ -199,7 +222,7 @@ def build_state(settings: Settings) -> AppState:
             api_key=config.google_fonts_api_key,
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
-        libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
+        libraries=libraries,
         assets=assets,
         queue=queue,
         previews=previews,
@@ -207,6 +230,7 @@ def build_state(settings: Settings) -> AppState:
         events=events,
         print_progress=ProgressObserver(events),
         checkouts=checkouts,
+        installs=installs,
         checks=asyncio.Semaphore(config.check_concurrency),
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
@@ -323,6 +347,14 @@ PrintProgressDep = Annotated[ProgressObserver, Depends(get_print_progress)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
+
+
+def get_fetcher(state: StateDep, libraries: LibrariesDep) -> CheckoutFetcher:
+    """Over the request's store, with the app's install permits and checkout gate."""
+    return CheckoutFetcher(libraries, state.installs, state.checkouts)
+
+
+FetcherDep = Annotated[CheckoutFetcher, Depends(get_fetcher)]
 
 # A template id: a slug of mine, or `builtin:<slug>`.
 SlugPath = Annotated[str, Path(pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)]

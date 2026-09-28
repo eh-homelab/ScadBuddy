@@ -351,7 +351,12 @@ export type DecideOptions = {
 }
 
 export type RevokeFilter = {
-  /** Only rows that the turn with this id parked on. */
+  /**
+   * Only rows that the turn with this id parked on, and that no other turn
+   * has been resumed for: a decision that landed after this turn released
+   * the session may already have resumed it (`bindResume`), and that turn's
+   * approval must survive this one's trailing clean-up.
+   */
   turnId?: string
   /** Leave the row bound to this resumed turn alone. */
   exceptResumeTurn?: string
@@ -716,7 +721,10 @@ export class ApprovalService {
     const rows = await this.deps.sql<{ id: string; session_id: string | null; tool: string }[]>`
       UPDATE ai_approvals SET revoked_at = now(), reason = ${reason}
       WHERE session_id = ${sessionId} AND decision = 'approved' AND consumed_at IS NULL AND revoked_at IS NULL
-        AND (${filter.turnId ?? null}::uuid IS NULL OR turn_id = ${filter.turnId ?? null}::uuid)
+        AND (${filter.turnId ?? null}::uuid IS NULL
+             OR (turn_id = ${filter.turnId ?? null}::uuid
+                 -- A row a later turn has already been resumed for is that turn's now.
+                 AND (resume_turn_id IS NULL OR resume_turn_id = ${filter.turnId ?? null}::uuid)))
         AND (${filter.exceptResumeTurn ?? null}::uuid IS NULL
              OR resume_turn_id IS DISTINCT FROM ${filter.exceptResumeTurn ?? null}::uuid)
       RETURNING id, session_id, tool`

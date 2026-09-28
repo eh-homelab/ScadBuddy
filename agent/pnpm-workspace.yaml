@@ -1,0 +1,5 @@
+# msw's install script only copies its browser service worker into a web app's
+# public directory (package.json "msw.workerDirectory"). The agent uses msw from
+# node, in vitest (msw/node), and has no such directory, so the script is not run.
+allowBuilds:
+  msw: false

@@ -184,6 +184,50 @@ describe.skipIf(!TEST_DATABASE_URL)(`approvals in Postgres${TEST_DATABASE_URL ? 
     expect(await service.consumeById(fresh.id)).toBeUndefined()
   })
 
+  it('a decision after turn A released the session resumes turn B, and A’s trailing clean-up leaves B’s approval alone', async () => {
+    const { session } = await m.start(agentA, { origin: 'mcp', title: 't' })
+    const turnA = '55555555-5555-4555-8555-555555555555'
+    const turnB = '66666666-6666-4666-8666-666666666666'
+    const service: ApprovalService = new ApprovalService({
+      sql: db.sql,
+      events: m.events,
+      resume: async (a) => ((await service.bindResume(a.id, turnB)) ? { resumed: true } : { resumed: false, reason: 'x' }),
+    })
+    const input = { job: 'box.3mf' }
+    const parkedOnA = await service.create({
+      sessionId: session.id,
+      turnId: turnA,
+      toolUseId: 'toolu_a',
+      tool: 'mcp__stub__print',
+      input,
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    // Turn A has released the session (no claim): the decision is an orphan's and resumes turn B.
+    await service.decide(browser, parkedOnA.id, true)
+    expect(await service.get(parkedOnA.id, browser)).toMatchObject({ resumeTurnId: turnB, revokedAt: null })
+    // Then A's finish runs its post-release clean-up.
+    expect(await service.revokeUnused(session.id, 'it was decided as its turn ended', { turnId: turnA })).toBe(0)
+    expect(await service.consume(session.id, turnB, 'mcp__stub__print', service.hash('mcp__stub__print', input))).toMatchObject({
+      id: parkedOnA.id,
+    })
+
+    // F1/F3 intact: an unbound approval of turn A is still voided by the same clean-up.
+    const unbound = await service.create({
+      sessionId: session.id,
+      turnId: turnA,
+      toolUseId: 'toolu_a2',
+      tool: 'mcp__stub__print',
+      input,
+      tier: 'outward',
+      requestedBy: agentA,
+    })
+    await db.sql`UPDATE ai_approvals SET decision = 'approved', decided_at = now(), usable_until = now() + interval '1 hour'
+                 WHERE id = ${unbound.id}`
+    expect(await service.revokeUnused(session.id, 'it was decided as its turn ended', { turnId: turnA })).toBe(1)
+    expect((await service.get(unbound.id, browser)).revokedAt).not.toBeNull()
+  })
+
   it('an approval stays usable only until the usable_until fixed at its decision', async () => {
     const { session } = await orphan()
     const turnA = '11111111-1111-4111-8111-111111111111'

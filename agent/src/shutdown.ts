@@ -5,6 +5,13 @@
 // Terminating until the kubelet's SIGKILL.
 
 export type ShutdownSteps = {
+  /**
+   * Ends long-lived streams the server would otherwise wait on until the
+   * deadline: the `/mcp` sessions' standing SSE responses (app.ts `close`).
+   * Run first, because `http.Server#close` waits for open connections and
+   * never ends them itself.
+   */
+  closeSessions?: () => Promise<void>
   /** Stops accepting connections; resolves once in-flight requests have finished. */
   closeServer: () => Promise<void>
   /** Closes the database pool, when there is one. */
@@ -16,14 +23,15 @@ export type ShutdownSteps = {
 export type ShutdownResult = 'clean' | 'timed out'
 
 export async function shutdown(steps: ShutdownSteps): Promise<ShutdownResult> {
-  const { closeServer, closeDatabase, timeoutMs = 10_000 } = steps
+  const { closeSessions, closeServer, closeDatabase, timeoutMs = 10_000 } = steps
   let timer: NodeJS.Timeout | undefined
   const deadline = new Promise<'timed out'>((resolve) => {
     timer = setTimeout(() => resolve('timed out'), timeoutMs)
   })
   let result: ShutdownResult
   try {
-    result = await Promise.race([closeServer().then(() => 'clean' as const), deadline])
+    const drained = (closeSessions?.() ?? Promise.resolve()).catch(() => {}).then(closeServer)
+    result = await Promise.race([drained.then(() => 'clean' as const), deadline])
   } catch {
     // http.Server#close only errors when the server was not listening, in
     // which case there is nothing in flight to wait for.

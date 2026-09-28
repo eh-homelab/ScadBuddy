@@ -721,7 +721,11 @@ export class SessionManager {
     // A decision that landed while this turn was finishing saw it still
     // holding the session and took it for parked (approvals/service.ts
     // decide), so nobody resumes for it: void an approval of this turn's
-    // that nothing used, and settle the status if nothing is pending now.
+    // that nothing used, and settle the status if nothing is pending now. A
+    // decision that lands after the release is an orphan's: decide() resumes
+    // for it, and a row already bound to that resumed turn is skipped here
+    // (revokeUnused `turnId`). Whichever of the two gets the row first wins;
+    // a void is announced, so an approval is never lost silently.
     await this.approvals.revokeUnused(id, 'it was decided as its turn ended', { turnId })
     await this.approvals.refreshStatus(id)
     return outcome

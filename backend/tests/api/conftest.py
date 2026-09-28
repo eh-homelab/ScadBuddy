@@ -25,6 +25,8 @@ from scadbuddy.render.split import ColourPart
 
 MODEL_SLUG = "demo"
 FAIL_WIDTH = 999.0
+#: What the failing stub says it could not open (#408).
+FAILED_WARNING = "OpenSCAD could not open pic.svg"
 
 # A stand-in for the real binary: enough to answer --version and to export a .param,
 # so the routes that shell out are exercised where no openscad is installed.
@@ -194,7 +196,9 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
 
     async def fake_render(job: Job) -> tuple[JobResult, list[str]]:
         if job.params.get("width") == FAIL_WIDTH:
-            raise OpenSCADError("openscad exited with 1", ["ERROR: something broke"])
+            raise OpenSCADError(
+                "openscad exited with 1", ["ERROR: something broke"], warnings=[FAILED_WARNING]
+            )
         return _fake_result(paths, job), ["rendered fine"]
 
     queues: dict[str, RenderQueue] = {}
