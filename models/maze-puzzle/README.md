@@ -39,8 +39,7 @@ and in ScadBuddy.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `mode` | `open_tray` | `open_tray`, or `ball_lid`: a flat lid with a snap skirt prints next to the tray, upside down. It clicks over a V-groove round the outside of the border. Put the ball in, then snap the lid on. A clear filament lets you see the maze. |
-| `parts` | `both` | Lid mode only. `both` puts the lid beside the tray — to the right when the pair fits the bed's 300 mm width (both nozzles), else behind within its 320 mm depth. When neither fits (15 × 15 at 16 mm, or a large round maze) the lid is left off with an `ECHO: "NOTE: ..."` line: render again with `lid` for the lid alone, and `tray` for the tray alone. |
+| `mode` | `open_tray` | `open_tray`, or `ball_lid`: a flat lid with a snap skirt prints upside down beside the tray, to the right when the pair fits the bed's 300 mm width (both nozzles), else behind within its 320 mm depth. When neither fits (15 × 15 at 16 mm, or a large round maze) the lid goes on **plate 2** of the same 3MF, with an `ECHO: "NOTE: ..."` line saying so. It clicks over a V-groove round the outside of the border. Put the ball in, then snap the lid on. A clear filament lets you see the maze. |
 | `ball_d` | `6` | Ball diameter. Corridors are at least `ball_d + 1` mm wide: if `cell_size - wall_thickness` is narrower, the pitch is widened. In lid mode the walls are at least `ball_d + 0.5` mm tall so the ball cannot jam against the lid. Either change is reported by an `ECHO: "NOTE: ..."` line. |
 | `markers` | `true` | Inlays the start circle and finish star, 0.6 mm deep and flush with the floor. |
 
@@ -64,7 +63,8 @@ and in ScadBuddy.
 | `marker_color` | start and finish inlays | 3 |
 | `lid_color` | lid | 4 |
 
-The open tray is three parts; lid mode adds the fourth. Turning `markers` off
+The open tray is three parts; lid mode adds the fourth. The lid keeps extruder 4
+when it moves to plate 2. Turning `markers` off
 drops the marker part. Setting two colours to the same value merges those
 parts into one filament.
 
@@ -87,6 +87,17 @@ the finish the last (back-right). The model echoes the maze it built:
 ECHO: "MAZE", cells_x, cells_y, active[], east_open[], north_open[], start, finish
 ```
 
+## Plates
+
+The model follows ScadBuddy's plate convention (design spec §6.4): it declares
+`$plate = 0` and echoes `plates = N`. With `$plate = 0` — plain OpenSCAD,
+MakerWorld, ScadBuddy's preview — it draws everything, and a lid that needs its
+own plate sits to the right of the tray, past the edge of the bed. ScadBuddy
+renders `$plate = 1` (the tray, plus the lid when it fits beside it) and, when
+the model echoes `plates = 2`, `$plate = 2` (the lid alone, where the tray would
+be), and writes both plates into one 3MF. The print dialog then offers plate 1,
+plate 2, or both.
+
 ## Variations
 
 - **Size:** `cells_x`/`cells_y` from 4 × 4 (a 44 mm pocket puzzle) to 15 × 15
@@ -100,17 +111,23 @@ ECHO: "MAZE", cells_x, cells_y, active[], east_open[], north_open[], start, fini
 ./verify.sh
 ```
 
-Renders the defaults and 18 variations (both shapes, both modes, 4 × 4 to
+Renders the defaults and 17 variations (both shapes, both modes, 4 × 4 to
 15 × 15, non-square grids, an auto-widened 12 mm ball, thick walls without
-markers, a lid placed behind the tray, a tray and lid too big to share the
-plate, and each of `parts = lid` / `tray`) and checks for each:
+markers, a lid placed behind the tray, and three trays and lids too big to
+share a plate) and checks for each:
 
 - the echoed maze is perfect: every active cell reachable from the start,
   openings == cells − 1, no opening into a missing cell, start ≠ finish;
 - different seeds give different mazes, the same seed the same maze;
 - the expected colour parts, nothing in `Default`, the exact bounding box the
-  parameters imply (including where the lid goes, or that it is left off with
+  parameters imply (including where the lid goes, and that a lid on plate 2 says so in
   a note), sitting on z = 0 and fitting the 300 × 320 mm bed;
+- the echoed plate count: 2 exactly when the tray and lid cannot share the
+  bed. Then each plate is rendered on its own with `-D '$plate=k'`, as
+  ScadBuddy does: plate 1 holds the tray's colours and plate 2 only the lid,
+  each at its expected bounding box and fitting the bed, and each colour's
+  closed part (rendered through the colour wrapper with the same `$plate`) has
+  the volume of that colour in the everything-at-once render;
 - from one closed render per colour: the floor, wall, marker and lid z ranges;
   the parts do not overlap; the wall volume equals the outline minus exactly
   the cells and openings of the echoed maze (so the geometry is the maze that
