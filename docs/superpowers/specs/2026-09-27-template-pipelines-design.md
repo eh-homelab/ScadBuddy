@@ -134,14 +134,14 @@ through phase 1 as the default pipeline's `inputs.params`, and is dropped by pha
 
 The API's `POST /models/{slug}/render`:
 
-1. One Postgres transaction inserts the row `queued`, or coalesces onto the pending
+1. One Postgres transaction inserts the row `pending`, or coalesces onto the pending
    row with the same `render_key` (`claims + 1`), exactly as today. The response
    (job id, `coalesced`) comes from that commit.
 2. `start_workflow(TemplatePipeline, id=f"render-{job_id}",
    id_conflict_policy=USE_EXISTING, task_queue="render")`. Starting twice is a no-op;
    a coalesced request finds the running workflow.
 3. A **reconciler** (in the API process, every 5 s and at boot) re-issues step 2 for
-   every `queued` row older than 5 s that has no `started_at`. Idempotent thanks to
+   every `pending` row older than 5 s that has no `started_at`. Idempotent thanks to
    the fixed ID. This is the transactional-outbox pattern with Temporal's workflow ID
    as the dedup key, and it is what makes a crash between 1 and 2 harmless.
 
@@ -227,9 +227,13 @@ run the subprocess under it exactly as `runner.py` does today, and their
 `start_to_close` is **derived** from it — `render_timeout + 60 s` — so the two can
 never invert; the spec forbids a separate activity-timeout setting. On
 cancellation, heartbeat failure or the activity's own timeout, the activity's
-cancellation path kills the `openscad` process group before returning (the child
-is killed, not awaited — the base spec's rule for the runner carries over); a
-Temporal timeout alone does not stop a subprocess. Heartbeat every 5 s; retry
+cancellation path kills the `openscad` subprocess before returning; a Temporal
+timeout alone does not stop a subprocess. Today `runner.py` does `process.kill()`
+on the one child it spawned, which is enough for `openscad`. This spec adds a
+**new** requirement for phase 1: `run_openscad` and the template-activity wrapper
+(§5.2) start their child with `start_new_session=True` and kill the **process
+group** (`os.killpg`), because a template activity may spawn children of its own
+and a plain `kill()` on the parent would orphan them. Heartbeat every 5 s; retry
 policy 3 attempts with backoff.
 
 ### 3.5 Worker versioning
@@ -552,26 +556,37 @@ re-rendering; this makes that the rule.
 
 ## 8. Versioning
 
-Four layers, each with an owner:
+Four layers, each with an owner.
 
-1. **Contract majors.** `model.json`'s `ui.api` and `pipeline.api`. The host supports
-   the current major and the previous one; an unsupported major falls back (UI: the
-   generated form with a banner; pipeline: the job fails at `load_pipeline` with a
-   message naming the majors). Minor additions never break a template.
-2. **Inputs.** A template declares `INPUTS_VERSION` in `pipeline.py` and stamps it as
-   `inputs.v`. It may define `migrate(inputs, from_version) -> inputs`. Presets and
-   outputs store inputs with their `v`; when one opens under a newer template
-   revision, the host calls the pipeline's `migrate` (an activity, so it may read the
-   snapshot) before handing inputs to the UI. A failed migration shows the raw inputs
-   read-only with the error.
-3. **Workflows.** §3.5: build-ID worker versioning; running workflows finish on the
-   build they started on; `load_pipeline` records the pipeline source in history so a
-   template edit never changes a running job.
-4. **Reproducibility record.** Every output stores: template revision, `ui.api`,
-   `pipeline.api`, `inputs.v`, the worker image digest (`SCADBUDDY_REVISION`), the
-   `openscad --version` string, the plate geometry key, and the store refs of every
-   Part it was built from. "Re-render" is a new job on the same record; "Customize
-   this version" pins the revision.
+### 8.1 Contract majors
+
+`model.json`'s `ui.api` and `pipeline.api`. The host supports
+the current major and the previous one; an unsupported major falls back (UI: the
+generated form with a banner; pipeline: the job fails at `load_pipeline` with a
+message naming the majors). Minor additions never break a template.
+
+### 8.2 Inputs
+
+A template declares `INPUTS_VERSION` in `pipeline.py` and stamps it as
+`inputs.v`. It may define `migrate(inputs, from_version) -> inputs`. Presets and
+outputs store inputs with their `v`; when one opens under a newer template
+revision, the host calls the pipeline's `migrate` (an activity, so it may read the
+snapshot) before handing inputs to the UI. A failed migration shows the raw inputs
+read-only with the error.
+
+### 8.3 Workflows
+
+§3.5: build-ID worker versioning; running workflows finish on the
+build they started on; `load_pipeline` records the pipeline source in history so a
+template edit never changes a running job.
+
+### 8.4 Reproducibility record
+
+Every output stores: template revision, `ui.api`,
+`pipeline.api`, `inputs.v`, the worker image digest (`SCADBUDDY_REVISION`), the
+`openscad --version` string, the plate geometry key, and the store refs of every
+Part it was built from. "Re-render" is a new job on the same record; "Customize
+this version" pins the revision.
 
 ## 9. Trust and containment
 
