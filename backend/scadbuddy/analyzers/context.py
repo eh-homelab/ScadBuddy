@@ -47,7 +47,7 @@ class AnalysisRequest(BaseModel):
     """The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).
 
     Every field means what it means on
-    :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
+    :class:`~scadbuddy.bambuddy.print_run.PrintRunRequest`, but the plan and the
     choices are optional here: an analysis can run before the dialog has them.
     ``printer_id`` omitted is the model's remembered printer, then the configured one,
     then the first active one, as the dialog's choices route picks it; ``choices``
