@@ -8,7 +8,8 @@ import threading
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import psycopg
@@ -38,6 +39,9 @@ from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import UNUSED_DATABASE_URL, fake_3mf_openscad
+
+if TYPE_CHECKING:
+    from scadbuddy.api.deps import AppState
 from tests.support.temporal import temporal_client
 
 
@@ -321,3 +325,9 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
             await handle.terminate()
             if not worker.done():
                 worker.cancel()
+
+
+def test_the_in_process_worker_names_the_state_it_is_missing() -> None:
+    state = cast("AppState", SimpleNamespace(projection=None, blobs=object(), refs=None))
+    with pytest.raises(RuntimeError, match=r"AppState\.projection, AppState\.refs"):
+        worker_module.worker_deps_from_state(state)

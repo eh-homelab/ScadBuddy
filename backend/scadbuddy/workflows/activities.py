@@ -33,7 +33,7 @@ from scadbuddy.render.jobs import (
     render_solids_stage,
     timed_stage,
 )
-from scadbuddy.render.previews import render_preview
+from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore
@@ -316,7 +316,16 @@ class RenderActivities:
                 checkouts=d.checkouts,
             )
         )
-        return await _heartbeating(work)
+        try:
+            return await _heartbeating(work)
+        except OpenSCADError as error:
+            raise _failure(error) from None
+        except PreviewFailedError as error:
+            # Deterministic too (no plate image to keep): not retried, and typed so
+            # the scheduler records it against the source (`is_render_error`).
+            raise ApplicationError(
+                str(error), Failure(error=str(error)), type="PreviewFailedError", non_retryable=True
+            ) from None
 
     @activity.defn(name="project")
     async def project(self, projection: Projection) -> None:
