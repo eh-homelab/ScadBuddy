@@ -104,7 +104,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per-triangle material), `solids.py` (one closed solid per colour via a `color()`
   wrapper), `bambu3mf.py` (Bambu-style 3MF writer), `glb.py`, `thumbnail.py` (numpy
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
-  (`render_job` ties the steps together; job queue).
+  (`render_job` ties the steps together; job queue), `render_cache.py` (finished
+  renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
+  parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).

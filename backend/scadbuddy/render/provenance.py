@@ -22,7 +22,7 @@ from xml.sax.saxutils import escape
 
 from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.core.paths import MODEL_META_NAME
+from scadbuddy.core.paths import MODEL_META_NAME, RENDERS_DIR_NAME
 from scadbuddy.library.catalogue import README_NAME, THUMBNAIL_NAME
 from scadbuddy.library.deeplink import EDIT_NOTE
 from scadbuddy.library.media import MEDIA_DIR
@@ -84,6 +84,8 @@ def source_version(model_dir: Path) -> str:
         # video there would be a gigabyte hashed on every render.
         and path.relative_to(model_dir).parts[0] != MEDIA_DIR
         and not path.name.startswith(WRAPPER_PREFIX)
+        # The renders kept under the model are its output, not its source.
+        and RENDERS_DIR_NAME not in path.relative_to(model_dir).parts
     ):
         digest.update(name.encode("utf-8"))
         digest.update(b"\0")

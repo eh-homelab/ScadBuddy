@@ -30,7 +30,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.previews import PreviewScheduler
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -124,7 +124,7 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
         f"/api/v1/models/{SLUG}/render", json={"params": {"width": next(_WIDTHS)}}
     ).json()["job_id"]
     wait_for_job(client, job_id)
-    with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
         archive.writestr(PLATE_THUMBNAIL, cover)
     response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text

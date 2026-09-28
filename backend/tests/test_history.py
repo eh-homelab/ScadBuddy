@@ -28,6 +28,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import prune_revision_exports
+from scadbuddy.render.render_cache import RENDERS_DIR_NAME
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 pytestmark = pytest.mark.requires_git
@@ -132,6 +133,20 @@ def test_ensure_repo_ignores_the_render_wrapper(models: Path, history: ModelHist
     assert WRAPPER_PREFIX in (models / GITIGNORE_NAME).read_text(encoding="utf-8")
 
     (models / "keychain" / f"{WRAPPER_PREFIX}abc123.scad").write_text("// wrapper\n")
+
+    assert history.commit("should record nothing", "keychain") is None
+
+
+def test_ensure_repo_ignores_the_kept_renders(models: Path, history: ModelHistory) -> None:
+    """A finished render is kept under its template (`render_cache`); it is derived
+    from the source, so it must never move the template's revision."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+
+    entry = models / "keychain" / RENDERS_DIR_NAME / "0123abcd"
+    entry.mkdir(parents=True)
+    (entry / "model.3mf").write_bytes(b"3mf")
+    (entry / "render.json").write_text("{}\n", encoding="utf-8")
 
     assert history.commit("should record nothing", "keychain") is None
 
