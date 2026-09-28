@@ -396,7 +396,9 @@ through the Fullscreen API, but a cross-origin frame may only use that API when 
 `<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`), and Bambuddy's is
 only known to set its sandbox flags (§1), so wherever the API is refused the workspace
 covers the window instead — when embedded, the frame. Escape leaves either, unless a
-dialog opened from the flyout takes it first.
+dialog opened from the flyout takes it first. Full screen hides the assistant panel
+with the rest of the page, so the assistant's shortcut leaves full screen and shows
+the panel rather than toggling it out of sight.
 
 The preview is not a separate cheap render — it **is** the render. Every
 parameter change (debounced 400 ms) submits a render job; the job produces the

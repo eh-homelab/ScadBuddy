@@ -41,6 +41,21 @@ test.describe('assistant panel (#256)', () => {
     await expect(panel.getByTestId('agent-status')).toHaveText('Idle')
   })
 
+  test('comes out of the customizer’s full screen for Ctrl+`', async ({ page }) => {
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toBeVisible()
+    await page.getByRole('button', { name: 'Full screen', exact: true }).click()
+    await expect(page.getByRole('button', { name: 'Exit full screen' })).toBeVisible()
+    expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
+
+    // Full screen hides the panel with the rest of the page, so the shortcut leaves it.
+    await page.keyboard.press('Control+Backquote')
+    const panel = page.getByRole('complementary', { name: 'Assistant' })
+    await expect(panel.getByRole('textbox', { name: 'Message the assistant' })).toBeFocused()
+    await expect(page.getByRole('button', { name: 'Full screen', exact: true })).toBeVisible()
+    expect(await page.evaluate('document.fullscreenElement')).toBeNull()
+  })
+
   test('toggles with Ctrl+` and keeps the transcript while closed', async ({ page }) => {
     await page.goto('/')
     // The app mounts after the msw worker starts; the shortcut listener with it.

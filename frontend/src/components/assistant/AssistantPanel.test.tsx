@@ -1,6 +1,8 @@
 import { act, fireEvent, screen, waitFor, within } from '@testing-library/react'
+import { useRef, type ReactNode } from 'react'
 import { Route, Routes } from 'react-router'
 import type { ClientMessage } from '../../agent/chat/protocol'
+import { useFullscreen } from '../../lib/useFullscreen'
 import { EXTERNAL_SESSION_ID, createMockAgentTransport, type MockAgentTransport } from '../../mocks/agent'
 import { renderPage } from '../../test/utils'
 import { AppShell } from '../AppShell'
@@ -16,16 +18,31 @@ const factory = () => {
   return agent
 }
 
-function renderShell(route = '/m/name-keychain') {
+function renderShell(route = '/m/name-keychain', page: ReactNode = <p>page</p>) {
   return renderPage(
     <Routes>
       <Route element={<AppShell embedded={false} assistantTransport={factory} />}>
-        <Route path="*" element={<p>page</p>} />
+        <Route path="*" element={page} />
       </Route>
     </Routes>,
     { route },
   )
 }
+
+/** A page with a full-screen view, as the customizer has; jsdom takes the fallback. */
+function FullscreenPage() {
+  const view = useRef<HTMLDivElement>(null)
+  const { mode, toggle } = useFullscreen(view)
+  return (
+    <div ref={view}>
+      <button type="button" onClick={toggle}>
+        {mode ? 'Exit full screen' : 'Full screen'}
+      </button>
+    </div>
+  )
+}
+
+const pressShortcut = () => fireEvent.keyDown(window, { key: '`', code: 'Backquote', ctrlKey: true })
 
 const sentOf = <T extends ClientMessage['type']>(type: T) =>
   agent.sent.filter((m): m is Extract<ClientMessage, { type: T }> => m.type === type)
@@ -61,6 +78,30 @@ describe('assistant panel', () => {
     await user.keyboard('{Escape}')
     expect(screen.queryByRole('complementary', { name: 'Assistant' })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Assistant' })).toHaveFocus()
+  })
+
+  it('comes out of full screen for Ctrl+` rather than opening out of sight', async () => {
+    const { user } = renderShell('/m/name-keychain', <FullscreenPage />)
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+
+    pressShortcut()
+    expect(await screen.findByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+    const box = await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await waitFor(() => expect(box).toHaveFocus())
+  })
+
+  it('brings back a panel full screen had hidden, rather than closing it unseen', async () => {
+    const { user } = renderShell('/m/name-keychain', <FullscreenPage />)
+    await user.click(screen.getByRole('button', { name: 'Assistant' }))
+    await screen.findByRole('textbox', { name: 'Message the assistant' })
+    await user.click(screen.getByRole('button', { name: 'Full screen' }))
+
+    pressShortcut()
+    expect(await screen.findByRole('button', { name: 'Full screen' })).toBeInTheDocument()
+    expect(screen.getByRole('complementary', { name: 'Assistant' })).toBeInTheDocument()
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Message the assistant' })).toHaveFocus(),
+    )
   })
 
   it('offers prompts for the page and sends the page context with the turn', async () => {

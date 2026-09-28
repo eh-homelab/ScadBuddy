@@ -1,6 +1,6 @@
 import { act, fireEvent, renderHook } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useFullscreen } from './useFullscreen'
+import { leaveFullscreen, useFullscreen } from './useFullscreen'
 
 let element: HTMLDivElement | undefined
 
@@ -31,7 +31,7 @@ function offerFullscreen(target: HTMLElement, { refuse = false } = {}) {
     change(target)
   })
   target.requestFullscreen = request
-  return { request, exit, leave: () => change(null) }
+  return { request, exit, enter: () => change(target), leave: () => change(null) }
 }
 
 afterEach(() => {
@@ -113,6 +113,71 @@ describe('useFullscreen', () => {
     act(() => api.leave())
     expect(result.current.mode).toBeNull()
     expect(api.exit).not.toHaveBeenCalled()
+  })
+
+  it('asks once while a request is in flight, and leaves for the page', async () => {
+    const { element, result } = mount()
+    const api = offerFullscreen(element)
+    // Settled only when the test says so, like a slow transition.
+    let grant = () => {}
+    api.request.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          grant = () => {
+            api.enter()
+            resolve()
+          }
+        }),
+    )
+
+    // A double click: the second press lands before the first is answered.
+    act(() => result.current.toggle())
+    act(() => result.current.toggle())
+    expect(api.request).toHaveBeenCalledOnce()
+
+    await act(async () => grant())
+    expect(result.current.mode).toBe('screen')
+
+    await act(async () => result.current.toggle())
+    expect(result.current.mode).toBeNull()
+  })
+
+  it('drops the stand-in when the Fullscreen API takes over', async () => {
+    const { element, result } = mount()
+    const api = offerFullscreen(element, { refuse: true })
+    await act(async () => result.current.toggle())
+    expect(result.current.mode).toBe('window')
+
+    // The element goes full screen after all; leaving that must reach the page, not a
+    // stand-in left underneath.
+    act(() => api.enter())
+    expect(result.current.mode).toBe('screen')
+    act(() => api.leave())
+    expect(result.current.mode).toBeNull()
+  })
+
+  it('leaves either mode when asked from outside, and says whether it was in one', async () => {
+    const { element, result } = mount()
+    expect(leaveFullscreen()).toBe(false)
+
+    act(() => result.current.toggle())
+    expect(result.current.mode).toBe('window')
+    let left = false
+    act(() => {
+      left = leaveFullscreen()
+    })
+    expect(left).toBe(true)
+    expect(result.current.mode).toBeNull()
+
+    const api = offerFullscreen(element)
+    await act(async () => result.current.toggle())
+    expect(result.current.mode).toBe('screen')
+    act(() => {
+      left = leaveFullscreen()
+    })
+    expect(left).toBe(true)
+    expect(api.exit).toHaveBeenCalledOnce()
+    expect(result.current.mode).toBeNull()
   })
 
   it('fills the window when the browser refuses full screen', async () => {

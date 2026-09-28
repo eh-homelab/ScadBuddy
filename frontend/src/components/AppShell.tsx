@@ -17,6 +17,7 @@ import {
 import type { ChatTransportFactory } from '../agent/chat/transport'
 import { isEmbedded } from '../lib/embed'
 import { useLoadDisplayUnit } from '../lib/units'
+import { leaveFullscreen } from '../lib/useFullscreen'
 
 // Split out: the panel, its protocol schemas (zod) and its renderer download only
 // when someone opens it, and never when AI is off.
@@ -56,7 +57,13 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
     setOpen(false)
     toggleButton.current?.focus()
   }, [])
-  const toggle = useCallback(() => (open ? closePanel() : openPanel()), [open, closePanel, openPanel])
+  // Full screen hides the panel along with the rest of the page, so there the toggle
+  // means "show me the assistant": it leaves full screen and opens the panel, rather
+  // than opening (or closing) it out of sight.
+  const toggle = useCallback(() => {
+    if (leaveFullscreen() || !open) openPanel()
+    else closePanel()
+  }, [open, closePanel, openPanel])
 
   useEffect(() => {
     if (!ai.available) return
