@@ -9,6 +9,8 @@ import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
@@ -622,6 +624,18 @@ export function SettingsPage() {
           </Button>
           {savedAt && <span className="text-[12px] text-ok">Saved at {savedAt}</span>}
         </div>
+
+        {/* Applied as you go, not by Save changes: each action is its own request. */}
+        {ai.available && (
+          <div className="mt-8">
+            <h2 className="text-[15px] font-semibold tracking-tight">Assistant plugins</h2>
+            <p className="mt-0.5 text-[13px] text-muted">
+              What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+            </p>
+            <PluginPackagesPanel />
+            <RemotePluginsPanel />
+          </div>
+        )}
       </div>
     </div>
   )

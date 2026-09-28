@@ -308,7 +308,7 @@ async def post_attach_project(
     async with client_for(settings) as client:
         # The body's ids are filed under the project as asked, but only the output's own
         # items are linked to it: a caller-named item would open its archive's media.
-        linkable = await owned_queue_items(client, meta) if links.available else set()
+        linkable = await owned_queue_items(client, meta, links, ids) if links.available else set()
         return await attach_results(
             client,
             project_id,
