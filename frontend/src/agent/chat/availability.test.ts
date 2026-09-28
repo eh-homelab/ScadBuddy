@@ -62,6 +62,51 @@ describe('fetchAiAvailability', () => {
     })
   })
 
+  it('keeps the gate’s refusal when the agent cannot serve for another reason too', async () => {
+    // The agent names the outage first, but this page is refused whatever happens to
+    // the database: the shell must not ride this out, and the transport must say so.
+    const body = {
+      available: false,
+      state: 'unavailable',
+      ai: 'unavailable (database unreachable)',
+      reason: 'The database is unreachable.',
+      chat: 'refused',
+    }
+    expect(await fetchAiAvailability(answer(body))).toEqual({
+      available: false,
+      state: 'unavailable',
+      reason: 'The database is unreachable.',
+      chat: 'refused',
+    })
+    const off = {
+      available: false,
+      state: 'disabled',
+      ai: 'disabled (no Claude credential)',
+      reason: 'No Claude credential is configured yet.',
+      chat: 'refused',
+    }
+    expect(await fetchAiAvailability(answer(off))).toEqual({
+      available: false,
+      state: 'not_configured',
+      reason: 'No Claude credential is configured yet.',
+      chat: 'refused',
+    })
+  })
+
+  it('is unavailable, not "not set up", when the agent was started without its chat socket', async () => {
+    const body = {
+      available: false,
+      state: 'enabled',
+      ai: 'enabled',
+      reason: 'The agent service was started without its chat socket.',
+    }
+    expect(await fetchAiAvailability(answer(body))).toEqual({
+      available: false,
+      state: 'unavailable',
+      reason: 'The agent service was started without its chat socket.',
+    })
+  })
+
   it('is unreachable when nothing answers, the path is not routed, or the SPA answers instead', async () => {
     const down: typeof fetch = () => Promise.reject(new TypeError('Failed to fetch'))
     expect(await fetchAiAvailability(down)).toMatchObject({

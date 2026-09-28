@@ -12,9 +12,10 @@ import { useEffect, useSyncExternalStore } from 'react'
  * - `not_configured`: the agent answered but is switched off for a setup reason: no
  *   Claude credential yet, no key-encryption key, no database.
  * - `unavailable`: the agent answered but cannot serve, for example because its
- *   database is down, or because this page would be refused by the chat socket's
- *   gate (`chat: 'refused'`: opened by LAN address or over plain HTTP rather than at
- *   the public HTTPS URL).
+ *   database is down, because it was started without its chat socket, or because
+ *   this page would be refused by the chat socket's gate (`chat: 'refused'`: opened
+ *   by LAN address or over plain HTTP rather than at the public HTTPS URL). The
+ *   gate's verdict rides along with any state, `not_configured` too.
  * - `unreachable`: nothing answered as the agent. Either the service is down, or
  *   `/api/v1/ai/*` is not routed to it, in which case the backend's SPA fallback
  *   answers with the app page.
@@ -123,9 +124,13 @@ async function read(fetchImpl: typeof fetch, signal: AbortSignal): Promise<AiAva
   if (!isStatusBody(body)) return { available: false, state: 'unreachable', reason: NOT_ROUTED }
   if (body.available) return { available: true, state: 'configured' }
   const reason = body.reason ?? body.ai
-  if (body.state === 'enabled' && body.chat === 'refused') return { available: false, state: 'unavailable', reason, chat: 'refused' }
-  if (body.state === 'unavailable') return { available: false, state: 'unavailable', reason }
-  return { available: false, state: 'not_configured', reason }
+  // The gate's verdict is about this page, not the agent's health, so it rides along
+  // whatever the state (the agent names a setup problem first, but still sends it).
+  const chat = body.chat === 'refused' ? { chat: 'refused' as const } : {}
+  if (body.state === 'disabled') return { available: false, state: 'not_configured', reason, ...chat }
+  // `unavailable`, or `enabled` but not available: refused for this page, or started
+  // without its chat socket. Either way the agent answered and cannot serve.
+  return { available: false, state: 'unavailable', reason, ...chat }
 }
 
 // One read shared by every caller in the tab (the shell, Settings).
