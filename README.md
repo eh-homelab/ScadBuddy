@@ -71,12 +71,11 @@ Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
 **Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
 for the project picker).
 
-**Renders on Temporal** (#424) are behind `SCADBUDDY_TEMPORAL_ADDRESS` (the
-Temporal frontend's `host:port`). Empty, renders run on the legacy in-process
-queue described below. Set, they run on Temporal: the API submits and a separate
-render worker (see "Render worker" under Deploying) runs them. Temporal is
-optional until #546 makes the address required and removes the legacy queue. For
-a one-process dev run, let the API host the worker itself:
+**Renders run on Temporal** (#424, #546). `SCADBUDDY_TEMPORAL_ADDRESS` (the
+Temporal frontend's `host:port`) is required: without it the backend does not start.
+The API submits and a separate render worker (see "Render worker" under Deploying)
+runs them. The API's client connects lazily, so the API boots while Temporal is
+down, and its renders wait. For a one-process dev run, let the API host the worker itself:
 
 ```bash
 temporal server start-dev --namespace scadbuddy      # listens on 127.0.0.1:7233
@@ -95,10 +94,6 @@ must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only
 and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
-Drain renders, and stop the worker Deployment, before flipping
-`SCADBUDDY_TEMPORAL_ADDRESS` either way: a restart across the flip fails the renders
-in flight, while a pending one carries over (a Temporal boot adopts the legacy
-queue's pending renders; a legacy boot adopts Temporal's).
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
@@ -116,7 +111,8 @@ queue's pending renders; a legacy boot adopts Temporal's).
   `/data/libraries` at start when it is not there, so a fresh install renders
   BOSL2 models without network access (licence:
   [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
-- **Environment** (all optional but `SCADBUDDY_DATABASE_URL`):
+- **Environment** (all optional but `SCADBUDDY_DATABASE_URL` and
+  `SCADBUDDY_TEMPORAL_ADDRESS`):
   `SCADBUDDY_BAMBUDDY_URL`, `SCADBUDDY_BAMBUDDY_API_KEY`, `SCADBUDDY_PUBLIC_URL`,
   `SCADBUDDY_DEFAULT_PLATE` and `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default
   1073741824, 1 GiB) set the starting values for Settings. Once a value is saved
@@ -319,7 +315,7 @@ and the new pod is serving that exact build.
 
 ### Render worker (#424)
 
-With `SCADBUDDY_TEMPORAL_ADDRESS` set, renders run on a separate worker. It is the
+Renders run on a separate worker. It is the
 **same image** run as `python -m scadbuddy.worker`, and it serves `/healthz`
 (`{"ok": true, "build_id": …, "task_queue": …}`) and `/metrics` on port **9090**.
 Probe that port: the image's `HEALTHCHECK` is the API's 8080.

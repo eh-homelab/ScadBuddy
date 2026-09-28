@@ -21,6 +21,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
 from tests.conftest import MODEL_SLUG
 
@@ -447,4 +448,9 @@ def test_the_boot_recounts_the_upload_store(
 def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
     """One store for the routes and the renders, caps and all (#390)."""
     state = getattr(app.state, STATE_ATTR)
-    assert state.queue.assets is state.assets
+    deps = worker_deps_from_state(state)
+    try:
+        assert deps.assets is state.assets
+    finally:
+        assert deps.thumbnail_executor is not None
+        deps.thumbnail_executor.shutdown()

@@ -40,10 +40,10 @@ but an api module after a non-api module that itself follows an api module loses
 `tests/api/conftest.py`: `uv run --frozen pytest tests/api/test_health.py
 tests/test_config.py tests/api/test_jobs.py` errors at setup of `test_jobs.py`'s tests
 with `fixture 'client' not found`. Put the `tests/api/` paths together.
-Renders: `SCADBUDDY_TEMPORAL_ADDRESS` empty runs the legacy in-process render queue; set,
-renders run on Temporal with `python -m scadbuddy.worker` as the worker (or
-`SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). The legacy path
-goes in the follow-up that makes the address required (#546).
+Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), like
+`SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
+`SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
+an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:

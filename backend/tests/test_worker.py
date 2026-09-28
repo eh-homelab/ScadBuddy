@@ -38,7 +38,7 @@ from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, drained, make_current
 from scadbuddy.workflows.models import piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import UNUSED_DATABASE_URL, fake_3mf_openscad
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS, fake_3mf_openscad
 
 if TYPE_CHECKING:
     from scadbuddy.api.deps import AppState
@@ -245,6 +245,7 @@ async def test_the_in_process_worker_stops_without_draining(
     monkeypatch.setattr(worker_module, "drained", never)
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         data_dir=tmp_path,
         revision=f"test-{uuid.uuid4().hex[:8]}",
         temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
@@ -285,6 +286,7 @@ async def test_the_in_process_worker_runs_a_workflow_and_ends_on_its_stop_event(
     settings = Settings(
         database_url=UNUSED_DATABASE_URL,
         data_dir=tmp_path,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         revision=f"test-{uuid.uuid4().hex[:8]}",
         temporal_task_queue_render=f"t-{uuid.uuid4().hex[:8]}",
     )

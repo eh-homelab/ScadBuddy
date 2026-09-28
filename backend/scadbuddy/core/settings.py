@@ -122,6 +122,16 @@ class Settings(BaseSettings):
             )
         return value
 
+    @field_validator("temporal_address")
+    @classmethod
+    def _temporal_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError(
+                "SCADBUDDY_TEMPORAL_ADDRESS is required: ScadBuddy renders on Temporal. Set"
+                " it to the Temporal frontend's host:port, e.g. temporal-frontend:7233"
+            )
+        return value
+
     @field_validator("database_pool_size")
     @classmethod
     def _pool_size_at_least_one(cls, value: int) -> int:
@@ -129,10 +139,9 @@ class Settings(BaseSettings):
             raise ValueError(f"SCADBUDDY_DATABASE_POOL_SIZE must be at least 1, not {value}")
         return value
 
-    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Empty (for now)
-    # keeps renders on the legacy queue; set, they run on Temporal. The final phase-1
-    # PR makes it required and removes the legacy queue.
-    temporal_address: str = ""
+    # SCADBUDDY_TEMPORAL_ADDRESS: host:port of the Temporal frontend. Required
+    # (#546): every render runs on Temporal (spec 2026-09-27 §3.1).
+    temporal_address: str = Field(default="", validate_default=True)
     temporal_namespace: str = DEFAULT_TEMPORAL_NAMESPACE
     temporal_task_queue_render: str = DEFAULT_TEMPORAL_TASK_QUEUE_RENDER
     # SCADBUDDY_TEMPORAL_WORKER_INPROCESS: run the render worker inside the API

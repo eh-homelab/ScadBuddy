@@ -35,6 +35,7 @@ from scadbuddy.library.settings_store import SettingsPatch, SettingsStore
 from scadbuddy.render.job_store import JobStore, Reaped
 from scadbuddy.render.jobs import Job, JobResult, RenderQueue
 from scadbuddy.render.solids import WRAPPER_PREFIX
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 
 def _model(slug: str, kind: str = "model.updated") -> ModelEvent:
@@ -370,7 +371,12 @@ def test_every_settings_write_is_announced_with_its_section(
 ) -> None:
     bus = InProcessEventBus()
     seen = _record(bus)
-    store = SettingsStore(Settings(data_dir=tmp_path, database_url=pg_conninfo), events=bus)
+    store = SettingsStore(
+        Settings(
+            data_dir=tmp_path, database_url=pg_conninfo, temporal_address=UNUSED_TEMPORAL_ADDRESS
+        ),
+        events=bus,
+    )
     store.open()
     try:
         store.save(SettingsPatch(public_url="https://scad.example"))

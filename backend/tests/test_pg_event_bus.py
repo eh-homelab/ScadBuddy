@@ -45,7 +45,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.render.job_store import render_key
 from scadbuddy.render.jobs import Job, JobResult, QueueFullError, RenderQueue
 from scadbuddy.render.pg_store import PostgresJobStore, migrate
-from tests.conftest import UNUSED_DATABASE_URL
+from scadbuddy.render.projection import JobProjection
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 #: Well inside this, or it is not "at once".
 PROMPTLY = 5.0
@@ -549,26 +550,26 @@ def _stale_job(store: PostgresJobStore, n: int) -> Job:
 
 
 @pytest.mark.requires_postgres
-def test_a_database_url_selects_the_postgres_bus_on_the_queue_s_listener(
+def test_a_database_url_selects_the_postgres_bus_on_the_projection_s_listener(
     tmp_path: Path, pg_conninfo: str
 ) -> None:
     state = build_state(
         Settings(
             data_dir=tmp_path,
             database_url=pg_conninfo,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
             event_log_retention_seconds=60,
             event_log_retention_rows=10,
         )
     )
     assert isinstance(state.events, PgNotifyEventBus)
-    store = state.queue.store
-    assert isinstance(store, PostgresJobStore)
-    assert store.events is state.events
-    assert state.events.listener is store.pg_listener
+    projection = state.projection
+    assert isinstance(projection, JobProjection)
+    assert state.queue.store is projection
+    assert projection.events is state.events
+    assert state.events.listener is projection.pg_listener
     assert state.events.retention == EventLogRetention(seconds=60, rows=10)
-    assert isinstance(state.queue, RenderQueue)
-    assert state.queue.events is state.events
-    assert PG_CHANNEL in store.pg_listener.channels
+    assert PG_CHANNEL in projection.pg_listener.channels
 
 
 @pytest.mark.parametrize("field", ["event_log_retention_seconds", "event_log_retention_rows"])
@@ -580,6 +581,6 @@ def test_retention_settings_are_validated_by_name(field: str) -> None:
 def test_retention_settings_come_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_SECONDS", "120")
     monkeypatch.setenv("SCADBUDDY_EVENT_LOG_RETENTION_ROWS", "0")
-    settings = Settings(database_url=UNUSED_DATABASE_URL)
+    settings = Settings(database_url=UNUSED_DATABASE_URL, temporal_address=UNUSED_TEMPORAL_ADDRESS)
     assert settings.event_log_retention_seconds == 120
     assert settings.event_log_retention_rows == 0

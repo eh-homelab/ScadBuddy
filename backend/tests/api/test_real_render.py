@@ -20,6 +20,7 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from tests.api.conftest import wait_for_job
+from tests.conftest import UNUSED_TEMPORAL_ADDRESS
 
 pytestmark = pytest.mark.requires_openscad
 
@@ -34,6 +35,7 @@ color("#0000FF") translate([size, 0, 0]) cube(size);
 def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestClient]:
     settings = Settings(
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         openscad=load_config().openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,

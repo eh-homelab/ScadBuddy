@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
-from tests.conftest import UNUSED_DATABASE_URL
+from tests.conftest import UNUSED_DATABASE_URL, UNUSED_TEMPORAL_ADDRESS
 
 
 def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) -> None:
@@ -19,6 +19,12 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) ->
         "data_dir_writable": True,
         "revision": "unknown",
         "version": "dev",
+        "temporal": {
+            "address": UNUSED_TEMPORAL_ADDRESS,
+            "namespace": "scadbuddy",
+            "task_queue": "render",
+            "worker_inprocess": False,
+        },
     }
 
 
@@ -69,7 +75,11 @@ def test_a_built_in_never_overwrites_a_model_of_mine(
 
 def test_an_explicit_directory_must_exist_to_be_used(tmp_path: Path) -> None:
     def settings(**fields: Path) -> Settings:
-        return Settings(database_url=UNUSED_DATABASE_URL, **fields)  # type: ignore[arg-type]
+        return Settings(
+            database_url=UNUSED_DATABASE_URL,
+            temporal_address=UNUSED_TEMPORAL_ADDRESS,
+            **fields,  # type: ignore[arg-type]
+        )
 
     assert settings(seed_models_dir=tmp_path).resolve_seed_models_dir() == tmp_path
     assert settings(seed_models_dir=tmp_path / "gone").resolve_seed_models_dir() is None
@@ -86,6 +96,7 @@ def test_the_environment_overrides_every_field(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("SCADBUDDY_REVISION", "0123456789abcdef0123456789abcdef01234567")
     monkeypatch.setenv("SCADBUDDY_VERSION", "1.2.3")
     monkeypatch.setenv("SCADBUDDY_DATABASE_URL", UNUSED_DATABASE_URL)
+    monkeypatch.setenv("SCADBUDDY_TEMPORAL_ADDRESS", UNUSED_TEMPORAL_ADDRESS)
 
     config = Settings().to_config()
     assert config.data_dir == Path("/srv/scad")

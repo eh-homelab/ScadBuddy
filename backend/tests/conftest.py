@@ -132,6 +132,9 @@ def _skip_without_temporal(request: pytest.FixtureRequest) -> None:
 #: For a `Settings` whose app never starts: the database URL is required (#401), but
 #: nothing is dialled until the lifespan opens the stores.
 UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
+#: The same for the Temporal address (#546). Nothing listens on port 1, and the API's
+#: client is lazy, so an app built with it boots and its renders wait, unstarted.
+UNUSED_TEMPORAL_ADDRESS = "127.0.0.1:1"
 
 
 @pytest.fixture
@@ -261,6 +264,7 @@ def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: st
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
         database_url=pg_conninfo,
+        temporal_address=UNUSED_TEMPORAL_ADDRESS,
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,
