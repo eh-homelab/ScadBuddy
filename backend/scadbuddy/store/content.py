@@ -228,14 +228,34 @@ class ContentStore:
         """Remove ``key`` and its object. A row on another backend is left for it."""
         stat = await asyncio.to_thread(self.index.delete, key, backend=self.name)
         if stat is not None:
-            await self._release(stat.ref)
+            await self._release_or_keep(stat)
 
     async def delete_if_stale(self, key: str, cutoff: datetime) -> bool:
         stat = await asyncio.to_thread(self.index.delete_if_stale, key, cutoff, backend=self.name)
         if stat is None:
             return False
-        await self._release(stat.ref)
+        await self._release_or_keep(stat)
         return True
+
+    async def _release_or_keep(self, stat: BlobStat) -> None:
+        """Release a deleted row's object. If that fails for any reason but a refusal,
+        the row is put back (unless the key was stored again meanwhile), so the object
+        stays tracked and a later pass retries; a refused object is outside ScadBuddy's
+        folders and is left untracked on purpose."""
+        try:
+            await self._release(stat.ref)
+        except RefusedDeleteError:
+            raise
+        except Exception:
+            await asyncio.to_thread(
+                self.index.swap,
+                stat.key,
+                stat.ref,
+                expected=None,
+                slug=stat.slug,
+                meta=stat.meta,
+            )
+            raise
 
     async def list(self, scope: BlobScope) -> AsyncIterator[BlobStat]:
         for stat in await asyncio.to_thread(self.index.stats, None, scope.slug, backend=self.name):

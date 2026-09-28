@@ -5,7 +5,9 @@ upload into the store and brings it into a worker's own `AssetStore` before a re
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Iterable
+from datetime import datetime
 
 from scadbuddy.library.assets import (
     AssetMeta,
@@ -14,6 +16,8 @@ from scadbuddy.library.assets import (
     AssetStore,
 )
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
+
+logger = logging.getLogger(__name__)
 
 
 def asset_key(asset_id: str) -> str:
@@ -37,7 +41,14 @@ class RemoteAssets:
             meta=meta.model_dump(),
         )
 
+    async def clock(self) -> datetime:
+        """Now, by the database's clock: a sweep's cutoff is compared with `touched_at`."""
+        return await asyncio.to_thread(self.content.index.now)
+
     async def ensure(self, store: AssetStore, ids: Iterable[str]) -> list[str]:
+        """Bring every id the store holds into this process's ``store``; the ids fetched.
+        One it cannot bring in is logged by id and reason: the render then refuses the
+        parameter, and the log says it was not in the blob store."""
         fetched: list[str] = []
         for asset_id in sorted(set(ids)):
             try:
@@ -49,28 +60,74 @@ class RemoteAssets:
             stat = await asyncio.to_thread(self.content.index.get, key)
             # This backend's row only: `read` downloads from this backend.
             if stat is None or stat.ref.backend != self.content.name:
+                # `asset_ids_in` is loose: any 64-hex value in the params is a candidate.
+                logger.info(
+                    "a parameter's value is not an upload in the blob store",
+                    extra={"asset_id": asset_id, "reason": "no row"},
+                )
                 continue
             try:
                 data = await self.content.read(stat.ref)
                 await asyncio.to_thread(store.adopt, AssetMeta.model_validate(stat.meta), data)
-            except (BlobMissingError, BlobCorruptError, AssetRejectedError):
-                # Gone or altered: forget it, so the API's `backfill` mirrors it again;
-                # the render reports the id as missing, as for an unknown one.
-                await self.content.forget(key)
+            except (BlobMissingError, BlobCorruptError, AssetRejectedError) as error:
+                logger.warning(
+                    "an uploaded file is gone or altered in the blob store",
+                    extra={"asset_id": asset_id, "reason": repr(error)},
+                )
+                await self._drop_bad(key)
                 continue
             fetched.append(asset_id)
         return fetched
 
-    async def drop(self, ids: Iterable[str]) -> None:
+    async def _drop_bad(self, key: str) -> None:
+        """Drop a copy that cannot be read, object too, so the API's `backfill` mirrors
+        the upload again; only the row when the object cannot be removed."""
+        try:
+            await self.content.delete(key)
+        except Exception:
+            logger.exception("could not remove an unreadable upload's copy", extra={"key": key})
+            await self.content.forget(key)
+
+    async def drop(self, ids: Iterable[str], *, cutoff: datetime) -> list[str]:
+        """Remove the store's copies of uploads swept from the volume, the ids dropped.
+        Only a copy not stored again since ``cutoff`` (the sweep's start): a re-upload
+        during the sweep bumps its `touched_at` and keeps it. A failure is logged and
+        leaves that copy for the next sweep's `reconcile`."""
+        dropped: list[str] = []
         for asset_id in ids:
-            await self.content.delete(asset_key(asset_id))
+            try:
+                if await self.content.delete_if_stale(asset_key(asset_id), cutoff):
+                    dropped.append(asset_id)
+            except Exception:
+                logger.exception(
+                    "could not remove a swept upload's copy", extra={"asset_id": asset_id}
+                )
+        return dropped
+
+    async def reconcile(self, store: AssetStore, *, cutoff: datetime) -> list[str]:
+        """Drop every copy on this backend whose upload ``store`` no longer holds: what
+        an earlier `drop` failed to remove."""
+        rows = await asyncio.to_thread(
+            self.content.index.stats, ["asset"], backend=self.content.name
+        )
+        local = set(await asyncio.to_thread(store.ids))
+        orphans = [
+            asset_id
+            for asset_id in (row.key.removeprefix(asset_key("")) for row in rows)
+            if asset_id not in local
+        ]
+        return await self.drop(orphans, cutoff=cutoff)
 
     async def backfill(self, store: AssetStore) -> int:
+        """Mirror every upload the store has no copy of on this backend."""
         done = 0
         for asset_id in await asyncio.to_thread(store.ids):
             stat = await asyncio.to_thread(self.content.index.get, asset_key(asset_id))
             if stat is None or stat.ref.backend != self.content.name:
-                meta = await asyncio.to_thread(store.get, asset_id)
+                try:
+                    meta = await asyncio.to_thread(store.get, asset_id)
+                except AssetNotFoundError:
+                    continue  # swept since `ids()`
                 await self.mirror(store, meta, slug=None, title=None)
                 done += 1
         return done

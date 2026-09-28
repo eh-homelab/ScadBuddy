@@ -16,6 +16,7 @@ from scadbuddy.library.assets import (
     AssetNotFoundError,
     AssetRejectedError,
     AssetStore,
+    asset_ids_in,
     display_name,
     file_assets,
     sample_files,
@@ -374,7 +375,6 @@ def test_the_catalogue_thumbnail_is_never_a_sample(model_dir: Path) -> None:
 
 
 def test_an_adopted_asset_is_stored_as_it_was_and_listed(tmp_path: Path) -> None:
-    from scadbuddy.library.assets import asset_ids_in
 
     source = AssetStore(tmp_path / "api")
     meta = source.put(HEART_SVG, "heart.svg")
