@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
-from scadbuddy.render.job_store import QueueFullError
+from scadbuddy.render.job_models import QueueFullError
 from scadbuddy.render.submit import RenderService
 from tests.api.conftest import FAIL_WIDTH, FAILED_WARNING, set_fake_env, wait_for_job
 

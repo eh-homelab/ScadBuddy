@@ -208,20 +208,6 @@ on shutdown.
     `scadbuddy_events_received_total`, `scadbuddy_events_resyncs_total` and
     `scadbuddy_event_log_pruned_total` show it working. NOTIFY channels are per
     database, so give each deployment its own database, not just its own schema.
-  - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
-    than this for a worker, unrendered.
-  - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
-    jobs it was not woken for, only while the listener below is disconnected.
-  - `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s), Postgres only: each process
-    `LISTEN`s on `scadbuddy_render_queue`, and a submit or requeue on any replica
-    sends `NOTIFY` in the same transaction, so an idle worker starts the job at
-    once. While that connection is up, idle workers still check this often, to
-    catch a notification missed around a reconnect. The listener reconnects with
-    back-off; `scadbuddy_render_queue_listener_connected` and
-    `scadbuddy_render_queue_listener_reconnects_total` show its state.
-  - `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s) and `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2),
-    Postgres only: a running job whose worker stops heartbeating for a lease is
-    requeued, and failed after its last attempt.
   - `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and `SCADBUDDY_RENDER_LATENCY_SLO`
     (60 s): targets, not limits. They are exported with the metrics for alerts.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is

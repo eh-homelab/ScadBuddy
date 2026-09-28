@@ -34,7 +34,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.glb import BoundingBox, read_glb
-from scadbuddy.render.jobs import (
+from scadbuddy.render.job_models import (
     Job,
     JobNotFoundError,
     JobState,

@@ -28,8 +28,7 @@ from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.render.job_models import Job
-from scadbuddy.render.job_store import render_key
+from scadbuddy.render.job_models import Job, render_key
 from scadbuddy.render.projection import JobProjection, workflow_id_for
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.worker import _poll, _wait_drained, run_inprocess_worker, run_worker

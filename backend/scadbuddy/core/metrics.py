@@ -25,9 +25,8 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 __all__ = ["CONTENT_TYPE_LATEST", "HttpMetrics", "Metrics", "RenderOutcome", "RenderStage"]
 
-#: How a job left the queue. ``expired`` waited past SCADBUDDY_RENDER_QUEUE_TIMEOUT
-#: and never reached a worker; ``superseded`` was replaced by a newer render first.
-RenderOutcome = Literal["done", "failed", "expired", "superseded"]
+#: How a job settled; ``superseded`` was replaced by a newer render first.
+RenderOutcome = Literal["done", "failed", "superseded"]
 RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write"]
 #: What a job store call that failed was doing: a worker claiming or recording a
 #: job, a heartbeat, the lease reaper, the per-scrape read of the queue gauges, or
@@ -66,15 +65,10 @@ class Metrics:
             "Render requests answered with an identical job already waiting.",
             registry=r,
         )
-        self.render_cached = Counter(
-            "scadbuddy_render_jobs_cached",
-            "Render requests answered with a finished render kept under the template.",
-            registry=r,
-        )
         self.store_info = Gauge(
             "scadbuddy_render_store_info",
-            'Which job store holds the render queue: backend="postgres" when '
-            'SCADBUDDY_DATABASE_URL is set, "files" otherwise; always 1.',
+            'Which job store holds the render jobs: backend="postgres" (the '
+            "render_jobs projection); always 1.",
             ["backend"],
             registry=r,
         )
@@ -92,16 +86,14 @@ class Metrics:
         )
         self.listener_connected = Gauge(
             "scadbuddy_render_queue_listener_connected",
-            "1 while this process LISTENs for the NOTIFY that wakes its render workers "
-            "(Postgres); 0 while that connection is down and the workers fall back to "
-            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none. "
-            "The same connection carries the event bus (scadbuddy_events).",
+            "1 while this process's LISTEN connection (the event bus's, scadbuddy_events) "
+            "is up; 0 while it is down and reconnecting.",
             registry=r,
         )
         self.listener_reconnects = Counter(
             "scadbuddy_render_queue_listener_reconnects",
-            "Times the render queue's LISTEN connection was re-established after it "
-            "dropped (Postgres). A first connection is not counted.",
+            "Times this process's LISTEN connection was re-established after it "
+            "dropped. A first connection is not counted.",
             registry=r,
         )
         # The Postgres event bus (spec §7): what went out, what came in, what was lost.
@@ -212,7 +204,7 @@ class Metrics:
         )
 
         # Uploads for `// file` parameters (#296). The usage gauges are read from the
-        # store per scrape, like the queue's.
+        # store per scrape, like the render queue's from the projection.
         self.assets_stored = Gauge(
             "scadbuddy_assets_stored",
             "Distinct files stored for `// file` parameters under data/assets/.",

@@ -25,14 +25,9 @@ from scadbuddy.core.config import (
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_REALTIME_SOCKETS,
     DEFAULT_RENDER_CONCURRENCY,
-    DEFAULT_RENDER_FALLBACK_POLL_INTERVAL,
     DEFAULT_RENDER_LATENCY_SLO,
-    DEFAULT_RENDER_LEASE_TIMEOUT,
-    DEFAULT_RENDER_MAX_ATTEMPTS,
-    DEFAULT_RENDER_POLL_INTERVAL,
     DEFAULT_RENDER_QUEUE_DEPTH_SLO,
     DEFAULT_RENDER_QUEUE_MAX,
-    DEFAULT_RENDER_QUEUE_TIMEOUT,
     DEFAULT_RENDER_TIMEOUT,
     DEFAULT_SOLID_CONCURRENCY,
     DEFAULT_TEMPORAL_NAMESPACE,
@@ -60,11 +55,6 @@ class Settings(BaseSettings):
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
     solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
-    render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
-    render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
-    render_fallback_poll_interval: float = DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
-    render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
-    render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
     render_latency_slo: float = DEFAULT_RENDER_LATENCY_SLO
     check_concurrency: int = DEFAULT_CHECK_CONCURRENCY
@@ -192,11 +182,6 @@ class Settings(BaseSettings):
             render_concurrency=self.render_concurrency,
             solid_concurrency=self.solid_concurrency,
             render_queue_max=self.render_queue_max,
-            render_queue_timeout=self.render_queue_timeout,
-            render_poll_interval=self.render_poll_interval,
-            render_fallback_poll_interval=self.render_fallback_poll_interval,
-            render_lease_timeout=self.render_lease_timeout,
-            render_max_attempts=self.render_max_attempts,
             render_queue_depth_slo=self.render_queue_depth_slo,
             render_latency_slo=self.render_latency_slo,
             check_concurrency=self.check_concurrency,

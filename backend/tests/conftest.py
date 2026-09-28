@@ -8,7 +8,7 @@ import subprocess
 import uuid
 import zipfile
 import zlib
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
@@ -20,11 +20,15 @@ import trimesh
 from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core import settings as settings_module
-from scadbuddy.core.config import load_config
+from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.library import url_import
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import GIT, git_env
+from scadbuddy.render.job_models import Job, JobResult, now
+from scadbuddy.render.jobs import render_job
+from scadbuddy.render.schema import ParamValue
 from tests.support.temporal import TEST_TEMPORAL_ADDRESS_ENV, temporal_available
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -434,6 +438,20 @@ def read_png(data: bytes) -> np.ndarray:
     if rows[:, 0].any():
         raise ValueError("expected filter type 0 on every row")
     return rows[:, 1:].reshape(height, width, 4)
+
+
+async def render_once(
+    paths: DataPaths, slug: str, params: Mapping[str, ParamValue]
+) -> tuple[Job, JobResult]:
+    """Render ``slug`` through the production pipeline (`render_job`: the stages the
+    worker's activities run, in one process) with the configured `openscad`."""
+    job = Job(id=uuid.uuid4().hex, slug=slug, params=dict(params), created_at=now())
+    config = Config(openscad=load_config().openscad, data_dir=paths.root)
+    result, log_tail = await render_job(
+        job, config=config, paths=paths, assets=AssetStore(paths.assets)
+    )
+    job.state, job.result, job.log_tail = "done", result, log_tail
+    return job, result
 
 
 #: Any globally routable address; nothing ever connects to it.

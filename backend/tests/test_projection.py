@@ -5,21 +5,24 @@ from __future__ import annotations
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import psycopg
 import pytest
 
-from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.job_models import Job, JobResult, PartInfo, StepInfo
-from scadbuddy.render.job_store import SUPERSEDED_ERROR, QueueFullError, render_key
-from scadbuddy.render.pg_store import TEMPORAL_INTERRUPTED_ERROR, PostgresJobStore
+from scadbuddy.render.job_models import (
+    SUPERSEDED_ERROR,
+    Job,
+    JobResult,
+    PartInfo,
+    QueueFullError,
+    StepInfo,
+    render_key,
+)
 from scadbuddy.render.projection import (
     CANCELLED_ERROR,
-    LEGACY_INTERRUPTED_ERROR,
     JobProjection,
     workflow_id_for,
 )
@@ -271,23 +274,6 @@ def test_delete_removes_the_row_and_its_blob_refs(
         assert conn.execute("SELECT count(*) FROM blob_refs").fetchone() == (0,)
 
 
-def test_the_legacy_queue_still_works_on_the_migrated_table(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
-) -> None:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        job = _job(width=11)
-        store.submit(job, render_key("demo", {"width": 11}, None))
-        claimed = store.claim()
-        assert claimed is not None and claimed.id == job.id
-        claimed.state, claimed.result, claimed.finished_at = "done", _result(), datetime.now(UTC)
-        assert store.finish(claimed)
-        assert store.read(job.id).state == "done"
-    finally:
-        store.close()
-
-
 def test_a_newer_render_supersedes_a_running_one(
     pg_conninfo: str, announcing: JobProjection
 ) -> None:
@@ -330,176 +316,31 @@ def test_the_cancellation_handler_writes_the_final_projection_once_announced(
     assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
 
 
-def test_a_cache_hit_is_recorded_done_without_a_workflow(
-    pg_conninfo: str, announcing: JobProjection
-) -> None:
-    waiting = announcing.submit(_job(width=23), render_key("demo", {"width": 23}, None)).job
-    hit = _job(width=24)
-    hit.state, hit.result = "done", _result()
-    hit.started_at = hit.finished_at = datetime.now(UTC)
-    submitted = announcing.submit(hit, render_key("demo", {"width": 24}, None), max_pending=1)
-    assert submitted.cached and not submitted.coalesced
-    stored = announcing.read(hit.id)
-    assert stored.state == "done" and stored.result == hit.result
-    assert stored.workflow_id is None and stored.finished_at is not None
-    assert announcing.read(waiting.id).state == "pending"
-    assert _kinds(pg_conninfo) == ["job.pending", "job.done"]
-
-
-def test_the_legacy_queue_never_claims_a_workflow_row(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
-) -> None:
-    projection.submit(_job(width=25), render_key("demo", {"width": 25}, None))
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        assert store.claim() is None
-    finally:
-        store.close()
-
-
-def test_a_legacy_submit_writes_inputs(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
-) -> None:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        job = _job(width=26)
-        store.submit(job, render_key("demo", {"width": 26}, None))
-    finally:
-        store.close()
-    assert projection.read(job.id).inputs == {"params": {"width": 26}}
+def _as_legacy(conninfo: str, *job_ids: str) -> None:
+    """What a pre-Temporal release's queue wrote: rows that name no workflow."""
+    with psycopg.connect(conninfo) as conn:
+        conn.execute(
+            "UPDATE render_jobs SET workflow_id = NULL WHERE id = ANY(%s)", (list(job_ids),)
+        )
 
 
 def test_stale_pending_never_returns_a_legacy_row(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+    pg_conninfo: str, projection: JobProjection
 ) -> None:
-    # During a rolling deploy the legacy queue owns its pending rows (no workflow_id);
-    # the reconciler must not start a workflow for one.
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        store.submit(_job(width=27), render_key("demo", {"width": 27}, None))
-    finally:
-        store.close()
+    # Until `adopt_legacy_pending` gives it a workflow id, the reconciler leaves it.
+    legacy = projection.submit(_job(width=27), render_key("demo", {"width": 27}, None)).job
+    _as_legacy(pg_conninfo, legacy.id)
     owned = projection.submit(_job(width=28), render_key("demo", {"width": 28}, None)).job
     assert [j.id for j in projection.stale_pending(older_than=0)] == [owned.id]
 
 
-def test_a_legacy_cache_hit_returns_the_inputs_it_wrote(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
+def test_boot_adopts_the_legacy_queues_pending_rows(
+    projection: JobProjection, pg_conninfo: str
 ) -> None:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        hit = _job(width=29)
-        hit.state, hit.result = "done", _result()
-        hit.started_at = hit.finished_at = datetime.now(UTC)
-        submitted = store.submit(hit, render_key("demo", {"width": 29}, None))
-        assert submitted.cached
-        assert submitted.job.inputs == {"params": {"width": 29}}
-        assert store.read(hit.id).inputs == submitted.job.inputs
-    finally:
-        store.close()
-
-
-def test_a_legacy_read_reports_the_claim_count(
-    pg_conninfo: str, projection: JobProjection, tmp_path: Path
-) -> None:
-    store = PostgresJobStore(pg_conninfo, DataPaths(tmp_path), pool_size=2)
-    store.open()
-    try:
-        key = render_key("demo", {"width": 30}, None)
-        first = store.submit(_job(width=30), key).job
-        assert store.submit(_job(width=30), key).job.id == first.id
-        assert store.read(first.id).claims == 2
-    finally:
-        store.close()
-
-
-# ── flipping SCADBUDDY_TEMPORAL_ADDRESS across a restart (final review I4) ──────
-
-
-def test_temporal_boot_fails_the_legacy_queues_running_rows_only(
-    announcing: JobProjection, pg_conninfo: str, paths: DataPaths
-) -> None:
-    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
-    legacy.open()
-    try:
-        running, waiting = _job(n=1), _job(n=2)
-        legacy.submit(running, render_key("demo", running.params, None))
-        claimed = legacy.claim()
-        assert claimed is not None and claimed.id == running.id
-        legacy.submit(waiting, render_key("demo", waiting.params, None))
-    finally:
-        legacy.close()
-
-    failed = announcing.fail_legacy_running(LEGACY_INTERRUPTED_ERROR)
-
-    assert [job.id for job in failed] == [running.id]
-    stored = announcing.read(running.id)
-    assert (stored.state, stored.error) == ("failed", LEGACY_INTERRUPTED_ERROR)
-    assert stored.finished_at is not None
-    # A legacy pending row is the reconciler's to start.
-    assert announcing.read(waiting.id).state == "pending"
-    assert "job.failed" in _kinds(pg_conninfo)
-
-
-def test_legacy_boot_adopts_temporal_pending_rows_and_fails_running_ones(
-    projection: JobProjection, pg_conninfo: str, paths: DataPaths
-) -> None:
-    running, waiting = _job(n=3), _job(n=4)
-    projection.submit(running, render_key("demo", running.params, None))
-    assert projection.mark_started(running.id) is not None
-    projection.submit(waiting, render_key("demo", waiting.params, None))
-
-    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
-    legacy.open()
-    try:
-        abandoned = legacy.abandon_orphans()
-        claimed = legacy.claim()
-    finally:
-        legacy.close()
-
-    assert [job.id for job in abandoned] == [running.id]
-    stored = projection.read(running.id)
-    assert (stored.state, stored.error) == ("failed", TEMPORAL_INTERRUPTED_ERROR)
-    # The pending one is the legacy queue's now: its claim takes it.
-    assert claimed is not None and claimed.id == waiting.id
-
-
-def test_a_legacy_row_a_workflow_adopted_is_not_failed_as_a_legacy_running_row(
-    projection: JobProjection, pg_conninfo: str, paths: DataPaths
-) -> None:
-    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
-    legacy.open()
-    try:
-        adopted = _job(n=5)
-        legacy.submit(adopted, render_key("demo", adopted.params, None))
-    finally:
-        legacy.close()
-
-    # The reconciler started `render-<id>` for it, and the workflow marked it running.
-    started = projection.mark_started(adopted.id)
-
-    assert started is not None and started.workflow_id == workflow_id_for(adopted.id)
-    assert projection.fail_legacy_running(LEGACY_INTERRUPTED_ERROR) == []
-    assert projection.read(adopted.id).state == "running"
-
-
-def test_temporal_boot_adopts_the_legacy_queues_pending_rows(
-    projection: JobProjection, pg_conninfo: str, paths: DataPaths
-) -> None:
-    ours = _job(n=6)
-    projection.submit(ours, render_key("demo", ours.params, None))
-    legacy = PostgresJobStore(pg_conninfo, paths, pool_size=2)
-    legacy.open()
-    try:
-        waiting = _job(n=7)
-        legacy.submit(waiting, render_key("demo", waiting.params, None))
-    finally:
-        legacy.close()
-    assert projection.read(waiting.id).workflow_id is None
+    ours, waiting = _job(n=6), _job(n=7)
+    for job in (ours, waiting):
+        projection.submit(job, render_key("demo", job.params, None))
+    _as_legacy(pg_conninfo, waiting.id)
 
     assert projection.adopt_legacy_pending() == [waiting.id]
 

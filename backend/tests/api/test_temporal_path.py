@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
+from temporalio.client import Client
 
 from scadbuddy.api.deps import STATE_ATTR, AppState
 from scadbuddy.core.paths import DataPaths
@@ -124,8 +125,8 @@ def test_the_api_boots_while_temporal_is_down_and_queues_renders_for_the_reconci
 def test_a_failing_start_on_temporal_still_closes_the_projection(
     settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The Temporal path's twin of the legacy queue's failing-backfill test: what
-    `_start_temporal` raises past opening the projection is cleaned up, not leaked."""
+    """What `_start_render` raises past opening the projection is cleaned up, not
+    leaked."""
     cfg = settings.model_copy(
         update={
             "temporal_address": "127.0.0.1:1",

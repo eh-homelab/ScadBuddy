@@ -121,14 +121,16 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per-triangle material), `solids.py` (one closed solid per colour via a `color()`
   wrapper), `bambu3mf.py` (Bambu-style 3MF writer), `glb.py`, `thumbnail.py` (numpy
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
-  (`render_job` ties the steps together; job queue), `render_cache.py` (finished
-  renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
-  parameters at the same revision is answered without OpenSCAD), `submit.py`
-  (`RenderService`, the Temporal path: submit inserts the row, starts the workflow, and a
-  reconciler starts any pending row nothing picked up), `projection.py` (`render_jobs`
-  as a projection the workflow writes in place through the `project` activity),
-  `backend.py` (the `RenderBackend` Protocol the routes see, met by the legacy
-  `RenderQueue` and by `RenderService`).
+  (the render stages the worker's activities run; `render_job` runs them in one
+  process, which the pipeline tests use), `job_models.py` (`Job`, `render_key`,
+  `QueueFullError`), `submit.py` (`RenderService`, what the routes type against as
+  `RenderDep`: submit inserts the row, starts the workflow, and a reconciler starts
+  any pending row nothing picked up), `projection.py` (`render_jobs` as a projection
+  the workflow writes in place through the `project` activity), `pg_store.py` (the
+  backend's migrations). The legacy in-process queue, its file and Postgres stores
+  and its `.renders/<key>` cache are gone (#546): the Temporal path's cache is the blob
+  store's piece (`piece.json`), and nothing writes or prunes `models/<slug>/.renders/`
+  any more (it stays hidden and git-ignored for volumes that still hold one).
 - `backend/scadbuddy/workflows/` — renders on Temporal (#424): `pipelines.py`
   (`TemplatePipeline`, its `RenderPiece` children, `RenderPreview`), `activities.py`
   (the render stages as activities, `WorkerDeps`), `client.py` (`connect`,
