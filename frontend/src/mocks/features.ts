@@ -27,7 +27,8 @@ export function toFeatures(modules: Record<string, unknown>): MockFeature[] {
     })
 }
 
-// Nested folders (`features/<feature>/index.ts`) count too; colocated tests do not.
+// Every `.ts` file under `features/`, at any depth, is a module and must export
+// `handlers`; colocated tests are skipped.
 const modules = import.meta.glob(['./features/**/*.ts', '!./features/**/*.test.ts'], {
   eager: true,
 })
