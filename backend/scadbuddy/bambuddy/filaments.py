@@ -550,49 +550,28 @@ async def gather_plate_options(
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
     The spools, assignments and printer are the same for every plate, so they are read
-    once; only each plate's slots are read per plate (#480). Every read runs
-    concurrently, and a failed read raises the first failure in the order spools,
-    assignments, printer, inventory-remain, then plates in ``plate_ids`` order — the
-    order reading them in turn would raise in. Because the reads are concurrent, a
-    failure in an earlier read does not stop the later ones from reaching Bambuddy:
-    an auth failure on ``spools()`` still issues the assignments, printer and every
-    plate's requirements call before the error is raised. That extra load is an
-    accepted cost of reading everything at once rather than one at a time."""
+    once, before the plates and in sequence — spools, then assignments, then the
+    printer, then inventory-remain — exactly as the single-plate path has always read
+    them. A shared-read failure therefore always wins over any plate-specific failure,
+    matching that path's historical behavior. Only each plate's own slots are read per
+    plate (#480), concurrently with each other; a failed plate read raises the first
+    failing plate's error, in ``plate_ids`` order, as reading them in turn would."""
+    spools = await client.spools()
+    assignments = await client.spool_assignments()
 
-    async def printer_side() -> tuple[Printer | None, list[SlotMaterial]]:
-        if printer_id is None:
-            return None, []
-        printer, remain = await asyncio.gather(
-            client.printer(printer_id),
-            client.inventory_remain(printer_id),
-            return_exceptions=True,
-        )
-        # Deterministic even when both fail: printer's failure is reported first,
-        # matching the order a sequential read would have raised in.
-        if isinstance(printer, BaseException):
-            raise printer
-        if isinstance(remain, BaseException):
-            raise remain
-        return printer, remain.slot_materials
+    printer = None
+    slot_materials: list[SlotMaterial] = []
+    if printer_id is not None:
+        printer = await client.printer(printer_id)
+        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
-    shared = asyncio.gather(
-        client.spools(), client.spool_assignments(), printer_side(), return_exceptions=True
-    )
-    plates = asyncio.gather(
+    answers = await asyncio.gather(
         *(
             _requirements(client, library_file_id, plate, fallback_colours, own_colours)
             for plate in plate_ids
         ),
         return_exceptions=True,
     )
-    (spools, assignments, side), answers = await asyncio.gather(shared, plates)
-    if isinstance(spools, BaseException):
-        raise spools
-    if isinstance(assignments, BaseException):
-        raise assignments
-    if isinstance(side, BaseException):
-        raise side
-    printer, slot_materials = side
     per_plate: list[list[SlotNeed]] = []
     for answer in answers:
         if isinstance(answer, BaseException):

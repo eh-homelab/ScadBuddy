@@ -395,20 +395,20 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     assert (printer.call_count, remain.call_count) == (1, 1)
 
 
-# --- the failure path (#525): concurrent reads, deterministic errors ----------
+# --- the failure path (#525): shared reads sequential, plates concurrent -----
 
 
 @respx.mock
-async def test_an_early_shared_read_failure_raises_it_despite_the_plates_still_being_read(
+async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
     bambuddy: BambuddyClient,
 ) -> None:
-    """Reading everything concurrently means a failing ``spools()`` no longer skips the
-    other calls the way a sequential read would — that is an accepted cost (#525) — but
-    the error that surfaces must still be ``spools()``'s."""
+    """The shared reads run sequentially and before the plates: a failing ``spools()``
+    raises immediately, and neither the rest of the shared reads nor any plate's
+    requirements are ever asked for."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(500, json={"detail": "spools-boom"})
     )
-    respx.get(f"{API}/inventory/assignments").mock(
+    assignments = respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
     requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
@@ -425,39 +425,73 @@ async def test_an_early_shared_read_failure_raises_it_despite_the_plates_still_b
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
     assert "spools-boom" in excinfo.value.detail
 
-    # The extra calls still reach Bambuddy; only the surfaced error is pinned.
-    assert requirements.call_count == 3
-    assert printer.called
-    assert remain.called
+    assert not assignments.called
+    assert not requirements.called
+    assert not printer.called
+    assert not remain.called
 
 
 @respx.mock
-async def test_a_double_printer_side_failure_raises_the_printers_error(
+async def test_a_printer_failure_raises_and_never_reaches_the_plates(
     bambuddy: BambuddyClient,
 ) -> None:
-    """When both ``printer()`` and ``inventory_remain()`` fail, the printer's failure
-    wins deterministically — the order a sequential read would have raised in — rather
-    than whichever of the two happens to finish first."""
+    """A printer-side failure is a shared-read failure too, and is raised before any
+    plate is read, matching the single-plate path's historical order."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
     respx.get(f"{API}/inventory/assignments").mock(
         return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
     )
-    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+    requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
         return_value=httpx.Response(200, json=recording("filament-requirements.json"))
     )
     respx.get(f"{API}/printers/1").mock(
         return_value=httpx.Response(500, json={"detail": "printer-boom"})
     )
-    respx.get(f"{API}/printers/1/inventory-remain").mock(
-        return_value=httpx.Response(500, json={"detail": "remain-boom"})
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
+    assert "printer-boom" in excinfo.value.detail
+
+    assert not requirements.called
+    assert not remain.called
+
+
+@respx.mock
+async def test_a_printer_failure_beats_a_plate_failure(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Pins finding #1 on #525 directly: a printer failure and a plate-specific
+    failure happening together must surface the printer's error, because the shared
+    reads run first and in sequence — never the plate's, no matter how the plate read
+    and the printer read would otherwise race."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(500, json={"detail": "plate-boom"})
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(500, json={"detail": "printer-boom"})
+    )
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
     )
 
     with pytest.raises(ApiError) as excinfo:
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1])
     assert "printer-boom" in excinfo.value.detail
-    assert "remain-boom" not in excinfo.value.detail
+    assert "plate-boom" not in excinfo.value.detail
+
+    assert not requirements.called
+    assert not remain.called
 
 
 @respx.mock

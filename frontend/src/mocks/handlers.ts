@@ -2185,9 +2185,10 @@ export const handlers = [
     // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
     // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
     // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
-    // `choices.filaments` payload instead of ever hitting this route. If that shortcut
-    // is ever removed, every other test's default single-plate fixture would silently
-    // start losing slots instead of getting the fixture's full list.
+    // `choices.filaments` payload instead of ever hitting this route. That assumption is
+    // pinned by PrintPicker.test.tsx's "never GETs /filaments for plate 1 without all
+    // plates" (#525 finding 3) — if it ever removes the shortcut, that test fails here
+    // instead of every other test's single-plate fixture silently losing slots.
     const rawPlateId = Number(search.get('plate_id') ?? 1)
     const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []

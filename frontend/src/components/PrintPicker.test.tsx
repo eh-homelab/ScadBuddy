@@ -1030,6 +1030,16 @@ describe('PrintPicker · Plates of a 3MF', () => {
     expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument()
   })
 
+  it('never GETs /filaments for plate 1 without all plates', async () => {
+    // #525 finding 3: the msw mock's per-plate filtering in `handlers.ts` is only
+    // safe because plate 1 without `all_plates` is seeded from the bulk
+    // `choices.filaments` payload and never hits this route. Pin that directly.
+    const reads = watch('GET', '/filaments')
+    renderPicker()
+    await loaded()
+    expect(reads.urls).toHaveLength(0)
+  })
+
   it('offers each plate of a multi-plate output, reading that plate’s slots', async () => {
     server.use(
       http.get('/api/v1/outputs/:id/plates', () =>
