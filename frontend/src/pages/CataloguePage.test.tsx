@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes } from 'react-router'
+import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
@@ -9,6 +9,112 @@ import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
 import { CataloguePage } from './CataloguePage'
+
+function Search() {
+  const { search } = useLocation()
+  return <p data-testid="search">{search}</p>
+}
+
+function renderCatalogue(route = '/') {
+  return renderPage(
+    <>
+      <CataloguePage />
+      <Search />
+    </>,
+    { route },
+  )
+}
+
+function names(): string[] {
+  return screen.getAllByRole('heading', { level: 2 }).map((heading) => heading.textContent ?? '')
+}
+
+describe('CataloguePage filters (#276)', () => {
+  it('filters by a debounced search, folding accents, and puts it in the URL', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'CREME')
+    await waitFor(() => expect(screen.getByTestId('search')).toHaveTextContent('?q=CREME'))
+    expect(names()).toEqual(['Crème Coaster'])
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 4')
+  })
+
+  it('adds a card tag to the filter from the URL-encoded chip', async () => {
+    const { user } = renderCatalogue()
+    const coaster = (await screen.findByRole('heading', { name: 'Crème Coaster' })).closest(
+      'li',
+    ) as HTMLElement
+
+    await user.click(within(coaster).getByRole('button', { name: 'Filter by Tea & Coffee' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=Tea+%26+Coffee')
+    expect(names()).toEqual(['Crème Coaster'])
+    expect(screen.getByRole('button', { name: 'Tea & Coffee 1' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
+    // The chip is a button beside the card's link, not inside it.
+    expect(within(coaster).getByRole('link').contains(within(coaster).getByRole('button', {
+      name: 'Filter by kitchen',
+    }))).toBe(false)
+  })
+
+  it('reads a deep link: several tags, origin and sort', async () => {
+    renderCatalogue('/?tag=keychain&origin=builtin')
+    expect(await screen.findByRole('heading', { name: 'Keychain Template' })).toBeInTheDocument()
+    expect(names()).toEqual(['Keychain Template'])
+    expect(screen.getByTestId('result-count')).toHaveTextContent('1 of 4')
+  })
+
+  it('sorts by name', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(names()[0]).toBe('Name Keychain')
+
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Sort' }), 'Name')
+    expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
+    expect(names()).toEqual(['Crème Coaster', 'Gridfinity Bin', 'Keychain Template', 'Name Keychain'])
+  })
+
+  it('says when nothing matches, apart from an empty catalogue, and clears back', async () => {
+    const { user } = renderCatalogue('/?q=nothing-like-this&sort=name')
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'No models yet' })).not.toBeInTheDocument()
+
+    await user.click(screen.getAllByRole('button', { name: 'Clear filters' })[0] as HTMLElement)
+    expect(screen.getByTestId('search')).toHaveTextContent('?sort=name')
+    expect(screen.getByRole('searchbox')).toHaveValue('')
+    expect(names()).toHaveLength(4)
+  })
+
+  it('counts tags over the models the other filters leave, so no chip is a dead end', async () => {
+    const { user } = renderCatalogue()
+    const tags = within(await screen.findByRole('group', { name: 'Tags' }))
+    expect(tags.getByRole('button', { name: 'template 1' })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Mine' }))
+    expect(tags.queryByRole('button', { name: /^template/ })).not.toBeInTheDocument()
+
+    await user.type(screen.getByRole('searchbox', { name: 'Search models' }), 'coaster')
+    await waitFor(() => expect(names()).toEqual(['Crème Coaster']))
+    expect(tags.getByRole('button', { name: 'kitchen 1' })).toBeInTheDocument()
+    expect(tags.queryByRole('button', { name: /^keychain/ })).not.toBeInTheDocument()
+  })
+
+  it('keeps a selected tag that nothing matches any more, so it can be unselected', async () => {
+    const { user } = renderCatalogue('/?tag=template&origin=mine')
+    expect(await screen.findByRole('heading', { name: 'No models match' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'template 0' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?origin=mine')
+  })
+
+  it('shows no filters over an empty catalogue', async () => {
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([])))
+    renderCatalogue()
+    await screen.findByRole('heading', { name: 'No models yet' })
+    expect(screen.queryByRole('searchbox')).not.toBeInTheDocument()
+  })
+})
 
 describe('CataloguePage', () => {
   it('lists every model with its tags and when it last changed', async () => {
@@ -158,6 +264,47 @@ describe('CataloguePage', () => {
     const own = await imageOf()
     expect(new Set([before, moved, own]).size).toBe(3)
     expect(own).toContain(`/api/v1/models/name-keychain/thumbnail?v=`)
+  })
+
+  it('shows a model created without a thumbnail by its preview once that has rendered', async () => {
+    // The mock answers the create first and has the preview on the next read, as
+    // the backend's background render does.
+    const created = await api.createModelFromSource({
+      name: 'Fresh Widget',
+      source: 'cube(1);\n',
+      description: '',
+      force: false,
+    })
+    expect(created.has_thumbnail).toBe(false)
+
+    renderPage(<CataloguePage />)
+
+    const image = await screen.findByRole('img', { name: 'Fresh Widget' })
+    const preview = (await api.getModel(created.slug)).thumbnail_preview_id ?? ''
+    expect(preview).not.toBe('')
+    expect(image.getAttribute('src')).toContain(preview)
+  })
+
+  it('refetches a default-render preview re-rendered after a source edit', async () => {
+    const base = {
+      ...(models[0] as (typeof models)[number]),
+      version: 'a'.repeat(40),
+      has_thumbnail: true,
+      thumbnail_source: 'preview' as const,
+    }
+    let record = { ...base, thumbnail_preview_id: '1'.repeat(16) }
+    server.use(http.get('/api/v1/models', () => HttpResponse.json([record])))
+    const imageOf = async () =>
+      (await screen.findByRole('img', { name: 'Name Keychain' })).getAttribute('src')
+
+    const first = renderPage(<CataloguePage />)
+    const before = await imageOf()
+    first.unmount()
+
+    // The same revision key otherwise: only the preview's id says it was re-rendered.
+    record = { ...base, thumbnail_preview_id: '2'.repeat(16) }
+    renderPage(<CataloguePage />)
+    expect(await imageOf()).not.toBe(before)
   })
 
   it('links an imported model back to where it came from', async () => {

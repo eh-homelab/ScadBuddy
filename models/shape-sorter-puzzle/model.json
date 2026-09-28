@@ -1,0 +1,6 @@
+{
+  "name": "Shape Sorter Puzzle",
+  "description": "A toddler's peg puzzle: a tray with a hole for every piece and chunky pieces with knobs to lift them by. Choose basic shapes, animals made from simple round shapes, the numbers 0-9, or the letters of a word. Every piece has its own colour, and each hole's floor carries a flush inlay of its piece's shape in the same colour. Pieces fit their holes at a set clearance, measured on the rendered geometry, and the tray and pieces lay out together on one plate when they fit.",
+  "tags": ["toy", "kids", "toddler", "puzzle", "learning", "multi-colour"],
+  "source": "inspired by Printables \"educational baby/toddler puzzle\" (Bas, 761 downloads) and \"Educational Number and Shape Puzzle for kids\" (hvrkh, 445 downloads)"
+}

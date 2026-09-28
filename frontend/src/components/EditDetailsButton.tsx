@@ -308,12 +308,14 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
                 {thumbnail
                   ? `${thumbnail.name} replaces the current one on save.`
                   : removeThumbnail
-                    ? 'Removed on save. The first generated plate stands in, if there is one.'
+                    ? 'Removed on save. A generated plate, or else a render of the default settings, stands in.'
                     : model.thumbnail_source === 'model'
                       ? 'Set on this model.'
                       : model.thumbnail_source === 'output'
                         ? 'None set; the first generated plate stands in.'
-                        : 'None set. The first generated plate will stand in.'}
+                        : model.thumbnail_source === 'preview'
+                          ? 'None set; a render of the default settings stands in.'
+                          : 'None set. A render of the default settings stands in once it is ready; a generated plate takes precedence.'}
               </p>
               <div className="flex items-center gap-2">
                 <label className="inline-flex cursor-pointer items-center rounded-[6px] border border-line bg-surface-2 px-2.5 py-1 text-[13px] hover:border-line-strong">

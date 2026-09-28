@@ -213,13 +213,35 @@ describe('EditDetailsButton', () => {
     expect(removeReadme).not.toHaveBeenCalled()
   })
 
+  it('says a render of the default settings stands in when that is the thumbnail', async () => {
+    server.use(
+      http.get('/api/v1/models/gridfinity-bin', async () => {
+        const model = await (await fetch('/api/v1/models')).json()
+        const bin = (model as { slug: string }[]).find(({ slug }) => slug === 'gridfinity-bin')
+        return HttpResponse.json({
+          ...bin,
+          has_thumbnail: true,
+          thumbnail_source: 'preview',
+          thumbnail_preview_id: '1'.repeat(16),
+        })
+      }),
+    )
+    const { dialog } = await open('gridfinity-bin')
+
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+      'None set; a render of the default settings stands in.',
+    )
+  })
+
   it('sets a new thumbnail from a chosen PNG', async () => {
     // Spied, as the multipart upload cannot cross jsdom into Node's fetch.
     const setThumbnail = vi
       .spyOn(api, 'setThumbnail')
       .mockImplementation(async (slug) => ({ ...(await api.getModel(slug)), version: 'next' }))
     const { dialog, user, onSaved } = await open('gridfinity-bin')
-    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('None set')
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+      'None set. A render of the default settings stands in once it is ready; a generated plate takes precedence.',
+    )
 
     const png = new File(['png'], 'cover.png', { type: 'image/png' })
     await user.upload(within(dialog).getByLabelText('Thumbnail (PNG)'), png)
@@ -314,7 +336,9 @@ describe('EditDetailsButton', () => {
     const { dialog, user, onSaved } = await open()
 
     await user.click(within(dialog).getByRole('button', { name: 'Remove thumbnail' }))
-    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent('Removed on save')
+    expect(within(dialog).getByTestId('thumbnail-state')).toHaveTextContent(
+      'Removed on save. A generated plate, or else a render of the default settings, stands in.',
+    )
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
 
     await waitFor(() => expect(onSaved).toHaveBeenCalledOnce())

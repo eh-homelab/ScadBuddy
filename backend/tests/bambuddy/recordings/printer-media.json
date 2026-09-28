@@ -1,0 +1,95 @@
+{
+    "archive_id": 35,
+    "printer_id": 1,
+    "local_timelapse": {
+        "name": "video_2026-09-27_12-22-00.mp4",
+        "size": 2143595
+    },
+    "remote_files": [
+        {
+            "name": "ipcam-record.2026-09-27_12-04-27.229.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-04-27.229.mp4",
+            "size": 251931635,
+            "mtime": "2026-09-27T04:16:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_12-16-25.230.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-16-25.230.mp4",
+            "size": 251924793,
+            "mtime": "2026-09-27T04:25:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_12-25-19.231.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-25-19.231.mp4",
+            "size": 251957872,
+            "mtime": "2026-09-27T04:34:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_12-34-11.232.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-34-11.232.mp4",
+            "size": 251856062,
+            "mtime": "2026-09-27T04:42:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_12-42-56.233.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-42-56.233.mp4",
+            "size": 251858545,
+            "mtime": "2026-09-27T04:51:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_12-51-36.234.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_12-51-36.234.mp4",
+            "size": 251881478,
+            "mtime": "2026-09-27T05:01:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-01-30.235.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-01-30.235.mp4",
+            "size": 251889773,
+            "mtime": "2026-09-27T05:11:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-11-30.236.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-11-30.236.mp4",
+            "size": 251892019,
+            "mtime": "2026-09-27T05:21:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-21-52.237.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-21-52.237.mp4",
+            "size": 251848547,
+            "mtime": "2026-09-27T05:30:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-30-04.238.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-30-04.238.mp4",
+            "size": 251856156,
+            "mtime": "2026-09-27T05:38:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-38-30.239.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-38-30.239.mp4",
+            "size": 251850094,
+            "mtime": "2026-09-27T05:47:00",
+            "kind": "ipcam"
+        },
+        {
+            "name": "ipcam-record.2026-09-27_13-47-01.240.mp4",
+            "path": "/ipcam/ipcam-record.2026-09-27_13-47-01.240.mp4",
+            "size": 137589901,
+            "mtime": "2026-09-27T05:51:00",
+            "kind": "ipcam"
+        }
+    ],
+    "warnings": []
+}

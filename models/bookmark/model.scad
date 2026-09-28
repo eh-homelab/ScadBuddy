@@ -413,8 +413,14 @@ HOLE_Y = L / 2 - hole_from_top;
 BEADS = HOLE ? bead_count : 0;
 
 TOPPER = shape == "star_top" || shape == "heart_top";
-TS = min(topper_size, 2.5 * W);                          // topper width
-TH = shape == "heart_top" ? TS * 0.9 : TS * 0.95;        // topper height
+// Topper width: at most 2.5x the strip, and short enough (60 % of the
+// length) that the strip still shows below it and it stays inside the length.
+TH_K = shape == "heart_top" ? 0.9 : 0.95;                // height / width
+TS = min(topper_size, 2.5 * W, 0.6 * L / TH_K);          // topper width
+TH = TS * TH_K;                                          // topper height
+if (TOPPER && TS < topper_size)
+    echo(str("NOTE: topper_size reduced to ", round(TS * 10) / 10,
+             " mm to fit a ", W, " mm wide, ", L, " mm long bookmark"));
 TOPPER_C = L / 2 - TH / 2;                               // topper centre (Y)
 
 // Corner clip: right angle at the origin, legs along -X and -Y.
@@ -463,9 +469,13 @@ module builtin_outline(s) {
         round_all(min(R, W / 8))
             polygon([[-W / 2, -L / 2], [0, -L / 2 + E], [W / 2, -L / 2], [W / 2, L / 2], [-W / 2, L / 2]]);
     else if (s == "rounded_tab")
+        // The round top is a half-ellipse no taller than half the length, and
+        // the bottom radius at most half the width, so the tab stays inside
+        // W x L and the strip never collapses.
+        let (ry = min(W / 2, L / 2), rb = min(R, W / 2 - 0.01))
         hull() {
-            translate([0, L / 2 - W / 2]) circle(d = W);
-            translate([0, -L / 2 + R]) offset(r = R) square([W - 2 * R, 0.01], center = true);
+            translate([0, L / 2 - ry]) scale([1, ry / (W / 2)]) circle(d = W);
+            translate([0, -L / 2 + rb]) offset(r = rb) square([W - 2 * rb, 0.01], center = true);
         }
     else if (s == "scalloped") {
         sr = scallop_size / 2;
@@ -574,13 +584,24 @@ module overlay_raw() {
 
 // Text box: [centre, rotation, length along the text, height across it].
 T_ACROSS = W - 2 * (BW + TEXT_PAD);
-T_ALONG = L - 2 * (BW + TEXT_PAD + 1) - (HOLE ? hole_from_top + hole_diameter / 2 : 0) - 2 * abs(text_y);
+// Along the strip the text keeps clear of the ends and of the cord hole; the
+// box is as long as fits on both sides of text_y, and text_y is pulled back
+// onto the strip if it would put the text off it.
+T_BOT = -L / 2 + BW + TEXT_PAD + 1;
+T_TOP = min(L / 2 - (BW + TEXT_PAD + 1), HOLE ? HOLE_Y - hole_diameter / 2 - TEXT_PAD : L);
+TY = T_TOP - T_BOT < 5 ? (T_TOP + T_BOT) / 2 : min(T_TOP - 2.5, max(T_BOT + 2.5, text_y));
+T_ALONG = 2 * min(T_TOP - TY, TY - T_BOT);
+if (TEXT_ON && !CORNER && abs(TY - text_y) > 1e-6)
+    echo(str("NOTE: text_y ", text_y, " would put the text off the bookmark; moved to ", round(TY * 10) / 10, " mm"));
+if (OVERLAY_ON && !CORNER && (abs(overlay_y) > L / 2 || abs(overlay_x) > W / 2))
+    echo(str("NOTE: overlay_x / overlay_y (", overlay_x, ", ", overlay_y, ") put the overlay's centre off the ",
+             W, " x ", L, " mm bookmark; it may be cut off or missing"));
 TC = 0.32 * A;
 TBOX = CORNER ? [[-TC, -TC], -45,
                  max(5, 2 * sqrt(2) * TC - 2 * sqrt(2) * (wall_width + TEXT_PAD)),
                  max(3, 2 * (A - 2 * TC) / sqrt(2) - 2 * (BW + TEXT_PAD))]
-     : text_direction == "horizontal" ? [[0, text_y], 0, max(5, T_ACROSS), max(3, T_ALONG)]
-     : [[0, text_y], 90, max(5, T_ALONG), max(3, T_ACROSS)];
+     : text_direction == "horizontal" ? [[0, TY], 0, max(5, T_ACROSS), max(3, T_ALONG)]
+     : [[0, TY], 90, max(5, T_ALONG), max(3, T_ACROSS)];
 
 module text_raw() {
     text(label, size = text_size, font = font, halign = "center", valign = "center");

@@ -1,0 +1,6 @@
+{
+  "name": "Fidget Slider Board",
+  "description": "A print-in-place sliding fidget toy: a heart, star, dinosaur, rounded-rectangle or circle board with rows of round-knobbed beads that slide back and forth in closed tracks. The beads print already captured in their tracks, flat and without supports. Bead colours go by row, by column or in rainbow diagonals (up to 8 colours), with an optional name inlaid flush into the board. Every bead's clearance, capture and free travel is measured on the rendered geometry.",
+  "tags": ["toy", "kids", "fidget", "print-in-place", "sensory", "multi-colour"],
+  "source": "inspired by Printables \"Triangle Sliding Fidget Toy\" (Martin Šlefr, 10,295 downloads), \"Slider Fidget\" (TomoDesigns, 4,136 downloads) and \"Print in Place Sliding Number Puzzle\" (zcassell, 10,733 downloads)"
+}

@@ -3,7 +3,9 @@
 Self-hosted OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. The design,
 and the measured facts it rests on, are in
 `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` (§3 is the verified-facts list);
-the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`.
+the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`; template-owned
+UIs and pipelines on Temporal, the blob store and Arrange are
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md`.
 Deployment is described in `README.md` ("Deploying").
 
 ## Commands (what CI runs)
@@ -113,7 +115,7 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   env vars; AI settings live in the database.
   `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
   `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
-  (credential writes now; `/mcp` and the agent's own sockets later) uses the one allowlist in
+  (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
   (`tools: []`, `settingSources: []`) and `src/harness/run.ts` runs every `query()` on
@@ -121,7 +123,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   abort, the tier seam in `src/harness/permissions.ts` as both `canUseTool` and a
   `PreToolUse` hook; outward → denied as "needs approval" until #258);
   `src/api/backend.ts` is the `openapi-fetch` client over the generated
-  `src/api/schema.d.ts`.
+  `src/api/schema.d.ts`. `src/tools/` is the tool registry (#251): one `defineTool`
+  per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
+  auth in `src/auth/`); every `/api/v1` operation needs a tool or a
+  `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
   - Database: the agent owns the `ai_*` tables. Schema changes are appended to
     `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
     start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
@@ -141,8 +146,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
-  line 185) describes the backend container; the
-  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
+  §4, "Architecture") describes the backend container; the
+  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
+  09-27 template-pipelines spec makes Postgres and Temporal required.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
@@ -184,6 +190,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Consequences in `frontend/src/lib/embed.ts`: downloads are fetched as a blob and
   opened with `target=_blank`; deep links to Bambuddy use `window.open(..., '_blank')`
   when embedded.
+- Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
+  Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
+  where it is refused (`document.fullscreenEnabled` is false, or the request is
+  rejected) the full-screen view covers the frame instead.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 
@@ -196,8 +206,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Node major is pinned in both the Dockerfile and `ci.yml` (`24`); change them
   together, LTS (even) majors only. That covers the Dockerfile's `frontend` and three
   `agent*` stages and the `frontend`, `agent` and `freshness` jobs.
-  `frontend/pnpm-workspace.yaml` must be copied into the Docker build (it holds
-  `allowBuilds`); `agent/` has none because no dependency has an install script.
+  `frontend/pnpm-workspace.yaml` and `agent/pnpm-workspace.yaml` must be copied into
+  the Docker build (they hold `allowBuilds`; the agent's declines msw's install script).
 - `@anthropic-ai/claude-agent-sdk` is pinned exactly in `agent/package.json`, and the
   Dockerfile asserts the Claude Code binary it bundles (`CLAUDE_CODE_VERSION`,
   currently 2.1.283 for SDK 0.3.283). Bump both in the same commit.

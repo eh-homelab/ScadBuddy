@@ -60,7 +60,7 @@ the pitch and the length.
 
 | Parameter | Default | What it does |
 |---|---|---|
-| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments`. All letters are the same size: the largest that fits the smallest segment, and never under 4.5 mm. If the length cannot fit a segment for every letter at that size, the render fails with a message naming how many segments fit: raise `length` or shorten the name. It never drops letters. |
+| `name` | *(empty)* | Up to 12 characters. Each letter goes on its own body segment, centred along the body, and reads left to right with the head on the right. Segments are added if the name has more letters than `segments`. All letters are the same size: the largest that fits the smallest segment, and never under 4.5 mm. If the length has no room for a segment per letter at that size, the critter is lengthened to fit and the log says `NOTE: length raised from … to … mm to fit the N-letter name`. It never drops letters; only a name that would make the critter bigger than the plate fails the render, with a message saying to shorten the name. |
 | `font` | `DejaVu Sans:style=Bold` | Typeface for the name. |
 
 ### Hinges
@@ -120,7 +120,7 @@ children under 3. Supervise young children. A hinge can pinch small fingers.
 ./verify.sh
 ```
 
-Renders the defaults and twelve variations in `scadbuddy-verify:local`:
+Renders the defaults and fifteen variations in `scadbuddy-verify:local`:
 
 - every animal, with and without a name;
 - every pose;
@@ -131,10 +131,14 @@ Renders the defaults and twelve variations in `scadbuddy-verify:local`:
 - a name with wide letters on a snake too short for the segments asked, so
   segments are dropped, but never below the pitch a 4.5 mm letter needs;
 - the smallest dragon, and a dragon too wide for its length to fit even one
-  segment, so it grows.
+  segment, so it grows;
+- names longer than the length has segments for (12 letters at 120 mm, wide
+  letters on a short caterpillar, 8 letters at the defaults), so it grows.
 
-It also renders two names that cannot fit their length, and checks that the
-render fails with a message saying to raise the length or shorten the name.
+Dropped segments and a raised length must each be reported with a `NOTE:`
+line in the log, and must not be when nothing changed. It also renders a
+12-letter name that would make a straight dragon longer than the plate, and
+checks that the render fails with a message saying to shorten the name.
 It does the same with the plate narrowed to 150 mm (through the hidden
 `bed_w`), to prove the plate-fit assert below fires.
 

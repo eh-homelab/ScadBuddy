@@ -116,16 +116,21 @@ exists when there is text.
 ./verify.sh
 ```
 
-Renders the defaults and 16 variations (every style at the steepest angle, at
+Renders the defaults and 19 variations (every style at the steepest angle, at
 the most upright with text, at the smallest settings and as a 250 mm tablet
-stand; long text that must shrink; no cable; one colour; a script face) and
+stand; long text that must shrink; no cable; one colour; a script face; a
+floor, cable slot and channel the model has to clamp; a cut-out too short for
+windows) and
 checks each 3MF: no geometry on the `Default` material, the expected colour
 parts, and no overlap between them (each colour rendered closed on its own,
 as ScadBuddy does, sums to the whole); on z = 0; the bounding box equal to the
 width, depth and height the parameters imply, and inside the plate; the
 stand's and the device's centres of mass inside the footprint; no downward
 surface steeper than 45° from vertical except flat bridges; text inside and
-flush with the front face; no OpenSCAD warnings. `ONLY=<regex>` runs a subset.
+flush with the front face; no OpenSCAD warnings; a `NOTE:` in the log for
+every value the model changes (`floor_height` raised to `thickness` + 1,
+`cable_width` or `cable_channel_height` reduced, no room for cut-out windows)
+and none otherwise. `ONLY=<regex>` runs a subset.
 The 3MF parsing runs on the host with `python3` and the standard library only.
 
 ## Not yet print-tested
