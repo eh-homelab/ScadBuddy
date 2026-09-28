@@ -1,0 +1,103 @@
+---
+name: AI evals
+
+# Opt-in live evals of the agent (issue #259, docs/ai/evals.md): the scenarios
+# in agent/evals/scenarios.ts, answered by a real Claude model through the real
+# harness, scored by deterministic checks. NOT part of required CI and never
+# a merge gate (`CI Summary` does not know about this workflow).
+#
+# Why only `workflow_dispatch`:
+#   - it calls Anthropic and costs money, so a human starts it;
+#   - a fork cannot trigger it. `workflow_dispatch` needs write access to this
+#     repository, and there is no `pull_request`/`pull_request_target` trigger,
+#     so the secret below is never exposed to code from a fork PR;
+#   - the deterministic half of the same harness (scripted model, fake
+#     Anthropic endpoint) already runs on every PR in `ci.yml`'s `agent` job as
+#     agent/test/evals.test.ts.
+#
+# The credential is the repository secret SCADBUDDY_EVAL_ANTHROPIC_API_KEY,
+# passed to the one step that needs it. Without the secret the run SKIPS every
+# scenario with the reason in the log and succeeds; it does not fail.
+#
+# ubuntu-latest like every other job here: the repo is public, never move a job
+# onto the self-hosted `clusters-runner*` pools (see ci.yml's header).
+on:
+  workflow_dispatch:
+    inputs:
+      model:
+        description: "Claude model id or alias (blank: the Agent SDK's default)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  evals:
+    name: Live AI evals
+    runs-on: ubuntu-latest
+    # The scenarios run one at a time, each up to vitest's 6 minutes
+    # (vitest.evals.config.ts, live.eval.ts): 4 scenarios are 24 minutes before
+    # checkout and install. Keep headroom so a slow model fails a scenario, not
+    # the job.
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: agent
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      # Pinned with the Dockerfile's agent stages and ci.yml's `agent` job.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+
+      - name: Enable corepack
+        run: corepack enable
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `inputs.model` reaches the run as an environment variable, never
+      # interpolated into the script.
+      - name: Run the live evals
+        env:
+          SCADBUDDY_EVAL_ANTHROPIC_API_KEY: ${{ secrets.SCADBUDDY_EVAL_ANTHROPIC_API_KEY }}
+          SCADBUDDY_EVAL_MODEL: ${{ inputs.model }}
+          SCADBUDDY_EVAL_REPORT: ${{ runner.temp }}/eval-report.json
+        run: pnpm evals
+
+      - name: Summarise
+        if: always()
+        env:
+          REPORT: ${{ runner.temp }}/eval-report.json
+        run: |
+          set -euo pipefail
+          if [ ! -f "$REPORT" ]; then
+            echo "No eval report: the run skipped (no credential) or failed before scoring." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          {
+            echo "## AI evals: $(jq -r '"\(.passed)/\(.total) passed"' "$REPORT")"
+            echo
+            echo "| Scenario | Result | Model | Failed checks |"
+            echo "|---|---|---|---|"
+            # A literal | in a title or check name would split the table cell.
+            jq -r 'def cell: tostring | gsub("\\|"; "\\|");
+              .scenarios[] | "| \(.title | cell) | \(if .pass then "pass" else "FAIL" end) | \(.model // "unknown" | cell) | \([.checks[] | select(.pass | not) | .name] | join("; ") | cell) |"' "$REPORT"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ai-eval-report
+          path: ${{ runner.temp }}/eval-report.json
+          if-no-files-found: ignore
