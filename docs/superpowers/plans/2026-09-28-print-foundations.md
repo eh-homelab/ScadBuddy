@@ -47,7 +47,7 @@ class LibraryCopy(BaseModel):
     sliced: list[SlicedCopy] = Field(default_factory=list)
 
 # Stored by BambuddyUploadStore in output_bambuddy_uploads / output_bambuddy_slices
-# (render/pg_store.py migration 4), not in meta.json. The API's OutputDetail fills
+# (render/pg_store.py migration 5), not in meta.json. The API's OutputDetail fills
 # library_files from it. No data migration (#455): library_file_id /
 # library_file_plate / library_files in an old meta.json are ignored, so that output's
 # next send uploads afresh.

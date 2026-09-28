@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_fonts, get_libraries
 from scadbuddy.core.events import Event, InProcessEventBus
+from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.api.test_fonts import FakeBackedService, FakeClient
@@ -56,11 +57,21 @@ class Recorded(list[Event]):
         with self._changed:
             assert self._changed.wait_for(seen, timeout), f"{kind} for {job_id} never published"
 
+    def wait_for_kind(self, kind: str, timeout: float = 5.0) -> None:
+        """Until an event of ``kind`` is in: on the Postgres bus (#374) delivery comes
+        back through LISTEN, a moment after the request that published it returned."""
+        with self._changed:
+            assert self._changed.wait_for(
+                lambda: any(event.kind == kind for event in self), timeout
+            ), f"{kind} never published"
+
 
 @pytest.fixture
 def events(app: FastAPI) -> Recorded:
     bus = getattr(app.state, STATE_ATTR).events
-    assert isinstance(bus, InProcessEventBus)
+    # A test with a database gets the Postgres bus (#374), which delivers through the
+    # same in-process bus once its NOTIFY comes back.
+    assert isinstance(bus, InProcessEventBus | PgNotifyEventBus)
     seen = Recorded()
     bus.add_listener(seen.record)
     return seen
@@ -355,6 +366,7 @@ def test_saving_and_deleting_an_output_publish_their_events(
 ) -> None:
     output_id = make_output(client, model)
     _ok(client.delete(f"/api/v1/outputs/{output_id}"), 204)
+    cast(Recorded, events).wait_for_kind("output.deleted")
     assert published(events, "output.created") == [
         {"kind": "output.created", "output_id": output_id, "slug": model}
     ]
@@ -389,6 +401,7 @@ def test_a_print_publishes_progress_and_then_settled_once(
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
 
+    cast(Recorded, events).wait_for_kind("print.settled")
     ids = {"output_id": output_id, "slug": model}
     assert [e for e in published(events) if e["kind"].startswith("print.")] == [
         {"kind": "print.progress", **ids},  # the run

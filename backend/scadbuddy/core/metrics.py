@@ -32,6 +32,9 @@ RenderStage = Literal["source", "render", "split", "solids", "thumbnail", "write
 #: What a job store call that failed was doing: a worker claiming or recording a
 #: job, a heartbeat, the lease reaper, or the per-scrape read of the queue gauges.
 StoreOperation = Literal["work", "heartbeat", "reap", "read"]
+#: Why the Postgres event bus did not publish an event: its payload was over the
+#: NOTIFY cap, its outbox overflowed, or the database write failed.
+EventDropReason = Literal["oversize", "outbox_full", "error"]
 
 # A render is bounded by SCADBUDDY_RENDER_TIMEOUT (120 s by default) per openscad
 # pass, and a multi-colour job makes one pass per colour, so the tail runs long.
@@ -85,13 +88,41 @@ class Metrics:
             "scadbuddy_render_queue_listener_connected",
             "1 while this process LISTENs for the NOTIFY that wakes its render workers "
             "(Postgres); 0 while that connection is down and the workers fall back to "
-            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none.",
+            "SCADBUDDY_RENDER_POLL_INTERVAL. Always 0 with the file store, which has none. "
+            "The same connection carries the event bus (scadbuddy_events).",
             registry=r,
         )
         self.listener_reconnects = Counter(
             "scadbuddy_render_queue_listener_reconnects",
             "Times the render queue's LISTEN connection was re-established after it "
             "dropped (Postgres). A first connection is not counted.",
+            registry=r,
+        )
+        # The Postgres event bus (spec §7): what went out, what came in, what was lost.
+        self.events_published = Counter(
+            "scadbuddy_events_published",
+            "Events written to the event log and NOTIFYed on scadbuddy_events (Postgres).",
+            registry=r,
+        )
+        self.events_dropped = Counter(
+            "scadbuddy_events_dropped",
+            "Events the Postgres bus did not publish, by reason.",
+            ["reason"],
+            registry=r,
+        )
+        self.events_received = Counter(
+            "scadbuddy_events_received",
+            "Events this process heard on scadbuddy_events and delivered to its subscribers.",
+            registry=r,
+        )
+        self.events_resyncs = Counter(
+            "scadbuddy_events_resyncs",
+            "bus.resync markers delivered because the LISTEN connection came back after a drop.",
+            registry=r,
+        )
+        self.event_log_pruned = Counter(
+            "scadbuddy_event_log_pruned",
+            "Rows removed from the event log by SCADBUDDY_EVENT_LOG_RETENTION_*.",
             registry=r,
         )
         self.render_rejected = Counter(
@@ -234,6 +265,8 @@ class Metrics:
             self.stage_duration.labels(stage)
         for operation in get_args(StoreOperation):
             self.store_errors.labels(operation)
+        for reason in get_args(EventDropReason):
+            self.events_dropped.labels(reason)
 
     @contextmanager
     def stage(self, stage: RenderStage) -> Iterator[None]:
