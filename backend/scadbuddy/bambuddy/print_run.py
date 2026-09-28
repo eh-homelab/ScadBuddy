@@ -3,8 +3,7 @@
 ScadBuddy owns no slicing settings. The print dialog's run (:func:`execute_run`)
 derives every preset from the dialog's choices — spools, nozzles, quality and plate
 (spec 2026-09-27 §4) — and always slices then queues; there is no pipeline to run or
-choose from here. Bambuddy's own slicer pipelines are still what the send bar runs
-(``scadbuddy.bambuddy.send``), which is unaffected by this module.
+choose from here. The send bar only uploads (#312); this is the only path that prints.
 """
 
 from __future__ import annotations
@@ -28,7 +27,7 @@ from scadbuddy.bambuddy.filaments import (
     across_plates,
     check,
     every_plate,
-    gather_options,
+    gather_plate_options,
     normalise_colour,
     queue_filaments,
 )
@@ -106,8 +105,8 @@ class PrintRunRequest(BaseModel):
     #: be — a print with no project is simply one nobody filed.
     project_id: int | None = None
     #: Per-print overrides from the dialog's options disclosure (#78), the most specific
-    #: scope, as on ``SendRequest``. Nothing here is remembered, and ``copies`` wins over
-    #: a ``quantity`` sent alongside it.
+    #: scope. Nothing here is remembered, and ``copies`` wins over a ``quantity`` sent
+    #: alongside it.
     options: PrintOptions = Field(default_factory=PrintOptions)
     #: The caller's idempotency key for this print (#470): a new one (a UUID) per
     #: deliberate Print, the same one on every retry of it. Part of the run's key, so a
@@ -174,17 +173,14 @@ async def filament_options_for_output(
         if all_plates
         else [plate_id]
     )
-    read = [
-        await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate,
-            fallback_colours=list(meta.colors),
-            own_colours=list(meta.colors) if copy.recolored else None,
-        )
-        for plate in plate_ids
-    ]
+    read = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+        own_colours=list(meta.colors) if copy.recolored else None,
+    )
     options = read[0] if len(read) == 1 else every_plate(read)
     if printer_id is None:
         return options
@@ -300,7 +296,6 @@ async def execute_run(
     target = await target_for(
         client,
         settings,
-        meta.slug,
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
         colours=await _spool_colours(client, meta, request.filament_plan),
@@ -331,14 +326,14 @@ async def execute_run(
     # filament, not a plate position (#180), so slot 2 is the same colour on every plate.
     planned: list[tuple[int, FilamentOptions, Resolved, SlicePlan]] = []
     errors: list[str] = []
-    for plate_id in plate_ids:
-        options = await gather_options(
-            client,
-            library_file_id=library_file_id,
-            printer_id=printer_id,
-            plate_id=plate_id,
-            fallback_colours=list(meta.colors),
-        )
+    per_plate = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=plate_ids,
+        fallback_colours=list(meta.colors),
+    )
+    for plate_id, options in zip(plate_ids, per_plate, strict=True):
         resolved = resolve(options, request.filament_plan, choices, catalogue, spool_presets)
         for error in resolved.errors:
             message = (

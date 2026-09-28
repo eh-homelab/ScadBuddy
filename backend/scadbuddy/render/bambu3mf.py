@@ -330,9 +330,9 @@ def _cover_metadata(plate_index: int) -> str:
 #: names that could be mistaken for real ones — it owns no slicer settings.
 PRESET_PLACEHOLDER = "ScadBuddy"
 #: Only the arity-free presence of this option matters; 1 and 3 entries were both
-#: measured to slice identically on a two-extruder H2C. The send path replaces it
-#: with the target pipeline's real nozzle when it can name one (#126): slicing never
-#: reads it, but a person deciding whether to start a print does.
+#: measured to slice identically on a two-extruder H2C. The print run replaces it
+#: with the nozzle it chose (#126): slicing never reads it, but a person deciding
+#: whether to start a print does.
 PLACEHOLDER_NOZZLE_DIAMETER = ["0.4"]
 
 

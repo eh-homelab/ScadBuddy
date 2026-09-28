@@ -8,15 +8,34 @@ Assertions are on the request bodies, because that is all Bambuddy sees.
 from __future__ import annotations
 
 import json
+from typing import Any
 
+import httpx
 import pytest
 import respx
 from fastapi.testclient import TestClient
 
 from tests.api.test_print_filaments import slice_routes
 from tests.api.test_print_run_choices import body, run_print, run_request, run_routes
-from tests.api.test_send import configure, make_output, upload_route
-from tests.api.test_send_options import queue_route, remember
+from tests.api.test_send import API, configure, make_output, upload_route
+from tests.bambuddy.conftest import recording
+
+OPTIONS_ROUTE = "/api/v1/settings/print-options"
+
+
+def remember(
+    client: TestClient, scope: str, options: dict[str, Any], key: str | None = None
+) -> None:
+    body: dict[str, Any] = {"scope": scope, "options": options}
+    if key is not None:
+        body["key"] = key
+    assert client.put(OPTIONS_ROUTE, json=body).status_code == 200
+
+
+def queue_route() -> respx.Route:
+    return respx.post(f"{API}/queue/").mock(
+        return_value=httpx.Response(200, json=recording("queue-item.json"))
+    )
 
 
 def _prepared(client: TestClient, model: str, *, printer_id: int = 1) -> str:
@@ -60,6 +79,41 @@ def test_a_per_printer_option_applies_to_the_chosen_printer(client: TestClient, 
     run_print(client, output_id, json=body())
 
     assert json.loads(queue.calls.last.request.read())["timelapse"] is False
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_per_printer_override_for_another_printer_is_ignored(
+    client: TestClient, model: str
+) -> None:
+    """Printer 7's override must not leak onto a print on printer 1: the global value
+    stands. Applying every remembered printer's options would queue ``False``."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "printer", {"timelapse": False}, key="7")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    run_print(client, output_id, json=run_request(printer_id=1))
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert queued["printer_id"] == 1
+    assert queued["timelapse"] is True
+
+
+@pytest.mark.requires_postgres
+@respx.mock
+def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, model: str) -> None:
+    """Another model's override must not leak onto this one: the global value stands."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "model", {"timelapse": False}, key="some-other-model")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    run_print(client, output_id, json=body())
+
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is True
 
 
 @pytest.mark.requires_postgres

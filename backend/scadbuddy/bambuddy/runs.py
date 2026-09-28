@@ -6,7 +6,7 @@ cut a request long before that: Envoy's default route timeout is 15 s, Cloudflar
 first-byte limit about 100 s. The browser got a non-JSON 504 while the backend went on
 and queued the print, and a retry queued it again.
 
-Now the route makes the refusals that are cheap (:func:`~scadbuddy.bambuddy.pipelines.
+Now the route makes the refusals that are cheap (:func:`~scadbuddy.bambuddy.print_run.
 prepare_run`), records a run here, answers 202 with it and hands the rest to
 :class:`PrintRuns`, which runs it as a task on the event loop. ``GET /print/runs/{id}``
 reads the row, so any replica can answer it.
@@ -68,7 +68,7 @@ from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field
 
-from scadbuddy.bambuddy.pipelines import PrintRunRequest, PrintRunResult
+from scadbuddy.bambuddy.print_run import PrintRunRequest, PrintRunResult
 from scadbuddy.core.events import EventBus, PrintRunEvent, emit
 from scadbuddy.core.problems import ApiError
 

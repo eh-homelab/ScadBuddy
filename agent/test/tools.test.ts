@@ -771,6 +771,16 @@ describe('invalid arguments', () => {
     expect(result.isError).toBe(true)
     expect(firstText(result)).toContain('invalid arguments')
   })
+
+  it('refuse a send that still asks to queue, instead of quietly uploading (#312)', async () => {
+    const result = await runTool(
+      { ...tool('send_to_bambuddy'), gated: false },
+      { output_id: '0123456789abcdef0123456789abcdef', mode: 'queue', copies: 2 },
+      ctx(),
+    )
+    expect(result.isError).toBe(true)
+    expect(firstText(result)).toContain('invalid arguments')
+  })
 })
 
 describe('print media (#307)', () => {

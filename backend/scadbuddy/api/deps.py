@@ -56,6 +56,11 @@ RUN_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
+#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
+#: N x this. As many as the resolver has threads. Library installs share those
+#: threads; an import that finds none free is the same retryable 503.
+IMPORT_CONCURRENCY = 2
 
 
 @dataclass
@@ -109,6 +114,13 @@ class AppState:
     #: the loop, not in a thread.
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
+    )
+    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
+    #: replica. Held for the fetch only -- the parse check after it takes `checks`
+    #: like any create -- and an import that finds it full is refused at once, not
+    #: queued.
+    imports: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
     )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
     #: render queue holds the same one.
@@ -190,8 +202,10 @@ def build_state(settings: Settings) -> AppState:
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     # The render queue's: a route builds its own over its `LibrariesDep`.
     fetcher = CheckoutFetcher(libraries, installs, checkouts)
+    # The bytes on the volume, the rest on the render queue's pool (#591).
     assets = AssetStore(
         paths.assets,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
@@ -438,6 +452,10 @@ def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
 
 
+def get_imports(state: StateDep) -> asyncio.Semaphore:
+    return state.imports
+
+
 def get_checkouts(state: StateDep) -> CheckoutGate:
     return state.checkouts
 
@@ -463,6 +481,7 @@ OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 

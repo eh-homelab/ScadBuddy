@@ -17,8 +17,8 @@ import { defineTool, json, type Tool, type ToolContext, ToolError } from './regi
 //   are chosen, and the backend's resolver derives Bambu's printer, process and
 //   filament presets from them. There are no pipelines, presets or eligibility
 //   tools any more: their routes went with the pipeline picker (that spec §7,
-//   "Removed from the dialog"). The send bar alone still runs the Settings
-//   pipeline (send_to_bambuddy; spool-first there is #312).
+//   "Removed from the dialog"). send_to_bambuddy only uploads to the library
+//   (#312).
 // - Farm context, read: printers and live status (get_print_targets in
 //   settings.ts), the print dialog's choices (get_print_choices), spools with
 //   per-slot remaining grams (get_print_filaments), and print progress. The
@@ -343,27 +343,21 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'send_to_bambuddy',
     description:
-      "Send an output's 3MF to Bambuddy's library folder, or in `queue` mode also run the Settings slicer " +
-      'pipeline to queue it (the send bar; print_output is the spool-first print).',
-    input: z.object({
-      output_id: outputId,
-      mode: z.enum(['library', 'queue']).default('library'),
-      copies: z.number().int().min(1).max(1000).optional(),
-      options: printOptions,
-    }),
+      "Upload an output's 3MF to Bambuddy's library folder. Nothing is sliced or queued: printing is " +
+      'print_output.',
+    // Strict, so an older client still asking for `mode: 'queue'` or `copies` is refused
+    // rather than silently given a library upload (the HTTP route 422s the same, #312).
+    input: z.object({ output_id: outputId }).strict(),
     risk: 'outward',
-    bambuddyScope: ['Manage Library', 'Manage Queue'],
+    bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],
-    summarize: ({ output_id, mode, copies }) =>
-      mode === 'queue'
-        ? `Send output ${output_id} to Bambuddy and queue ${copies ?? 1} cop${copies === 1 || !copies ? 'y' : 'ies'}`
-        : `Send output ${output_id} to Bambuddy's library`,
-    handler: async ({ output_id, mode, copies, options }, { backend }) =>
+    summarize: ({ output_id }) => `Send output ${output_id} to Bambuddy's library`,
+    handler: async ({ output_id }, { backend }) =>
       json(
         await ok(
           backend.POST('/api/v1/outputs/{output_id}/send', {
             params: { path: { output_id } },
-            body: { mode, copies: copies ?? null, options },
+            body: { mode: 'library' },
           }),
           `send ${output_id}`,
         ),

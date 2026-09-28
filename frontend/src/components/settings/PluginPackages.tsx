@@ -2,7 +2,9 @@ import { useState, type FormEvent, type ReactNode } from 'react'
 import { USER_ONLY } from '../../agent/dom'
 import {
   aiPlugins,
+  packageFetch,
   refusalProblems,
+  repinMoves,
   type FileDiff,
   type PackageInstall,
   type PackageReview,
@@ -93,6 +95,24 @@ export function ReviewParts({ review }: { review: PackageReview }) {
         </details>
       </div>
     </dl>
+  )
+}
+
+/** Where a re-pin that moved comes from; approving it leaves the package disabled. */
+function MovedNotice({ pkg }: { pkg: PluginPackage }) {
+  if (!pkg.pending || !repinMoves(pkg)) return null
+  const from = packageFetch(pkg)
+  const place = (url: string, path: string) => (
+    <span className="sb-num break-all">
+      {url}
+      {path && ` · ${path}`}
+    </span>
+  )
+  return (
+    <p role="note" className="rounded-[6px] border border-warn/40 bg-warn/8 p-2 text-[12px]">
+      This re-pin is fetched from a different place: {place(pkg.pending.plugin_url, pkg.pending.plugin_path)}, not{' '}
+      {place(from.url, from.path)}. Approving it leaves the package disabled until you enable it again.
+    </p>
   )
 }
 
@@ -199,6 +219,7 @@ function ApproveDialog({
             {pin.content_hash}
           </dd>
         </dl>
+        {pending && <MovedNotice pkg={pkg} />}
         <ReviewParts review={pin.review} />
         <label className="flex items-start gap-2" {...USER_ONLY}>
           <input
@@ -452,6 +473,9 @@ function PackageCard({
             <span className="sb-num break-all">{pkg.pending.commit_sha}</span>. The current pin keeps loading until you
             approve this one.
           </p>
+          <div className="mt-2">
+            <MovedNotice pkg={pkg} />
+          </div>
           <div className="mt-2">
             <Diff diff={pkg.pending.diff} />
           </div>

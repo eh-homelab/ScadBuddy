@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from scadbuddy.bambuddy.pipelines import PrintRunResult
+from scadbuddy.bambuddy.print_run import PrintRunResult
 from scadbuddy.bambuddy.runs import (
     LOST_DETAIL,
     LOST_UNQUEUED_DETAIL,
