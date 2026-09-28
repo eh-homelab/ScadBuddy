@@ -46,12 +46,40 @@ export const settingsTools: Tool[] = [
   defineTool({
     name: 'test_bambuddy_connection',
     description:
-      'Check that Bambuddy is reachable and accepts the configured API key; lists the printers it can see.',
+      'Check that Bambuddy is reachable and accepts the configured API key; lists the printers it can see ' +
+      'and, per Bambuddy scope ScadBuddy uses, whether the key has it (each write scope is probed on a ' +
+      'record that cannot exist, so nothing changes).',
     input: z.object({}),
     risk: 'read',
     bambuddyScope: ['Read Status'],
     routes: ['POST /api/v1/settings/test'],
     handler: async (_args, { backend }) => json(redact(await ok(backend.POST('/api/v1/settings/test'), 'test connection'))),
+  }),
+
+  defineTool({
+    name: 'get_bambuddy_status',
+    description:
+      "Bambuddy's version, and whether it photographs a print when it finishes (capture_finish_photo). " +
+      "Read-only: ScadBuddy never changes Bambuddy's settings; the user turns it on in Bambuddy.",
+    input: z.object({}),
+    risk: 'read',
+    bambuddyScope: ['Read Status'],
+    routes: ['GET /api/v1/settings/bambuddy'],
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/settings/bambuddy'), 'get Bambuddy status')),
+  }),
+
+  defineTool({
+    name: 'get_remembered_choices',
+    description:
+      'What the print dialog remembers (#322): per-model printer and spool choices, per-printer plates, ' +
+      'and the print options at each scope. Forget one with remember_model_print_choices, ' +
+      'remember_printer_bed_type or set_print_options.',
+    input: z.object({}),
+    risk: 'read',
+    routes: ['GET /api/v1/settings/remembered'],
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/settings/remembered'), 'get remembered choices')),
   }),
 
   defineTool({

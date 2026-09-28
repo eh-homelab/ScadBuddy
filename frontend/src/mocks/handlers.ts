@@ -1,6 +1,7 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   Asset,
+  BambuddyStatus,
   AssetUsage,
   AttachResult,
   ChoicesView,
@@ -91,7 +92,12 @@ const state = {
   readmes: { 'name-keychain': fixtures.keychainReadme } as Record<string, string>,
   /** Per-template presets, shipped (`template-*`) and saved. */
   presets: structuredClone(fixtures.presets) as Record<string, ParamPreset[]>,
-  settings: { ...fixtures.settings } as Settings,
+  settings: structuredClone(fixtures.settings) as Settings,
+  /** #322 — the values the mock process "started" with, for `restart_required`. */
+  running: structuredClone(fixtures.settings) as Settings,
+  /** #86 — the per-model pipelines the store still holds (`model_pipelines`). */
+  modelPipelines: {} as Record<string, number>,
+  bambuddyStatus: structuredClone(fixtures.bambuddyStatus) as BambuddyStatus,
   /** #349 — the agent's headless-browser setting (`ai_settings`), off by default. */
   headlessBrowser: false,
   printOptions: structuredClone(fixtures.printOptions) as PrintOptionsState,
@@ -202,7 +208,10 @@ export function resetMockState(): void {
   }
   state.readmes = { 'name-keychain': fixtures.keychainReadme }
   state.presets = structuredClone(fixtures.presets)
-  state.settings = { ...fixtures.settings }
+  state.settings = structuredClone(fixtures.settings)
+  state.running = structuredClone(fixtures.settings)
+  state.modelPipelines = {}
+  state.bambuddyStatus = structuredClone(fixtures.bambuddyStatus)
   state.headlessBrowser = false
   state.printOptions = structuredClone(fixtures.printOptions)
   state.jobs.clear()
@@ -276,9 +285,98 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
-/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+/** #274 — the upload limit in effect (#322: Settings can change it too). */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #322 — seeds what the print dialog remembers, for the Remembered choices table. */
+export function setMockRemembered(remembered: {
+  modelPipelines?: Record<string, number>
+  modelChoices?: Record<string, ModelPrintChoices>
+  printerBedTypes?: Record<string, string>
+}): void {
+  if (remembered.modelPipelines) state.modelPipelines = { ...remembered.modelPipelines }
+  if (remembered.modelChoices) state.modelChoices = structuredClone(remembered.modelChoices)
+  if (remembered.printerBedTypes) state.printerBedTypes = { ...remembered.printerBedTypes }
+}
+
+/** #322 — the settings the mock process runs with, as if it had just restarted. */
+export function restartMockBackend(): void {
+  state.running = structuredClone(state.settings)
+  state.settings = { ...state.settings, restart_required: [] }
+}
+
+const SECRETS = { bambuddy_api_key: 'has_api_key', google_fonts_api_key: 'has_google_fonts_api_key' } as const
+/** The env-seeded fields a clear can hold; the rest are numbers, switches or a level. */
+const NULLABLE = new Set(['bambuddy_url', 'bambuddy_api_key', 'public_url', 'default_plate', 'google_fonts_api_key'])
+const AT_LEAST_ONE = new Set(['render_concurrency', 'check_concurrency', 'render_max_attempts', 'library_max_bytes'])
+const MORE_THAN_ZERO = new Set(['render_timeout', 'job_ttl', 'render_poll_interval', 'render_fallback_poll_interval', 'render_lease_timeout', 'media_upload_max_bytes'])
+
+function envName(name: string): string {
+  return `SCADBUDDY_${name.toUpperCase()}`
+}
+
+function refused(name: string, msg: string) {
+  return HttpResponse.json(
+    {
+      type: 'about:blank',
+      title: 'Unprocessable Content',
+      status: 422,
+      detail: 'the request did not match the expected shape',
+      errors: [{ loc: ['body', name], msg }],
+    },
+    { status: 422, headers: { 'Content-Type': 'application/problem+json' } },
+  )
+}
+
+/** Mirrors `SettingsStore.save` and `SettingsPatch`'s checks, then the view's bookkeeping. */
+function putSettings(body: Record<string, unknown>) {
+  const sources = { ...state.settings.sources }
+  const next: Record<string, unknown> = { ...state.settings }
+  const reset = (body.reset as string[] | undefined) ?? []
+  const envSeeded = new Set(Object.keys(fixtures.settingsApplies))
+  for (const name of reset) {
+    if (!envSeeded.has(name)) return refused('reset', `${name}: not an env-seeded setting, so nothing to reset`)
+  }
+  for (const [name, value] of Object.entries(body)) {
+    if (name === 'reset') continue
+    if (!envSeeded.has(name)) {
+      next[name] = name === 'display_unit' ? (value ?? 'mm') : value
+      continue
+    }
+    if (value === null && !NULLABLE.has(name)) {
+      return refused(name, `Value error, ${envName(name)} cannot be cleared; reset it to follow the deployment's value`)
+    }
+    if (typeof value === 'number') {
+      if (AT_LEAST_ONE.has(name) && value < 1) return refused(name, `Value error, ${envName(name)} must be at least 1, not ${value}`)
+      if (MORE_THAN_ZERO.has(name) && value <= 0) return refused(name, `Value error, ${envName(name)} must be more than 0, not ${value}`)
+      if (value < 0) return refused(name, `Value error, ${envName(name)} must be at least 0, not ${value}`)
+    }
+    if (name in SECRETS) {
+      const has = SECRETS[name as keyof typeof SECRETS]
+      next[has] = typeof value === 'string' && value.length > 0
+      sources[name] = next[has] ? 'stored' : 'cleared'
+      continue
+    }
+    next[name] = name === 'log_level' && typeof value === 'string' ? value.toUpperCase() : value
+    sources[name] = value === null ? 'cleared' : 'stored'
+  }
+  for (const name of reset) {
+    const fromEnv = name in fixtures.settingsDeployment
+    const value = fromEnv
+      ? fixtures.settingsDeployment[name]
+      : (fixtures.settingsDefaults as Record<string, unknown>)[name] ?? null
+    if (name in SECRETS) next[SECRETS[name as keyof typeof SECRETS]] = Boolean(value)
+    else next[name] = value
+    sources[name] = fromEnv ? 'env' : 'default'
+  }
+  next.sources = sources
+  next.restart_required = Object.entries(fixtures.settingsApplies)
+    .filter(([name, applies]) => applies === 'restart' && next[name] !== (state.running as Record<string, unknown>)[name])
+    .map(([name]) => name)
+  state.settings = next as Settings
+  return HttpResponse.json(state.settings)
 }
 
 /** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
@@ -576,6 +674,19 @@ export async function storeAsset(file: Blob & { name?: string }): Promise<Asset 
 async function sha256Hex(bytes: ArrayBuffer): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', bytes)
   return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+}
+
+function remembered() {
+  const dropEmpty = (options: PrintOptions | undefined) =>
+    Object.fromEntries(Object.entries(options ?? {}).filter(([, value]) => value !== null && value !== undefined))
+  return {
+    model_pipelines: { ...state.modelPipelines },
+    model_print_choices: structuredClone(state.modelChoices),
+    printer_bed_types: { ...state.printerBedTypes },
+    print_options: dropEmpty(state.printOptions.global_options),
+    printer_print_options: structuredClone(state.printOptions.printers ?? {}),
+    model_print_options: structuredClone(state.printOptions.models ?? {}),
+  }
 }
 
 function problem(status: number, title: string, detail?: string, extensions: object = {}) {
@@ -2449,29 +2560,34 @@ export const handlers = [
   }),
 
   http.put(`${base}/settings`, async ({ request }) => {
-    const body = (await request.json()) as {
-      bambuddy_url?: string | null
-      bambuddy_api_key?: string
-      public_url?: string | null
-      library_folder_id?: number | null
-      pipeline_id?: number | null
-      printer_id?: number | null
-      display_unit?: Settings['display_unit'] | null
-    }
-    state.settings = {
-      ...state.settings,
-      ...body,
-      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
-      media_upload_max_bytes: state.settings.media_upload_max_bytes,
-      display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
-      has_api_key:
-        body.bambuddy_api_key === undefined
-          ? state.settings.has_api_key
-          : body.bambuddy_api_key.length > 0,
-    }
-    delete (state.settings as { bambuddy_api_key?: string }).bambuddy_api_key
+    const body = (await request.json()) as Record<string, unknown>
+    // Stored before the answer comes back, as the server commits before it responds.
+    const response = putSettings(body)
     await delay(120)
-    return HttpResponse.json(state.settings)
+    return response
+  }),
+
+  // #322 — what the print dialog remembers, each forgotten through its own route.
+  http.get(`${base}/settings/remembered`, () => HttpResponse.json(remembered())),
+
+  http.delete(`${base}/settings/remembered`, () => {
+    state.modelPipelines = {}
+    state.modelChoices = {}
+    state.printerBedTypes = {}
+    state.printOptions.global_options = {}
+    state.printOptions.printers = {}
+    state.printOptions.models = {}
+    return HttpResponse.json(remembered())
+  }),
+
+  http.delete(`${base}/settings/remembered/model-pipelines/:slug`, ({ params }) => {
+    delete state.modelPipelines[String(params.slug)]
+    return HttpResponse.json(remembered())
+  }),
+
+  http.get(`${base}/settings/bambuddy`, () => {
+    if (!state.settings.bambuddy_url) return problem(409, 'Conflict', 'no Bambuddy URL is configured')
+    return HttpResponse.json(state.bambuddyStatus)
   }),
 
   // #81 — the server resolves Bambuddy's code or the profile name, else the default.
@@ -2554,6 +2670,18 @@ export const handlers = [
       ok: true,
       detail: 'Connected. Bambuddy reports 3DP-31B-598.',
       printers: fixtures.targets.printers,
+      scopes: [
+        { scope: 'Read Status', status: 'ok', required: true, detail: 'Printers, their status, and the print history.' },
+        { scope: 'Manage Library', status: 'ok', required: true, detail: 'Uploading 3MFs to the library, and its folders.' },
+        { scope: 'Manage Queue', status: 'ok', required: true, detail: 'Queueing prints and running slicer pipelines.' },
+        { scope: 'Manage Projects', status: 'ok', required: false, detail: 'Sending to a Bambuddy project.' },
+        {
+          scope: 'Manage Archives',
+          status: 'missing',
+          required: false,
+          detail: 'The key does not have Manage Archives. Needed for: Attaching photos and timelapses to a print.',
+        },
+      ],
     })
   }),
 

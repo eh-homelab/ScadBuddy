@@ -1,4 +1,5 @@
 import type {
+  BambuddyStatus,
   BambuddyTargets,
   FilamentOptions,
   PrintOptions,
@@ -607,7 +608,68 @@ export const outputs: Output[] = [
   },
 ]
 
+/**
+ * #322 — the runtime settings' built-in defaults, as `core/config.py` has them, and what
+ * this mock deployment sets through `SCADBUDDY_*`. A reset goes back to the deployment's
+ * value, else the default.
+ */
+export const settingsDefaults = {
+  bambuddy_url: null,
+  public_url: null,
+  default_plate: null,
+  media_upload_max_bytes: 1024 * 1024 * 1024,
+  render_timeout: 120,
+  render_concurrency: 2,
+  solid_concurrency: 0,
+  render_queue_max: 0,
+  render_queue_timeout: 0,
+  render_poll_interval: 1,
+  render_fallback_poll_interval: 30,
+  render_lease_timeout: 60,
+  render_max_attempts: 2,
+  render_queue_depth_slo: 16,
+  render_latency_slo: 60,
+  check_concurrency: 1,
+  job_ttl: 86400,
+  preview_renders: true,
+  lsp_sessions: 4,
+  realtime_sockets: 256,
+  library_max_bytes: 200_000_000,
+  asset_max_total_bytes: 1_000_000_000,
+  asset_max_count: 10_000,
+  asset_sweep_grace: 7 * 86400,
+  asset_sweep_interval: 86400,
+  duplicate_staging_max_age: 3600,
+  fonts_catalogue_ttl: 86400,
+  event_log_retention_seconds: 86400,
+  event_log_retention_rows: 100_000,
+  log_level: 'INFO',
+} as const satisfies Partial<Settings>
+
+export const settingsDeployment: Record<string, unknown> = {
+  public_url: 'https://scadbuddy.internal.nullreference.io',
+  render_timeout: 300,
+  google_fonts_api_key: 'from-the-deployment',
+}
+
+/** `core/settings.py` `APPLIES`: when a change to each env-seeded field takes effect. */
+export const settingsApplies: NonNullable<Settings['applies']> = {
+  ...Object.fromEntries(Object.keys(settingsDefaults).map((name) => [name, 'live' as const])),
+  bambuddy_api_key: 'live',
+  google_fonts_api_key: 'live',
+  render_concurrency: 'restart',
+  render_fallback_poll_interval: 'restart',
+  render_lease_timeout: 'restart',
+  render_max_attempts: 'restart',
+  check_concurrency: 'restart',
+  lsp_sessions: 'restart',
+  realtime_sockets: 'restart',
+  preview_renders: 'restart',
+  asset_sweep_interval: 'restart',
+}
+
 export const settings: Settings = {
+  ...settingsDefaults,
   bambuddy_url: 'https://bambuddy.internal.nullreference.io',
   has_api_key: true,
   public_url: 'https://scadbuddy.internal.nullreference.io',
@@ -620,7 +682,59 @@ export const settings: Settings = {
   bed_type: null,
   default_plate: null,
   display_unit: 'mm',
-  media_upload_max_bytes: 1024 * 1024 * 1024,
+  last_project_id: null,
+  render_timeout: 300,
+  job_ttl: 3600,
+  has_google_fonts_api_key: false,
+  sources: {
+    ...Object.fromEntries(Object.keys(settingsApplies).map((name) => [name, 'default' as const])),
+    bambuddy_url: 'stored',
+    bambuddy_api_key: 'stored',
+    public_url: 'env',
+    render_timeout: 'env',
+    job_ttl: 'stored',
+    google_fonts_api_key: 'cleared',
+  },
+  applies: settingsApplies,
+  restart_required: [],
+  bootstrap: [
+    {
+      name: 'data_dir',
+      env_var: 'SCADBUDDY_DATA_DIR',
+      value: '/data',
+      source: 'default',
+      reason: 'The data volume. It is needed before any stored setting can be read.',
+    },
+    {
+      name: 'database_url',
+      env_var: 'SCADBUDDY_DATABASE_URL',
+      value: 'postgres.scadbuddy.svc:5432/scadbuddy',
+      source: 'env',
+      reason: 'Where the settings themselves are kept, so the UI cannot choose it; it is also a credential.',
+    },
+    {
+      name: 'openscad',
+      env_var: 'SCADBUDDY_OPENSCAD',
+      value: 'openscad',
+      source: 'default',
+      reason: 'The binary the server runs. Choosing it from a web form would let anyone who can reach the page run any program.',
+    },
+    {
+      name: 'version',
+      env_var: 'SCADBUDDY_VERSION',
+      value: 'v0.42.0',
+      source: 'env',
+      reason: 'A build stamp that /healthz reports, not a setting.',
+    },
+  ],
+  about: { version: 'v0.42.0', revision: 'abc1234', openscad_version: 'OpenSCAD version 2026.09.28' },
+}
+
+export const bambuddyStatus: BambuddyStatus = {
+  version: '1.2.5.6',
+  capture_finish_photo: false,
+  settings_url: 'https://bambuddy.internal.nullreference.io/settings',
+  detail: null,
 }
 
 /**
