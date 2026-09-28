@@ -1031,10 +1031,11 @@ export interface paths {
         get?: never;
         /**
          * Remember this model's printer and spools
-         * @description The rest of what the picker chose, beside the model's pipeline (#78).
+         * @description The printer and spools the picker last chose for this model (#78).
          *
          *     Replaces this model's entry whole; an empty body forgets it, so the picker opens on
-         *     the auto-match again. Needs no Bambuddy, like the pipeline default.
+         *     the auto-match again. Needs no Bambuddy: this is ScadBuddy's own preference, stored
+         *     per slug.
          */
         put: operations["put_model_choices_api_v1_print_models__slug__choices_put"];
         post?: never;
@@ -1044,65 +1045,21 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/v1/print/models/{slug}/pipeline": {
+    "/api/v1/print/outputs/{output_id}/choices": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get?: never;
         /**
-         * Remember this model's pipeline
-         * @description Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug.
+         * What the print dialog offers for this output
+         * @description Printers, installed nozzles, quality tiers and processes, plates with the last one
+         *     used, and the filament step — one read for the whole dialog (spec §3).
          */
-        put: operations["put_model_pipeline_api_v1_print_models__slug__pipeline_put"];
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/models/{slug}/pipelines": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Pipelines, with this model's default */
-        get: operations["get_model_pipelines_api_v1_print_models__slug__pipelines_get"];
+        get: operations["get_choices_api_v1_print_outputs__output_id__choices_get"];
         put?: never;
         post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/outputs/{output_id}/eligibility": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Which pipelines would accept this output
-         * @description Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
-         *
-         *     Bambuddy judges a *library file*, so there is no eligibility answer before an
-         *     upload. The upload happens once per output: an output is immutable, so a recorded
-         *     ``library_file_id`` still describes this 3MF.
-         *
-         *     Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
-         *     ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
-         *     top-level ``ok`` means only that *some* printer passes.
-         */
-        post: operations["post_eligibility_api_v1_print_outputs__output_id__eligibility_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1128,9 +1085,10 @@ export interface paths {
          *     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
          *     this printer": without one the spools are still listed, with their last known
          *     assignment, but the reconciled remaining weights are not. It is also what reads the
-         *     mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
-         *     nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
-         *     re-derived, because naming a preset means reading the whole catalogue again.
+         *     mounted nozzles (#78).
+         *
+         *     ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
+         *     place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
          */
         get: operations["get_filaments_api_v1_print_outputs__output_id__filaments_get"];
         put?: never;
@@ -1205,71 +1163,15 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Run a pipeline for this output
-         * @description ``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
-         *     ``force``.
+         * Slice this output with the dialog's choices and queue it
+         * @description Derive every slicer preset from the chosen spools, nozzles, quality and plate
+         *     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
          *
-         *     Without ``pipeline_id`` the model's own default is used, then the global one. A
-         *     blocking eligibility issue is Bambuddy's 409, whose body this passes through as the
-         *     ``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records
-         *     ``eligibility_overridden``.
-         *
-         *     There is deliberately no printer here. ``PipelineRunRequest`` carries none, so a
-         *     class-targeted pipeline fans out by its own ``fanout_strategy`` and reports the
-         *     printer per copy in ``run.jobs[]``.
+         *     A choice the resolver cannot turn into presets — mixed nozzle sizes, or a slot with
+         *     no filament preset for the nozzle — is a 422 before anything is sliced. Which AMS
+         *     tray and extruder each spool feeds is still Bambuddy's decision at dispatch.
          */
         post: operations["post_run_api_v1_print_outputs__output_id__run_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/pipelines": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Create a pipeline from presets
-         * @description ``POST /api/v1/slicer-pipelines/`` verbatim.
-         *
-         *     ``SlicerPipelineCreate`` carries no target or fanout fields, so the new pipeline
-         *     cannot be created pre-aimed at a printer — Bambuddy targets it and the response
-         *     reports what it chose. Re-targeting is a ``PUT`` ScadBuddy does not make.
-         */
-        post: operations["post_pipeline_api_v1_print_pipelines_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/v1/print/presets": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /**
-         * Presets a new pipeline can be built from
-         * @description Printer presets and bed types, plus — once a printer preset is named — the
-         *     process and filament presets compatible with it.
-         *
-         *     The filter is server-side on purpose: the live instance holds ~4000 process and
-         *     filament presets across the cloud and standard tiers, which is not a payload to
-         *     hand a browser so it can filter them itself. Nozzle diameter is not a field
-         *     anywhere; it lives in the process preset's *name* ("… H2C 0.2 nozzle"), which is
-         *     why the form picks a process preset rather than a diameter.
-         */
-        get: operations["get_presets_api_v1_print_presets_get"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1514,17 +1416,6 @@ export interface components {
             /** Printers */
             printers?: components["schemas"]["Printer"][];
         };
-        /**
-         * BedTypeChoice
-         * @description One plate type a printer takes (#83): ``value`` is what a slice's ``bed_type``
-         *     carries, ``label`` what Bambu Studio's own bed picker calls it.
-         */
-        BedTypeChoice: {
-            /** Label */
-            label: string;
-            /** Value */
-            value: string;
-        };
         /** Body_create_model_api_v1_models_post */
         Body_create_model_api_v1_models_post: {
             /** Description */
@@ -1655,6 +1546,40 @@ export interface components {
              */
             source: string;
         };
+        /** ChoicesView */
+        ChoicesView: {
+            /**
+             * Bed Type
+             * @default Textured PEI Plate
+             */
+            bed_type: string;
+            /** Bed Types */
+            bed_types?: string[];
+            /** Filament Presets */
+            filament_presets?: {
+                [key: string]: components["schemas"]["FilamentPresetOption"][];
+            };
+            filaments: components["schemas"]["FilamentOptions"];
+            /** Installed */
+            installed?: components["schemas"]["InstalledNozzle"][];
+            /** Last Bed Type */
+            last_bed_type?: string | null;
+            model_choices?: components["schemas"]["ModelPrintChoices"];
+            /** Nozzle Sizes */
+            nozzle_sizes?: string[];
+            /** Printer Id */
+            printer_id?: number | null;
+            /** Printers */
+            printers?: components["schemas"]["Printer"][];
+            /** Processes */
+            processes?: {
+                [key: string]: string[];
+            };
+            /** Tiers */
+            tiers?: {
+                [key: string]: components["schemas"]["TierOption"][];
+            };
+        };
         /** ConnectionTest */
         ConnectionTest: {
             /** Detail */
@@ -1761,65 +1686,6 @@ export interface components {
              */
             source: "record" | "3mf";
         };
-        /**
-         * EligibilityCheck
-         * @description ``pipeline_ids`` omitted means every pipeline Bambuddy has.
-         */
-        EligibilityCheck: {
-            /** Pipeline Ids */
-            pipeline_ids?: number[] | null;
-        };
-        /**
-         * EligibilityIssue
-         * @description ``kind`` is an open enum here on purpose — Bambuddy adds kinds between
-         *     releases and an unknown one must still render, not 502 the whole report.
-         */
-        EligibilityIssue: {
-            /** Actual */
-            actual?: string | null;
-            /** Expected */
-            expected?: string | null;
-            /** Kind */
-            kind: string;
-            /** Slot Index */
-            slot_index?: number | null;
-        };
-        /** EligibilityOverview */
-        EligibilityOverview: {
-            /** Library File Id */
-            library_file_id: number;
-            /** Reports */
-            reports?: components["schemas"]["PipelineReport"][];
-        };
-        /**
-         * EligibilityReport
-         * @description Returned by ``check-eligibility`` and, on a 409, by ``run``.
-         *
-         *     Under ``target_kind="printer_class"`` ``ok`` is true when *at least one* matching
-         *     printer passes, and the per-printer detail moves to ``printer_reports`` — ``issues``
-         *     then carries only class-level problems. Reading ``ok`` as "every printer is ready"
-         *     is wrong for that target kind.
-         */
-        EligibilityReport: {
-            /** Issues */
-            issues?: components["schemas"]["EligibilityIssue"][];
-            /** Ok */
-            ok: boolean;
-            /** Printer Reports */
-            printer_reports?: components["schemas"]["PerPrinterReport"][];
-            /**
-             * Target Kind
-             * @default specific_printer
-             * @enum {string}
-             */
-            target_kind: "specific_printer" | "printer_class";
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-            /** Target Printer Name */
-            target_printer_name?: string | null;
-        };
         /** FeatureEstimate */
         FeatureEstimate: {
             bbox: components["schemas"]["BoundingBox"];
@@ -1845,8 +1711,6 @@ export interface components {
             library_file_id: number;
             /** Nozzles */
             nozzles?: components["schemas"]["NozzleInfo"][];
-            /** Pipeline Nozzle Diameter */
-            pipeline_nozzle_diameter?: string | null;
             /** Printer Id */
             printer_id?: number | null;
             /** Printer Name */
@@ -1879,6 +1743,15 @@ export interface components {
             slots?: components["schemas"]["SlotChoice"][];
         };
         /**
+         * FilamentPresetOption
+         * @description One row of Advanced mode's per-slot override: all the dialog reads of a preset.
+         */
+        FilamentPresetOption: {
+            /** Name */
+            name: string;
+            ref: components["schemas"]["PresetRef"];
+        };
+        /**
          * FilamentWarning
          * @description Advisory, never blocking. Bambuddy's own refusals are the eligibility report.
          */
@@ -1887,7 +1760,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out" | "nozzle-mismatch";
+            kind: "not-loaded" | "low-filament" | "no-choice" | "no-preset" | "no-fan-out" | "mixed-sizes" | "no-process" | "not-installed" | "plate-differs" | "hf-unsupported";
             /** Message */
             message: string;
             /** Slot Id */
@@ -2066,6 +1939,18 @@ export interface components {
             name: string;
             /** Used By */
             used_by?: string[];
+        };
+        /** InstalledNozzle */
+        InstalledNozzle: {
+            /** Count */
+            count: number;
+            /**
+             * Flow
+             * @enum {string}
+             */
+            flow: "standard" | "high_flow";
+            /** Size */
+            size: string;
         };
         /** JobStatus */
         JobStatus: {
@@ -2278,12 +2163,22 @@ export interface components {
          *     one case the picker asks. ``filament_plan`` is only a plan the user moved off the
          *     auto-match: a spool no longer in the inventory is dropped by the picker, which then
          *     falls back to the auto-match for that slot.
+         *
+         *     ``nozzles``, ``tier`` and ``process_name`` are the spool-first dialog's own choices
+         *     (spec 2026-09-27 §7). All default to "nothing remembered", so a settings file
+         *     written before them still loads; an empty ``nozzles`` means the dialog's default.
          */
         ModelPrintChoices: {
             /** Filament Plan */
             filament_plan?: components["schemas"]["SlotChoice"][];
+            /** Nozzles */
+            nozzles?: components["schemas"]["NozzleChoice"][];
             /** Printer Id */
             printer_id?: number | null;
+            /** Process Name */
+            process_name?: string | null;
+            /** Tier */
+            tier?: ("fine" | "standard" | "draft") | null;
         };
         /** ModelRecord */
         ModelRecord: {
@@ -2350,6 +2245,26 @@ export interface components {
             message: string;
             /** Short */
             short: string;
+        };
+        /**
+         * NozzleChoice
+         * @description One extruder's nozzle in the spool-first print dialog (spec 2026-09-27 §4).
+         *
+         *     Here rather than in ``resolver`` so the settings store can remember it per model
+         *     without importing the resolver (which reaches the client, which imports the store).
+         */
+        NozzleChoice: {
+            /**
+             * Flow
+             * @default standard
+             * @enum {string}
+             */
+            flow: "standard" | "high_flow";
+            /**
+             * Size
+             * @enum {string}
+             */
+            size: "0.2" | "0.4" | "0.6" | "0.8";
         };
         /**
          * NozzleInfo
@@ -2608,17 +2523,6 @@ export interface components {
             /** Tags */
             tags?: string[];
         };
-        /** PerPrinterReport */
-        PerPrinterReport: {
-            /** Issues */
-            issues?: components["schemas"]["EligibilityIssue"][];
-            /** Ok */
-            ok: boolean;
-            /** Printer Id */
-            printer_id: number;
-            /** Printer Name */
-            printer_name: string;
-        };
         /** Pipeline */
         Pipeline: {
             /** Bed Type */
@@ -2649,222 +2553,6 @@ export interface components {
             target_model_class?: string | null;
             /** Target Printer Id */
             target_printer_id?: number | null;
-        };
-        /** PipelineChoices */
-        PipelineChoices: {
-            /** Default Pipeline Id */
-            default_pipeline_id?: number | null;
-            /** Global Pipeline Id */
-            global_pipeline_id?: number | null;
-            model_choices?: components["schemas"]["ModelPrintChoices"];
-            /** Model Pipeline Id */
-            model_pipeline_id?: number | null;
-            /** Pipelines */
-            pipelines?: components["schemas"]["PipelineView"][];
-            /** Printer Bed Types */
-            printer_bed_types?: {
-                [key: string]: string;
-            };
-            /** Printers */
-            printers?: components["schemas"]["Printer"][];
-        };
-        /**
-         * PipelineCreate
-         * @description ``POST /api/v1/slicer-pipelines/``.
-         *
-         *     ``SlicerPipelineCreate`` carries **no** target or fanout fields even though
-         *     ``SlicerPipelineResponse`` returns them — a pipeline is created against the
-         *     defaults and re-targeted with ``PUT``, which ScadBuddy does not do.
-         */
-        PipelineCreate: {
-            /** Bed Type */
-            bed_type?: string | null;
-            /** Description */
-            description?: string | null;
-            /** Filament Presets */
-            filament_presets: components["schemas"]["PresetRef"][];
-            /** Name */
-            name: string;
-            printer_preset: components["schemas"]["PresetRef"];
-            process_preset: components["schemas"]["PresetRef"];
-        };
-        /** PipelineDefault */
-        PipelineDefault: {
-            /** Global Pipeline Id */
-            global_pipeline_id?: number | null;
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-            /** Slug */
-            slug: string;
-        };
-        /**
-         * PipelineDefaultPatch
-         * @description ``null`` clears this model's default, falling back to the global one.
-         */
-        PipelineDefaultPatch: {
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-        };
-        /**
-         * PipelineJob
-         * @description One copy of a run: the queue entry it became and the printer it landed on.
-         */
-        PipelineJob: {
-            /** Assigned Printer Id */
-            assigned_printer_id?: number | null;
-            /** Assigned Printer Name */
-            assigned_printer_name?: string | null;
-            /** Completed At */
-            completed_at?: string | null;
-            /** Copy Index */
-            copy_index: number;
-            /** Dispatched At */
-            dispatched_at?: string | null;
-            /** Error Message */
-            error_message?: string | null;
-            /** Id */
-            id: number;
-            /** Pipeline Run Id */
-            pipeline_run_id: number;
-            /** Queue Entry Id */
-            queue_entry_id?: number | null;
-            /** Status */
-            status: string;
-        };
-        /**
-         * PipelineReport
-         * @description Bambuddy's report for one pipeline, passed through as it came.
-         *
-         *     ``report`` is ``None`` exactly when ``error`` is set: that pipeline could not be
-         *     judged, which is neither ready nor blocked, and the picker says so rather than
-         *     guessing either way. That either-or is enforced below rather than merely described,
-         *     because the browser branches on it: a row with neither would render as silently
-         *     absent, and one with both would claim two states at once.
-         */
-        PipelineReport: {
-            /** Error */
-            error?: string | null;
-            /** Pipeline Id */
-            pipeline_id: number;
-            report?: components["schemas"]["EligibilityReport"] | null;
-        };
-        /** PipelineRun */
-        PipelineRun: {
-            /** Completed At */
-            completed_at?: string | null;
-            /**
-             * Copies
-             * @default 1
-             */
-            copies: number;
-            /**
-             * Copies Cancelled
-             * @default 0
-             */
-            copies_cancelled: number;
-            /**
-             * Copies Completed
-             * @default 0
-             */
-            copies_completed: number;
-            /**
-             * Copies Failed
-             * @default 0
-             */
-            copies_failed: number;
-            /**
-             * Copies In Progress
-             * @default 0
-             */
-            copies_in_progress: number;
-            /** Created At */
-            created_at?: string | null;
-            /**
-             * Eligibility Overridden
-             * @default false
-             */
-            eligibility_overridden: boolean;
-            /** Error Message */
-            error_message?: string | null;
-            /** Fanout Strategy */
-            fanout_strategy?: ("max_parallel" | "fill_one_first" | "round_robin") | null;
-            /** Id */
-            id: number;
-            /** Jobs */
-            jobs?: components["schemas"]["PipelineJob"][];
-            /** Parent Run Id */
-            parent_run_id?: number | null;
-            /** Pipeline Id */
-            pipeline_id?: number | null;
-            /** Pipeline Name */
-            pipeline_name?: string | null;
-            /** Slice Job Id */
-            slice_job_id?: number | null;
-            /** Sliced Library File Id */
-            sliced_library_file_id?: number | null;
-            /** Source Archive Id */
-            source_archive_id?: number | null;
-            /** Source Filename */
-            source_filename?: string | null;
-            /** Source Library File Id */
-            source_library_file_id?: number | null;
-            /** Started At */
-            started_at?: string | null;
-            /** Status */
-            status: string;
-            /** Target Kind */
-            target_kind?: ("specific_printer" | "printer_class") | null;
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-        };
-        /**
-         * PipelineView
-         * @description A pipeline as the picker shows it: Bambuddy's row plus resolved preset names and
-         *     the printers its target comes out as.
-         */
-        PipelineView: {
-            /** Bed Type */
-            bed_type?: string | null;
-            /** Bed Types */
-            bed_types?: components["schemas"]["BedTypeChoice"][];
-            /** Description */
-            description?: string | null;
-            /**
-             * Fanout Strategy
-             * @enum {string}
-             */
-            fanout_strategy: "max_parallel" | "fill_one_first" | "round_robin";
-            /** Filament Preset Names */
-            filament_preset_names?: (string | null)[];
-            /** Filament Presets */
-            filament_presets?: components["schemas"]["PresetRef"][];
-            /** Id */
-            id: number;
-            /** Name */
-            name: string;
-            /** Nozzle Diameter */
-            nozzle_diameter?: string | null;
-            /** Printer Ids */
-            printer_ids?: number[];
-            printer_preset?: components["schemas"]["PresetRef"] | null;
-            /** Printer Preset Name */
-            printer_preset_name?: string | null;
-            process_preset?: components["schemas"]["PresetRef"] | null;
-            /** Process Preset Name */
-            process_preset_name?: string | null;
-            /**
-             * Target Kind
-             * @enum {string}
-             */
-            target_kind: "specific_printer" | "printer_class";
-            /** Target Model Class */
-            target_model_class?: string | null;
-            /** Target Printer Id */
-            target_printer_id?: number | null;
-            /** Target Printer Name */
-            target_printer_name?: string | null;
         };
         /** PlateArea */
         PlateArea: {
@@ -2938,41 +2626,6 @@ export interface components {
             usable: components["schemas"]["PlateArea"];
         };
         /**
-         * PresetChoice
-         * @description One row of the "New pipeline" form's pickers.
-         *
-         *     ``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns
-         *     one, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.
-         *     An empty list means the preset declares no restriction, not that it fits nothing.
-         */
-        PresetChoice: {
-            /** Compatible Printers */
-            compatible_printers?: string[];
-            /** Filament Colour */
-            filament_colour?: string | null;
-            /** Filament Type */
-            filament_type?: string | null;
-            /** Name */
-            name: string;
-            ref: components["schemas"]["PresetRef"];
-        };
-        /**
-         * PresetOptions
-         * @description Printer presets and bed types always; process and filament only once a printer
-         *     preset is named, because unfiltered those two tiers are thousands of rows.
-         */
-        PresetOptions: {
-            /** Bed Types */
-            bed_types?: string[];
-            /** Filament */
-            filament?: components["schemas"]["PresetChoice"][];
-            /** Printer */
-            printer?: components["schemas"]["PresetChoice"][];
-            printer_preset?: components["schemas"]["PresetRef"] | null;
-            /** Process */
-            process?: components["schemas"]["PresetChoice"][];
-        };
-        /**
          * PresetRef
          * @description A slicer preset, identified by tier and id (``{"source":"cloud","id":"GM041"}``).
          */
@@ -2984,6 +2637,27 @@ export interface components {
              * @enum {string}
              */
             source: "orca_cloud" | "cloud" | "local" | "standard";
+        };
+        /** PrintChoices */
+        PrintChoices: {
+            /**
+             * Bed Type
+             * @default Textured PEI Plate
+             */
+            bed_type: string;
+            /** Filament Overrides */
+            filament_overrides?: {
+                [key: string]: components["schemas"]["PresetRef"];
+            };
+            /** Nozzles */
+            nozzles: components["schemas"]["NozzleChoice"][];
+            /** Process Name */
+            process_name?: string | null;
+            /**
+             * Tier
+             * @default standard
+             */
+            tier: ("fine" | "standard" | "draft") | null;
         };
         /**
          * PrintOptions
@@ -3145,24 +2819,9 @@ export interface components {
         };
         /**
          * PrintRunRequest
-         * @description ``pipeline_id`` omitted means "whatever this model defaults to".
-         *
-         *     ``force`` is the caller's explicit override of a blocking eligibility issue; the UI
-         *     only offers it once the issues have been shown.
-         *
-         *     The request does not choose its route; what it needs does. A pipeline run takes
-         *     only a source, ``copies`` and ``force``, so it is sliced and queued instead when
-         *     either:
-         *
-         *     - it carries a ``filament_plan``. A plan names one spool per plate slot, and those
-         *       queue-item fields exist on no other Bambuddy call (#87); or
-         *     - a remembered print option applies that a run cannot carry (#124). The options
-         *       resolve global → per-printer → per-model → this request's ``options`` and
-         *       ``copies``; or
-         *     - it names a plate type, or any plate but the first (#83). A run slices plate 1
-         *       with the pipeline's own bed type.
-         *
-         *     Otherwise it runs the pipeline exactly as before.
+         * @description The print dialog's choices (spec 2026-09-27 §2, §4): spools, nozzles, quality and
+         *     plate. Every slicer preset is derived from them by the resolver; there is no
+         *     pipeline to name, and the run always slices then queues.
          */
         PrintRunRequest: {
             /**
@@ -3170,19 +2829,11 @@ export interface components {
              * @default false
              */
             all_plates: boolean;
-            /** Bed Type */
-            bed_type?: string | null;
+            choices: components["schemas"]["PrintChoices"];
             /** Copies */
             copies?: number | null;
-            filament_plan?: components["schemas"]["FilamentPlan"] | null;
-            /**
-             * Force
-             * @default false
-             */
-            force: boolean;
+            filament_plan: components["schemas"]["FilamentPlan"];
             options?: components["schemas"]["PrintOptions"];
-            /** Pipeline Id */
-            pipeline_id?: number | null;
             /**
              * Plate Id
              * @default 1
@@ -3195,11 +2846,9 @@ export interface components {
         };
         /**
          * PrintRunResult
-         * @description One shape for both routes, so the caller need not know which one ran.
-         *
-         *     ``route`` says which it was, and exactly one of ``run`` / ``queue_item_ids`` is
-         *     populated: a pipeline run reports its copies through ``jobs[]``, while a queued item
-         *     is a single row carrying ``quantity``. Following either to completion is #89.
+         * @description What a run queued. ``route`` is always ``"slice_queue"`` now; it stays so a
+         *     reader of the result need not change until the dialog does (following it to
+         *     completion is #89).
          */
         PrintRunResult: {
             /** Bambuddy Url */
@@ -3210,8 +2859,6 @@ export interface components {
             folder_id?: number | null;
             /** Library File Id */
             library_file_id: number;
-            /** Pipeline Id */
-            pipeline_id: number;
             /** Printer Id */
             printer_id?: number | null;
             /** Project Id */
@@ -3220,11 +2867,10 @@ export interface components {
             queue_item_ids?: number[];
             /**
              * Route
-             * @default pipeline
-             * @enum {string}
+             * @default slice_queue
+             * @constant
              */
-            route: "pipeline" | "slice_queue";
-            run?: components["schemas"]["PipelineRun"] | null;
+            route: "slice_queue";
             /** Slice Job Id */
             slice_job_id?: number | null;
             /** Sliced Library File Id */
@@ -3591,6 +3237,16 @@ export interface components {
             storage_location?: string | null;
             /** Subtype */
             subtype?: string | null;
+        };
+        /** TierOption */
+        TierOption: {
+            /** Process Name */
+            process_name: string;
+            /**
+             * Tier
+             * @enum {string}
+             */
+            tier: "fine" | "standard" | "draft";
         };
         /**
          * Upstream
@@ -5894,47 +5550,14 @@ export interface operations {
             };
         };
     };
-    put_model_pipeline_api_v1_print_models__slug__pipeline_put: {
+    get_choices_api_v1_print_outputs__output_id__choices_get: {
         parameters: {
-            query?: never;
+            query?: {
+                printer_id?: number | null;
+            };
             header?: never;
             path: {
-                slug: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PipelineDefaultPatch"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PipelineDefault"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_model_pipelines_api_v1_print_models__slug__pipelines_get: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                slug: string;
+                output_id: string;
             };
             cookie?: never;
         };
@@ -5946,42 +5569,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["PipelineChoices"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    post_eligibility_api_v1_print_outputs__output_id__eligibility_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                output_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["EligibilityCheck"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["EligibilityOverview"];
+                    "application/json": components["schemas"]["ChoicesView"];
                 };
             };
             /** @description Validation Error */
@@ -5999,8 +5587,8 @@ export interface operations {
         parameters: {
             query?: {
                 printer_id?: number | null;
-                nozzle_diameter?: string | null;
                 plate_id?: number;
+                all_plates?: boolean;
             };
             header?: never;
             path: {
@@ -6118,71 +5706,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["PrintRunResult"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    post_pipeline_api_v1_print_pipelines_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["PipelineCreate"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PipelineView"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    get_presets_api_v1_print_presets_get: {
-        parameters: {
-            query?: {
-                printer_preset_source?: ("orca_cloud" | "cloud" | "local" | "standard") | null;
-                printer_preset_id?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["PresetOptions"];
                 };
             };
             /** @description Validation Error */
@@ -6340,8 +5863,6 @@ export interface operations {
     get_print_options_api_v1_settings_print_options_get: {
         parameters: {
             query?: {
-                /** @description The model about to be printed, whose own pipeline may differ */
-                slug?: string | null;
                 /** @description The pipeline about to run, when the caller has already chosen one */
                 pipeline_id?: number | null;
             };
