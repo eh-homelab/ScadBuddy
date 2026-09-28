@@ -10,7 +10,12 @@
 #   - from one closed render per colour (the way ScadBuddy builds its parts):
 #     the wall volume equals the outline minus exactly the corridors and
 #     openings the echoed maze describes, each part's z range, and that the
-#     parts do not overlap (their volumes add up to the volume of the whole).
+#     parts do not overlap (their volumes add up to the volume of the whole);
+#   - ScadBuddy's plate convention (spec §6.4): the model echoes `plates = N`,
+#     2 exactly when the tray and lid cannot share the bed; then each plate,
+#     rendered with -D '$plate=k' as ScadBuddy does (and per colour through the
+#     wrapper), holds its own parts, fits the bed on its own, and the plates'
+#     per-colour volumes add up to the everything-at-once render's.
 #
 # The checking runs on the host with python3 and the standard library only:
 # the OpenSCAD image has no Python.
@@ -52,7 +57,7 @@ TOL = 0.01
 # Defaults and hidden constants, mirrored from model.scad.
 D = dict(cells_x=8, cells_y=8, seed=42, cell_size=10, shape="square",
          wall_height=6, wall_thickness=1.6, mode="open_tray", ball_d=6,
-         markers=True, parts="both")
+         markers=True)
 FLOOR_T, BORDER_EXTRA, BALL_CLEAR, LID_HEAD, INLAY = 2, 1.2, 1.0, 0.5, 0.6
 LID_T, SKIRT_T, LID_FIT, PART_GAP = 1.6, 1.6, 0.25, 8
 FLOOR, WALL, MARKER, LID = "#80DEEA", "#006064", "#FFCA28", "#FFFFFF"
@@ -75,10 +80,9 @@ CASES = [
     # Tray + lid side by side would pass the 300 mm width: the lid goes behind.
     ("lid-behind-15x6", dict(mode="ball_lid", cells_x=15, cells_y=6)),
     ("round-lid", dict(shape="round", mode="ball_lid", seed=11)),
-    # Neither way fits: the lid is left off with a note; print it on its own.
+    # Neither way fits: the lid goes on plate 2, with a note.
     ("lid-too-big-15x15", dict(mode="ball_lid", cells_x=15, cells_y=15, cell_size=16)),
-    ("lid-only-15x15", dict(mode="ball_lid", cells_x=15, cells_y=15, cell_size=16, parts="lid")),
-    ("tray-only", dict(mode="ball_lid", parts="tray")),
+    ("lid-plate-2-15x13", dict(mode="ball_lid", cells_x=15, cells_y=13, cell_size=14, seed=3)),
 ]
 BED = (300, 320)
 
@@ -96,7 +100,7 @@ def defines(ov):
 
 
 def docker(script):
-    r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w",
+    r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", os.getcwd() + ":/w", "-w", "/w",
                         IMAGE, "bash", "-ec", script], capture_output=True, text=True)
     if r.returncode or "WARNING" in r.stderr or "ERROR" in r.stderr:
         print(r.stderr)
@@ -149,6 +153,21 @@ for name, ov in CASES:
                         % (defines(ov), OUT, name))
 combined = {name: read_3mf("%s/%s.3mf" % (OUT, name)) for name, _ in CASES}
 
+
+def echoed_plates(log):
+    counts = [int(m.group(1)) for m in re.finditer(r"^ECHO: plates = (\d+)$", log, re.M)]
+    return counts[-1] if counts else None
+
+
+# ---- phase 1b: one render per plate, as ScadBuddy renders a multi-plate template
+plates = {name: echoed_plates(logs[name]) or 1 for name, _ in CASES}
+plate_jobs = [(name, k, dict(ov, **{"$plate": k})) for name, ov in CASES
+              for k in range(1, plates[name] + 1) if plates[name] > 1]
+if plate_jobs:
+    docker("\n".join("openscad --backend=Manifold %s -o %s/%s_p%d.3mf model.scad"
+                      % (defines(pov), OUT, name, k) for name, k, pov in plate_jobs))
+per_plate = {(name, k): read_3mf("%s/%s_p%d.3mf" % (OUT, name, k)) for name, k, _ in plate_jobs}
+
 # ---- phase 2: one closed render per colour, plus one of everything
 with open("%s/wrap.scad" % OUT, "w") as f:
     f.write('_sb_t = "";\nmodule color(c, alpha = 1) { if (_sb_t == "*" || c == _sb_t) children(); }\n'
@@ -162,6 +181,12 @@ for name, ov in CASES:
         tag = "all" if col == "*" else col[1:]
         jobs.append("openscad --backend=Manifold %s -D '_sb_t=\"%s\"' -o %s/%s_%s.stl %s/wrap.scad"
                     % (defines(ov), col, OUT, name, tag, OUT))
+for name, k, pov in plate_jobs:
+    mats, _, tris = per_plate[(name, k)]
+    used = Counter(t[3] for t in tris)
+    for col in [col for i, (n, col) in enumerate(mats) if n != "Default" and used.get(i)]:
+        jobs.append("openscad --backend=Manifold %s -D '_sb_t=\"%s\"' -o %s/%s_p%d_%s.stl %s/wrap.scad"
+                    % (defines(pov), col, OUT, name, k, col[1:], OUT))
 docker("\n".join(jobs))
 
 # ---- checks
@@ -194,7 +219,7 @@ def dims(ov):
     R_out = min(W, H) * p / 2 + p / 4 + B
     return dict(W=W, H=H, t=t, p=p, c=p - t, wh=wh, B=B, rc=B + t / 2, R_out=R_out,
                 skirt_h=min(4, wh - 0.4), round=q("shape") == "round",
-                lid=q("mode") == "ball_lid", markers=q("markers"), parts=q("parts"))
+                lid=q("mode") == "ball_lid", markers=q("markers"))
 
 
 def outline_area(d, grow=0):
@@ -268,7 +293,7 @@ for name, ov in CASES:
     used = Counter(t[3] for t in tris)
     named = {col for i, (n, col) in enumerate(mats) if n != "Default" and used.get(i)}
     # Lid placement, as in model.scad: right of the tray, else behind it,
-    # else not on this plate.
+    # else on plate 2 (and, drawn with everything, to the right, off the bed).
     (ox0, oy0), (ox1, oy1) = outline_box(d)
     g = LID_FIT + SKIRT_T
     span = (ox1 - ox0, oy1 - oy0)
@@ -276,12 +301,14 @@ for name, ov in CASES:
     lid_at = ((span[0] + g + PART_GAP, 0) if pair[0] <= BED[0] and span[1] + 2 * g <= BED[1]
               else (0, span[1] + g + PART_GAP) if pair[1] <= BED[1] and span[0] + 2 * g <= BED[0]
               else None)
-    show_tray = not d["lid"] or d["parts"] != "lid"
-    show_lid = d["lid"] and (d["parts"] == "lid" or (d["parts"] == "both" and lid_at is not None))
-    if d["lid"] and d["parts"] == "both" and lid_at is None:
-        check("the lid is left off" in logs[name], "tray and lid do not fit together: lid left off, with a note")
-    want = (({FLOOR, WALL} | ({MARKER} if d["markers"] else set())) if show_tray else set()) \
-        | ({LID} if show_lid else set())
+    show_tray, show_lid = True, d["lid"]
+    two = d["lid"] and lid_at is None
+    check(plates[name] == (2 if two else 1), "echoes plates = %d (got %s)"
+          % (2 if two else 1, echoed_plates(logs[name])))
+    if two:
+        check("the lid is on plate 2" in logs[name], "tray and lid do not fit together: lid on plate 2, with a note")
+    tray_cols = {FLOOR, WALL} | ({MARKER} if d["markers"] else set())
+    want = tray_cols | ({LID} if show_lid else set())
     check(named == want, "parts are %s (got %s)" % (sorted(want), sorted(named)))
     check(used.get(0, 0) == 0, "Default material has no triangles (got %d)" % used.get(0, 0))
 
@@ -291,7 +318,7 @@ for name, ov in CASES:
     if show_tray:
         boxes.append(((ox0, oy0, 0.0), (ox1, oy1, z_top)))
     if show_lid:
-        lx, ly = lid_at if show_tray else (0, 0)
+        lx, ly = lid_at if lid_at is not None else (span[0] + g + PART_GAP, 0)
         boxes.append(((ox0 - g + lx, oy0 - g + ly, 0.0), (ox1 + g + lx, oy1 + g + ly, lid_h)))
     elo = [min(b[0][i] for b in boxes) for i in range(3)]
     ehi = [max(b[1][i] for b in boxes) for i in range(3)]
@@ -301,9 +328,27 @@ for name, ov in CASES:
           % (tuple(round(x, 2) for x in lo), tuple(round(x, 2) for x in hi),
              tuple(round(x, 2) for x in elo), tuple(round(x, 2) for x in ehi)))
     check(near(lo[2], 0), "sits on z=0 (min z %.3f)" % lo[2])
-    check(hi[0] - lo[0] <= BED[0] and hi[1] - lo[1] <= BED[1],
-          "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
-          % (BED[0], BED[1], hi[0] - lo[0], hi[1] - lo[1]))
+    if not two:
+        check(hi[0] - lo[0] <= BED[0] and hi[1] - lo[1] <= BED[1],
+              "fits the H2C bed, %d x %d with both nozzles (%.1f x %.1f)"
+              % (BED[0], BED[1], hi[0] - lo[0], hi[1] - lo[1]))
+
+    # -- plates: each rendered on its own, as ScadBuddy renders them
+    if two:
+        tray_box, lid_box = boxes[0], ((ox0 - g, oy0 - g, 0.0), (ox1 + g, oy1 + g, lid_h))
+        for k, cols, box in ((1, tray_cols, tray_box), (2, {LID}, lid_box)):
+            pm, pv, pt = per_plate[(name, k)]
+            pused = Counter(t[3] for t in pt)
+            pnamed = {col for i, (n, col) in enumerate(pm) if n != "Default" and pused.get(i)}
+            check(pnamed == cols, "plate %d holds %s (got %s)" % (k, sorted(cols), sorted(pnamed)))
+            plo, phi = bbox(pv)
+            check(all(near(a, b) for a, b in zip(plo + phi, box[0] + box[1])),
+                  "plate %d bbox %s .. %s == %s .. %s"
+                  % (k, tuple(round(x, 2) for x in plo), tuple(round(x, 2) for x in phi),
+                     tuple(round(x, 2) for x in box[0]), tuple(round(x, 2) for x in box[1])))
+            check(phi[0] - plo[0] <= BED[0] and phi[1] - plo[1] <= BED[1],
+                  "plate %d fits the H2C bed on its own (%.1f x %.1f)"
+                  % (k, phi[0] - plo[0], phi[1] - plo[1]))
 
     # -- closed parts
     parts = {col: read_stl("%s/%s_%s.stl" % (OUT, name, col[1:])) for col in named}
@@ -313,6 +358,14 @@ for name, ov in CASES:
     check(abs(sum(vols.values()) - vw) <= 0.001 * vw,
           "parts do not overlap: sum of part volumes %.1f == whole %.1f mm^3"
           % (sum(vols.values()), vw))
+
+    if two:
+        for col in named:
+            vp = sum(volume(read_stl("%s/%s_p%d_%s.stl" % (OUT, name, k, col[1:])))
+                     for k in (1, 2) if (k == 2) == (col == LID))
+            check(abs(vp - vols[col]) <= 0.001 * vols[col],
+                  "%s: the plate's closed part %.1f mm^3 == the everything render's %.1f"
+                  % (col, vp, vols[col]))
 
     zr = {col: (bbox([v for t in s for v in t])[0][2], bbox([v for t in s for v in t])[1][2])
           for col, s in parts.items()}

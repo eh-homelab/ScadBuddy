@@ -205,6 +205,41 @@ class Metrics:
             registry=r,
         )
 
+        # Uploads for `// file` parameters (#296). The usage gauges are read from the
+        # store per scrape, like the queue's.
+        self.assets_stored = Gauge(
+            "scadbuddy_assets_stored",
+            "Distinct files stored for `// file` parameters under data/assets/.",
+            registry=r,
+        )
+        self.assets_bytes = Gauge(
+            "scadbuddy_assets_bytes",
+            "Total bytes of the files stored for `// file` parameters.",
+            registry=r,
+        )
+        self.assets_max_count = Gauge(
+            "scadbuddy_assets_max_count",
+            "SCADBUDDY_ASSET_MAX_COUNT: stored files past which an upload is refused; "
+            "0 is no limit.",
+            registry=r,
+        )
+        self.assets_max_bytes = Gauge(
+            "scadbuddy_assets_max_bytes",
+            "SCADBUDDY_ASSET_MAX_TOTAL_BYTES: stored bytes past which an upload is "
+            "refused; 0 is no limit.",
+            registry=r,
+        )
+        self.assets_rejected = Counter(
+            "scadbuddy_assets_rejected",
+            "Uploads refused (413) because the store was at one of its caps.",
+            registry=r,
+        )
+        self.assets_swept = Counter(
+            "scadbuddy_assets_swept",
+            "Stored files removed by the sweep because nothing referenced or used them.",
+            registry=r,
+        )
+
         self.http_requests = Counter(
             "scadbuddy_http_requests",
             "HTTP requests served, by method, route template and status.",

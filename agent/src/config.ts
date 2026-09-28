@@ -1,17 +1,34 @@
+import { OriginConfigError, originPolicy } from './http/origins.js'
+
 // The agent service's whole environment surface. Design spec §9
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): "There are no
-// AI env vars. The only variables the agent reads are SCADBUDDY_DATABASE_URL
-// (shared with #241), the backend URL, and the key-encryption key file." Every
-// AI-specific setting (credentials, MCP auth mode, plugins) lives in the
+// AI-*configuration* env vars ... infrastructure bootstrap variables still
+// reach the agent container, because Settings itself needs them to exist."
+// Every AI-specific setting (credentials, MCP auth mode, plugins) lives in the
 // database and is edited in Settings, so do not add a variable here for one.
+//
+// What is here is infrastructure: where the database and backend are, the
+// key-encryption key (and the previous one while rotating it), and how the pod
+// is reached (its public URL and the proxies in front of it). The last two
+// cannot live in Settings: they decide which requests may change Settings.
 
 export type Config = {
   /** Postgres URL shared with the backend (#241). Unset → AI features are disabled. */
   databaseUrl: string | undefined
   /** Where the Python backend listens; the sidecar reaches it over the pod's localhost (spec §4.3). */
   backendUrl: string
-  /** Key-encryption key file for envelope encryption (spec §9). Read by #255, not yet. */
+  /** Key-encryption key file for envelope encryption (spec §9); format and loading in secrets.ts. */
   secretKeyFile: string | undefined
+  /** The key being rotated away from; rows sealed under it are re-wrapped at start (spec §9). */
+  previousSecretKeyFile: string | undefined
+  /**
+   * The UI's public URL, the same SCADBUDDY_PUBLIC_URL the backend reads
+   * (backend/scadbuddy/core/settings.py `public_url`). Its origin is the one
+   * accepted on writes (src/http/origins.ts). Unset → loopback only.
+   */
+  publicUrl: string | undefined
+  /** CIDR list of proxies whose X-Forwarded-* headers are believed. Unset → none. */
+  trustedProxies: string | undefined
 }
 
 export const DEFAULT_BACKEND_URL = 'http://127.0.0.1:8080'
@@ -21,6 +38,9 @@ export const ENV_VARS = [
   'SCADBUDDY_DATABASE_URL',
   'SCADBUDDY_BACKEND_URL',
   'SCADBUDDY_SECRET_KEY_FILE',
+  'SCADBUDDY_SECRET_KEY_PREVIOUS_FILE',
+  'SCADBUDDY_PUBLIC_URL',
+  'SCADBUDDY_AGENT_TRUSTED_PROXIES',
 ] as const
 
 type Env = Readonly<Partial<Record<(typeof ENV_VARS)[number], string>>>
@@ -63,10 +83,22 @@ export function loadConfig(env: Env = process.env): Config {
     throw new ConfigError(`SCADBUDDY_BACKEND_URL must be http(s), not ${parsed.protocol}//`)
   }
 
+  const publicUrl = present(env.SCADBUDDY_PUBLIC_URL)
+  const trustedProxies = present(env.SCADBUDDY_AGENT_TRUSTED_PROXIES)
+  try {
+    originPolicy(publicUrl, trustedProxies)
+  } catch (err) {
+    if (err instanceof OriginConfigError) throw new ConfigError(err.message)
+    throw err
+  }
+
   return {
     databaseUrl,
     // No trailing slash, so `${backendUrl}/api/v1/...` never doubles it.
     backendUrl: backendUrl.replace(/\/+$/, ''),
     secretKeyFile: present(env.SCADBUDDY_SECRET_KEY_FILE),
+    previousSecretKeyFile: present(env.SCADBUDDY_SECRET_KEY_PREVIOUS_FILE),
+    publicUrl,
+    trustedProxies,
   }
 }

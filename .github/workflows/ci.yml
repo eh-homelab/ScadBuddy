@@ -231,8 +231,22 @@ jobs:
       - name: Test the template selector
         run: .github/scripts/select-models.test.sh
 
+      # verify-models.sh reaps a timed-out template's containers by the
+      # `scadbuddy-verify=<slug>` label (#302). An unlabelled `docker run` that
+      # mounts nothing would survive the timeout, so each one fails here.
+      # Its own tests first, so a regression in the lint reads as a failing
+      # case rather than as a template violation.
+      - name: Test the docker run label lint
+        run: .github/scripts/lint-verify-labels.test.sh
+
+      - name: Check every template docker run is labelled
+        run: .github/scripts/lint-verify-labels.sh
+
       - name: Test the review-summary lookup
         run: .github/scripts/review-summary-for-sha.test.sh
+
+      - name: Test the issue-intake failure check
+        run: .github/scripts/intake-verify.test.sh
 
       # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
       # in CI reads: a skill that loses its frontmatter still loads with its
@@ -342,14 +356,30 @@ jobs:
   # Claude Code version the Agent SDK bundles (the Dockerfile's
   # CLAUDE_CODE_VERSION), so an SDK bump that moves it reds this job on the PR.
   #
-  # No test here calls Anthropic. The scaffold makes no model call at all; the
-  # harness stories point ANTHROPIC_BASE_URL at a fake endpoint (#255).
+  # No test here calls Anthropic: test/run.test.ts points the SDK at a local
+  # fake Anthropic-format endpoint as its gateway (ANTHROPIC_BASE_URL, #255).
+  # The Postgres service is for test/pg.test.ts (the agent's `ai_*` tables and
+  # migrations), reached on the runner's loopback; each test works in a schema
+  # of its own, as the backend's `requires_postgres` tests do.
   agent:
     name: Agent lint, typecheck, test, build, image
     needs: layout
     if: ${{ needs.layout.outputs.agent == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: scadbuddy_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     defaults:
       run:
         working-directory: agent
@@ -376,6 +406,8 @@ jobs:
         run: pnpm typecheck
 
       - name: Unit tests
+        env:
+          SCADBUDDY_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test
         run: pnpm test
 
       - name: Build

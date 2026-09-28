@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { USER_ONLY } from '../agent/dom'
 import { api, ApiError } from '../api/client'
 import type { PipelineCreate, PipelineView, PresetChoice, PresetRef } from '../api/types'
 import { Button } from './ui/Button'
@@ -271,6 +272,7 @@ export function NewPipelineForm({ colors, onCreated, onCancel }: Props) {
           onClick={() => void create()}
           disabled={!complete || saving}
           aria-busy={saving}
+          {...USER_ONLY}
         >
           {saving && <Spinner />}
           Create pipeline

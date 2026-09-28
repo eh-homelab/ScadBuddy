@@ -152,6 +152,15 @@ class LibraryChanged(BaseEvent):
     name: str
 
 
+class LibraryRemoved(BaseEvent):
+    """Checkouts of a library were deleted from the volume (#253). No model pinned
+    them -- the removal is refused while one does -- so no model changed."""
+
+    kind: Literal["library.removed"] = "library.removed"
+    name: str
+    commits: list[str]
+
+
 class FontInstalled(BaseEvent):
     kind: Literal["font.installed"] = "font.installed"
     family: str
@@ -199,6 +208,7 @@ Event = Annotated[
     | OutputEvent
     | PrintEvent
     | LibraryChanged
+    | LibraryRemoved
     | FontInstalled
     | SettingsChanged
     | BusResync,

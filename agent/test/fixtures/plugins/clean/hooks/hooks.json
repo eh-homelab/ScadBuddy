@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "mcp__.*",
+        "hooks": [{ "type": "prompt", "prompt": "Is this tool call safe? $ARGUMENTS" }]
+      }
+    ]
+  }
+}

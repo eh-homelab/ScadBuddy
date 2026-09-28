@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import type { Plate, PlateFit } from '../api/types'
-import { fitLabel, fitMessages } from './plate'
+import type { Job, Plate, PlateFit } from '../api/types'
+import { fitLabel, fitMessages, fitTargets, platesFitMessages, worstFit } from './plate'
 
 const H2C: Plate = {
   model: 'Bambu Lab H2C',
@@ -55,5 +55,56 @@ describe('fitMessages', () => {
       'the model is 295.0 x 315.0 mm, which leaves no room for the 60 mm prime tower',
     ])
     expect(fitLabel(tower)).toBe('Does not fit')
+  })
+})
+
+describe('multi-plate fit (#289)', () => {
+  const box = (x: number, y: number, z: number): Job['bbox_mm'] => ({
+    min: [0, 0, 0],
+    max: [x, y, z],
+    size: [x, y, z],
+  })
+  const done = (rest: Partial<Job>): Job =>
+    ({ id: 'j', slug: 'maze', status: 'done', created_at: '', bbox_mm: box(498, 248, 8.5), ...rest }) as Job
+
+  it('checks the one model of an ordinary render', () => {
+    expect(fitTargets(done({ colors: ['#111111', '#222222'] }))).toEqual([
+      { plate: null, size: [498, 248, 8.5], colours: 2 },
+    ])
+    expect(fitTargets(done({ plates: [] }))).toEqual([{ plate: null, size: [498, 248, 8.5], colours: 1 }])
+    expect(fitTargets(undefined)).toEqual([])
+    expect(fitTargets(done({ status: 'running', bbox_mm: null }))).toEqual([])
+  })
+
+  it('checks each plate with its own box and colours, not the preview of them all', () => {
+    const job = done({
+      colors: ['#111111', '#222222', '#FFFFFF'],
+      plates: [
+        { index: 1, bbox_mm: box(244, 244, 8.5)!, colors: ['#111111', '#222222'] },
+        { index: 2, bbox_mm: box(248, 248, 5.6)!, colors: ['#FFFFFF'] },
+      ],
+    })
+    expect(fitTargets(job)).toEqual([
+      { plate: 1, size: [244, 244, 8.5], colours: 2 },
+      { plate: 2, size: [248, 248, 5.6], colours: 1 },
+    ])
+  })
+
+  it('names the plate a problem is on, and reports the plate that does not fit', () => {
+    const fits = [fit({}), fit({ overshoots: [{ axis: 'X', size: 312, limit: 300 }] })]
+    const targets = [
+      { plate: 1, size: [1, 1, 1], colours: 2 },
+      { plate: 2, size: [1, 1, 1], colours: 1 },
+    ]
+    expect(platesFitMessages(fits, targets)).toEqual(['plate 2: X is 12.0 mm over the H2C (312.0 of 300.0 mm)'])
+    expect(worstFit(fits)).toBe(fits[1])
+    expect(worstFit([])).toBeUndefined()
+  })
+
+  it('leaves a one-plate message unprefixed', () => {
+    const over = fit({ overshoots: [{ axis: 'Y', size: 330, limit: 320 }] })
+    expect(platesFitMessages([over], [{ plate: null, size: [1, 1, 1], colours: 1 }])).toEqual([
+      'Y is 10.0 mm over the H2C (330.0 of 320.0 mm)',
+    ])
   })
 })

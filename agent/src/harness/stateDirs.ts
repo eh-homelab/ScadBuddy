@@ -1,5 +1,6 @@
 import { constants } from 'node:fs'
 import { access, mkdir } from 'node:fs/promises'
+import path from 'node:path'
 import { claudeConfigDir, scratchDir, type HarnessPaths } from './options.js'
 
 // The deployment mounts an emptyDir (Kubernetes) or tmpfs (the CI smoke test)
@@ -13,6 +14,40 @@ import { claudeConfigDir, scratchDir, type HarnessPaths } from './options.js'
 
 export class StateDirError extends Error {
   override name = 'StateDirError'
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+/** A canonical 8-4-4-4-12 hex UUID: every session id (and so directory name) is one. */
+export function isUuid(value: string): boolean {
+  return UUID.test(value)
+}
+
+/**
+ * A session's own working directory (#300, spec §6): `work/sessions/<id>`.
+ * Deterministic from the session id, so every replica computes the same path
+ * and a session's `cwd` is the same wherever it resumes (spec §3.1: the SDK's
+ * store key "derives from the working directory"). The id must be a UUID, which
+ * the session manager guarantees; anything else is refused so it can never
+ * escape `work/`.
+ */
+export function sessionWorkDir(paths: HarnessPaths, sessionId: string): string {
+  if (!isUuid(sessionId)) {
+    throw new StateDirError(`not a session id: ${JSON.stringify(sessionId)}`)
+  }
+  return path.join(scratchDir(paths), 'sessions', sessionId.toLowerCase())
+}
+
+/** Creates the session's working directory on this replica, idempotently. */
+export async function ensureSessionDir(paths: HarnessPaths, sessionId: string): Promise<string> {
+  const dir = sessionWorkDir(paths, sessionId)
+  try {
+    await mkdir(dir, { recursive: true })
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code ?? String(err)
+    throw new StateDirError(`cannot create the session working directory ${dir} (${code})`)
+  }
+  return dir
 }
 
 export async function ensureStateDirs(paths: HarnessPaths): Promise<string[]> {

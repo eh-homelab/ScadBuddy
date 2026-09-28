@@ -44,7 +44,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
-if ! docker run --rm "$IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if ! docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "FAIL: $IMAGE has no '$FONT_FAMILY'" >&2
     exit 1
 fi
@@ -399,7 +399,7 @@ for name, ov in CASES:
 with open("%s/jobs.txt" % OUT, "w") as f:
     f.write("\n".join(jobs) + "\n")
 t0 = time.time()
-r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w", IMAGE, "bash", "-c",
+r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", os.getcwd() + ":/w", "-w", "/w", IMAGE, "bash", "-c",
                     "tr '\\n' '\\0' < %s/jobs.txt | xargs -0 -P 8 -I{} bash -c '{} 2>&1' "
                     "| grep -E 'WARNING|ERROR' ; true" % OUT],
                    capture_output=True, text=True)
