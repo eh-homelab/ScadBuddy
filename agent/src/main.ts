@@ -2,22 +2,26 @@ import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
-import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { mcpAuthSettings } from './auth/authenticate.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
+import { bundledPluginPaths } from './harness/plugins.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
+import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
 
@@ -92,9 +96,27 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
+
+// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
+// of its own, retried in the background, feeding MCP resource subscriptions.
+const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+events?.start()
+const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 // One store for Settings (routes/mcpTokens.ts) and /mcp.
 const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
+// The /mcp auth mode and anonymous cap (ai_settings keys, auth/authenticate.ts
+// `mcpAuthSettings`): one reader for /mcp, per request, and for Settings
+// (routes/mcpAuthMode.ts), so both report the same thing.
+const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`))
+// The registry's services (#251), shared by /mcp and every session's in-process tools.
+const toolServices = {
+  backend,
+  pending: new PendingActionStore(),
+  pollIntervalMs: 1000,
+  renderWaitMs: 10 * 60_000,
+  publicBaseUrl: config.publicUrl,
+}
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
@@ -106,6 +128,10 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // ScadBuddy's tools and their tiers (tools/harness.ts), and its own
+        // plugin, vetted once here and again per query (harness/plugins.ts).
+        ...harnessTools(toolServices),
+        pluginPaths: bundledPluginPaths((message) => console.error(message)),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
@@ -152,19 +178,19 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
+    resources,
     services: {
-      backend,
-      pending: new PendingActionStore(),
-      pollIntervalMs: 1000,
-      renderWaitMs: 10 * 60_000,
-      publicBaseUrl: config.publicUrl,
+      ...toolServices,
+      // Prepared outward calls wait for the UI in ai_approvals (tools/approvals.ts).
+      ...(sessions ? { approvals: sessions.approvals } : {}),
     },
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
-    // fail-closed store only makes sure nothing could verify anyway.
-    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
+    // fail-closed store only makes sure nothing could verify anyway. The mode and
+    // the anonymous cap are ai_settings keys, read per request
+    // (auth/authenticate.ts `mcpAuthSettings`).
     tokens,
-    authSettings: () => DEFAULT_MCP_AUTH,
+    authSettings,
   },
 })
 
@@ -186,7 +212,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void shutdown({
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
-      closeSessions: () => app.close(),
+      closeSessions: async () => {
+        await app.close()
+        resources.close()
+        await events?.close()
+      },
       closeServer: async () => {
         await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
         await pluginForwarder.close()

@@ -1,13 +1,17 @@
 import { checkOrigin, isSecureTransport, type OriginPolicy, type RequestFacts } from '../http/origins.js'
-import { type Principal, type Tier, tiersUpTo } from './principal.js'
+import { type Principal, type Tier, TIERS, tiersUpTo } from './principal.js'
 import type { TokenStore } from './tokens.js'
 
 // `/mcp` authentication and transport rules, spec §8.3–§8.4
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md) and issue #251.
 //
-// The mode and the anonymous cap are database settings edited in Settings
-// (spec D4, §8.3). That storage arrives with #255; until then they are plain
-// config handed to `createApp`, and `main.ts` passes `DEFAULT_MCP_AUTH`.
+// The mode and the anonymous cap are database settings (spec D4, §8.3, §9: "MCP
+// auth mode" is AI state in the `ai_*` tables, and there are "no
+// AI-configuration env vars"). They are two keys of `ai_settings`
+// (db/migrations/20260927T2349Z_credentials_settings.sql, one JSON value per
+// key), read on every /mcp request by `mcpAuthSettings` below, so a change
+// applies to the next request on every replica. An unset key is the default;
+// a value that is not one of the allowed ones fails closed.
 
 export type McpAuthMode = 'bearer' | 'disabled' | 'oidc'
 
@@ -20,6 +24,64 @@ export type McpAuthSettings = {
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
   mode: 'bearer',
   anonymousCap: 'outward',
+}
+
+/** ai_settings key: `"bearer"` (the default), `"disabled"` or `"oidc"`. */
+export const SETTING_MCP_AUTH_MODE = 'mcp_auth_mode'
+/** ai_settings key: `"read"`, `"write"` or `"outward"` (the default), the anonymous cap in `disabled` mode. */
+export const SETTING_MCP_ANONYMOUS_CAP = 'mcp_anonymous_cap'
+
+const MODES: readonly string[] = ['bearer', 'disabled', 'oidc'] satisfies McpAuthMode[]
+
+/** Reads ai_settings; credentials.ts SettingsStore is one. */
+export type SettingsReader = { get<T>(key: string): Promise<T | undefined> }
+
+/**
+ * The `authSettings` reader /mcp calls per request (mcp/http.ts), over
+ * `ai_settings`; the defaults when there is no settings store. A read that
+ * throws is left to throw: mcp/http.ts `resolveAuth` then fails closed
+ * (`bearer` with no token that verifies).
+ *
+ * A value that is not allowed is not guessed at: an unknown mode is `bearer`
+ * and an unknown cap is `read`. `disabled` mode, and each bad value, is
+ * logged through `warn` when it is first seen, and again whenever it changes,
+ * rather than on every request.
+ */
+export function mcpAuthSettings(
+  settings: SettingsReader | undefined,
+  warn: (message: string) => void,
+): () => Promise<McpAuthSettings> {
+  let lastWarning = ''
+  return async () => {
+    if (!settings) return DEFAULT_MCP_AUTH
+    const [mode, cap] = await Promise.all([
+      settings.get<unknown>(SETTING_MCP_AUTH_MODE),
+      settings.get<unknown>(SETTING_MCP_ANONYMOUS_CAP),
+    ])
+    const warnings: string[] = []
+    const resolved: McpAuthSettings = { ...DEFAULT_MCP_AUTH }
+    if (typeof mode === 'string' && MODES.includes(mode)) resolved.mode = mode as McpAuthMode
+    else if (mode !== undefined) {
+      warnings.push(`ai_settings ${SETTING_MCP_AUTH_MODE} is ${JSON.stringify(mode)}, not one of ${MODES.join(', ')}; using bearer`)
+    }
+    if (typeof cap === 'string' && (TIERS as readonly string[]).includes(cap)) resolved.anonymousCap = cap as Tier
+    else if (cap !== undefined) {
+      resolved.anonymousCap = 'read'
+      warnings.push(`ai_settings ${SETTING_MCP_ANONYMOUS_CAP} is ${JSON.stringify(cap)}, not one of ${TIERS.join(', ')}; using read`)
+    }
+    if (resolved.mode === 'disabled') {
+      warnings.push(
+        `MCP auth is DISABLED (ai_settings ${SETTING_MCP_AUTH_MODE}): /mcp serves any HTTPS caller that can reach it ` +
+          `as "anonymous", up to the "${resolved.anonymousCap}" tier (spec §8.3). Outward actions still need a human approval.`,
+      )
+    }
+    const warning = warnings.join('\n')
+    if (warning !== lastWarning) {
+      lastWarning = warning
+      for (const w of warnings) warn(w)
+    }
+    return resolved
+  }
 }
 
 export type AuthResult = { ok: true; principal: Principal } | { ok: false; response: Response }

@@ -98,11 +98,15 @@ import { scrubForLog } from '../sessions/sdkEvents.js'
 //     periodically, and list/decide run it first).
 //   - a shutdown leaves the approval pending (it survives the restart).
 //
-// SEAM for #251 (PR #368): its MCP `prepare` / `confirm_action` pair uses this
-// store instead of its in-memory PendingActionStore: `prepare` → `create()`
-// (session optional, no turn) and returns the id and summary; the UI decides
-// through `decide()`; `confirm_action` → `waitFor()` then `consumeById()`,
-// running the tool only when that returns the approved row.
+// #251's MCP `prepare` / `confirm_action` pair (tools/registry.ts `runTool`,
+// tools/approvals.ts) uses this store: `prepare` → `create()` with no session
+// and no turn, under the pending action's id, requested by the caller's
+// principal; the UI decides through `decide()` (a sessionless approval is
+// visible to the browser user, grant holders and the principal that asked);
+// `confirm_action` → `get()` as that principal, a hash check against the
+// prepared input, then `consumeById()`, running the tool only when that
+// returns the approved row. It does not `waitFor()`: an MCP call answers at
+// once and says the decision is still pending.
 
 /** ai_settings key: seconds an approval waits for a decision. */
 export const SETTING_APPROVAL_EXPIRY_SECONDS = 'approval_expiry_seconds'
@@ -333,6 +337,8 @@ type SessionAccess = {
 }
 
 export type CreateApproval = {
+  /** A UUID for the row; a random one when omitted. #251's prepare passes its pending action's id. */
+  id?: string
   sessionId: string | null
   turnId: string | null
   toolUseId: string
@@ -491,7 +497,7 @@ export class ApprovalService {
   /** Records a pending approval (and, in a session, emits `approval.required`). */
   async create(request: CreateApproval): Promise<ApprovalRecord> {
     const secrets = request.secrets ?? []
-    const id = randomUUID()
+    const id = request.id ?? randomUUID()
     const summary = summariseInput(request.tool, request.input, secrets)
     const ttl = await this.expirySeconds()
     const { requestedBy: by } = request

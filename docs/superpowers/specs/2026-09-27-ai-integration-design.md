@@ -242,7 +242,7 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 | Item | Where it matters | Verified by |
 |---|---|---|
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
-| Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
+| ~~Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas~~ **Answered in #264:** only that every service connects to the primary. `LISTEN` and `NOTIFY` are refused on a hot standby ("`LISTEN`, `NOTIFY`" are among the commands not allowed, <https://www.postgresql.org/docs/current/hot-standby.html>), and CloudNativePG's `-rw` service "Points to the primary instance of the cluster" (<https://cloudnative-pg.io/docs/devel/service_management>), so `SCADBUDDY_DATABASE_URL` must name the `-rw` service, never `-ro` or `-r`. Any number of agent and backend replicas can then listen: a NOTIFY reaches every listening session (<https://www.postgresql.org/docs/current/sql-notify.html>). Measured on `postgres:17` by `agent/test/eventBus.pg.test.ts` | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
 | Which keys `filament_overrides` accepts on `PrintQueueItemCreate` (can it carry nozzle temperature and fan?) | §11 | #284 |
 | Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
@@ -366,6 +366,18 @@ A test asserts both lists are identical, apart from browser-only tools. A CI che
 when an operation in `backend/openapi.json` has neither a tool nor an explicit allowlist
 entry.
 
+As wired (#255, `agent/src/tools/harness.ts`): every session's queries get the harness
+projection, bound to the session owner's principal, and a `tierOf` that maps
+`mcp__scadbuddy__<name>` to each tool's `risk` for the permission seam (§8.1). An
+outward call that the seam approved runs at once, because the harness projection tells
+`runTool` it is past the gate (`gate: 'harness'`). Only `/mcp` calls take the
+prepare/confirm path of §8.2. Measured on SDK 0.3.283: its in-process server validates
+arguments with its own bundled zod 4.4.3, which refused any call that left out a
+`.default()` field of our zod 4.6.5 ("expected nonoptional"). The harness projection
+therefore offers such top-level fields as optional, with the same default in the JSON
+Schema, and the tool's own schema applies the default (`agent/src/tools/projections.ts`
+`sdkShape`; `agent/test/harnessWiring.test.ts`).
+
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
 render and streams progress until it settles, and `print_output` fills any omitted
 choice the way the print dialog opens, then slices and queues behind a single approval.
@@ -441,6 +453,31 @@ print progress, Bambuddy printers, queue, inventory, history and stats, librarie
 settings, sessions, and the browser snapshot) use the same principal and tier checks as
 tools.
 
+Decided while building #264 (`agent/src/resources/`; MCP
+[resources][mcp-resources], protocol 2025-11-25 as `@modelcontextprotocol/sdk` 1.30.1
+implements it):
+
+- **Every resource is backed by a `read` tool of the registry**
+  (`catalog.ts` `RESOURCES`): reading `scadbuddy://models/{slug}/source` runs
+  `get_source`. So there is one typed backend client, one argument validation and one
+  redaction path, and the openapi coverage check needs no resource entries.
+- **Tiers.** A resource needs its tool's tier (`read`), raised to `write` for
+  `scadbuddy://settings`. `resources/list` and `resources/templates/list` leave out
+  what the caller may not read; `resources/read` and `resources/subscribe` refuse it.
+- **URIs** are RFC 6570 level-1 templates, one path segment per variable,
+  percent-encoded (`builtin:x` is `builtin%3Ax`); subscriptions and notifications use
+  that canonical spelling whichever one the client sent.
+- **Errors** follow the resources page: `-32002` for an unknown URI or a backend 404,
+  `-32602` for an argument the tool refuses, `-32603` otherwise.
+- **Binary** content is a base64 `blob`; above the tools' inline cap (8 MiB,
+  `tools/binary.ts`) the content is the same JSON note, with `application/json`.
+- **Completion** (`completion/complete`) offers slugs, and commits and output ids
+  for a slug given in `context.arguments`.
+- **Not built in #264**, for want of a backend route or event source on `main`: the
+  Bambuddy printers, queue, inventory, history and stats resources (print watcher,
+  #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
+  sessions (#300).
+
 ## 6. Sessions (#300)
 
 - **Storage.** A Postgres `SessionStore` adapter (§3.1) mirrors SDK transcripts, so any
@@ -487,8 +524,14 @@ Two independent consumers `LISTEN` on the channel, each on its own connection
   (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
   sockets under `/api/v1/ai/*`.
 
-The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). The
-UI socket does not replay: on every (re)subscribe the server confirms with
+The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). As
+built (`agent/src/events/pgListener.ts`), the agent LISTENs on a dedicated connection
+and keeps its place in the backend's `events` log by `seq`; when that connection drops
+and comes back, it replays the rows after its place, skipping event ids it has already
+delivered, and when the gap is larger than 1000 events or the log cannot be read it
+tells every subscriber to resync (each subscribed URI gets `resources/updated`, plus one
+`list_changed`). Resource notifications are coalesced to at most one per URI per 250 ms
+per session (`agent/src/resources/hub.ts`). The UI socket does not replay: on every (re)subscribe the server confirms with
 `subscribed` only once it is listening, and the client re-reads then, so a reconnect
 cannot leave a gap.
 
@@ -550,7 +593,16 @@ including `disabled`. Where it is enforced:
   `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
-  approval.
+  approval. As built (#255): the prepare records an `ai_approvals` row with no session
+  and no turn, requested by the caller's principal, under the pending action's id, and
+  keeps the call itself (tool and parsed arguments) in the agent's memory only, since
+  the table stores no inputs. `confirm_action` runs it only when the action is the
+  caller's, the row is the caller's, the row's tool and input hash match the prepared
+  call, and the row is approved and still usable. Using it is one conditional update
+  (`consumeById`), so it runs once. It does not wait: a pending approval is refused with
+  the reason, and the client confirms again once the user has decided. A call prepared
+  before a restart, or on another replica, cannot be confirmed and is prepared again.
+  The code is `agent/src/tools/registry.ts` `prepare` and `agent/src/tools/approvals.ts`.
 - **Headless browser (#349):** the backend refuses outward routes on requests that carry
   the agent-actor marker unless an approved outward action authorises them (§5.3). Until
   the §3.2 items for that mechanism are verified, the headless browser stays off.
@@ -559,6 +611,15 @@ including `disabled`. Where it is enforced:
 
 The mode is a database setting, changed in Settings, and changing it counts as a
 settings write, so it needs approval.
+
+As built (#255): two `ai_settings` keys, `mcp_auth_mode` (`"bearer"`, `"disabled"` or
+`"oidc"`; unset means `bearer`) and `mcp_anonymous_cap` (`"read"`, `"write"` or
+`"outward"`; unset means `outward`). They are read on every `/mcp` request, so a change
+applies on every replica without a restart. An unknown value fails closed, to `bearer`
+or a `read` cap, and a failed read serves `bearer` with no verifiable token. The agent
+logs a warning while the mode is `disabled`, once per change of the settings (the
+banner is the UI's). The code is `agent/src/auth/authenticate.ts` `mcpAuthSettings`.
+There is no Settings route for them yet, so no approval applies yet either.
 
 - **`bearer` (default).** `Authorization: Bearer <token>`. Unauthenticated requests get
   `401` with a `WWW-Authenticate: Bearer` header.
@@ -618,7 +679,15 @@ agent service:
 - MCP auth mode, tokens (hashed), and OIDC configuration;
 - plugins: source, pinned commit, enabled parts, endpoint credentials (encrypted), and
   tier map;
-- sessions (§6), MCP subscriptions, and the resumability event log;
+- sessions (§6);
+- ~~MCP subscriptions, and the resumability event log~~ (decided in #264: these live
+  with the MCP session, in memory on the replica that holds it. An MCP session is
+  in-memory state, so after a restart its id answers 404 and the transport spec
+  requires the client to start a new session ("When a client receives HTTP 404 in
+  response to a request containing an `MCP-Session-Id`, it MUST start a new session",
+  [Streamable HTTP][mcp-transport]), which re-subscribes. A durable copy would replay
+  into a session that no longer exists. What is durable is the backend's `events`
+  table, which covers the agent's own LISTEN gaps, §7);
 - approvals of outward actions (§8.2, `ai_approvals`);
 - the audit log.
 
@@ -652,6 +721,14 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
+  As built (#299): the agent image carries it at `/app/plugins/scadbuddy` (Dockerfile
+  `agent` stage), and every session query gets it as a local plugin after
+  `agent/src/harness/plugins.ts` vets it (`bundledPluginPaths`, once at start, then
+  per query). Its `.mcp.json` is not started there: `strictMcpConfig` ignores
+  "plugins" among "all other MCP configurations" (`sdk.d.ts` 0.3.283), and the tools
+  come from the in-process server (§5.1). Measured on Claude Code 2.1.283: the init
+  message lists `scadbuddy` 0.1.0 in `plugins`, with its three skills and no
+  `plugin_errors` (`agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has
@@ -742,6 +819,8 @@ Each of these is in §3.2 until verified.
 [sdk-hooks]: https://code.claude.com/docs/en/agent-sdk/hooks
 [gateways]: https://code.claude.com/docs/en/llm-gateway
 [mcp-auth]: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+[mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
+[mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject
 [pw-plugin-mcp]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.mcp.json
 [pw-plugin-json]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.claude-plugin/plugin.json

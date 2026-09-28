@@ -7,10 +7,10 @@ The plugin's own README, [`plugins/scadbuddy/README.md`](../../plugins/scadbuddy
 is the primary reference. This page is the user-facing summary, and says what works
 today.
 
-> **Status.** The skills and subagents load. The MCP server the plugin connects to,
-> `<your ScadBuddy>/mcp`, is **not on `main`** (open PR #368). Until it ships, the
-> plugin's tools have nothing to connect to. The plugin README says so too
-> ("The `/mcp` endpoint and its tools are built in issues #251 and #261").
+> **Status.** The skills and subagents load, in your Claude Code and in ScadBuddy's own
+> harness ([Inside ScadBuddy](#inside-scadbuddy)). The MCP server the plugin connects to,
+> `<your ScadBuddy>/mcp`, is on `main` (#368), but nothing deploys the agent sidecar or
+> routes `/mcp` to it yet, and tokens cannot be minted in Settings yet (#251).
 
 ## What is in it
 
@@ -54,14 +54,17 @@ declares:
 | `scadbuddy_url` | yes | Your ScadBuddy's HTTPS base URL, **with no trailing slash**, for example `https://scadbuddy.example.org`. The server URL is `${user_config.scadbuddy_url}/mcp` ([`.mcp.json`](../../plugins/scadbuddy/.mcp.json)). |
 | `scadbuddy_token` | no; `sensitive` | A bearer token minted in ScadBuddy Settings, sent as `Authorization: Bearer …`. Leave it empty only if the operator set the MCP auth mode to `disabled`. |
 
-What the spec says the server will do (spec §8.2–§8.4; this is **not built on `main`**):
+What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)):
 
 - `/mcp` refuses plain HTTP, except on loopback;
-- `bearer` is the default auth mode, and a request without a valid token gets `401`;
+- `bearer` is the default auth mode, and a request without a valid token gets `401`.
+  The mode is an `ai_settings` key ([operating.md](operating.md#9-mcp-auth-mode));
 - outward actions (send, print, delete, settings writes) always need a human approval
-  in the ScadBuddy UI, whatever the token allows.
+  in the ScadBuddy UI, whatever the token allows. The tool returns a
+  `pending_action_id`; once the user approves it, `confirm_action` runs it, once
+  ([security.md](security.md#prepare-and-confirm-over-mcp)).
 
-Token minting in Settings is also part of open PR #368.
+Token minting in Settings is not built yet (#251).
 
 In Claude Code the tools will appear as `mcp__plugin_scadbuddy_scadbuddy__<tool>`
 (plugin README, citing [plugin components](https://code.claude.com/docs/en/plugins/components)).
@@ -69,16 +72,29 @@ The subagents' `tools` field lists both `mcp__scadbuddy` and
 `mcp__plugin_scadbuddy_scadbuddy`, so the same files work inside ScadBuddy's own harness
 and in an external install.
 
-## Inside ScadBuddy (planned)
+## Inside ScadBuddy
 
-The spec (§10) has the agent service load this directory by path, through the Agent SDK
+The agent service loads this directory by path (spec §10), through the Agent SDK
 `plugins: [{ type: "local", path }]` option
-([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)). The harness can
-do this: `pluginPaths` in `runHarness()`
-([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)) vets and passes local
-plugins, and the vetting test accepts `plugins/scadbuddy` (PR #379, row 8). But
-`main.ts` passes no plugin path yet. Vetting is described in
-[security.md](security.md#plugin-vetting).
+([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)):
+
+- The agent image carries it at `/app/plugins/scadbuddy` ([`Dockerfile`](../../Dockerfile),
+  `agent` stage). `main.ts` passes it to every session as `pluginPaths`, through
+  `bundledPluginPaths()` in [`agent/src/harness/plugins.ts`](../../agent/src/harness/plugins.ts).
+  That vets it once at start and leaves it out, with a log line, if it is missing or
+  refused. `runHarness()` vets it again on every query
+  ([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)).
+- Its skills and subagents load. Its `.mcp.json` does not: `strictMcpConfig` ignores
+  plugin MCP configurations (`sdk.d.ts` 0.3.283). The tools come from the harness's
+  in-process `scadbuddy` server instead, as `mcp__scadbuddy__<tool>`
+  ([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). That is the first
+  of the two names the subagents allow.
+- On Claude Code 2.1.283 the init message lists the plugin (`scadbuddy`, version
+  `0.1.0`), its skills `scadbuddy:authoring`, `scadbuddy:customize` and
+  `scadbuddy:print`, and no `plugin_errors`. Measured against the fake Anthropic endpoint
+  in [`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts).
+
+Vetting is described in [security.md](security.md#plugin-vetting).
 
 ## Citations in skills
 

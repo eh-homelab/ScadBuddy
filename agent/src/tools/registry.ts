@@ -2,7 +2,8 @@ import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
-import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import type { ApprovalService } from '../approvals/service.js'
+import { hasTier, ownerOf, type Principal, type Tier } from '../auth/principal.js'
 import { type PendingActionStore, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
@@ -28,10 +29,22 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 /** Long-running tools report here; a no-op when the caller sent no progress token. */
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
+/**
+ * The part of the approval store (#258, approvals/service.ts `ApprovalService`)
+ * the prepare/confirm pair uses.
+ */
+export type ToolApprovals = Pick<ApprovalService, 'create' | 'get' | 'hash' | 'consumeById'>
+
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
   pending: PendingActionStore
+  /**
+   * Where a prepared outward call waits for a human (`ai_approvals`). Without
+   * it (no database) outward calls are still prepared, and `confirm_action`
+   * refuses every one.
+   */
+  approvals?: ToolApprovals
   /** How often a render is polled while `render_model` waits. */
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
@@ -46,6 +59,16 @@ export type ToolContext = ToolServices & {
   principal: Principal
   progress: Progress
   signal: AbortSignal
+  /**
+   * `harness`: the call came through the harness's permission seam
+   * (harness/permissions.ts), which runs before any tool and parks every
+   * outward call until a human approves it (or denies it when there is no
+   * approval gate), so a call that reaches here was approved and is not
+   * prepared a second time. Only the harness projection sets it
+   * (projections.ts `createHarnessServer`); the in-process server is reachable
+   * only from a harness query.
+   */
+  gate?: 'harness'
 }
 
 export type ToolSpec<S extends z.ZodRawShape> = {
@@ -116,10 +139,73 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
 
 export class ToolError extends Error {
   override name = 'ToolError'
+  /** The backend's HTTP status, when the error is a backend answer (call.ts `ok`). */
+  readonly status: number | undefined
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.status = status
+  }
 }
 
 export function errorResult(message: string): CallToolResult {
   return { isError: true, content: [{ type: 'text', text: message }] }
+}
+
+/**
+ * The `prepare` half of spec §8.2's flow for external MCP clients: records the
+ * call (pending.ts) and, when there is a database, its approval in
+ * `ai_approvals` under the same id, requested by the caller's principal, for
+ * the UI to decide. Nothing runs; `confirm_action` (approvals.ts) does, once.
+ */
+async function prepare(tool: Tool, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
+  const summary = tool.summarize(args)
+  // A copy taken now is what runs, and what the approval's hash binds to.
+  const input = structuredClone((args ?? {}) as Record<string, unknown>)
+  const action = ctx.pending.prepare({
+    tool: tool.name,
+    args: input,
+    summary,
+    principalId: ctx.principal.id,
+    run: (runCtx) => tool.execute(input, runCtx),
+  })
+  if (!ctx.approvals) {
+    return json({
+      status: 'pending_approval',
+      pending_action_id: action.id,
+      summary,
+      expires_at: action.expiresAt.toISOString(),
+      next:
+        'Outward actions need a human approval in the ScadBuddy UI, and this agent has no database to ' +
+        'record one in, so confirm_action will refuse it. Nothing was sent.',
+    })
+  }
+  let expiresAt: string
+  try {
+    const approval = await ctx.approvals.create({
+      id: action.id,
+      sessionId: null,
+      turnId: null,
+      toolUseId: action.id,
+      tool: tool.name,
+      input,
+      tier: 'outward',
+      requestedBy: ownerOf(ctx.principal),
+    })
+    expiresAt = approval.expiresAt
+  } catch (err) {
+    ctx.pending.remove(action.id)
+    throw err
+  }
+  return json({
+    status: 'pending_approval',
+    pending_action_id: action.id,
+    summary,
+    expires_at: expiresAt,
+    next:
+      'Nothing was sent. Ask the user to approve this in the ScadBuddy UI before expires_at, then call ' +
+      'confirm_action with this pending_action_id to run it.',
+  })
 }
 
 /**
@@ -134,23 +220,7 @@ export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Prom
     )
   }
   try {
-    if (tool.gated) {
-      const action = ctx.pending.prepare({
-        tool: tool.name,
-        args,
-        summary: tool.summarize(args),
-        principalId: ctx.principal.id,
-      })
-      return json({
-        status: 'pending_approval',
-        pending_action_id: action.id,
-        summary: action.summary,
-        expires_at: action.expiresAt.toISOString(),
-        next:
-          'Outward actions need a human approval in the ScadBuddy UI. That approval flow is not ' +
-          'available yet (#258), so confirm_action refuses for now; nothing was sent.',
-      })
-    }
+    if (tool.gated && ctx.gate !== 'harness') return await prepare(tool, args, ctx)
     return await tool.execute(args, ctx)
   } catch (err) {
     if (err instanceof z.ZodError) return errorResult(`invalid arguments: ${z.prettifyError(err)}`)
