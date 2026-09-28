@@ -121,7 +121,7 @@ shutters = true;
 // Flower box under the window, with flowers
 flower_box = true;
 
-// Window and door frames, sills and thresholds in their own colours
+// Window and door frames, sills and thresholds in their own colours (off: wall colour; glazing bars keep the frame colour)
 trim = true;
 
 /* [Doors] */
@@ -1173,6 +1173,48 @@ module room_preview() {
                 if (a < dr_cx(u)) one_leaf(u, h, a);
                 else translate([2 * dr_cx(u), 0, 0]) mirror([1, 0, 0]) one_leaf(u, h, 2 * dr_cx(u) - a);
     }
+}
+
+// ------------------------------------------------------------ notes
+// Say so whenever the piece being made differs from what was asked for.
+
+function r1(x) = round(x * 10) / 10;
+WIN_PIECE = preview == "" && piece == "wall_window";
+DOOR_PIECE = preview == "" && (piece == "wall_door_lower" || piece == "wall_door_upper"
+    || piece == "door_leaf_lower" || piece == "door_leaf_upper"
+    || (piece == "connectors" && connector_type == "hinge_pins"));
+if (WIN_PIECE) {
+    u = width_units;
+    if (win_w(u) < window_width)
+        echo(str("NOTE: window_width reduced to ", r1(win_w(u)), " mm to fit a ", width_units,
+                 "-unit wall (it keeps room for the end keys", window_style == "arched" ? " and the arch" : "", ")"));
+    if (window_style != "round" && win_h(u) < window_height)
+        echo(str("NOTE: window_height reduced to ", r1(win_h(u)), " mm so the window clears the top-edge pegs and keys"));
+    if (win_sill() < window_sill)
+        echo(str("NOTE: window_sill lowered to ", r1(win_sill()), " mm to leave a 30 mm tall window in the course"));
+    if (shutters && window_style != "round" && !has_shutters(u))
+        echo("NOTE: no room for shutters beside this window; left off");
+    if (flower_box && !has_box())
+        echo("NOTE: no room for a flower box under this window; left off");
+}
+if (DOOR_PIECE) {
+    u = width_units;
+    if (width_units < 1)
+        echo(str("NOTE: door walls are at least 1 unit long; width_units ", width_units, " made as 1"));
+    if (dr_w(u) < door_width)
+        echo(str("NOTE: door_width reduced to ", r1(dr_w(u)), " mm to fit a ", du(u), "-unit wall with its frame and end keys"));
+    if (dr_top() - THR < door_height)
+        echo(str("NOTE: door_height reduced to ", r1(dr_top() - THR), " mm to leave a 25 mm header in two ",
+                 course_height, " mm courses"));
+}
+if (preview == "" && piece == "floor_tile") {
+    Lx = wl(width_units); Ly = wl(depth_units);
+    if (rug != "none" && !rug_fits(Lx, Ly))
+        echo("NOTE: this floor tile is too small for a rug; left off");
+    sw = min(Lx - sw_in(), sw_in() + stair_width + 10) - sw_in();
+    if (stairwell && sw < stair_width)
+        echo(str("NOTE: the stairwell is only ", r1(sw), " mm wide on this tile; the stairs are ", stair_width,
+                 " mm wide (use a wider tile)"));
 }
 
 // ------------------------------------------------------------ plate

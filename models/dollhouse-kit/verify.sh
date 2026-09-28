@@ -133,6 +133,11 @@ CASES = [
     # Too small for a rug: it is left off instead of drawn with a negative size.
     ("floor-rug-no-room", dict(piece="floor_tile", module_size=100, width_units=0.5, depth_units=0.5,
                                wall_thickness=7, floor_texture="plain", rug="rectangle"), ["floor_color"]),
+    # Second audit: pieces that cannot be what was asked for say so with a NOTE.
+    ("note-window-shrunk", dict(width_units=0.5, window_width=180, window_height=200, course_height=180), None),
+    ("note-door-shrunk", dict(piece="wall_door_lower", width_units=0.5, door_width=140, door_height=400,
+                              course_height=180), None),
+    ("note-stairwell-narrow", dict(piece="floor_tile", width_units=0.5, stairwell=True), None),
     ("roof-shingles", dict(piece="roof_panel"), ["roof_color", "roof_accent_color"]),
     ("roof-tiles", dict(piece="roof_panel", roof_style="tiles", width_units=2), ["roof_color", "roof_accent_color"]),
     ("roof-flat", dict(piece="roof_panel", roof_style="flat"), ["roof_color", "roof_accent_color"]),
@@ -279,6 +284,23 @@ for name, ov, _ in CASES:
                         % (defines(ov), col, OUT, name, col[1:], OUT))
 docker("\n".join(j + " >/dev/null 2>&1" for j in jobs))
 
+# What each case must report (NOTE lines, #285); a case not listed must report nothing.
+NOTES = {
+    "note-window-shrunk": [
+        "NOTE: window_width reduced to 45 mm to fit a 0.5-unit wall (it keeps room for the end keys)",
+        "NOTE: window_height reduced to 122.4 mm so the window clears the top-edge pegs and keys",
+        "NOTE: no room for shutters beside this window; left off"],
+    "note-door-shrunk": [
+        "NOTE: door walls are at least 1 unit long; width_units 0.5 made as 1",
+        "NOTE: door_width reduced to 108 mm to fit a 1-unit wall with its frame and end keys",
+        "NOTE: door_height reduced to 330 mm to leave a 25 mm header in two 180 mm courses"],
+    "note-stairwell-narrow": [
+        "NOTE: the stairwell is only 57.2 mm wide on this tile; the stairs are 100 mm wide (use a wider tile)"],
+    "floor-rug-no-room": ["NOTE: this floor tile is too small for a rug; left off"],
+}
+NOTE_FREE = {"defaults", "door-lower", "door-upper-arched", "leaf-lower", "floor-herringbone-rug", "floor-stairwell",
+             "hinge-pins", "room-preview"}
+
 # ---- checks per case
 for name, ov, want in CASES:
     mats, verts, tris = combined[name]
@@ -289,6 +311,11 @@ for name, ov, want in CASES:
     print("\n[%s] %.1fs  bbox %.2f x %.2f x %.2f  parts=%d"
           % (name, secs.get(name, -1), ext[0], ext[1], ext[2], len(named)))
     check(used.get(0, 0) == 0, "Default material has no triangles (got %d)" % used.get(0, 0))
+    log_notes = [l for l in open("%s/%s.log" % (OUT, name)).read().splitlines() if l.startswith('ECHO: "NOTE:')]
+    for want_note in NOTES.get(name, []):
+        check(any(want_note in l for l in log_notes), "reports %r" % want_note)
+    if name in NOTE_FREE:
+        check(not log_notes, "reports no NOTE (got %s)" % log_notes)
     check(abs(min(zs)) <= TOL, "sits on z=0 (min z %.3f)" % min(zs))
     if name != "room-preview":
         check(secs.get(name, 99) < 10, "renders in under 10 s (%.1f s)" % secs.get(name, 99))

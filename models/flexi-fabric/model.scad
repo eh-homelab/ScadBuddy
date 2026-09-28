@@ -57,7 +57,7 @@ bar_width = 1.2; // [0.8:0.1:2]
 // How links are coloured
 colour_mode = "rainbow"; // [single:Single colour, checker:Checker - neighbours differ, stripes:Vertical stripes, rows:Horizontal rows, gradient_bands:Gradient bands left to right, rainbow:Rainbow arcs, random_seeded:Random - seeded, overlay_only:Base colour plus overlay]
 
-// How many palette colours the multi-colour modes use
+// How many palette colours the multi-colour modes use (checker always uses the fewest that keep neighbours apart: 2, or 3 for hex scales)
 colour_count = 8; // [2:1:8]
 
 // Stripe / row width, in links
@@ -382,6 +382,9 @@ function cells_in(poly) = let (G = keep(keep(fit_grid(poly))))
 // so every setting renders something.
 CELLS_SHAPE = cells_in(SHAPE);
 CELLS0 = len(CELLS_SHAPE) > 1 ? CELLS_SHAPE : cells_in(shape_poly("rectangle", width, height));
+if (shape != "rectangle" && len(CELLS_SHAPE) <= 1)
+    echo(str("NOTE: a ", width, " x ", height, " mm ", shape, " has room for fewer than two ", LINK,
+             " mm links; made a rectangle instead"));
 
 // ===========================================================================
 // Colour modes
@@ -569,7 +572,11 @@ module overlay_part() {
 
 echo(FLEXI = [pattern, len(CELLS), LINK, BAR_W, SPEC[S_GAP], LEVELS, TOTAL_H, HB, VG,
               norm(A), CLS[0], len(VARIANTS)]);
-if (LINK > link_size) echo(str("WARNING: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance"));
+if (LINK > link_size) echo(str("NOTE: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance"));
+if (LINK < link_size) echo(str("NOTE: link_size reduced to ", LINK, " mm to keep four links across the ",
+                               min(width, height), " mm side"));
+if (colour_mode == "checker" && colour_count != CLS[0])
+    echo(str("NOTE: checker uses ", CLS[0], " colours for this pattern (colour_count ", colour_count, " is ignored)"));
 if (BAR_W < bar_width) echo(str("NOTE: bar width reduced to ", BAR_W, " mm to keep ", clearance, " mm clearance"));
 
 for (col = [0 : 7])

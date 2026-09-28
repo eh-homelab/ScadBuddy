@@ -180,21 +180,21 @@ Keep these the same for every piece of one house.
 | Parameter | Default | What it does |
 |---|---|---|
 | `window_style` | `square` | `square`, `arched` (round top), `round`. |
-| `window_width` | `70` | Opening width (round: diameter). Shrinks to leave room for the end keys. |
+| `window_width` | `70` | Opening width (round: diameter). Shrinks to leave room for the end keys. Whenever a window setting, the shutters or the flower box cannot be honoured, the render prints a `NOTE:` saying what was made instead. |
 | `window_height` | `120` | Opening height; limited so the top clears the top-edge pegs and keys. |
 | `window_sill` | `40` | Bottom of the opening above the bottom of the course. |
 | `window_panes_x`, `window_panes_y` | `2`, `2` | Glazing bars. |
 | `glass` | `true` | 0.6 mm pane on the inside face, in `window_pane_color` (translucent filament looks best). |
 | `shutters` | `true` | Louvred shutters either side, as wide as there is room for (none on round windows or when under 10 mm). |
 | `flower_box` | `true` | A box under the sill with blossoms in two colours and leaves. |
-| `trim` | `true` | Frame lining in the opening, architrave (flush inside, raised outside), sill, door threshold and hinge blocks in their own colours. Off: all wall colour. |
+| `trim` | `true` | Frame lining in the opening, architrave (flush inside, raised outside), sill, door threshold and hinge blocks in their own colours. Off: all wall colour, except the glazing bars, which stay in `window_frame_color`. |
 
 ### Doors
 
 | Parameter | Default | What it does |
 |---|---|---|
 | `door_style` | `plain` | `plain` and `arched` hang one Dutch-door leaf; `french` a glazed pair. |
-| `door_width` | `100` | Clear width. |
+| `door_width` | `100` | Clear width. A width, height or `width_units` the wall cannot take is reduced (or raised to 1 unit) with a `NOTE:`. |
 | `door_height` | `330` | Clear height above the threshold; the header keeps at least 25 mm. |
 | `door_panels` | `2` | Raised panels per leaf half. |
 
@@ -365,11 +365,14 @@ railing bottom edge, and one per hole between storeys and under the roof.
 
 Renders every piece with its defaults, the style variations above, every
 piece at its largest settings, eight "max colour" cases with all 31 colours
-distinct, and the room preview (65 cases), renders the closed per-colour
+distinct, three cases whose settings cannot all be honoured, and the room
+preview (69 cases), renders the closed per-colour
 solids of 21 of them, then runs 26 fit probes. It
 checks colour parts and no Default geometry, that the per-colour closed solids
 add up to the whole piece (no two colours overlap), the 300 mm bed envelope,
 exact grid lengths, key and peg play, mated pieces not intersecting, a
 320 mm-tall doll-sized box passing through the door (and a 331 mm one not),
-the window height against a doll's eye, and render time per piece. Output goes
+the window height against a doll's eye, the NOTE lines a piece prints when it
+cannot be what was asked for (and that the defaults print none), and render
+time per piece. Output goes
 to `.verify/`; it exits non-zero on any failure.

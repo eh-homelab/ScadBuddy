@@ -76,6 +76,9 @@ CASES+=(
     "tight-square|link_size=5;clearance=0.6;width=40;height=40;colour_mode=\"single\""
     "tight-rings|pattern=\"chainmail_rings\";link_size=5;clearance=0.6;width=40;height=40;colour_mode=\"single\""
     "big-links-thin-layers|link_size=15;layer_height=0.12;bar_layers=6;bar_width=2;clearance=0.2;width=80;height=60"
+    # Second audit: every silent adjustment says so with a NOTE.
+    "note-star-fallback|shape=\"star\";width=40;height=40;link_size=15;colour_mode=\"single\""
+    "note-checker-hex-2|pattern=\"hex_scales\";colour_mode=\"checker\";colour_count=2;width=70;height=70"
     "largest|width=300;height=300;link_size=5;colour_mode=\"checker\""
 )
 
@@ -312,6 +315,14 @@ def passes_over(V, top_tris, bottom_tris):
 
 
 # ---- per case -------------------------------------------------------------
+NOTES = {
+    "tight-rings": ["NOTE: link_size raised to 9.5 mm so links keep 0.6 mm clearance"],
+    "small-sheet-big-links": ["NOTE: link_size reduced to 10 mm to keep four links across the 40 mm side"],
+    "note-star-fallback": ["NOTE: a 40 x 40 mm star has room for fewer than two 10 mm links; made a rectangle instead",
+                           "NOTE: link_size reduced to 10 mm"],
+    "note-checker-hex-2": ["NOTE: checker uses 3 colours for this pattern (colour_count 2 is ignored)"],
+}
+
 for line in open(os.path.join(OUT, "cases.txt")):
     parts = line.rstrip("\n").split(" ", 2)
     name, ms = parts[0], int(parts[1])
@@ -369,6 +380,10 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, "no-such-file" in log, "missing overlay file is reported in the log and the render still completes")
         check(name, not any(mats[i][1] == p["overlay_color"].upper() for i in named),
               "missing overlay file adds no overlay part")
+    # Messages for the user are NOTE lines (#285); each silent adjustment has one.
+    check(name, 'ECHO: "WARNING:' not in log, "no WARNING echoes: template messages are NOTE lines")
+    for want in NOTES.get(name, []):
+        check(name, want in log, "reports %r" % want)
     check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))
     exp_h = (levels - 1) * (float(hb) + float(vg)) + float(hb)
     check(name, abs(max(zs) - total_h) <= 1e-3 and abs(total_h - exp_h) <= 1e-6,
