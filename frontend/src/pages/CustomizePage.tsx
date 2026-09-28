@@ -265,7 +265,10 @@ export function CustomizePage() {
       // What the template changed from the parameters it was given (#285).
       notes: settledJob?.notes ?? [],
       // The log only earns its tokens when something went wrong.
-      log_tail: settledJob?.status === 'failed' ? (settledJob.log_tail ?? []).slice(-20) : undefined,
+      log_tail:
+        settledJob?.status === 'failed' || settledJob?.status === 'cancelled'
+          ? (settledJob.log_tail ?? []).slice(-20)
+          : undefined,
       plate: plateFit?.plate.name ?? null,
       fits: fitProblems.length === 0,
       fit_problems: fitProblems,
