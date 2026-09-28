@@ -42,7 +42,7 @@ from scadbuddy.bambuddy.hardware import (
     nozzle_warning,
     plate_warning,
 )
-from scadbuddy.bambuddy.models import PrinterStatus
+from scadbuddy.bambuddy.models import PrinterStatus, SpoolAssignment
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
 from scadbuddy.bambuddy.resolver import (
@@ -63,7 +63,7 @@ from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore, PlateSend
 from scadbuddy.library.settings_store import StoredSettings
-from scadbuddy.render.bambu3mf import plates_of
+from scadbuddy.render.bambu3mf import plate_filaments, plates_of
 
 logger = logging.getLogger(__name__)
 
@@ -223,17 +223,34 @@ async def _read_status(client: BambuddyClient, printer_id: int) -> PrinterStatus
         return None
 
 
+def _used_slots(store: OutputStore, meta: OutputMeta, plate_ids: list[int]) -> set[int]:
+    """The filaments the printed plates use (#469), read from the local 3MF so the
+    check still runs before the upload. A plate the file doesn't say about counts as
+    using every filament of the model."""
+    every = set(range(1, len(meta.colors) + 1))
+    by_plate = plate_filaments(store.directory(meta.id) / MODEL_NAME)
+    return set().union(*(by_plate.get(plate, every) for plate in plate_ids)) & every
+
+
 async def _spool_sides(
     client: BambuddyClient,
-    meta: OutputMeta,
     plan: FilamentPlan,
+    used: set[int],
     printer_id: int,
     printer_status: PrinterStatus | None,
 ) -> list[SlotSide]:
-    """Each chosen spool's side on ``printer_id``, for the output's own filaments (#469)."""
-    count = len(meta.colors)
-    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id <= count]})
-    assignments = await client.spool_assignments()
+    """Each chosen spool's side on ``printer_id``, for the filaments printed (#469).
+
+    With no printer status no side can be told, so the assignments aren't read; and an
+    unreadable ``/inventory/assignments`` leaves every side unknown, as an unreadable
+    status does, rather than failing a run that used to succeed."""
+    own = plan.model_copy(update={"slots": [s for s in plan.slots if s.slot_id in used]})
+    assignments: list[SpoolAssignment] = []
+    if printer_status is not None:
+        try:
+            assignments = await client.spool_assignments()
+        except (ApiError, ValueError):
+            logger.info("spool assignments unreadable; no spool's side is known")
     return slot_sides(own, assignments, printer_status, printer_id=printer_id)
 
 
@@ -290,13 +307,9 @@ async def run_for_output(
     # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
     # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
-    sides = await _spool_sides(client, meta, request.filament_plan, printer_id, printer_status)
-    extruders = plan_extruders(
-        sides,
-        printer_status,
-        size=choices.nozzles[0].size,
-        filament_count=len(meta.colors),
-    )
+    used = _used_slots(store, meta, plate_ids)
+    sides = await _spool_sides(client, request.filament_plan, used, printer_id, printer_status)
+    extruders = plan_extruders(sides, printer_status, size=choices.nozzles[0].size, used_slots=used)
     if extruders.errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
