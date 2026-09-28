@@ -2,14 +2,17 @@
 # Render models/coaster-set with the defaults and each major variation (every
 # pattern, every shape, face down, cork recess, holder, alternating colours,
 # per-coaster monograms, SVG and PNG overlays, refused and missing overlay
-# files, a set too big for the plate, the biggest coaster with its holder)
-# and check each 3MF:
+# files, a set too big for the plate, the biggest coaster with its holder,
+# large sets with a holder) and check each 3MF:
 #
 #   - no uncoloured geometry, the expected colour parts, and the colour parts
 #     do not overlap (each colour rendered closed on its own through a
 #     wrapper like ScadBuddy's adds up to the whole)
-#   - on z=0, bounding box equal to the layout the parameters imply, and
-#     inside the H2C plate
+#   - the plate split into its connected pieces (#422): exactly one piece per
+#     coaster, of a coaster's footprint and thickness, plus the holder; no
+#     two footprints closer than the gap (or the reduced gap the log gives);
+#     all inside the 300 x 320 H2C plate, on z=0. The grid is not
+#     re-derived; a few cases pin how many coasters fit (#411)
 #   - inlays flush with the decorated face, on top (face up) or on the bed
 #     (face down), and the solid volume equals the coasters' outline times
 #     thickness minus the recess (so the inlays fill their pockets exactly)
@@ -101,7 +104,12 @@ CASES+=(
     'overlay-refused-backslash|overlay_file="..\\sample-overlay.svg";count=1'
     'too-many-for-plate|count=12;size=150'
     'twelve-small-holder|count=12;size=60;holder=true;pattern="sunburst";holder_color="#8D6E63"'
-    # Too big for two holder-sized cells: the coaster sits above the holder.
+    # #411: coaster cells are coaster-sized and the holder goes beside, below or
+    # at the end of the last row; with holder-sized cells these fitted 5 and 8.
+    'holder-95-eight|count=8;holder=true'
+    'holder-70-twelve|count=12;size=70;shape="square";holder=true;holder_color="#8D6E63"'
+    # Too big to sit beside or below its holder with the gap: one coaster,
+    # above the holder, gap cut to fit (#410).
     'holder-biggest-stacked|count=4;size=150;holder=true;holder_clearance=3;gap=20;holder_color="#8D6E63"'
     'thin-recess-clamped|thickness=3;underside="recess";recess_depth=4;inlay_depth=1;count=2;shape="square"'
     'thin-recess-none|thickness=3;underside="recess";inlay_depth=2;count=2;shape="round"'
@@ -194,6 +202,43 @@ def stl_volume(path):
     return vol
 
 
+def components(T):
+    """Triangles grouped into connected pieces (union-find over shared vertices)."""
+    parent = list(range(1 + max(max(t[:3]) for t in T)))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    for t in T:
+        for a, b in ((t[0], t[1]), (t[1], t[2])):
+            ra, rb = find(a), find(b)
+            if ra != rb:
+                parent[ra] = rb
+    groups = {}
+    for t in T:
+        groups.setdefault(find(t[0]), set()).update(t[:3])
+    return list(groups.values())
+
+
+def piece_box(V, verts):
+    """[x0, x1, y0, y1, z0, z1] of one piece."""
+    xs, ys, zs = zip(*(V[i] for i in verts))
+    return [min(xs), max(xs), min(ys), max(ys), min(zs), max(zs)]
+
+
+def is_box(b, w, h, top):
+    return (abs(b[1] - b[0] - w) <= 0.02 and abs(b[3] - b[2] - h) <= 0.02
+            and abs(b[4]) <= 1e-4 and abs(b[5] - top) <= 0.02)
+
+
+# Cases that pin how many coasters fit. A holder used to size every grid cell
+# for itself (#411): 95 mm coasters fitted 5 with it, 70 mm ones 8.
+EXPECT_FIT = {"holder-95-eight": 7, "holder-70-twelve": 12, "holder-biggest-stacked": 1}
+
+
 def area(shape, size, cr, o):
     """Area of the coaster outline grown by o (mirrors shape_2d)."""
     if shape == "round":
@@ -216,40 +261,14 @@ for line in open(os.path.join(OUT, "cases.txt")):
     print("\n%s (%s ms): %s" % (name, ms, defs or "(defaults)"))
     log = open(os.path.join(OUT, name + ".log")).read()
 
-    # Layout, mirrored from model.scad.
+    # Sizes of one coaster and of the holder. The layout itself is not
+    # re-derived here: the rendered pieces are checked directly (#422).
     size, th, d, gap = p["size"], p["thickness"], p["inlay_depth"], p["gap"]
     ext_x = size / math.cos(math.radians(30)) if p["shape"] == "hexagon" else size
     ext_y = size
     hold = p["holder"]
     grow = 2 * (p["holder_clearance"] + 2.4)
     grow_x = grow / math.cos(math.radians(30)) if p["shape"] == "hexagon" else grow
-    cell_x, cell_y = (ext_x + grow_x, ext_y + grow) if hold else (ext_x, ext_y)
-    px, py, extra = cell_x + gap, cell_y + gap, 1 if hold else 0
-
-    def pw(c, n): return min(c, n + extra) * px - gap
-    def ph(c, n): return math.ceil((n + extra) / c) * py - gap
-    n = int(p["count"])
-    while True:
-        cs = [c for c in range(1, n + extra + 1) if pw(c, n) <= BED_X and ph(c, n) <= BED_Y]
-        if cs or n == 1:
-            break
-        n -= 1
-    cols = min(cs, key=lambda c: max(pw(c, n), ph(c, n))) if cs else 1
-    W, H = pw(cols, n), ph(cols, n)
-    # Items sit centred in their cells; the holder's cell is its own size.
-    def pos(i): return (-W / 2 + cell_x / 2 + (i % cols) * px, H / 2 - cell_y / 2 - (i // cols) * py)
-    boxes = [(pos(i), ext_x / 2, ext_y / 2) for i in range(n)]
-    if hold:
-        boxes.append((pos(n), cell_x / 2, cell_y / 2))
-    # Not even one coaster fits beside its holder in two holder-sized cells:
-    # the coaster sits in its own-size cell above the holder, gap cut to fit.
-    stacked = hold and not cs
-    s_gap = min(gap, BED_Y - ext_y - cell_y)
-    if stacked:
-        W, H = max(ext_x, cell_x), ext_y + s_gap + cell_y
-        boxes = [((0, H / 2 - ext_y / 2), ext_x / 2, ext_y / 2), ((0, -H / 2 + cell_y / 2), cell_x / 2, cell_y / 2)]
-    bw = max(c[0] + hx for c, hx, hy in boxes) - min(c[0] - hx for c, hx, hy in boxes)
-    bh = max(c[1] + hy for c, hx, hy in boxes) - min(c[1] - hy for c, hx, hy in boxes)
     face_down = p["face"] == "down" or p["underside"] == "recess"
     recess_max = max(0.0, th - d - 1.2)
     recess = min(p["recess_depth"], recess_max) if p["underside"] == "recess" else 0
@@ -282,20 +301,47 @@ for line in open(os.path.join(OUT, "cases.txt")):
     check(name, counts.get(0, 0) == 0, "Default material carries no geometry (%d triangles)" % counts.get(0, 0))
     check(name, set(by_col) == cols_expected,
           "colour parts %s (got %s)" % (sorted(cols_expected), sorted(by_col)))
-    m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+)", log)
-    check(name, m is not None and int(m.group(1)) == n and int(m.group(2)) == cols,
-          "%d coaster(s) in %d column(s)%s" % (n, cols, "" if n == p["count"] else " (only %d fit)" % n))
+    # The plate, split into its separate printed pieces (#422): every
+    # coaster is one piece (its inlays touch it and are part of the same
+    # solid), the holder another. Pieces that overlapped would have merged,
+    # so the count of coaster-sized pieces is the number of coasters that
+    # really sit apart on the plate.
+    pieces = [piece_box(V, comp) for comp in components(T)]
+    coasters = [b for b in pieces if is_box(b, ext_x, ext_y, th)]
+    holders = [b for b in pieces if hold and is_box(b, ext_x + grow_x, ext_y + grow, h_height)]
+    n = len(coasters)
+    odd = len(pieces) - n - len(holders)
+    check(name, odd == 0 and len(holders) == (1 if hold else 0),
+          "%d separate pieces: %d coaster(s) of %.1f x %.1f%s%s"
+          % (len(pieces), n, ext_x, ext_y, " + %d holder(s)" % len(holders) if hold else "",
+             ", %d of another size (merged by an overlap?)" % odd if odd else ""))
+    if name in EXPECT_FIT:
+        check(name, n == EXPECT_FIT[name], "%d coaster(s) on the plate (want %d)" % (n, EXPECT_FIT[name]))
+    m = re.search(r"ECHO: COASTERS = \[(\d+), (\d+), (\d+), ([-\d.e]+), ([-\d.e]+)", log)
+    check(name, m is not None and int(m.group(1)) == n, "the model reports the %d coaster(s) it placed" % n)
     if p["underside"] == "recess" and p["recess_depth"] > recess_max + 1e-9:
         check(name, "NOTE: recess reduced" in log and (recess > 0 or "no recess cut" in log),
               "the log says the recess was reduced to %.2f mm" % recess)
     if n < p["count"]:
         check(name, "NOTE: only %d coaster%s of" % (n, "" if n == 1 else "s") in log, "the log says how many fit")
-    if stacked and s_gap < gap:
-        check(name, "NOTE: gap reduced from" in log, "the log says the gap was cut to %.1f mm" % s_gap)
+    else:
+        check(name, n == p["count"] and "NOTE: only" not in log, "all %d coasters placed" % p["count"])
+    # No two pieces' footprints overlap: every pair is at least the gap apart
+    # along x or y, or the reduced gap the log admits to.
+    g = re.search(r"NOTE: gap reduced from [\d.]+ to ([\d.]+) mm", log)
+    min_gap = float(g.group(1)) if g else gap
+    if g:
+        check(name, min_gap < gap, "the log says the gap was cut to %.1f mm" % min_gap)
+    seps = [max(a[0] - b[1], b[0] - a[1], a[2] - b[3], b[2] - a[3])
+            for i, a in enumerate(pieces) for b in pieces[i + 1:]]
+    check(name, all(s >= min_gap - 1e-3 for s in seps),
+          "no two footprints overlap: pieces at least %.1f mm apart (closest %s)"
+          % (min_gap, "%.2f" % min(seps) if seps else "-"))
     check(name, abs(min(zs)) <= 1e-4, "sits on z=0 (min z %.4f)" % min(zs))
-    check(name, abs(dx - bw) <= 0.02 and abs(dy - bh) <= 0.02, "plate %.2f x %.2f == %.2f x %.2f" % (dx, dy, bw, bh))
+    check(name, m is not None and abs(dx - float(m.group(4))) <= 0.02 and abs(dy - float(m.group(5))) <= 0.02,
+          "plate %.2f x %.2f is the size the model reports" % (dx, dy))
     check(name, abs(dz - top) <= 0.02, "height %.2f == %.2f" % (dz, top))
-    check(name, dx <= BED_X and dy <= BED_Y, "fits the %dx%d plate" % (BED_X, BED_Y))
+    check(name, dx <= BED_X + 1e-3 and dy <= BED_Y + 1e-3, "all pieces inside the %dx%d plate" % (BED_X, BED_Y))
 
     # Volume: every coaster is outline x thickness minus its recess.
     whole = sum(tetvol(V[t[0]], V[t[1]], V[t[2]]) for t in T)
