@@ -273,7 +273,12 @@ for name, ov in CASES:
         # Too many for the length: as many as fit, each at least the hinge minimum.
         check(N == DROPPED[name], "segments dropped to fit the length: %d of %d (expected %d)"
               % (N, want_n, DROPPED[name]))
-        check("NOTE: only %d body segment" % N in I["log"], "the log says only %d segments fit" % N)
+        if name in GROWS:
+            check("NOTE: only" not in I["log"], "grown, so no contradictory 'only N fit' note")
+            check("(%d of the %d segments asked)" % (N, p["segments"]) in I["log"],
+                  "the length note says %d of %d segments" % (N, p["segments"]))
+        else:
+            check("NOTE: only %d body segment" % N in I["log"], "the log says only %d segments fit" % N)
     elif name not in GROWS:
         check(N == want_n, "%d body segments (want %d)" % (N, want_n))
     if name not in DROPPED:

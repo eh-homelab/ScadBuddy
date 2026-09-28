@@ -408,7 +408,6 @@ function layout(n) = (best_cols(n) > 0 || n == 1) ? [n, max(1, best_cols(n))] : 
 LAYOUT = layout(count);
 N = LAYOUT[0];
 COLS = LAYOUT[1];
-ROWS = ceil((N + extra) / COLS);
 if (N < count)
     echo(str("NOTE: only ", N, N == 1 ? " coaster" : " coasters", " of ", count, N == 1 ? " fits" : " fit",
              " on the plate; print the rest as a second plate"));
@@ -418,6 +417,10 @@ if (N < count)
 // in a cell of its own size above the holder, with the gap cut to fit.
 STACKED = holder && best_cols(1) == 0;
 s_gap = min(gap, BED_Y - ext_y - h_ext_y);
+// 150 mm + a 3 mm clearance holder leaves 9.2 mm; a wider size or clearance
+// range must fail here, not overlap the coaster and the holder.
+assert(!STACKED || s_gap >= 0, str("a ", size, " mm coaster and its holder do not fit the plate"));
+ROWS = STACKED ? 2 : ceil((N + extra) / COLS);
 if (STACKED && s_gap < gap)
     echo(str("NOTE: gap reduced from ", gap, " to ", s_gap, " mm to fit the coaster and the holder on the plate"));
 

@@ -162,12 +162,16 @@ function best_n(n) = n <= 1 ? 1 : fits(n) ? n : best_n(n - 1);
 N = max(best_n(max(segments, len(name))), len(name));
 p = max(P_seg, span_len / sumf(N));
 L = head_len() + tail_len() + p * sumf(N);       // == length unless it had to grow
-if (N < segments)
+// One note: either the length was kept and segments dropped, or it grew.
+grew = L > length + 0.05;
+name_grew = grew && len(name) > 0 && N == len(name);
+if (N < segments && !grew)
     echo(str("NOTE: only ", N, " body segment", N == 1 ? "" : "s", " of ", segments, " fit in a ", length,
              " mm ", animal, " (each at least ", round(P_seg * 10) / 10, " mm long); raise length for more"));
-if (L > length + 0.05)
+if (grew)
     echo(str("NOTE: length raised from ", length, " to ", round(L), " mm to fit ",
-             len(name) > 0 && N == len(name) ? str("the ", len(name), "-letter name") : "one body segment"));
+             name_grew ? str("the ", len(name), "-letter name") : "one body segment",
+             N < segments ? str(" (", N, " of the ", segments, " segments asked)") : ""));
 feats = [for (k = [1:N]) feat(k, N)];
 function f_at(k) = factor(feats[k - 1]);
 
@@ -573,7 +577,7 @@ bound_x = max([for (q = corners) q[0]]) - min([for (q = corners) q[0]]);
 bound_y = max([for (q = corners) q[1]]) - min([for (q = corners) q[1]]);
 assert(bound_x <= bed_w && bound_y <= bed_d,
        str("the critter could be ", bound_x, " x ", bound_y, " mm, more than the ", bed_w, " x ",
-           bed_d, " mm plate: ", nm > 0 ? "shorten the name, curl it, " : "", "shorten it or make it narrower"));
+           bed_d, " mm plate: ", name_grew ? "shorten the name, curl it, " : "", "shorten it or make it narrower"));
 
 echo(str("SB_CRITTER N=", N, " pitch=", p, " length=", L, " R=", R, " neck=", 2 * neck_hw,
          " cap_mid=", cap_mid, " cap_top=", cap_top, " cap_lip=", cap_lip,
