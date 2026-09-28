@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { BUILTIN_SLUG, media } from '../mocks/fixtures'
+import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
 import { ApiError, api } from './client'
 import type { MediaView } from './types'
 
-const video = media[BUILTIN_SLUG]!.find((item) => item.kind === 'video')!
-const picture = media[BUILTIN_SLUG]![0]!
+const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
+const picture = media[GALLERY_SLUG]![0]!
 
 describe('media URLs (#274)', () => {
   it('addresses an item by its id, with the slug encoded', () => {
@@ -136,9 +136,8 @@ describe('uploadMedia (#274)', () => {
 
 describe('media writes against the mock API (#274)', () => {
   it('captions, reorders and deletes, each answering the model', async () => {
-    const [first, second, third, fourth] = media[BUILTIN_SLUG]!.map((item) => item.id)
-    // A copy of mine, since the built-in's media is read-only.
-    const copy = await api.duplicateModel(BUILTIN_SLUG, 'Gallery')
+    const [first, second, third, fourth] = media[GALLERY_SLUG]!.map((item) => item.id)
+    const copy = await api.duplicateModel(GALLERY_SLUG, 'Gallery')
 
     const captioned = await api.patchMedia(copy.slug, first!, 'The cover')
     expect(captioned.media?.[0]?.caption).toBe('The cover')

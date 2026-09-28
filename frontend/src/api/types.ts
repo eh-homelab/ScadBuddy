@@ -87,25 +87,18 @@ export type BambuddyPrinter = Schemas['Printer']
 export type PresetRef = Schemas['PresetRef']
 export type SidebarLink = Schemas['SidebarLink']
 
-/** #86 — the print picker's own wire types. */
-export type PipelineView = Schemas['PipelineView']
-export type PipelineChoices = Schemas['PipelineChoices']
-export type PipelineCreate = Schemas['PipelineCreate']
-export type PipelineDefault = Schemas['PipelineDefault']
-export type PresetChoice = Schemas['PresetChoice']
-export type PresetOptions = Schemas['PresetOptions']
-export type EligibilityOverview = Schemas['EligibilityOverview']
-export type PipelineReport = Schemas['PipelineReport']
-export type EligibilityReport = Schemas['EligibilityReport']
-export type EligibilityIssue = Schemas['EligibilityIssue']
-export type PerPrinterReport = Schemas['PerPrinterReport']
-/**
- * The intersection is the same stale-generator stand-in as the #79 block below: the
- * backend takes `project_id` on a run, and the generated type has not caught up. Drop it
- * when `schema.d.ts` is regenerated.
- */
-export type PrintRunRequest = Schemas['PrintRunRequest'] & { project_id?: number | null }
+/** Task 9 R5 — a filament preset a nozzle size takes, for Advanced mode's per-slot override. */
+export type FilamentPresetOption = Schemas['FilamentPresetOption']
+
+export type PrintRunRequest = Schemas['PrintRunRequest']
 export type PrintRunResult = Schemas['PrintRunResult']
+
+/** spec 2026-09-27 — the spool-first print dialog's own choices. */
+export type ChoicesView = Schemas['ChoicesView']
+export type PrintChoices = Schemas['PrintChoices']
+export type NozzleChoice = Schemas['NozzleChoice']
+export type InstalledNozzle = Schemas['InstalledNozzle']
+export type TierOption = Schemas['TierOption']
 export type PrintOptions = Schemas['PrintOptions']
 export type PrintOptionsView = Schemas['PrintOptionsView']
 export type PrintOptionsState = Schemas['PrintOptionsState']
@@ -124,8 +117,7 @@ export type LoadedAt = Schemas['LoadedAt']
 /** #78 — a printer's mounted nozzle, and what the picker remembers per model. */
 export type NozzleInfo = Schemas['NozzleInfo']
 export type ModelPrintChoices = Schemas['ModelPrintChoices']
-/** #83 — a plate type a printer takes, the plate remembered per printer, an output's plates. */
-export type BedTypeChoice = Schemas['BedTypeChoice']
+/** #83 — the plate remembered per printer, and an output's plates. */
 export type PrinterBedType = Schemas['PrinterBedType']
 export type OutputPlate = Schemas['OutputPlate']
 
@@ -171,8 +163,8 @@ export interface ParamGroup {
 
 /**
  * RFC 9457 problem details. The backend adds extensions alongside the standard
- * members — `required_scope` on a missing Bambuddy scope, `bambuddy_body` carrying a
- * pipeline-eligibility report verbatim — so unknown keys are kept, not dropped.
+ * members — `required_scope` on a missing Bambuddy scope, `bambuddy_body` carrying
+ * Bambuddy's own refusal verbatim — so unknown keys are kept, not dropped.
  */
 export interface Problem {
   type?: string

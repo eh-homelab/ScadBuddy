@@ -51,6 +51,8 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
+from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
+from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -262,10 +264,20 @@ class ModelPatch(BaseModel):
         return name.strip()
 
 
-#: Where a model's catalogue thumbnail comes from: ``model`` is one set on the model
-#: itself, ``output`` the first generated output's plate cover, standing in until one
-#: is set (#179).
-ThumbnailSource = Literal["model", "output"]
+#: Where a model's catalogue thumbnail comes from, in order of precedence: ``model``
+#: is one set on the model itself, ``output`` the first generated output's plate
+#: cover, standing in until one is set (#179), and ``preview`` the plate image of a
+#: background render at the default parameters, standing in until either exists.
+ThumbnailSource = Literal["model", "output", "preview"]
+
+
+@dataclass(frozen=True)
+class ThumbnailOrigin:
+    """Where a model's thumbnail comes from, and which output or preview it is."""
+
+    source: ThumbnailSource | None = None
+    output_id: str | None = None
+    preview_id: str | None = None
 
 
 class ModelRecord(ModelMeta):
@@ -281,6 +293,10 @@ class ModelRecord(ModelMeta):
     #: output is deleted, or an older one gains a cover), so this -- not
     #: ``version`` -- is what tells a client its cached image is stale.
     thumbnail_output_id: str | None = None
+    #: Which default-render preview stands in when ``thumbnail_source`` is
+    #: ``preview``, else None. It changes when a source edit is re-rendered, again
+    #: with no commit of its own, so a client keys its cached image on it too.
+    thumbnail_preview_id: str | None = None
     updated_at: datetime
     # The commit this model is currently at, or None when history is unavailable
     # (no git binary). Outputs stamp this as their ``model_version``.
@@ -301,6 +317,7 @@ class Catalogue:
         paths: DataPaths,
         history: ModelHistory | None = None,
         outputs: OutputStore | None = None,
+        previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
         media_store: MediaStore | None = None,
     ) -> None:
@@ -311,7 +328,27 @@ class Catalogue:
         self.media_store = media_store
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
+        #: Where the default-render preview is read from; None turns it off.
+        self.previews = previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: Called with a model's id after every catalogue change to it, from
+        #: whichever thread made the change: how the preview scheduler hears that a
+        #: model's source, thumbnail or existence may have changed. Must not raise.
+        self.on_change: Callable[[str], None] | None = None
+
+    def notify_change(self, *slugs: str) -> None:
+        """Tell :attr:`on_change` about a change made other than through this class
+        -- a revision restored straight through the history."""
+        if self.on_change is None:
+            return
+        for slug in slugs:
+            # The whole `_builtin/` mirror: the boot-time pass covers every built-in.
+            if slug == BUILTIN_DIR:
+                continue
+            try:
+                self.on_change(slug)
+            except Exception:
+                logger.exception("a catalogue change listener failed", extra={"slug": slug})
 
     def _commit(self, message: str, *slugs: str) -> str | None:
         """One commit per catalogue action. A failure never fails the action itself:
@@ -322,17 +359,21 @@ class Catalogue:
         full since boot would otherwise 500 a source edit that had already been
         written to disk, telling the client it failed when it did not.
         """
-        if self.history is None or not self.history.available:
-            return None
         try:
-            return self.history.commit(message, *slugs)
-        except (GitError, OSError):
-            # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
-            # attribute, and logging raises KeyError on the collision -- which
-            # would turn this whole tolerate-and-continue branch into the crash
-            # it exists to prevent.
-            logger.exception("could not record a revision", extra={"revision_message": message})
-            return None
+            if self.history is None or not self.history.available:
+                return None
+            try:
+                return self.history.commit(message, *slugs)
+            except (GitError, OSError):
+                # NOT `extra={"message": ...}`: `message` is a reserved LogRecord
+                # attribute, and logging raises KeyError on the collision -- which
+                # would turn this whole tolerate-and-continue branch into the crash
+                # it exists to prevent.
+                logger.exception("could not record a revision", extra={"revision_message": message})
+                return None
+        finally:
+            # The files are written whether or not the revision was recorded.
+            self.notify_change(*slugs)
 
     def _commit_change(self, message: str, change: Callable[[], None], *slugs: str) -> str | None:
         """Run ``change`` -- a read-modify-write of the template's files -- and commit it,
@@ -344,6 +385,7 @@ class Catalogue:
         """
         if self.history is None or not self.history.available:
             change()
+            self.notify_change(*slugs)
             return None
         changed = False
 
@@ -359,6 +401,9 @@ class Catalogue:
                 raise
             logger.exception("could not record a revision", extra={"revision_message": message})
             return None
+        finally:
+            if changed:
+                self.notify_change(*slugs)
 
     def version(self, slug: str) -> str | None:
         if self.history is None or not self.history.available:
@@ -392,19 +437,25 @@ class Catalogue:
     def readme_path(self, slug: str) -> Path:
         return self.paths.model_dir(slug) / README_NAME
 
-    def thumbnail_source(
-        self, slug: str, media: list[MediaView] | None = None
-    ) -> tuple[ThumbnailSource | None, str | None]:
-        """Where the thumbnail comes from, and which output when it is the fallback.
+    def thumbnail_source(self, slug: str, media: list[MediaView] | None = None) -> ThumbnailOrigin:
+        """Where the thumbnail comes from: the model's own cover (#274), else the
+        first generated output's plate cover, else the default-render preview.
         ``media`` is the template's, when the caller has already listed it."""
         listed = self.list_media(slug) if media is None else media
         if self._cover(slug, listed) is not None:
-            return "model", None
+            return ThumbnailOrigin("model")
         if self.outputs is not None:
             output_id = self.outputs.plate_cover_output(slug)
             if output_id is not None:
-                return "output", output_id
-        return None, None
+                return ThumbnailOrigin("output", output_id=output_id)
+        if self.previews is not None:
+            preview_id = self.previews.preview_id(slug)
+            if preview_id is not None:
+                return ThumbnailOrigin("preview", preview_id=preview_id)
+        return ThumbnailOrigin()
+
+    def has_output_cover(self, slug: str) -> bool:
+        return self.outputs is not None and self.outputs.has_plate_cover(slug)
 
     def _cover(self, slug: str, media: list[MediaView]) -> tuple[Path, str] | None:
         """The template's own cover image and its content type: the first item that
@@ -421,16 +472,21 @@ class Catalogue:
 
     def thumbnail(self, slug: str) -> tuple[bytes, str] | None:
         """The catalogue thumbnail and its content type: the template's cover, else
-        the first generated output's plate cover, else None."""
+        the first generated output's plate cover, else the default-render preview,
+        else None."""
         self._require(slug)
         cover = self._cover(slug, self.list_media(slug))
         if cover is not None:
             with contextlib.suppress(FileNotFoundError):
                 return cover[0].read_bytes(), cover[1]
-        if self.outputs is None:
+        if self.outputs is not None:
+            plate = self.outputs.plate_cover(slug)
+            if plate is not None:
+                return plate, "image/png"
+        if self.previews is None:
             return None
-        png = self.outputs.plate_cover(slug)
-        return (png, "image/png") if png is not None else None
+        preview = self.previews.image(slug)
+        return (preview, "image/png") if preview is not None else None
 
     def read_raw_meta(self, slug: str) -> dict[str, Any]:
         meta_path = self.paths.model_meta(slug)
@@ -509,15 +565,16 @@ class Catalogue:
             # Deleted since `_require`.
             raise ModelNotFoundError(slug) from None
         media = self._views(slug, self._stored_media(slug, meta, media_of))
-        thumbnail_source, thumbnail_output_id = self.thumbnail_source(slug, media)
+        thumbnail = self.thumbnail_source(slug, media)
         return ModelRecord(
             **meta.model_dump(exclude={"media"}),
             media=media,
             slug=slug,
             origin="builtin" if is_builtin(slug) else "mine",
-            has_thumbnail=thumbnail_source is not None,
-            thumbnail_source=thumbnail_source,
-            thumbnail_output_id=thumbnail_output_id,
+            has_thumbnail=thumbnail.source is not None,
+            thumbnail_source=thumbnail.source,
+            thumbnail_output_id=thumbnail.output_id,
+            thumbnail_preview_id=thumbnail.preview_id,
             has_readme=self.readme_path(slug).is_file(),
             updated_at=datetime.fromtimestamp(modified, UTC),
             version=version,
@@ -798,7 +855,8 @@ class Catalogue:
         return self.record(slug)
 
     def write_thumbnail(self, slug: str, png: bytes) -> ModelRecord:
-        """Set or replace the model's own thumbnail, as one revision.
+        """Set or replace the model's own thumbnail, as one revision. A default-render
+        preview has nothing left to stand in for, so it goes.
 
         Once the template has media (#274), the thumbnail is its cover: the PNG
         takes the place of a first item that is an image, or goes in front of a
@@ -807,6 +865,8 @@ class Catalogue:
         self._require(slug)
         if not self._stored_media(slug):
             self._write_sidecar(slug, THUMBNAIL_NAME, png)
+            if self.previews is not None:
+                self.previews.drop(slug)
             self._commit(f"Set {slug} thumbnail", slug)
             return self.record(slug)
         item_id = new_media_id()
@@ -821,6 +881,8 @@ class Catalogue:
             self._save_media(slug, edit, added=[cover.file])
 
         self._commit_change(f"Set {slug} thumbnail", change, slug)
+        if self.previews is not None:
+            self.previews.drop(slug)
         return self.record(slug)
 
     def delete_thumbnail(self, slug: str) -> ModelRecord:
@@ -1182,6 +1244,7 @@ class Catalogue:
         """
         if self.history is None or not self.history.available:
             self._replace_source(slug, source)
+            self.notify_change(slug)
             return
         started = written = False
 
@@ -1198,7 +1261,12 @@ class Catalogue:
                 raise
             if not started:
                 self._replace_source(slug, source)
+                written = True
             logger.exception("could not record a revision", extra={"revision_message": message})
+        finally:
+            # Like `_commit_change`: the preview scheduler hears of a source that was written.
+            if written:
+                self.notify_change(slug)
 
     def _replace_source(self, slug: str, source: str) -> None:
         """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
@@ -1466,15 +1534,25 @@ class Catalogue:
         # The saved presets are not derived, but they are keyed and orphaned the same
         # way: a template that is gone takes its presets with it.
         keyed_by_file = (self.paths.schema_cache, self.paths.presets)
-        roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
+        roots = (
+            self.paths.outputs,
+            self.paths.model_revisions,
+            *keyed_by_file,
+            self.paths.previews,
+        )
         for root in roots:
             try:
                 if not root.is_dir():
                     continue
                 for entry in root.iterdir():
-                    if root not in keyed_by_file:
+                    if root in (self.paths.outputs, self.paths.model_revisions):
                         candidates.append((entry.name, entry))
-                    elif entry.suffix == ".json":
+                    elif (root in keyed_by_file and entry.suffix == ".json") or (
+                        root == self.paths.previews
+                        and entry.suffix in (".png", ".json")
+                        # A dotfile is an atomic write's temp file, still in flight.
+                        and not entry.name.startswith(".")
+                    ):
                         candidates.append((entry.stem, entry))
             except OSError:
                 logger.exception("could not list for orphans", extra={"path": str(root)})
@@ -1486,7 +1564,13 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            if _remove_tree(path):
+            # A preview file goes under the preview lock, as every other change to one.
+            gone = (
+                remove_preview_file(path)
+                if path.parent == self.paths.previews
+                else _remove_tree(path)
+            )
+            if gone:
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
@@ -1525,6 +1609,9 @@ class Catalogue:
             self.paths.model_presets(slug),
         ):
             _remove_tree(path)
+        # Under the preview lock, with or without a store attached: a render of the
+        # previous model finishing now must not interleave with this.
+        drop_preview(self.paths, slug)
         self._forget_cover(slug)
 
     def _forget_cover(self, slug: str) -> None:
@@ -1551,7 +1638,7 @@ class Catalogue:
         logged and keeps its previous mirror (or none), and the rest still sync.
         """
         try:
-            wanted = _templates_in(bundled)
+            wanted = [slug for slug in _templates_in(bundled) if _routable(slug)]
             mirror = self.paths.builtins
             mirror.mkdir(parents=True, exist_ok=True)
             present = sorted(mirror.iterdir())
@@ -1564,7 +1651,7 @@ class Catalogue:
         changed: list[str] = []
         for slug in wanted:
             try:
-                if _tree(bundled / slug) == _tree(mirror / slug):
+                if _same_tree(bundled / slug, mirror / slug):
                     continue
                 self._replace_builtin(bundled / slug, mirror / slug)
             except OSError:
@@ -1715,13 +1802,34 @@ def _file_size(path: Path) -> int | None:
     return info.st_size if stat.S_ISREG(info.st_mode) else None
 
 
-def _tree(directory: Path) -> dict[str, bytes]:
-    """Every file under ``directory`` by relative path, dotfiles left out as the copy
-    leaves them out. Empty when there is no such directory."""
+def _routable(slug: str) -> bool:
+    """Can a route reach ``builtin:<slug>``? A bundled directory whose name is no slug
+    would be a built-in nothing can address, so it is skipped (#197)."""
+    if is_slug(slug):
+        return True
+    logger.warning("not a usable slug; skipping this built-in template", extra={"slug": slug})
+    return False
+
+
+def _same_tree(source: Path, target: Path) -> bool:
+    """Does ``target`` hold what ``source`` does? The copy keeps each file's size and
+    mtime, so matching stats settle it without reading a byte; only when they differ
+    are the bytes compared (#206)."""
+    return _tree(source, _stat) == _tree(target, _stat) or _tree(source) == _tree(target)
+
+
+def _stat(path: Path) -> tuple[int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns
+
+
+def _tree(directory: Path, read: Callable[[Path], object] = Path.read_bytes) -> dict[str, object]:
+    """``read`` of every file under ``directory`` by relative path, dotfiles left out
+    as the copy leaves them out. Empty when there is no such directory."""
     if not directory.is_dir():
         return {}
     return {
-        path.relative_to(directory).as_posix(): path.read_bytes()
+        path.relative_to(directory).as_posix(): read(path)
         for path in directory.rglob("*")
         if path.is_file()
         and not any(part.startswith(".") for part in path.relative_to(directory).parts)

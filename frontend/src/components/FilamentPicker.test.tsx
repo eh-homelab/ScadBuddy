@@ -109,6 +109,18 @@ describe('FilamentPicker', () => {
     expect(within(slot(2)).getByTestId('spool-27')).not.toBeChecked()
   })
 
+  it('says which colour each slot will print in, following the spool picked', async () => {
+    const { user } = open()
+    const spools = fixtures.filamentOptions.spools ?? []
+    const named = (id: number) => spools.find((spool) => spool.spool_id === id)?.color_name
+
+    expect(screen.getByTestId('slot-prints-in-2')).toHaveTextContent(`prints in ${named(27)}`)
+
+    await user.click(within(slot(2)).getByTestId('spool-22'))
+
+    expect(screen.getByTestId('slot-prints-in-2')).toHaveTextContent(`prints in ${named(22)}`)
+  })
+
   it('marks a spool already used by another slot without hiding it', async () => {
     const { user } = open()
     await user.click(within(slot(2)).getByTestId('spool-21'))
