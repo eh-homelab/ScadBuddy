@@ -1,4 +1,4 @@
-import { act, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { Route, Routes } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import type { ClientMessage } from '../../agent/chat/protocol'
@@ -120,6 +120,21 @@ describe('voice feature detection', () => {
     await openPanel()
     expect(screen.queryByRole('button', { name: 'Voice input' })).not.toBeInTheDocument()
     expect(screen.getByRole('checkbox', { name: 'Read replies aloud' })).toBeInTheDocument()
+  })
+
+  it('says, by the mic, that the browser may send the audio to its servers', async () => {
+    installSpeech()
+    await openPanel()
+    const note = screen.getByText(/Voice input is transcribed by your browser/)
+    expect(note).toBeVisible()
+    expect(note).toHaveTextContent('may send the audio to its maker’s servers (Chrome does)')
+    expect(screen.getByRole('button', { name: 'Voice input' })).toHaveAccessibleDescription(note.textContent!)
+  })
+
+  it('has no audio note where there is no speech recognition', async () => {
+    installSpeech({ recognition: false })
+    await openPanel()
+    expect(screen.queryByText(/Voice input is transcribed by your browser/)).not.toBeInTheDocument()
   })
 
   it('marks the mic and the voice setting user-only', async () => {
@@ -267,6 +282,22 @@ describe('inside the Bambuddy iframe', () => {
     FakeRecognition.instances[0]!.fail('not-allowed')
     expect(screen.getByRole('alert')).toHaveTextContent('Open ScadBuddy in a new tab to use voice')
     expect(screen.getByRole('button', { name: 'Open in a new tab to use voice' })).toBeInTheDocument()
+  })
+
+  it('disables the new-tab fallback while another agent holds the session', async () => {
+    installSpeech()
+    Object.defineProperty(document, 'permissionsPolicy', {
+      configurable: true,
+      value: { allowsFeature: (feature: string) => feature !== 'microphone' },
+    })
+    const { user } = await openPanel({ embedded: true })
+    await user.click(screen.getByRole('button', { name: 'Sessions (1)' }))
+    await user.click(screen.getByRole('button', { name: /Tune the gridfinity bin/ }))
+    await screen.findByText('Controlled by Claude Desktop')
+    const out = screen.getByRole('button', { name: 'Open in a new tab to use voice' })
+    expect(out).toBeDisabled()
+    fireEvent.click(out)
+    expect(openExternal).not.toHaveBeenCalled()
   })
 
   it('keeps the mic where the policy allows it', async () => {

@@ -35,10 +35,13 @@ export function MicButton({
   dictation,
   disabled,
   embedded,
+  describedBy,
 }: {
   dictation: Dictation
   disabled: boolean
   embedded: boolean
+  /** The id of the `VoiceDisclosure` note, read out with the mic. */
+  describedBy?: string
 }) {
   const pressed = useRef<{ at: number; started: boolean } | null>(null)
   if (!recognitionCtor()) return null
@@ -48,7 +51,11 @@ export function MicButton({
         size="sm"
         variant="ghost"
         title="Bambuddy doesn’t give its embedded pages the microphone"
-        onClick={() => openExternal(window.location.href, true)}
+        disabled={disabled}
+        aria-describedby={describedBy}
+        onClick={() => {
+          if (!disabled) openExternal(window.location.href, true)
+        }}
         {...USER_ONLY}
       >
         <MicIcon />
@@ -81,6 +88,7 @@ export function MicButton({
       variant={dictation.listening ? 'primary' : 'default'}
       aria-label="Voice input"
       aria-pressed={dictation.listening}
+      aria-describedby={describedBy}
       title="Press to talk and press again to stop, or hold while you speak"
       disabled={disabled}
       onPointerDown={onPointerDown}
@@ -94,6 +102,23 @@ export function MicButton({
       )}
       <MicIcon />
     </Button>
+  )
+}
+
+/**
+ * Says where the audio goes. The browser, not ScadBuddy, does the speech to text, and
+ * Chrome's engine is server-based: "On some browsers, like Chrome, using Speech
+ * Recognition on a web page involves a server-based recognition engine. Your audio is
+ * sent to a web service for recognition processing" (MDN,
+ * https://developer.mozilla.org/en-US/docs/Web/API/SpeechRecognition). Shown wherever the
+ * mic (or its new-tab fallback) is, and tied to it with `aria-describedby`.
+ */
+export function VoiceDisclosure({ id }: { id: string }) {
+  if (!recognitionCtor()) return null
+  return (
+    <p id={id} className="mt-1 text-[11px] text-faint">
+      Voice input is transcribed by your browser, which may send the audio to its maker’s servers (Chrome does).
+    </p>
   )
 }
 

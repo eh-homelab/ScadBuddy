@@ -11,7 +11,7 @@ import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
 import { useDictation, useSpokenReplies } from './useVoice'
-import { MicButton, SpeakRepliesToggle } from './VoiceControls'
+import { MicButton, SpeakRepliesToggle, VoiceDisclosure } from './VoiceControls'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -40,6 +40,7 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
   const composer = useRef<HTMLTextAreaElement>(null)
   const feedEnd = useRef<HTMLDivElement>(null)
   const pickerId = useId()
+  const voiceNoteId = useId()
 
   const active: SessionState | undefined = state.activeId ? state.sessions[state.activeId] : undefined
   const busy = isBusy(active) || state.awaitingStart
@@ -277,11 +278,12 @@ export function AssistantChat({ factory, onClose, focusKey, embedded = false }: 
             )}
           </div>
           {busy && <span className="text-[11.5px] text-faint">Wait for this turn to finish, or stop it.</span>}
-          <MicButton dictation={dictation} disabled={!owned} embedded={embedded} />
+          <MicButton dictation={dictation} disabled={!owned} embedded={embedded} describedBy={voiceNoteId} />
           <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !owned}>
             Send
           </Button>
         </div>
+        <VoiceDisclosure id={voiceNoteId} />
       </form>
     </div>
   )
