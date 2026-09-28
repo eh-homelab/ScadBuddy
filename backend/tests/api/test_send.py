@@ -14,8 +14,10 @@ import respx
 import trimesh
 from fastapi.testclient import TestClient
 
+from scadbuddy.bambuddy.send import Target
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.plate import DEFAULT_PLATE as GEOMETRY
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.bambuddy.conftest import recording
@@ -928,3 +930,13 @@ def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
             f"PLA only — the black spool\nEdit in ScadBuddy: https://scad.test/edit/{output_id}"
         )
     }
+
+
+def test_a_target_pinned_to_another_side_has_another_key() -> None:
+    """#469: the same plate, nozzle and colours sliced on the other extruder is another
+    file, so the upload must not be reused."""
+    right = Target(GEOMETRY, "0.2", ("#688197",), extruders=(0,))
+    left = Target(GEOMETRY, "0.2", ("#688197",), extruders=(1,))
+    unpinned = Target(GEOMETRY, "0.2", ("#688197",))
+    assert len({right.key, left.key, unpinned.key}) == 3
+    assert unpinned.key == Target(GEOMETRY, "0.2", ("#688197",)).key

@@ -10,12 +10,12 @@ import numpy as np
 import pytest
 import trimesh
 
+from scadbuddy.bambuddy.extruders import LEFT, RIGHT
 from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PROJECT_SETTINGS_NAME,
     write_bambu_3mf,
 )
-from scadbuddy.bambuddy.extruders import LEFT, RIGHT
 from scadbuddy.render.recolour import pin_extruders_3mf, recolour_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
