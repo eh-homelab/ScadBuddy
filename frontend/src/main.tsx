@@ -1,6 +1,7 @@
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
+import { installAgentBridge } from './agent'
 import { App } from './App'
 import './index.css'
 
@@ -12,6 +13,8 @@ async function start() {
       serviceWorker: { url: `${import.meta.env.BASE_URL}mockServiceWorker.js` },
     })
   }
+
+  installAgentBridge()
 
   const root = document.getElementById('root')
   if (!root) throw new Error('#root is missing from index.html')

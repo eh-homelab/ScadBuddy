@@ -1,9 +1,12 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { committed, touch, waitFor } from '../agent/highlight'
+import { AgentToolError } from '../agent/types'
+import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { ApiError, api } from '../api/client'
 import type { SourceCheck } from '../api/types'
 import { refusedCheck } from '../lib/problems'
 import { useDebounced } from '../lib/useDebounced'
-import { SourceEditor } from './SourceEditor'
+import { SourceEditor, type SourceEditHandle } from './SourceEditor'
 import { Button } from './ui/Button'
 import { Spinner } from './ui/Spinner'
 
@@ -93,6 +96,78 @@ export function SourceWorkbench({
   const refused = check !== undefined && !check.ok
   const busy = checking || saving
 
+  // #254 — the source editor's browser tools.
+  const editRef = useRef<SourceEditHandle | null>(null)
+  const editorBox = useRef<HTMLDivElement>(null)
+  const live = useLatest({ source, check, checking, error })
+
+  useAgentHandlers(
+    'source',
+    {
+      get_editor_text: () => ({
+        text: source,
+        lines: source.split('\n').length,
+        read_only: readOnly,
+        uri,
+      }),
+      replace_range: async ({ start_line, start_column, end_line, end_column, text }) => {
+        if (readOnly) {
+          throw new AgentToolError(
+            'refused',
+            'This is a built-in template, so its source is read-only. The user can Duplicate to edit.',
+          )
+        }
+        const start = offsetOf(source, start_line, start_column)
+        const end = offsetOf(source, end_line, end_column)
+        if (end < start) throw new AgentToolError('invalid_args', 'The range ends before it starts.')
+        const range = {
+          startLineNumber: start_line,
+          startColumn: start_column,
+          endLineNumber: end_line,
+          endColumn: end_column,
+        }
+        const next = source.slice(0, start) + text + source.slice(end)
+        if (editRef.current) editRef.current.replace(range, text)
+        // No editor mounted (it is still loading, or a test stands in for it): the same
+        // change, through the same `onSourceChange` the editor's own edits go through.
+        else onSourceChange(next)
+        touch(editRef.current?.element() ?? editorBox.current)
+        await committed(() => live.current.source === next, 'the editor to take the edit')
+        return { lines: next.split('\n').length, length: next.length, saved: false }
+      },
+      get_problems: async ({ wait, timeout_ms }) => {
+        if (wait) {
+          await waitFor(
+            () => {
+              const now = live.current
+              if (!now.source.trim()) return true
+              return now.check !== undefined || now.error ? true : undefined
+            },
+            { timeout: timeout_ms, what: "OpenSCAD's check of the current source" },
+          )
+        }
+        const { check: current, checking: busyNow, error: failure } = live.current
+        return {
+          current: current !== undefined,
+          checking: busyNow,
+          ok: current?.ok ?? null,
+          checked: current?.checked ?? null,
+          timed_out: current?.timed_out ?? false,
+          parameters: current?.parameters ?? null,
+          diagnostics: current?.diagnostics ?? [],
+          log_tail: current && !current.ok && !(current.diagnostics ?? []).length ? current.log_tail ?? [] : undefined,
+          error: failure,
+        }
+      },
+    },
+    () => ({
+      read_only: readOnly,
+      lines: source.split('\n').length,
+      check: check ? (check.ok ? 'ok' : 'errors') : checking ? 'checking' : 'none',
+      problems: check?.diagnostics?.length ?? 0,
+    }),
+  )
+
   async function save(force: boolean) {
     setSaving(true)
     setError(null)
@@ -148,8 +223,9 @@ export function SourceWorkbench({
         {fields}
       </div>
 
-      <div className="min-h-0 border-b border-line">
+      <div ref={editorBox} className="min-h-0 border-b border-line">
         <SourceEditor
+          editRef={editRef}
           value={source}
           onChange={onSourceChange}
           errors={check?.diagnostics ?? []}
@@ -170,6 +246,21 @@ export function SourceWorkbench({
       </div>
     </div>
   )
+}
+
+/** The string offset of a 1-based line and column; a position past the text is refused. */
+function offsetOf(source: string, line: number, column: number): number {
+  const lines = source.split('\n')
+  const text = lines[line - 1]
+  if (text === undefined) {
+    throw new AgentToolError('invalid_args', `Line ${line} is past the end (${lines.length} lines).`)
+  }
+  if (column > text.length + 1) {
+    throw new AgentToolError('invalid_args', `Line ${line} has ${text.length} characters; column ${column} is past its end.`)
+  }
+  let offset = 0
+  for (let index = 0; index < line - 1; index++) offset += (lines[index]?.length ?? 0) + 1
+  return offset + column - 1
 }
 
 function CheckReport({ check, checking }: { check: SourceCheck | undefined; checking: boolean }) {

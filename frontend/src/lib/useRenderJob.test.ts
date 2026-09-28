@@ -143,6 +143,37 @@ describe('useRenderJob', () => {
     expect(submit).toHaveBeenNthCalledWith(2, 'demo', { n: 2 }, undefined, undefined)
   })
 
+  it('reports a settle only for the newest render, never a superseded one (#254)', async () => {
+    const first = { n: 1 }
+    const second = { n: 2 }
+    // The superseded job's status answer is held back until after the next submit.
+    const lateA = deferred<Job>()
+    const poll = vi.mocked(api.getJob)
+    poll.mockImplementationOnce(() => lateA.promise)
+
+    const { result, rerender } = mount({ slug: 'demo', params: first })
+    await settle()
+    rerender({ slug: 'demo', params: second })
+    await settle()
+    expect(submit).toHaveBeenNthCalledWith(2, 'demo', second, undefined, JOB_A)
+
+    // A says "done" now, but it was superseded: neither its job nor its params count.
+    lateA.resolve(job(JOB_A, 'done'))
+    await settle()
+    expect(result.current.settledFor).toBeUndefined()
+    expect(result.current.job?.id).not.toBe(JOB_A)
+    expect(result.current.rendering).toBe(true)
+
+    poll.mockImplementation(async (id) => job(id, 'done'))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    expect(result.current.job?.id).toBe(JOB_B)
+    expect(result.current.rendering).toBe(false)
+    // By identity: the caller compares it to the exact values object it rendered.
+    expect(result.current.settledFor).toBe(second)
+  })
+
   it('never supersedes a render of another model or revision', async () => {
     const { rerender } = mount({ slug: 'demo', params: { n: 1 } })
     await settle()
