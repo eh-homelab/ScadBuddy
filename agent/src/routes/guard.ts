@@ -26,11 +26,15 @@ import {
 //      (SCADBUDDY_PUBLIC_URL), or both the same loopback origin from a loopback
 //      peer. Comparing Origin with Host alone would not do: under DNS rebinding
 //      both carry the attacker's name (src/http/origins.ts explains).
-//   3. PUT bodies as `Content-Type: application/json` only. This stops a
+//   3. JSON bodies as `Content-Type: application/json` only. This stops a
 //      cross-origin HTML form (which cannot send JSON without a CORS preflight
 //      this service never answers); it does nothing against a same-origin or
-//      rebound page, which is what 2 is for. (The POST and DELETE routes read
-//      no body.)
+//      rebound page, which is what 2 is for. Here for PUT; the POST routes
+//      that read a body check it where they read it, answering 415: the
+//      session routes (routes/sessions.ts `jsonBody`: POST /api/v1/ai/sessions,
+//      …/:id/messages) and the approval decisions (routes/approvals.ts). An
+//      empty POST body is not checked, since it carries nothing. Every body
+//      is size-capped before it is read (`jsonBodyLimit` below).
 //
 // Browsers send `Origin` on every POST, PUT and DELETE (Fetch standard), so a
 // write without one did not come from a page.
