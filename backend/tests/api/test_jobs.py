@@ -184,9 +184,6 @@ def test_a_preset_outside_the_customizer_is_rejected(client: TestClient, ranged:
     refused = client.post(url, json={"name": "Huge", "params": {"width": 1000}})
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["width"]
-    # Stricter than a render (which still takes a retired option, see the test above):
-    # a preset holds only what the dropdown can pick (#338, api/params.py
-    # `require_valid_preset_params`).
-    retired = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
-    assert retired.status_code == 422, retired.text
-    assert retired.json()["parameters"] == ["shape"]
+    # A preset saved before an option was renamed can be saved again.
+    kept = client.post(url, json={"name": "Old", "params": {"shape": "circle"}})
+    assert kept.status_code == 201, kept.text
