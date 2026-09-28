@@ -19,9 +19,11 @@ DEPLOYMENT_NAME = "scadbuddy-render"
 RPC_TIMEOUT = timedelta(seconds=10)
 
 
-async def connect(address: str, namespace: str) -> Client:
+async def connect(address: str, namespace: str, *, lazy: bool = False) -> Client:
+    """``lazy`` connects on the first call instead of here (the API, which must boot
+    with Temporal down); the worker connects eagerly and fails fast."""
     return await Client.connect(
-        address, namespace=namespace, data_converter=pydantic_data_converter
+        address, namespace=namespace, data_converter=pydantic_data_converter, lazy=lazy
     )
 
 

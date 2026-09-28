@@ -30,6 +30,18 @@ async def test_a_workflow_runs_against_the_temporal_dev_server() -> None:
         assert result == "HELLO"
 
 
+def test_a_worker_thread_lets_the_tests_own_failure_through(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def make_worker() -> Worker:
+        raise RuntimeError("could not build the worker")
+
+    thread = WorkerThread(make_worker)
+    with pytest.raises(AssertionError, match="the test's own failure"), thread:
+        raise AssertionError("the test's own failure")
+    assert "could not build the worker" in caplog.text
+
+
 def test_a_worker_thread_raises_what_stopped_its_worker() -> None:
     async def make_worker() -> Worker:
         raise RuntimeError("could not build the worker")

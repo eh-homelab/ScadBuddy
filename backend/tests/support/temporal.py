@@ -5,6 +5,7 @@ service or a dev server), else the `temporal` CLI's dev server started here
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import threading
@@ -15,6 +16,8 @@ from temporalio.client import Client
 from temporalio.contrib.pydantic import pydantic_data_converter
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Worker
+
+logger = logging.getLogger(__name__)
 
 TEST_TEMPORAL_ADDRESS_ENV = "SCADBUDDY_TEST_TEMPORAL_ADDRESS"
 TEST_TEMPORAL_DEV_SERVER_ENV = "SCADBUDDY_TEST_TEMPORAL_DEV_SERVER"
@@ -79,11 +82,15 @@ class WorkerThread:
         self._started.wait()
         return self
 
-    def __exit__(self, *_: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, *_: object) -> None:
         assert self._loop is not None
         self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(timeout=30)
         if not self._thread.is_alive():
             self._loop.close()
-        if self._error is not None:
+        if self._error is None:
+            return
+        if exc_type is None:
             raise self._error
+        # The test's own failure is the one to see; this one is logged beside it.
+        logger.error("the Temporal worker thread failed too", exc_info=self._error)

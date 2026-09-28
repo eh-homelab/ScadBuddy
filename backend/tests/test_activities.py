@@ -52,7 +52,7 @@ from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import fake_3mf_openscad
 from tests.support.temporal import temporal_client
 
-REVISION = "c0ffee"
+REVISION = "c0ffee0"
 
 
 class _History:

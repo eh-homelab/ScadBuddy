@@ -122,7 +122,7 @@ def test_a_blob_that_vanishes_mid_sweep_does_not_stop_it(tmp_path: Path, pg_conn
 
 
 @pytest.mark.requires_postgres
-def test_a_sweep_whose_remove_fails_raises_rather_than_counting_it(
+def test_a_blob_that_cannot_be_removed_is_not_counted_and_the_sweep_goes_on(
     tmp_path: Path, pg_conninfo: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from scadbuddy.render.projection import JobProjection
@@ -133,15 +133,17 @@ def test_a_sweep_whose_remove_fails_raises_rather_than_counting_it(
         refs = BlobRefs(projection.pool)
         store = LocalBlobStore(tmp_path / "blobs")
         old = time.time() - 7200
-        os.utime(store.dir_for("stuck"), (old, old))
+        for key in ("a-stuck", "b-stale"):
+            os.utime(store.dir_for(key), (old, old))
+        rmtree = shutil.rmtree
 
-        def refuse(path: object, ignore_errors: bool = False) -> None:
-            if not ignore_errors:
+        def refuse_one(path: Path, ignore_errors: bool = False) -> None:
+            if Path(path).name == "a-stuck" and not ignore_errors:
                 raise PermissionError(13, "Permission denied", str(path))
+            rmtree(path, ignore_errors=ignore_errors)
 
-        monkeypatch.setattr(shutil, "rmtree", refuse)
-        with pytest.raises(PermissionError):
-            sweep_blobs(store, refs, grace=3600)
-        assert store.exists("stuck")
+        monkeypatch.setattr(shutil, "rmtree", refuse_one)
+        assert sweep_blobs(store, refs, grace=3600) == ["b-stale"]
+        assert store.keys() == ["a-stuck"]
     finally:
         projection.close()

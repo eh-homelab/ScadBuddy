@@ -190,7 +190,7 @@ async def _sweep_blobs_logged(state: AppState) -> None:
         return
     try:
         removed = await asyncio.to_thread(
-            sweep_blobs, state.blobs, state.refs, grace=state.config.asset_sweep_grace
+            sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
         )
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
@@ -289,7 +289,14 @@ async def _start_temporal(state: AppState, service: RenderService) -> None:
     await asyncio.to_thread(projection.open)
     try:
         await _prepare_catalogue(state)
-        state.temporal = await connect(settings.temporal_address, settings.temporal_namespace)
+        # Lazy: Temporal being down must not take the catalogue down with it. Submits
+        # queue their rows, and the reconciler starts them once it is back. Not for
+        # the in-process worker (dev and tests), which needs a connected client.
+        state.temporal = await connect(
+            settings.temporal_address,
+            settings.temporal_namespace,
+            lazy=not settings.temporal_worker_inprocess,
+        )
         service.client = state.temporal
         # A flip from the legacy queue: what it was running, nothing will finish.
         interrupted = await asyncio.to_thread(

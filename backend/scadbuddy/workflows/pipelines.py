@@ -28,6 +28,7 @@ with workflow.unsafe.imports_passed_through():
         PrepareResult,
         Projection,
         RenderMainResult,
+        input_problem,
         piece_key,
     )
 
@@ -181,6 +182,10 @@ class TemplatePipeline:
                 retry_policy=PROJECT_RETRY,
             )
 
+        problem = input_problem(job.slug, job.model_version)
+        if problem is not None:
+            await project(state="failed", failure=Failure(error=problem))
+            return
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
         try:
             await project(state="running")
