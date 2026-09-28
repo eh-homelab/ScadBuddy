@@ -722,11 +722,17 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
 describe('mock API: metadata PATCH on a model that is not there', () => {
   beforeEach(() => resetMockState())
 
-  it('is a 404 before its presets are looked at, and writes nothing', async () => {
+  it('is a 404 before the presets\u2019 values are looked at, and writes nothing', async () => {
     await expect(
       api.updateModel('no-such-model', { presets: [{ name: 'X', params: { nope: 1 } }] }),
     ).rejects.toMatchObject({ status: 404 })
     await expect(api.listPresets('no-such-model')).rejects.toMatchObject({ status: 404 })
+  })
+
+  it('refuses a malformed list (422) before the route can answer 404 or 403', async () => {
+    const twice = { presets: [{ name: 'X' }, { name: 'x' }] }
+    await expect(api.updateModel('no-such-model', twice)).rejects.toMatchObject({ status: 422 })
+    await expect(api.updateModel(BUILTIN_SLUG, twice)).rejects.toMatchObject({ status: 422 })
   })
 })
 

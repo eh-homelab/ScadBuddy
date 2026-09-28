@@ -1030,17 +1030,13 @@ export const handlers = [
 
   http.patch(`${base}/models/:slug`, async ({ params, request }) => {
     const slug = String(params['slug'])
-    const refused = refuseBuiltin(slug)
-    if (refused) return refused
-    // The model first, as the server's `require_model` runs before anything else.
-    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const { presets: defined, ...patch } = (await request.json()) as ModelPatch
+    // #326: the template's own presets, replaced whole, checked in the server's order.
+    // First the body's shape -- each preset's name and id, then the list's length and
+    // uniqueness -- which is FastAPI parsing it into `ModelPatch` before the route runs,
+    // so it is refused (422) even for a built-in or a model that is not there.
+    const cleaned: NonNullable<typeof defined> = []
     if (defined) {
-      // #326: the template's own presets, replaced whole. Two passes, as the server
-      // makes them: the body's shape (each preset's name and id, then the list's
-      // length and uniqueness) is `TemplatePresets` parsing it before the route runs;
-      // only then are the values checked, by `require_valid_preset_params`.
-      const cleaned: typeof defined = []
       for (const preset of defined) {
         // The raw length first, as pydantic checks `max_length` before `_clean_name`
         // collapses the whitespace.
@@ -1095,6 +1091,13 @@ export const handlers = [
           ids.add(preset.id)
         }
       }
+    }
+    // Then the route: a built-in is read-only, and a missing model is a 404, before the
+    // values are checked against its schema by `require_valid_preset_params`.
+    const refused = refuseBuiltin(slug)
+    if (refused) return refused
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
+    if (defined) {
       for (const preset of cleaned) {
         const refused = valueRefusal(slug, preset.params ?? {})
         if (refused) return refused

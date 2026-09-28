@@ -451,3 +451,17 @@ def test_a_template_preset_description_and_tags_are_bounded(client: TestClient, 
     assert _patch_presets(client, model, long_tag).status_code == 422
     fine = [{"name": "X", "description": "d" * MAX_PRESET_DESCRIPTION, "tags": ["a", "b"]}]
     assert _patch_presets(client, model, fine).status_code == 200
+
+
+@pytest.mark.requires_git
+def test_a_malformed_preset_list_is_refused_before_the_route_runs(
+    client: TestClient, model: str
+) -> None:
+    """The list's shape is checked parsing the body, so it is a 422 even for a model
+    that is not there or a built-in; its values are checked in the route, after them."""
+    twice = [{"name": "X"}, {"name": "x"}]
+    assert _patch_presets(client, "no-such-model", twice).status_code == 422
+    assert _patch_presets(client, BUILTIN, twice).status_code == 422
+    unknown = [{"name": "X", "params": {"nope": 1}}]
+    assert _patch_presets(client, "no-such-model", unknown).status_code == 404
+    assert _patch_presets(client, BUILTIN, unknown).status_code == 403
