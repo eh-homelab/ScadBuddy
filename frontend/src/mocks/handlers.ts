@@ -56,6 +56,7 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -165,6 +166,15 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
@@ -197,6 +207,7 @@ function runJob(jobId: string): void {
 
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
+  resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.printRuns = new Map()
@@ -952,6 +963,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's plugin routes (#297), under /api/v1/ai.
+  ...aiPluginHandlers,
   // The agent service's routes (#251); the rest of this list is the backend.
   ...mcpTokenHandlers,
   ...mcpOidcHandlers,
