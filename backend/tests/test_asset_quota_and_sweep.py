@@ -6,6 +6,7 @@ import json
 import os
 import threading
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -21,7 +22,8 @@ from scadbuddy.library.assets import (
     referenced_asset_ids,
 )
 from scadbuddy.render.bambu3mf import write_bambu_3mf
-from scadbuddy.render.provenance import Provenance, stamp
+from scadbuddy.render.provenance import ROOT_MODEL, Provenance, stamp
+from scadbuddy.render.provenance import read as read_provenance
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.split import ColourPart
 
@@ -179,6 +181,33 @@ def test_an_unreadable_reference_source_fails_the_collection(paths: DataPaths) -
     # A directory where a record should be: reading it is an OSError, not "no refs".
     (output / "params.json").mkdir(parents=True)
     with pytest.raises(OSError):
+        referenced_asset_ids(paths)
+
+
+def test_a_stamp_provenance_cannot_parse_still_keeps_its_asset(
+    paths: DataPaths, store: AssetStore
+) -> None:
+    """`provenance.read` answers None for a stamp it cannot validate; the sweep must
+    not read that as "names nothing" when params.json is gone too."""
+    meta = store.put(svg(1), "a.svg")
+    output = paths.output_dir("demo", "a" * 32)
+    output.mkdir(parents=True)
+    archive = output / "model.3mf"
+    with zipfile.ZipFile(archive, "w") as written:
+        written.writestr(
+            ROOT_MODEL,
+            f'<model><metadata name="ScadBuddy:Provenance">{{"future": {{"label": '
+            f'"{meta.id}"}}</metadata></model>',
+        )
+    assert read_provenance(archive) is None
+    assert meta.id in referenced_asset_ids(paths)
+
+
+def test_a_3mf_that_cannot_be_opened_fails_the_collection(paths: DataPaths) -> None:
+    output = paths.output_dir("demo", "a" * 32)
+    output.mkdir(parents=True)
+    (output / "model.3mf").write_bytes(b"PK\x03\x04 truncated")
+    with pytest.raises(OSError, match=r"model\.3mf"):
         referenced_asset_ids(paths)
 
 

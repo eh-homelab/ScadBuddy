@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -183,6 +183,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if sweeper is not None:
             sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
         await state.queue.aclose()
         await state.events.aclose()
 

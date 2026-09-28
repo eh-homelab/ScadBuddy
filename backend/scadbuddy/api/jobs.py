@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     JOB_ID_PATTERN,
+    AssetsDep,
     CatalogueDep,
     ConfigDep,
     HistoryDep,
@@ -23,7 +24,7 @@ from scadbuddy.api.versions import require_history
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.assets import AssetStore, file_assets
+from scadbuddy.library.assets import file_assets
 from scadbuddy.library.history import (
     COMMIT_ID_PATTERN,
     GitError,
@@ -200,6 +201,7 @@ async def render_model(
     paths: PathsDep,
     config: ConfigDep,
     queue: QueueDep,
+    assets: AssetsDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
@@ -211,9 +213,7 @@ async def render_model(
         # A `file` parameter's value must name an upload or one of the revision's
         # own sample files (#204): checked here, so a bad one is a 422 rather than a
         # job that fails later or renders without it.
-        await asyncio.to_thread(
-            file_assets, schema, body.params, AssetStore(paths.assets), source.scad.parent
-        )
+        await asyncio.to_thread(file_assets, schema, body.params, assets, source.scad.parent)
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 

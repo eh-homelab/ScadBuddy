@@ -34,6 +34,7 @@ import re
 import secrets
 import time
 import unicodedata
+import zipfile
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -45,7 +46,7 @@ from pydantic import BaseModel
 
 from scadbuddy.core.paths import TEMPLATE_PRESETS_NAME, DataPaths
 from scadbuddy.library.catalogue import THUMBNAIL_NAME
-from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.render.provenance import ROOT_MODEL
 from scadbuddy.render.schema import FILE_KINDS, CustomizerSchema, ParamValue, is_bare_filename
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -470,14 +471,32 @@ def _ids_in(data: bytes) -> set[str]:
     return {match.decode("ascii") for match in _ID_IN_TEXT.findall(data)}
 
 
+def _ids_in_archive(archive: Path) -> set[str]:
+    """The ids in a 3MF's root model, where its provenance is stamped.
+
+    Not `provenance.read`: that answers None for a stamp it cannot parse as well as
+    for none at all, which is right for "Edit in ScadBuddy" and wrong here -- a
+    damaged or foreign-version stamp must still keep what it names. So the root
+    model's raw text is matched, as a JSON record's is. An archive that cannot be
+    opened at all raises OSError, which skips the whole sweep.
+    """
+    try:
+        with zipfile.ZipFile(archive) as opened:
+            return _ids_in(opened.read(ROOT_MODEL))
+    except FileNotFoundError:  # removed since the listing: it keeps nothing now
+        return set()
+    except (KeyError, zipfile.BadZipFile) as error:
+        raise OSError(f"cannot read {archive} for the asset ids it names: {error}") from None
+
+
 def referenced_asset_ids(
     paths: DataPaths, params: Iterable[Mapping[str, ParamValue]] = ()
 ) -> set[str]:
     """Every asset id something keeps (#296): the sweep removes nothing in here.
 
     - every output's records (``params.json`` and the rest of its JSON), and for an
-      output whose ``params.json`` is gone, the provenance stamped into its 3MF --
-      the same fallback "Edit in ScadBuddy" reads;
+      output whose ``params.json`` is gone, the root model of its 3MF, where the
+      provenance "Edit in ScadBuddy" falls back to is stamped;
     - every saved preset (``data/presets/``);
     - every template's shipped ``presets.json`` and ``model.json``, mine and built-in;
     - ``params``: the jobs in the render queue's store, finished or not.
@@ -498,9 +517,7 @@ def referenced_asset_ids(
             scan(record)
         archive = directory / "model.3mf"
         if not (directory / "params.json").is_file() and archive.is_file():
-            stamped = read_provenance(archive)
-            if stamped is not None:
-                found.update(_ids_in(json.dumps(stamped.params).encode()))
+            found.update(_ids_in_archive(archive))
     for preset_file in paths.presets.glob("*.json"):
         scan(preset_file)
     for pattern in (f"*/{TEMPLATE_PRESETS_NAME}", "*/model.json"):

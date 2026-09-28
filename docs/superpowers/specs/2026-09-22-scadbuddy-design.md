@@ -539,8 +539,10 @@ string.
     `scadbuddy_assets_max_bytes` (read per scrape), `scadbuddy_assets_rejected_total`
     and `scadbuddy_assets_swept_total`.
   - *What keeps an asset.* Any 64-hex string equal to its id in: an output's JSON
-    records (`params.json`, `meta.json`) or, when `params.json` is gone, the
-    provenance stamped into its 3MF (the fallback "Edit in ScadBuddy" reads); a
+    records (`params.json`, `meta.json`) or, when `params.json` is gone, the raw
+    root model of its 3MF, where the provenance "Edit in ScadBuddy" falls back to
+    is stamped (raw rather than through `provenance.read`, which answers "no
+    stamp" for a stamp it cannot parse); a
     saved preset (`presets/`); a template's `presets.json` or `model.json`, mine or
     built-in; or a job in the render queue's store, whatever its state (with
     Postgres, every replica's). The match is on raw text, not on parsed `file`
@@ -561,7 +563,7 @@ string.
     shape for library checkouts; there is no such sweep yet to share code with.)
   - *Why it is safe against concurrent uploads and renders.* The references are
     read first, and if any source cannot be read (a store outage, an unreadable
-    record) the sweep removes nothing. A reference made after that read is not in
+    record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
     the set, so what protects it is the last use: every path that creates one
     marks the asset used under the store's lock, and the sweep re-checks the last
     use under the same lock immediately before it removes each asset. Either the
