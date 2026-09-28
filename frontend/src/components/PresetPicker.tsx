@@ -5,9 +5,9 @@ import { ApiError, api } from '../api/client'
 import type { CustomizerSchema, ParamPreset } from '../api/types'
 import { sameValues, type ParamValues } from '../lib/params'
 import {
-  MAX_PRESET_DESCRIPTION,
   applyPreset,
   parsePresetTags,
+  presetDescriptionProblem,
   presetParams,
   presetTagsProblem,
 } from '../lib/presets'
@@ -63,8 +63,12 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
   const [description, setDescription] = useState('')
   const [tagsText, setTagsText] = useState('')
   const [nameError, setNameError] = useState<string | null>(null)
-  /** Whether `nameError` is about the tags, so the Tags field is marked with it. */
-  const [tagsInvalid, setTagsInvalid] = useState(false)
+  /**
+   * The field `nameError` is about, marked invalid and described by it: the description
+   * or the tags when they are refused here, else the name, which only the server judges.
+   */
+  const [invalidField, setInvalidField] = useState<'name' | 'description' | 'tags' | null>(null)
+  const descriptionInput = useRef<HTMLTextAreaElement>(null)
   const tagsInput = useRef<HTMLInputElement>(null)
   const dialogErrorId = useId()
   const [confirmingDelete, setConfirmingDelete] = useState(false)
@@ -92,7 +96,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setDescription('')
     setTagsText('')
     setNameError(null)
-    setTagsInvalid(false)
+    setInvalidField(null)
     setNaming('save')
   }
 
@@ -100,6 +104,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     if (!selected) return
     setName(`${selected.name} copy`)
     setNameError(null)
+    setInvalidField(null)
     setNaming('duplicate')
   }
 
@@ -109,7 +114,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
     setDescription(selected.description)
     setTagsText(selected.tags.join(', '))
     setNameError(null)
-    setTagsInvalid(false)
+    setInvalidField(null)
     setNaming('details')
   }
 
@@ -120,16 +125,29 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
    */
   function details(current?: readonly string[]): { description: string; tags?: string[] } | null {
     const trimmed = description.trim()
+    const descriptionProblem = presetDescriptionProblem(trimmed)
+    if (descriptionProblem) {
+      setNameError(descriptionProblem)
+      setInvalidField('description')
+      descriptionInput.current?.focus()
+      return null
+    }
     if (current && tagsText === current.join(', ')) return { description: trimmed }
     const tags = parsePresetTags(tagsText)
     const problem = presetTagsProblem(tags)
-    setTagsInvalid(problem !== null)
     if (problem) {
       setNameError(problem)
+      setInvalidField('tags')
       tagsInput.current?.focus()
       return null
     }
     return { description: trimmed, tags }
+  }
+
+  /** The server's refusal, shown against the name: the field it alone judges. */
+  function refused(caught: unknown) {
+    setNameError(message(caught))
+    setInvalidField('name')
   }
 
   function closeNaming() {
@@ -155,7 +173,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
       setSkipped([])
       setNaming(null)
     } catch (caught) {
-      setNameError(message(caught))
+      refused(caught)
     } finally {
       setBusy(false)
     }
@@ -179,7 +197,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
       setSelection({ preset: copy, applied: applyPreset(schema, copy).values })
       setNaming(null)
     } catch (caught) {
-      setNameError(message(caught))
+      refused(caught)
     } finally {
       setBusy(false)
     }
@@ -204,7 +222,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
       setSelection((current) => (current ? { ...current, preset: updated } : current))
       setNaming(null)
     } catch (caught) {
-      setNameError(message(caught))
+      refused(caught)
     } finally {
       setBusy(false)
     }
@@ -318,7 +336,7 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
             size="sm"
             onClick={openDetails}
             disabled={busy}
-            aria-label={`Edit details of preset ${selected.name}`}
+            aria-label={`Edit details of preset ${selected?.name ?? ''}`}
           >
             Edit details
           </Button>
@@ -407,6 +425,8 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
               onChange={(event) => setName(event.target.value)}
               maxLength={80}
               autoFocus
+              aria-invalid={invalidField === 'name' || undefined}
+              aria-describedby={invalidField === 'name' && nameError ? dialogErrorId : undefined}
               className={`h-8 ${FIELD}`}
             />
           </label>
@@ -415,10 +435,14 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
               <label className="flex flex-col gap-1 text-[13px] text-muted">
                 Description (optional, Markdown)
                 <textarea
+                  ref={descriptionInput}
                   value={description}
                   onChange={(event) => setDescription(event.target.value)}
-                  maxLength={MAX_PRESET_DESCRIPTION}
                   rows={3}
+                  aria-invalid={invalidField === 'description' || undefined}
+                  aria-describedby={
+                    invalidField === 'description' && nameError ? dialogErrorId : undefined
+                  }
                   className={`py-1.5 ${FIELD}`}
                 />
               </label>
@@ -428,8 +452,8 @@ export function PresetPicker({ slug, schema, values, onApply }: Props) {
                   ref={tagsInput}
                   value={tagsText}
                   onChange={(event) => setTagsText(event.target.value)}
-                  aria-invalid={tagsInvalid || undefined}
-                  aria-describedby={tagsInvalid && nameError ? dialogErrorId : undefined}
+                  aria-invalid={invalidField === 'tags' || undefined}
+                  aria-describedby={invalidField === 'tags' && nameError ? dialogErrorId : undefined}
                   placeholder="gift, small"
                   className={`h-8 ${FIELD}`}
                 />

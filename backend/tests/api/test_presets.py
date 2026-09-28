@@ -593,6 +593,30 @@ def test_a_template_tag_written_with_a_comma_still_loads(
     assert _patch_presets(client, model, [{"name": "X", "tags": ["M3, M4"]}]).status_code == 422
 
 
+def test_a_template_preset_with_null_details_still_loads(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """A model.json written by hand, or by a tool that writes every key, says ``null``
+    for a description or tags a preset has none of. That reads as none, rather than
+    failing the whole list and costing the template every preset it defines. A save's
+    body still refuses a null description (422)."""
+    _define(
+        paths,
+        model,
+        [
+            {"name": "Bare", "description": None, "tags": None},
+            {"name": "Plain", "tags": ["a"], "description": "Plain."},
+        ],
+    )
+    listed = client.get(_url(model)).json()
+    assert [(p["name"], p["description"], p["tags"]) for p in listed] == [
+        ("Bare", "", []),
+        ("Plain", "Plain.", ["a"]),
+    ]
+    null_description = client.post(_url(model), json={"name": "X", "description": None})
+    assert null_description.status_code == 422
+
+
 def test_a_saved_preset_carries_a_description_and_tags(client: TestClient, model: str) -> None:
     response = client.post(
         _url(model),

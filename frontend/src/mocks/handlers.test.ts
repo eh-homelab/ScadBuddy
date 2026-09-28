@@ -651,8 +651,10 @@ describe('mock API: a preset\'s description and tags (#327)', () => {
     const wide = await api.createPreset('name-keychain', {
       name: 'Emoji',
       params: {},
+      description: '\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION),
       tags: ['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße', 'STRASSE'],
     })
+    expect(wide.description).toBe('\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION))
     expect(wide.tags).toEqual(['\u{1F600}'.repeat(MAX_PRESET_TAG), 'Straße'])
     // Repeats are dropped before the bound: this many copies of one tag is one tag.
     const created = await api.createPreset('name-keychain', {

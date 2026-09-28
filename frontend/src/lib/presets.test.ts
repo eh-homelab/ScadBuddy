@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 import { keychainSchema } from '../mocks/fixtures'
 import { defaultValues } from './params'
 import {
+  MAX_PRESET_DESCRIPTION,
   MAX_PRESET_TAG,
   MAX_PRESET_TAGS,
   applyPreset,
   parsePresetTags,
+  presetDescriptionProblem,
   presetParams,
   presetTagsProblem,
 } from './presets'
@@ -76,5 +78,17 @@ describe('presetTagsProblem', () => {
     // 40 emoji are 80 UTF-16 units but 40 characters to the server.
     expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG)])).toBeNull()
     expect(presetTagsProblem(['\u{1F600}'.repeat(MAX_PRESET_TAG + 1)])).not.toBeNull()
+  })
+})
+
+describe('presetDescriptionProblem', () => {
+  it('names the bound a description is past, counting code points as the server does', () => {
+    expect(presetDescriptionProblem('')).toBeNull()
+    expect(presetDescriptionProblem('d'.repeat(MAX_PRESET_DESCRIPTION))).toBeNull()
+    expect(presetDescriptionProblem('d'.repeat(MAX_PRESET_DESCRIPTION + 1))).toBe(
+      `The description is longer than ${MAX_PRESET_DESCRIPTION} characters.`,
+    )
+    // Twice the UTF-16 units of the bound, but within it to the server.
+    expect(presetDescriptionProblem('\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION))).toBeNull()
   })
 })

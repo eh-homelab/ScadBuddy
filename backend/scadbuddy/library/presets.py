@@ -119,7 +119,7 @@ def _clean_tags(value: object) -> object:
 #: repeats never count against them. A tag holds no comma: the UI edits tags as one
 #: comma-separated line, which would split such a tag in two. That is a rule for what
 #: is written from now on; a template's file written before it is read as
-#: :func:`_tags_as_written` reads it.
+#: :func:`_details_as_written` reads it.
 PresetTags = Annotated[
     list[Annotated[str, StringConstraints(max_length=MAX_PRESET_TAG, pattern=r"^[^,]*$")]],
     BeforeValidator(_clean_tags),
@@ -127,32 +127,41 @@ PresetTags = Annotated[
 ]
 
 
-def _tags_as_written(raw: Any) -> Any:
-    """``raw``, a preset list read from a template's file, with a tag written before
-    #327 read as the tags it lists.
+def _details_as_written(raw: Any) -> Any:
+    """``raw``, a preset list read from a template's file, with details written by hand
+    or before #327 read as what they mean.
 
-    Until #327 a tag could hold a comma, and a template of mine may still have one in
-    its ``model.json``. Its list is validated whole, so refusing the tag now would cost
-    the template every preset it defines; instead the tag is split at its commas (as
-    the UI's tag line would split it) and cleaned, and a list that grew past
-    ``MAX_PRESET_TAGS`` is cut there. Entries without such a tag, and anything that is
-    not a preset list, are left for the validator to judge as they are; a save still
-    refuses a comma (422).
+    The list is validated whole, so refusing one entry's detail would cost the template
+    every preset it defines. So a ``null`` description or ``tags`` -- what a file
+    written by hand, or by a tool that writes every key, says for "none" -- reads as
+    none (``""``, ``[]``). And until #327 a tag could hold a comma, and a template of
+    mine may still have one in its ``model.json``; such a tag is split at its commas
+    (as the UI's tag line would split it) and cleaned, and a list that grew past
+    ``MAX_PRESET_TAGS`` is cut there. Entries without such a detail, and anything that
+    is not a preset list, are left for the validator to judge as they are; a save still
+    refuses a comma (422) and, in its body, a null.
     """
     if not isinstance(raw, list):
         return raw
     read: list[Any] = []
     for entry in raw:
-        tags = entry.get("tags") if isinstance(entry, dict) else None
-        if not isinstance(tags, list) or not any(isinstance(t, str) and "," in t for t in tags):
+        if not isinstance(entry, dict):
             read.append(entry)
             continue
-        split = [
-            part for tag in tags for part in (tag.split(",") if isinstance(tag, str) else [tag])
-        ]
-        cleaned = _clean_tags(split)
-        assert isinstance(cleaned, list)
-        read.append({**entry, "tags": cleaned[:MAX_PRESET_TAGS]})
+        details: dict[str, Any] = {}
+        if "description" in entry and entry["description"] is None:
+            details["description"] = ""
+        tags = entry.get("tags")
+        if "tags" in entry and tags is None:
+            details["tags"] = []
+        elif isinstance(tags, list) and any(isinstance(t, str) and "," in t for t in tags):
+            split = [
+                part for tag in tags for part in (tag.split(",") if isinstance(tag, str) else [tag])
+            ]
+            cleaned = _clean_tags(split)
+            assert isinstance(cleaned, list)
+            details["tags"] = cleaned[:MAX_PRESET_TAGS]
+        read.append({**entry, **details} if details else entry)
     return read
 
 
@@ -351,7 +360,7 @@ class PresetStore:
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
         try:
-            return _checked(_PRESET_LIST.validate_python(_tags_as_written(raw)))
+            return _checked(_PRESET_LIST.validate_python(_details_as_written(raw)))
         except (ValidationError, ValueError, RecursionError) as error:
             logger.warning(
                 "ignored a template's presets in %s: %s", name, error, extra={"slug": model_id}

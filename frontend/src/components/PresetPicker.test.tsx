@@ -2,6 +2,7 @@ import { screen, waitFor, within } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import type { Job } from '../api/types'
+import { MAX_PRESET_DESCRIPTION } from '../lib/presets'
 import { BUILTIN_SLUG } from '../mocks/fixtures'
 import { resetMockState } from '../mocks/handlers'
 import { server } from '../mocks/server'
@@ -107,9 +108,13 @@ describe('PresetPicker', () => {
     await picker()
     await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
     const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
-    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'mum')
+    const name = within(dialog).getByRole('textbox', { name: 'Preset name' })
+    await user.type(name, 'mum')
     await user.click(within(dialog).getByRole('button', { name: 'Save' }))
     expect(await within(dialog).findByRole('alert')).toHaveTextContent('already has a preset')
+    // The server's reason is about the name, so the Name field is marked with it.
+    expect(name).toHaveAttribute('aria-invalid', 'true')
+    expect(name).toHaveAccessibleDescription(/already has a preset/)
   })
 
   it('updates a saved preset once its values are changed', async () => {
@@ -310,6 +315,45 @@ describe('PresetPicker', () => {
     expect(tags).toHaveAccessibleDescription('At most 20 tags.')
     expect(tags).toHaveFocus()
     expect(create).not.toHaveBeenCalled()
+  })
+
+  it('says why a description is refused before sending it, counting as the server does', async () => {
+    const create = vi.spyOn(api, 'createPreset')
+    const { user } = render()
+    await picker()
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const dialog = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(dialog).getByRole('textbox', { name: 'Preset name' }), 'Long')
+    const description = within(dialog).getByRole('textbox', {
+      name: 'Description (optional, Markdown)',
+    })
+    // No `maxLength` on the field: it would count UTF-16 units, cutting an emoji short
+    // of the server's bound, which is in code points, as the Tags field counts.
+    expect(description).not.toHaveAttribute('maxlength')
+    await user.click(description)
+    await user.paste('\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION))
+    await user.click(within(dialog).getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(create).toHaveBeenCalledOnce())
+    expect(create.mock.calls[0]?.[1]?.description).toBe(
+      '\u{1F600}'.repeat(MAX_PRESET_DESCRIPTION),
+    )
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Save as preset…' }))
+    const again = screen.getByRole('dialog', { name: 'Save as preset' })
+    await user.type(within(again).getByRole('textbox', { name: 'Preset name' }), 'Longer')
+    const tooLong = within(again).getByRole('textbox', { name: 'Description (optional, Markdown)' })
+    await user.click(tooLong)
+    await user.paste('d'.repeat(MAX_PRESET_DESCRIPTION + 1))
+    await user.click(within(again).getByRole('button', { name: 'Save' }))
+    const alert = await within(again).findByRole('alert')
+    expect(alert).toHaveTextContent(
+      `The description is longer than ${MAX_PRESET_DESCRIPTION} characters.`,
+    )
+    expect(tooLong).toHaveAttribute('aria-invalid', 'true')
+    expect(tooLong).toHaveAccessibleDescription(/longer than/)
+    expect(tooLong).toHaveFocus()
+    expect(create).toHaveBeenCalledOnce()
   })
 
   it('leaves the tags out of an Edit details save that did not touch them', async () => {

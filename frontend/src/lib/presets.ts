@@ -53,6 +53,17 @@ export function tagLength(tag: string): number {
 }
 
 /**
+ * Why this description would be refused, in words, or null. Its length is counted as
+ * the server counts it, in code points -- the same count as a tag's, where a
+ * `maxLength` on the field would count UTF-16 units and cut an emoji short.
+ */
+export function presetDescriptionProblem(description: string): string | null {
+  return tagLength(description) > MAX_PRESET_DESCRIPTION
+    ? `The description is longer than ${MAX_PRESET_DESCRIPTION} characters.`
+    : null
+}
+
+/**
  * Tags as typed, comma-separated, cleaned as the server cleans them: trimmed, inner
  * whitespace collapsed, blanks dropped, each kept once ignoring case. The server
  * refuses a comma in a tag, so the split never breaks a stored tag in two.

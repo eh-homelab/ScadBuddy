@@ -907,11 +907,11 @@ export function cleanTags(tags: readonly string[]): string[] {
  * the tags cleaned first, as pydantic does before it checks the bounds.
  */
 function detailsRefusal(description: string | null | undefined, tags: string[] | null | undefined) {
-  if ((description ?? '').trim().length > MAX_PRESET_DESCRIPTION) {
+  // Lengths in code points, as Python counts them.
+  if ([...(description ?? '').trim()].length > MAX_PRESET_DESCRIPTION) {
     return shapeRefusal(`a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`)
   }
   const cleaned = cleanTags(tags ?? [])
-  // Lengths in code points, as Python counts them.
   if (cleaned.length > MAX_PRESET_TAGS || cleaned.some((tag) => [...tag].length > MAX_PRESET_TAG)) {
     return shapeRefusal(
       `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
