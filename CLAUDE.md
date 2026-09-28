@@ -102,7 +102,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
-  template's revision; shipped read-only ones in a template's `presets.json`).
+  template's revision; a template's own read-only ones in the `presets` list of its
+  `model.json`, with a legacy `presets.json` still read).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
@@ -177,9 +178,11 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image `openscad/openscad:dev` is a rolling nightly. The Dockerfile asserts
-  `OPENSCAD_VERSION` (currently 2026.09.23) and fails the build on drift. When it
-  fires, re-verify spec §3 against the new build and bump it in the same commit.
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-23@sha256:…`
+  (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.23). Bump
+  deliberately: re-verify spec §3 against the new build, then change the tag,
+  digest and `OPENSCAD_VERSION` in the same commit.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv
   provides 3.12. Do not switch to a Python base with OpenSCAD installed beside it —
   the facts below were measured on this exact image.
