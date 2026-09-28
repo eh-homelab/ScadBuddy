@@ -5,7 +5,7 @@ import type {
   McpTokenCreate,
   McpTokenTier,
   MintedMcpToken,
-} from '../api/mcpTokens'
+} from '../../api/mcpTokens'
 
 /**
  * The agent service's `/api/v1/ai/mcp-tokens` (#251, `agent/src/routes/mcpTokens.ts`)
@@ -49,7 +49,7 @@ const state = {
   authMode: 'bearer' as McpAuthMode | null,
 }
 
-export function resetMcpTokens(): void {
+export function reset(): void {
   state.tokens = seed()
   state.authMode = 'bearer'
 }
@@ -86,7 +86,7 @@ function problems(body: Partial<McpTokenCreate> & Record<string, unknown>): stri
   return undefined
 }
 
-export const mcpTokenHandlers = [
+export const handlers = [
   http.get(base, () =>
     HttpResponse.json(
       { auth_mode: state.authMode, tokens: state.tokens },

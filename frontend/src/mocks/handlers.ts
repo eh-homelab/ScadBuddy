@@ -44,7 +44,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
-import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
+import { features } from './features'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -220,7 +220,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
-  resetMcpTokens()
+  for (const feature of features) feature.reset?.()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -938,8 +938,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
-  // The agent service's routes (#251); the rest of this list is the backend.
-  ...mcpTokenHandlers,
+  // Each feature's own mocks (`features/*.ts`), ahead of the backend's list below.
+  ...features.flatMap((feature) => feature.handlers),
 
   http.get(`${base}/models`, () => {
     landPreviews()
