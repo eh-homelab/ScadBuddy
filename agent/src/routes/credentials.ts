@@ -5,9 +5,12 @@ import {
   CREDENTIAL_KINDS,
   CredentialError,
   type CredentialRepo,
+  normaliseBaseUrl,
   type StoredCredential,
 } from '../credentials.js'
 import type { ConnectionTest } from '../harness/testConnection.js'
+import { assertGatewayHostAllowed, EgressError, type Resolver, systemResolver } from '../http/egress.js'
+import type { OriginPolicy } from '../http/origins.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
 
@@ -25,6 +28,14 @@ export type CredentialRouteDeps = {
   kek: KekStatus
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
+  /** Which origins may write (src/http/origins.ts). */
+  origins: OriginPolicy
+  /** Resolves a gateway host for the SSRF check (src/http/egress.ts); the system resolver by default. */
+  resolveHost?: Resolver
+  /** Minimum time between the end of one connection test and the start of the next. */
+  testCooldownMs?: number
+  /** Clock, for tests. */
+  now?: () => number
 }
 
 export type CredentialView = {
@@ -33,7 +44,7 @@ export type CredentialView = {
   base_url: string | null
   last4: string | null
   updated_at: string | null
-  /** False when the stored secret was sealed with a key other than the mounted one. */
+  /** False when the stored secret was sealed with a key other than the mounted one, or in the old format. */
   usable: boolean
   /** Whether a PUT with a secret can succeed, and if not, why. */
   can_save: boolean
@@ -48,6 +59,7 @@ const PutBody = z.strictObject({
 
 const NO_DATABASE = 'AI features need the database: SCADBUDDY_DATABASE_URL is not set (spec §9)'
 const NOT_READY = 'the AI database is unreachable or its migrations have not applied; see /healthz'
+export const DEFAULT_TEST_COOLDOWN_MS = 10_000
 
 export function view(stored: StoredCredential | undefined, kek: KekStatus): CredentialView {
   return {
@@ -56,14 +68,18 @@ export function view(stored: StoredCredential | undefined, kek: KekStatus): Cred
     base_url: stored?.base_url ?? null,
     last4: stored?.last4 ?? null,
     updated_at: stored?.updated_at ?? null,
-    usable: stored !== undefined && kek.ok && kek.kek.id === stored.kekId,
+    usable: stored !== undefined && !stored.legacyFormat && kek.ok && kek.kek.id === stored.kekId,
     can_save: kek.ok,
+    // `reason` is the public one (no file path or errno; secrets.ts `loadKek`).
     cannot_save_reason: kek.ok ? null : `no key-encryption key: ${kek.reason}`,
   }
 }
 
 export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): void {
   const base = '/api/v1/ai/credentials'
+  const resolveHost = deps.resolveHost ?? systemResolver
+  const cooldownMs = deps.testCooldownMs ?? DEFAULT_TEST_COOLDOWN_MS
+  const now = deps.now ?? Date.now
 
   /** The store once migrations are current, or a 503 response. */
   async function store(): Promise<CredentialRepo | string> {
@@ -79,7 +95,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
 
   // Every write is outward tier; see guard.ts for what is and is not checked.
   app.on(['PUT', 'DELETE', 'POST'], [base, `${base}/*`], async (c, next) => {
-    const problem = uiRequestProblem(c, deps.remoteAddress)
+    const problem = uiRequestProblem(c, deps.origins, deps.remoteAddress)
     if (problem) return c.json({ detail: problem }, 403)
     await next()
   })
@@ -98,6 +114,11 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       return c.json({ detail }, 400)
     }
     try {
+      // A gateway host that is (or resolves to) link-local or cloud metadata
+      // is refused before anything is stored (src/http/egress.ts).
+      if (body.kind === 'gateway' && body.base_url) {
+        await assertGatewayHostAllowed(normaliseBaseUrl(body.base_url), resolveHost)
+      }
       const saved = await repo.put(
         {
           kind: body.kind,
@@ -109,6 +130,7 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
       return c.json(view(saved, deps.kek))
     } catch (err) {
       if (err instanceof CredentialError) return c.json({ detail: err.message }, err.status)
+      if (err instanceof EgressError) return c.json({ detail: err.message }, 400)
       throw err
     }
   })
@@ -120,20 +142,53 @@ export function registerCredentialRoutes(app: Hono, deps: CredentialRouteDeps): 
     return c.json(view(undefined, deps.kek))
   })
 
+  // One connection test at a time, and at most one per cooldown: each test
+  // starts a Claude Code process and spends real tokens.
+  let testing = false
+  let lastTestEnded = Number.NEGATIVE_INFINITY
+
   app.post(`${base}/test`, async (c) => {
-    const repo = await store()
-    if (typeof repo === 'string') return c.json({ detail: repo }, 503)
-    if (!deps.kek.ok) return c.json({ detail: `no key-encryption key: ${deps.kek.reason}` }, 503)
-    let credential: Credential | undefined
-    try {
-      credential = await repo.reveal(deps.kek.kek)
-    } catch (err) {
-      if (err instanceof SealError) {
-        return c.json({ detail: `the stored credential cannot be decrypted: ${err.message}; save it again` }, 409)
-      }
-      throw err
+    const waitMs = testing ? cooldownMs : lastTestEnded + cooldownMs - now()
+    if (waitMs > 0) {
+      c.header('Retry-After', String(Math.max(1, Math.ceil(waitMs / 1000))))
+      return c.json(
+        {
+          detail: testing
+            ? 'a connection test is already running'
+            : 'a connection test ran moments ago; try again shortly',
+        },
+        429,
+      )
     }
-    if (!credential) return c.json({ detail: 'no credential is configured' }, 404)
-    return c.json(await deps.testConnection(credential))
+    testing = true
+    try {
+      const repo = await store()
+      if (typeof repo === 'string') return c.json({ detail: repo }, 503)
+      if (!deps.kek.ok) return c.json({ detail: `no key-encryption key: ${deps.kek.reason}` }, 503)
+      let credential: Credential | undefined
+      try {
+        credential = await repo.reveal(deps.kek.kek)
+      } catch (err) {
+        if (err instanceof SealError) {
+          return c.json({ detail: `the stored credential cannot be decrypted: ${err.message}; save it again` }, 409)
+        }
+        throw err
+      }
+      if (!credential) return c.json({ detail: 'no credential is configured' }, 404)
+      if (credential.kind === 'gateway') {
+        // Again at test time: the name may resolve differently than at save.
+        try {
+          await assertGatewayHostAllowed(credential.baseUrl, resolveHost)
+        } catch (err) {
+          if (err instanceof EgressError) return c.json({ detail: err.message }, 400)
+          throw err
+        }
+      }
+      const result = await deps.testConnection(credential)
+      lastTestEnded = now()
+      return c.json(result)
+    } finally {
+      testing = false
+    }
   })
 }
