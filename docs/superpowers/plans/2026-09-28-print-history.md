@@ -177,9 +177,9 @@ A **print** is one linked archive (`output_bambuddy_prints` row joined to `GET /
 
 ### 2.6 Storage
 
-- Every piece of new ScadBuddy state (the links in 2.1, the attachments and captions in 2.5, and the slice `file_hash` column in 2.1) is a **Postgres** table or column. Each change is appended to `backend/scadbuddy/render/pg_store.py` `MIGRATIONS`.
+- Every piece of new ScadBuddy state (the links in 2.1, the attachments and captions in 2.5, and the slice `file_hash` column in 2.1) is a **Postgres** table or column. Each change is a new timestamped file in `backend/scadbuddy/migrations/` (#491).
 - **No backfill:** existing outputs simply have no prints until they print again or the reconciler links them.
-- Several open PRs also append migrations (#374, #430, #462, #463, #461, …), so each child takes **the next free number when it merges** and says so in its PR.
+- Several open PRs also add migrations (#374, #430, #462, #463, #461, …), which no longer conflict: each adds its own file, and a file with an older timestamp that merges later is still applied.
 - Nothing goes in `data/`. There is no in-memory fallback: the database is required (#401, #467).
 
 ### 2.7 UI routes (#310, #311)

@@ -1,7 +1,7 @@
 """Where decisions live, and how the one that applies is chosen (#284 "Scopes").
 
-Postgres only: the ``analyzer_decisions`` table, a backend migration in
-``render/pg_store.py``'s ``scadbuddy_migrations`` ledger (not an ``ai_*`` one:
+Postgres only: the ``analyzer_decisions`` table, a backend migration file in
+``backend/scadbuddy/migrations/`` in the ``scadbuddy_migrations`` ledger (not an ``ai_*`` one:
 script analyzers run with AI off, and so must their decisions). There is no file
 fallback. Until the database is required everywhere (#401), a ScadBuddy without
 ``SCADBUDDY_DATABASE_URL`` has no store; the routes that persist answer 503 saying
@@ -92,8 +92,8 @@ CONNECT_TIMEOUT = 5.0
 
 
 class PostgresDecisionStore:
-    """``analyzer_decisions`` on the #241 database, a backend migration in
-    ``render/pg_store.py``.
+    """``analyzer_decisions`` on the #241 database, created by
+    ``migrations/20260928T0724Z_analyzer_decisions.sql``.
 
     Connects on first use, not at construction, so building the app state stays
     offline, and applies the backend's migrations itself (idempotent, under their
