@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import fcntl
 import json
+import logging
 import os
 import shutil
 import subprocess
@@ -25,6 +26,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
     subject_line,
 )
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import prune_revision_exports
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
@@ -622,6 +624,53 @@ def test_an_unchanged_built_in_is_not_rewritten(catalogue: Catalogue, tmp_path: 
     for path, stat in keychain.items():
         assert (path.stat().st_ino, path.stat().st_mtime_ns) == (stat.st_ino, stat.st_mtime_ns)
     assert (mirror / "tag" / "model.scad").read_text(encoding="utf-8") == "cube(6);\n"
+
+
+def test_an_unchanged_built_in_is_judged_by_its_stats_alone(
+    catalogue: Catalogue, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Matching sizes and mtimes settle a boot's sync without reading a byte (#206);
+    a file whose mtime moved but whose bytes did not is still no change."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    catalogue.sync_builtins(image)
+    mirror = catalogue.paths.models / "_builtin" / "keychain" / "model.scad"
+    before = mirror.stat()
+
+    with monkeypatch.context() as patched:
+
+        def refuse(path: Path) -> bytes:
+            raise AssertionError(f"read {path}")
+
+        patched.setattr(Path, "read_bytes", refuse)
+        assert catalogue.sync_builtins(image) is None
+
+    os.utime(image / "keychain" / "model.scad", ns=(before.st_atime_ns, before.st_mtime_ns + 10**9))
+    assert catalogue.sync_builtins(image) is None
+    assert (mirror.stat().st_ino, mirror.stat().st_mtime_ns) == (before.st_ino, before.st_mtime_ns)
+
+
+def test_a_bundled_directory_that_is_no_slug_is_skipped(
+    catalogue: Catalogue, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No route could reach a built-in whose name is no slug (#197)."""
+    image = tmp_path / "image"
+    _bundle(image, "keychain", "cube(10);\n")
+    bad = ["Key_Chain", "-tag", "x" * (MAX_SLUG_LENGTH + 1)]
+    for name in bad:
+        _bundle(image, name, "cube(5);\n")
+
+    with caplog.at_level(logging.WARNING):
+        assert catalogue.sync_builtins(image) is not None
+
+    mirror = catalogue.paths.models / "_builtin"
+    assert sorted(path.name for path in mirror.iterdir()) == ["keychain"]
+    skipped = [
+        str(getattr(record, "slug", ""))
+        for record in caplog.records
+        if record.getMessage().startswith("not a usable slug")
+    ]
+    assert sorted(skipped) == sorted(bad)
 
 
 def test_syncing_overwrites_and_drops_what_the_image_no_longer_has(
