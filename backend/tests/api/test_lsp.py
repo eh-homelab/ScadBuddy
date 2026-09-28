@@ -409,7 +409,7 @@ def test_a_wedged_server_is_killed_and_its_slot_freed(
 ) -> None:
     """A server that stops answering would hold its permit for as long as the editor
     stays open (#201); an unanswered request ends the session instead."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     app: FastAPI = create_app(settings.model_copy(update={"lsp_sessions": 1}))
     route = f"/api/v1/models/{model}/lsp"
     with TestClient(app) as client:
@@ -438,7 +438,7 @@ def test_a_killed_server_that_is_never_reaped_still_frees_its_slot(
 ) -> None:
     """A process stuck in the kernel outlives SIGKILL; waiting on it forever would
     hold the permit all the same (#201), so cleanup gives up after KILL_WAIT."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
     spawn = asyncio.create_subprocess_exec
 
@@ -481,7 +481,7 @@ def test_unreaped_servers_are_counted(
 ) -> None:
     """A server that outlives its kill no longer holds a permit, so the log keeps
     count of how many are still around past SCADBUDDY_LSP_SESSIONS."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.5)
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     monkeypatch.setattr(lsp, "KILL_WAIT", 0.2)
     monkeypatch.setattr(lsp, "_unreaped", set())
     spawn = asyncio.create_subprocess_exec
@@ -542,12 +542,13 @@ def test_an_idle_session_is_not_ended(
     client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Only an unanswered request counts: an editor left open with nothing to ask
-    keeps its server."""
-    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 0.2)
+    keeps its server. The timeout stays above the fake server's start, which
+    ``initialize`` waits on, so only the idle stretch is judged."""
+    monkeypatch.setattr(lsp, "REQUEST_TIMEOUT", 1.0)
     with client.websocket_connect(f"/api/v1/models/{model}/lsp") as session:
         _initialize(session)
         session.send_json({"jsonrpc": "2.0", "method": "initialized", "params": {}})
-        time.sleep(0.6)
+        time.sleep(2.5)
         session.send_json({"jsonrpc": "2.0", "id": 2, "method": "shutdown"})
         assert session.receive_json()["id"] == 2
 

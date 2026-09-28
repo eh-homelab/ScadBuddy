@@ -19,6 +19,11 @@ A server that stops answering (alive, but wedged) would hold its session's permi
 as long as the editor stays open, so a request left unanswered for
 ``REQUEST_TIMEOUT`` seconds ends the session: the server is killed and the socket
 closed with 1011, and the editor carries on without one as it does on any failure.
+This assumes the server answers every request, which openscad-lsp 2.0.1 does only for
+the capabilities it advertises, on documents the editor has opened: an unknown method,
+params it cannot read, or a URI it never saw gets no reply at all. The editor
+(``frontend/src/lib/languageClient.ts``) keeps to that; a request outside it would
+end a healthy session.
 
 A killed server is given ``KILL_WAIT`` seconds to be reaped, then its permit is let go
 whether or not it has died. That is deliberate: a process stuck in the kernel (a hung
@@ -51,7 +56,8 @@ _CONTENT_LENGTH = b"content-length"
 #: by the client's ``initialize``.
 DEFAULT_CLIENT_ROOT = "file:///workspace/"
 #: Seconds a client's request may go unanswered before the server is taken as wedged.
-#: The watchdog checks every tenth of it, so detection takes up to 1.1x this.
+#: The watchdog checks every tenth of it, so detection takes up to 1.1x this. Only
+#: requests openscad-lsp answers may be sent (see the module docstring).
 REQUEST_TIMEOUT = 60.0
 #: Seconds to wait for a killed server to be reaped before letting the permit go;
 #: asyncio's child watcher reaps it whenever it does die.
