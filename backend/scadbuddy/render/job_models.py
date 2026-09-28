@@ -34,6 +34,10 @@ class JobResult(BaseModel):
     bbox_mm: BoundingBox
     colors: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    #: The template's own `NOTE:`/`WARNING:` echoes (#285): what it changed from the
+    #: parameters it was given, say a size capped to fit the plate. Defaulted, like
+    #: `source_version`, so a result stored before the field existed still loads.
+    notes: list[str] = Field(default_factory=list)
 
 
 class Job(BaseModel):

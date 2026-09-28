@@ -82,6 +82,8 @@ class JobStatus(BaseModel):
     bbox_mm: BoundingBox | None = None
     colors: list[str] | None = None
     warnings: list[str] | None = None
+    #: What the template echoed as `NOTE:`/`WARNING:` on a successful render (#285).
+    notes: list[str] | None = None
     parts: list[PartInfo] | None = None
 
 
@@ -102,6 +104,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         bbox_mm=result.bbox_mm if result else None,
         colors=result.colors if result else None,
         warnings=result.warnings if result else None,
+        notes=result.notes if result else None,
         parts=result.parts if result else None,
     )
 
