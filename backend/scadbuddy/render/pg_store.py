@@ -18,7 +18,8 @@ One table, ``render_jobs``, is both the job record and the wait list:
   that connection was down.
 
 Schema changes go in `MIGRATIONS`, append-only, applied at `open` under an advisory
-lock so two starting pods cannot race each other.
+lock so two starting pods cannot race each other. The list is the backend's whole
+schema, not only the queue's: the settings tables are in it too.
 """
 
 from __future__ import annotations
@@ -98,6 +99,29 @@ MIGRATIONS: tuple[str, ...] = (
         ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
+    """,
+    # 3: the settings (`library.settings_store.SettingsStore`), formerly
+    # data/settings.json. One row per setting, so a write touches only its own row.
+    # A JSON `null` value is an env-seeded setting the UI cleared; no row is "never
+    # set" (the environment's value, or the default). The print dialog's per-model
+    # choices and per-printer plates get tables of their own, since it writes both on
+    # every print.
+    """
+    CREATE TABLE settings (
+        name       text PRIMARY KEY,
+        value      jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE model_print_choices (
+        model_id   text PRIMARY KEY,
+        choices    jsonb NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE printer_bed_types (
+        printer_id bigint PRIMARY KEY,
+        bed_type   text NOT NULL,
+        updated_at timestamptz NOT NULL DEFAULT now()
+    );
     """,
 )
 

@@ -18,6 +18,7 @@ from scadbuddy.core.config import (
     DEFAULT_JOB_TTL,
     DEFAULT_LIBRARY_MAX_BYTES,
     DEFAULT_LSP_SESSIONS,
+    DEFAULT_MEDIA_UPLOAD_MAX_BYTES,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_REALTIME_SOCKETS,
@@ -71,6 +72,9 @@ class Settings(BaseSettings):
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
+    # SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES (#274): the initial value for the stored
+    # setting, like the Bambuddy fields below; `PUT /settings` overrides it.
+    media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
@@ -80,7 +84,8 @@ class Settings(BaseSettings):
     seed_models_dir: Path | None = None
     frontend_dir: Path | None = None
 
-    # Initial values for data/settings.json; the stored file wins once written.
+    # Initial values for the stored settings (`library.settings_store`, in Postgres);
+    # a value stored from the UI wins once written.
     bambuddy_url: str | None = None
     bambuddy_api_key: str | None = None
     # The URL Bambuddy should point its sidebar entry at; usually ScadBuddy's own
@@ -90,11 +95,22 @@ class Settings(BaseSettings):
     # preview draws while no printer has been chosen (#81).
     default_plate: str | None = None
 
-    # SCADBUDDY_DATABASE_URL: a libpq URL or DSN. Set, the render queue lives in
-    # Postgres (durable, shareable by replicas); unset, in files and this process.
-    # Server-side only, like the Bambuddy key.
-    database_url: str | None = None
+    # SCADBUDDY_DATABASE_URL: a libpq URL or DSN. Required (#401): the settings live
+    # only in Postgres, and so does the render queue. Server-side only, like the
+    # Bambuddy key.
+    database_url: str = Field(default="", validate_default=True)
     database_pool_size: int = DEFAULT_DATABASE_POOL_SIZE
+
+    @field_validator("database_url")
+    @classmethod
+    def _database_required(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError(
+                "SCADBUDDY_DATABASE_URL is required: ScadBuddy keeps its settings and render"
+                " queue in Postgres. Set it to a libpq URL, e.g."
+                " postgresql://user:password@host:5432/scadbuddy"
+            )
+        return value
 
     @field_validator("database_pool_size")
     @classmethod

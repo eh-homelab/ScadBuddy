@@ -26,8 +26,9 @@ color("#0000FF") translate([size, 0, 0]) cube(size);
 
 
 @pytest.fixture
-def client(data_dir: Path, seed_dir: Path) -> Iterator[TestClient]:
+def client(data_dir: Path, seed_dir: Path, pg_conninfo: str) -> Iterator[TestClient]:
     settings = Settings(
+        database_url=pg_conninfo,
         openscad=load_config().openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,

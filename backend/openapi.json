@@ -4639,6 +4639,18 @@
             ],
             "title": "Library Folder Id"
           },
+          "media_upload_max_bytes": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Media Upload Max Bytes"
+          },
           "pipeline_id": {
             "anyOf": [
               {
@@ -4764,6 +4776,10 @@
             ],
             "title": "Library Folder Id"
           },
+          "media_upload_max_bytes": {
+            "title": "Media Upload Max Bytes",
+            "type": "integer"
+          },
           "pipeline_id": {
             "anyOf": [
               {
@@ -4818,6 +4834,9 @@
             "title": "Public Url"
           }
         },
+        "required": [
+          "media_upload_max_bytes"
+        ],
         "title": "SettingsView",
         "type": "object"
       },

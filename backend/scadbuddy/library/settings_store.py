@@ -1,49 +1,58 @@
+"""The settings, in Postgres (``SCADBUDDY_DATABASE_URL``; formerly data/settings.json).
+
+Three tables, all in `scadbuddy.render.pg_store.MIGRATIONS` (3):
+
+- ``settings``: one row per setting, ``name -> value`` (jsonb). No row is "never set":
+  the environment's value for an :data:`ENV_SEEDED` field, else the default. A JSON
+  ``null`` row is an env-seeded field the UI cleared, which must outlast the
+  environment's value. Map-valued settings (``model_pipelines`` and the per-printer and
+  per-model print options) change one key at a time inside that row's upsert.
+- ``model_print_choices``: what the print dialog last chose, one row per model.
+- ``printer_bed_types``: the plate last printed on, one row per printer.
+
+The print dialog writes a model's choices and its printer's plate back to back on
+every print, and FastAPI runs each on its own threadpool thread; each write is one
+statement on its own row, so neither can drop the other's change.
+"""
+
 from __future__ import annotations
 
-import functools
-import json
-import os
-import tempfile
-import threading
-from collections.abc import Callable
-from pathlib import Path
-from typing import Literal
+import logging
+from typing import Any, Literal
 
+from psycopg import Connection
+from psycopg.rows import DictRow, dict_row
+from psycopg.types.json import Jsonb
+from psycopg_pool import ConnectionPool
 from pydantic import BaseModel, Field, field_validator
 
 from scadbuddy.bambuddy.models import NozzleChoice, PresetRef, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.core.config import DEFAULT_MEDIA_UPLOAD_MAX_BYTES
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import Settings
+from scadbuddy.render.pg_store import migrate
 
-SETTINGS_NAME = "settings.json"
-KEY_FILE_MODE = 0o600
+logger = logging.getLogger(__name__)
 
 #: How the UI shows lengths. Only a display choice: geometry, the plate table and every
 #: API value stay in millimetres, which is what OpenSCAD and Bambu Studio work in.
 DisplayUnit = Literal["mm", "in"]
 
 #: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
-ENV_SEEDED = ("bambuddy_url", "bambuddy_api_key", "public_url", "default_plate")
+ENV_SEEDED = (
+    "bambuddy_url",
+    "bambuddy_api_key",
+    "public_url",
+    "default_plate",
+    "media_upload_max_bytes",
+)
+#: The env-seeded fields with no ``None``: a clear puts the environment's value back,
+#: and keeps following it.
+NEVER_NONE = frozenset({"media_upload_max_bytes"})
 
-#: Held across every setter's load -> mutate -> write (PR #335 review 1). Sync route
-#: handlers run on FastAPI's threadpool, so two setters overlap for real — the print
-#: picker fires two remember PUTs back to back — and without this the second write
-#: would silently drop the first's change. Process-wide rather than per instance, since
-#: each request builds its own store over the same file. Re-entrant so a
-#: ``settings.changed`` listener, which runs inside the write, may itself call a setter.
-_WRITE_LOCK = threading.RLock()
-
-
-def _serialized[**P, R](setter: Callable[P, R]) -> Callable[P, R]:
-    """Run ``setter``'s whole read-modify-write under :data:`_WRITE_LOCK`."""
-
-    @functools.wraps(setter)
-    def locked(*args: P.args, **kwargs: P.kwargs) -> R:
-        with _WRITE_LOCK:
-            return setter(*args, **kwargs)
-
-    return locked
+#: The fields kept in tables of their own rather than as ``settings`` rows.
+OWN_TABLES = frozenset({"model_print_choices", "printer_bed_types"})
 
 
 class BambuddyIds(BaseModel):
@@ -96,6 +105,9 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
+    #: The largest media upload (#274), in bytes. Never cleared: a clear puts the
+    #: environment's value back.
+    media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # Used by "Slice and queue" when no pipeline is configured.
     printer_preset: PresetRef | None = None
@@ -103,10 +115,9 @@ class StoredSettings(BambuddyIds):
     filament_presets: list[PresetRef] = Field(default_factory=list)
     bed_type: str | None = None
 
-    #: Model slug -> the pipeline that model once printed with (#86). Kept so an
-    #: existing ``settings.json`` still loads and round-trips, but no longer read: its
-    #: routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here can
-    #: be neither seen nor changed and must not override the Settings pipeline.
+    #: Model slug -> the pipeline that model once printed with (#86). No longer read:
+    #: its routes went with the pipeline picker (spec 2026-09-27 §4), so an entry here
+    #: can be neither seen nor changed and must not override the Settings pipeline.
     model_pipelines: dict[str, int] = Field(default_factory=dict)
     #: Model slug -> the rest of what the picker chose, set one model at a time for the
     #: same reason (:meth:`SettingsStore.set_model_choices`).
@@ -139,11 +150,6 @@ class StoredSettings(BambuddyIds):
     printer_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
     model_print_options: dict[str, PrintOptions] = Field(default_factory=dict)
 
-    #: The :data:`ENV_SEEDED` fields a ``PUT /settings`` explicitly cleared. The file
-    #: stores every field, so a ``null`` in it cannot tell "cleared" from "never set";
-    #: this list can, and it is what lets a clear outlast the environment's value.
-    cleared: list[str] = Field(default_factory=list)
-
 
 class SettingsPatch(BaseModel):
     """An omitted field is left alone; an explicit ``null`` clears it."""
@@ -161,134 +167,147 @@ class SettingsPatch(BaseModel):
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
+    #: ``null`` puts it back to ``SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`` (or 1 GiB).
+    media_upload_max_bytes: int | None = Field(default=None, gt=0)
 
 
 class SettingsStore:
-    """``data/settings.json``, mode 0600 because it holds the API key.
+    """The settings, one row each, in Postgres.
 
-    The environment seeds the initial values; once the file exists it wins, so the
+    The environment seeds the initial values; once a value is stored it wins, so the
     UI can change what a deployment shipped with. For an :data:`ENV_SEEDED` field that
-    means: a value in the file wins; a field the UI explicitly cleared stays cleared
-    (#81 — a Settings page option that clears ``default_plate`` has to beat
-    ``SCADBUDDY_DEFAULT_PLATE``); and a field the file has never held a value for still
-    follows the environment, so a variable added to a deployment later is honoured.
+    means: a stored value wins; a field the UI explicitly cleared stays cleared (#81 — a
+    Settings page option that clears ``default_plate`` has to beat
+    ``SCADBUDDY_DEFAULT_PLATE``); and a field never stored still follows the
+    environment, so a variable added to a deployment later is honoured.
+
+    Every write commits before ``settings.changed`` is published, so a listener that
+    re-reads sees it.
     """
 
-    def __init__(self, path: Path, defaults: Settings, *, events: EventBus | None = None) -> None:
-        self.path = path
+    def __init__(
+        self,
+        defaults: Settings,
+        *,
+        events: EventBus | None = None,
+        connect_timeout: float = 30.0,
+    ) -> None:
         self.defaults = defaults
         #: Told of every write, as ``settings.changed`` with the section it touched.
         self.events = events
-
-    def _from_env(self) -> StoredSettings:
-        return StoredSettings(
-            bambuddy_url=self.defaults.bambuddy_url,
-            bambuddy_api_key=self.defaults.bambuddy_api_key,
-            public_url=self.defaults.public_url,
-            default_plate=self.defaults.default_plate,
+        self.connect_timeout = connect_timeout
+        self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
+            defaults.database_url,
+            min_size=1,
+            max_size=defaults.database_pool_size,
+            open=False,
+            connection_class=Connection[DictRow],
+            kwargs={"autocommit": True, "row_factory": dict_row},
+            name="scadbuddy-settings",
         )
 
-    def load(self) -> StoredSettings:
-        stored = self._from_env()
-        if not self.path.is_file():
-            return stored
-        on_disk = StoredSettings.model_validate_json(self.path.read_text(encoding="utf-8"))
-        merged = stored.model_dump()
-        merged.update(on_disk.model_dump(exclude_none=True))
-        for name in on_disk.cleared:
-            merged[name] = None
-        return StoredSettings.model_validate(merged)
+    def open(self) -> None:
+        """Connect and bring the schema up to date. Fails the start when it cannot."""
+        self._pool.open(wait=True, timeout=self.connect_timeout)
+        with self._pool.connection() as conn:
+            applied = migrate(conn)
+        if applied:
+            logger.info("applied database migrations", extra={"versions": applied})
 
-    @_serialized
+    def close(self) -> None:
+        self._pool.close()
+
+    def _from_env(self) -> dict[str, Any]:
+        return {name: getattr(self.defaults, name) for name in ENV_SEEDED}
+
+    def load(self) -> StoredSettings:
+        # One snapshot across the three tables, so a load never pairs a model's new
+        # choices with a plate from before the same print.
+        with self._pool.connection() as conn, conn.transaction():
+            conn.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            rows = conn.execute("SELECT name, value FROM settings").fetchall()
+            choices = conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
+            beds = conn.execute("SELECT printer_id, bed_type FROM printer_bed_types").fetchall()
+        values = self._from_env()
+        for row in rows:
+            # A name this version does not know (a newer one wrote it) is left alone.
+            if row["name"] in StoredSettings.model_fields and row["name"] not in OWN_TABLES:
+                values[row["name"]] = row["value"]
+        values["model_print_choices"] = {row["model_id"]: row["choices"] for row in choices}
+        values["printer_bed_types"] = {str(row["printer_id"]): row["bed_type"] for row in beds}
+        return StoredSettings.model_validate(values)
+
+    def _written(self, section: SettingsSection) -> StoredSettings:
+        """Announce a committed write and read the settings back."""
+        emit(self.events, SettingsChanged(section=section))
+        return self.load()
+
     def save(self, patch: SettingsPatch) -> StoredSettings:
-        current = self.load().model_dump()
         # exclude_unset, not exclude_none: an omitted key leaves the stored value
         # alone, while an explicit null clears it. Without that an id could be set
         # but never unset.
         changes = patch.model_dump(mode="json", exclude_unset=True)
         if changes.get("bambuddy_api_key") == "":
             changes["bambuddy_api_key"] = None
-        if "display_unit" in changes and changes["display_unit"] is None:
-            changes["display_unit"] = "mm"
-        cleared = set(current["cleared"])
-        for name in ENV_SEEDED:
-            if name not in changes:
-                continue
-            if changes[name] is None:
-                cleared.add(name)
-            else:
-                cleared.discard(name)
-        current.update(changes, cleared=sorted(cleared))
-        return self._write(StoredSettings.model_validate(current), "connection")
+        with self._pool.connection() as conn, conn.transaction():
+            for name, value in changes.items():
+                if value is not None:
+                    _put(conn, name, value)
+                elif name in ENV_SEEDED and name not in NEVER_NONE:
+                    # Cleared, which must beat the environment: a JSON null row.
+                    _put(conn, name, None)
+                else:
+                    # Back to the default, or to following the environment.
+                    conn.execute("DELETE FROM settings WHERE name = %s", (name,))
+        return self._written("connection")
 
-    @_serialized
     def set_model_pipeline(self, slug: str, pipeline_id: int | None) -> StoredSettings:
         """Point one model at a pipeline, or clear it back to the global fallback.
 
         One slug at a time rather than through :class:`SettingsPatch`, which would make
         the browser send the whole map back and lose any entry it had not loaded.
         """
-        settings = self.load()
-        pipelines = dict(settings.model_pipelines)
-        if pipeline_id is None:
-            pipelines.pop(slug, None)
-        else:
-            pipelines[slug] = pipeline_id
-        return self._write(
-            settings.model_copy(update={"model_pipelines": pipelines}), "model_pipeline"
-        )
+        with self._pool.connection() as conn:
+            _put_entry(conn, "model_pipelines", slug, pipeline_id)
+        return self._written("model_pipeline")
 
-    @_serialized
     def set_model_choices(self, slug: str, choices: ModelPrintChoices) -> StoredSettings:
         """Remember one model's printer and spools; an empty ``choices`` forgets them."""
-        settings = self.load()
-        remembered = dict(settings.model_print_choices)
-        if choices == ModelPrintChoices():
-            remembered.pop(slug, None)
-        else:
-            remembered[slug] = choices
-        return self._write(
-            settings.model_copy(update={"model_print_choices": remembered}), "model_choices"
-        )
+        with self._pool.connection() as conn:
+            if choices == ModelPrintChoices():
+                conn.execute("DELETE FROM model_print_choices WHERE model_id = %s", (slug,))
+            else:
+                conn.execute(
+                    "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)"
+                    " ON CONFLICT (model_id) DO UPDATE"
+                    " SET choices = EXCLUDED.choices, updated_at = now()",
+                    (slug, Jsonb(choices.model_dump(mode="json"))),
+                )
+        return self._written("model_choices")
 
-    @_serialized
     def set_printer_bed_type(self, printer_id: int, bed_type: str | None) -> StoredSettings:
         """Remember the plate on one printer; ``None`` forgets it."""
-        settings = self.load()
-        remembered = dict(settings.printer_bed_types)
-        if bed_type is None:
-            remembered.pop(str(printer_id), None)
-        else:
-            remembered[str(printer_id)] = bed_type
-        return self._write(
-            settings.model_copy(update={"printer_bed_types": remembered}), "printer_bed_type"
-        )
+        with self._pool.connection() as conn:
+            if bed_type is None:
+                conn.execute("DELETE FROM printer_bed_types WHERE printer_id = %s", (printer_id,))
+            else:
+                conn.execute(
+                    "INSERT INTO printer_bed_types (printer_id, bed_type) VALUES (%s, %s)"
+                    " ON CONFLICT (printer_id) DO UPDATE"
+                    " SET bed_type = EXCLUDED.bed_type, updated_at = now()",
+                    (printer_id, bed_type),
+                )
+        return self._written("printer_bed_type")
 
-    @_serialized
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
-        return self._write(
-            self.load().model_copy(update={"last_project_id": project_id}), "last_project"
-        )
+        with self._pool.connection() as conn:
+            if project_id is None:
+                conn.execute("DELETE FROM settings WHERE name = 'last_project_id'")
+            else:
+                _put(conn, "last_project_id", project_id)
+        return self._written("last_project")
 
-    def _write(self, settings: StoredSettings, section: SettingsSection) -> StoredSettings:
-        # A temporary file renamed over the old one, so a concurrent ``load`` (which
-        # takes no lock) reads the old file or the new one, never a half-written one.
-        # ``mkstemp`` creates it 0600, so the API key is never readable in between.
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.name}.")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(json.dumps(settings.model_dump(mode="json"), indent=2) + "\n")
-            os.chmod(temporary, KEY_FILE_MODE)
-            os.replace(temporary, self.path)
-        except BaseException:
-            Path(temporary).unlink(missing_ok=True)
-            raise
-        emit(self.events, SettingsChanged(section=section))
-        return settings
-
-    @_serialized
     def save_print_options(
         self, scope: OptionScope, key: str | None, options: PrintOptions
     ) -> StoredSettings:
@@ -298,20 +317,48 @@ class SettingsStore:
         :meth:`set_model_pipeline` is not: a patch replaces a whole value, so the browser
         would have to send every printer and model back and would lose any it had not
         loaded. An all-unset ``options`` **removes** the scope rather than storing an
-        empty object, so the file does not accumulate a row per printer someone once
-        opened the disclosure for.
+        empty object, so the settings do not accumulate an entry per printer someone
+        once opened the disclosure for.
         """
-        settings = self.load()
-        if scope == "global":
-            return self._write(
-                settings.model_copy(update={"print_options": options}), "print_options"
-            )
-        if not key:  # pragma: no cover - the route validates this first
-            raise ValueError(f"the {scope!r} scope needs a key")
-        field = "printer_print_options" if scope == "printer" else "model_print_options"
-        mapping = dict(getattr(settings, field))
-        if options.is_empty():
-            mapping.pop(key, None)
-        else:
-            mapping[key] = options
-        return self._write(settings.model_copy(update={field: mapping}), "print_options")
+        value = None if options.is_empty() else options.model_dump(mode="json")
+        with self._pool.connection() as conn:
+            if scope == "global":
+                if value is None:
+                    conn.execute("DELETE FROM settings WHERE name = 'print_options'")
+                else:
+                    _put(conn, "print_options", value)
+            else:
+                if not key:  # pragma: no cover - the route validates this first
+                    raise ValueError(f"the {scope!r} scope needs a key")
+                field = "printer_print_options" if scope == "printer" else "model_print_options"
+                _put_entry(conn, field, key, value)
+        return self._written("print_options")
+
+
+def _put(conn: Connection[DictRow], name: str, value: object) -> None:
+    """Store one setting's value; ``None`` stores a JSON ``null`` (cleared)."""
+    conn.execute(
+        "INSERT INTO settings (name, value) VALUES (%s, %s)"
+        " ON CONFLICT (name) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+        (name, Jsonb(value)),
+    )
+
+
+def _put_entry(conn: Connection[DictRow], name: str, key: str, value: object) -> None:
+    """Set (or, for ``None``, remove) one key of a map-valued setting.
+
+    Merged inside the upsert, under the row's lock, so two writers changing different
+    keys at once both land.
+    """
+    if value is None:
+        conn.execute(
+            "UPDATE settings SET value = value - %s, updated_at = now() WHERE name = %s",
+            (key, name),
+        )
+        return
+    conn.execute(
+        "INSERT INTO settings (name, value) VALUES (%s, jsonb_build_object(%s::text, %s::jsonb))"
+        " ON CONFLICT (name) DO UPDATE"
+        " SET value = settings.value || EXCLUDED.value, updated_at = now()",
+        (name, key, Jsonb(value)),
+    )

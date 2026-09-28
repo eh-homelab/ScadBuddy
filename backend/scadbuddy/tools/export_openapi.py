@@ -11,11 +11,14 @@ from scadbuddy.main import create_app
 
 # scadbuddy/tools/export_openapi.py -> scadbuddy -> backend
 DEFAULT_OUTPUT = Path(__file__).resolve().parents[2] / "openapi.json"
+#: Satisfies the required ``SCADBUDDY_DATABASE_URL`` for an app that never starts.
+UNUSED_DATABASE_URL = "postgresql://unused.invalid/scadbuddy"
 
 
 def export(out_path: Path) -> Path:
     # No frontend bundle and no data dir: the schema must not depend on the environment.
-    app = create_app(Settings(frontend_dir=Path("/nonexistent")))
+    # Building the app connects to nothing, so the database URL is never dialled.
+    app = create_app(Settings(frontend_dir=Path("/nonexistent"), database_url=UNUSED_DATABASE_URL))
     out_path.write_text(json.dumps(app.openapi(), indent=2, sort_keys=True) + "\n", "utf-8")
     return out_path
 

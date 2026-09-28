@@ -1,14 +1,17 @@
 from __future__ import annotations
 
-import json
-from pathlib import Path
+from typing import Any
 
 import httpx
+import psycopg
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from psycopg.types.json import Jsonb
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import SettingsStore
+from scadbuddy.library.settings_store import StoredSettings
 from tests.api.test_print import printers_route
 from tests.api.test_print_filaments import inventory_routes, prepared
 from tests.api.test_send import BASE, upload_route
@@ -197,22 +200,29 @@ def test_the_dialogs_nozzles_tier_and_process_are_remembered_per_model(
     assert body["model_choices"] == remembered
 
 
-def test_a_settings_file_from_before_the_dialog_choices_still_loads(
-    client: TestClient, model: str, data_dir: Path
+def _store_choices_row(settings: Settings, model: str, choices: dict[str, Any]) -> None:
+    """Write a ``model_print_choices`` row by hand, as an older writer might have."""
+    with psycopg.connect(settings.database_url) as conn:
+        conn.execute(
+            "INSERT INTO model_print_choices (model_id, choices) VALUES (%s, %s)",
+            (model, Jsonb(choices)),
+        )
+
+
+def _load(app: FastAPI) -> StoredSettings:
+    loaded: StoredSettings = getattr(app.state, STATE_ATTR).settings_store.load()
+    return loaded
+
+
+def test_a_stored_choice_with_only_the_printer_and_spools_still_loads(
+    client: TestClient, app: FastAPI, model: str, settings: Settings
 ) -> None:
-    """Existing settings.json rows carry only the printer and spools."""
-    (data_dir / "settings.json").write_text(
-        json.dumps(
-            {
-                "model_print_choices": {
-                    model: {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
-                }
-            }
-        ),
-        encoding="utf-8",
+    """Every dialog choice defaults to "nothing remembered", so a row without them loads."""
+    _store_choices_row(
+        settings, model, {"printer_id": 2, "filament_plan": [{"slot_id": 1, "spool_id": 9}]}
     )
 
-    loaded = SettingsStore(data_dir / "settings.json", Settings()).load()
+    loaded = _load(app)
 
     choices = loaded.model_print_choices[model]
     assert choices.printer_id == 2
@@ -277,7 +287,7 @@ def test_a_settings_printer_that_is_gone_falls_through_to_the_first_active_one(
 
 
 def test_a_single_remembered_nozzle_is_read_as_both_sides(
-    client: TestClient, model: str, data_dir: Path
+    client: TestClient, app: FastAPI, model: str, settings: Settings
 ) -> None:
     """Final review 10: the dialog has two sides, so a remembered choice is none or two.
     One entry (hand-edited, or an older writer) means that nozzle on both sides."""
@@ -287,11 +297,9 @@ def test_a_single_remembered_nozzle_is_read_as_both_sides(
 
     both = [{"size": "0.6", "flow": "standard"}, {"size": "0.6", "flow": "standard"}]
     assert saved["nozzles"] == both
-    (data_dir / "settings.json").write_text(
-        json.dumps({"model_print_choices": {model: one}}), encoding="utf-8"
-    )
-    loaded = SettingsStore(data_dir / "settings.json", Settings()).load()
-    assert [n.model_dump() for n in loaded.model_print_choices[model].nozzles] == both
+    _store_choices_row(settings, "another-model", one)
+    loaded = _load(app)
+    assert [n.model_dump() for n in loaded.model_print_choices["another-model"].nozzles] == both
 
 
 def test_more_than_two_remembered_nozzles_are_refused(client: TestClient, model: str) -> None:

@@ -3078,6 +3078,8 @@ export interface components {
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
             library_folder_id?: number | null;
+            /** Media Upload Max Bytes */
+            media_upload_max_bytes?: number | null;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Printer Id */
@@ -3113,6 +3115,8 @@ export interface components {
             has_api_key: boolean;
             /** Library Folder Id */
             library_folder_id?: number | null;
+            /** Media Upload Max Bytes */
+            media_upload_max_bytes: number;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Printer Id */

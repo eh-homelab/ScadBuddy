@@ -532,6 +532,7 @@ export const settings: Settings = {
   bed_type: null,
   default_plate: null,
   display_unit: 'mm',
+  media_upload_max_bytes: 1024 * 1024 * 1024,
 }
 
 /**

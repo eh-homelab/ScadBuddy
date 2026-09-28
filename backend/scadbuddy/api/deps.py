@@ -29,7 +29,7 @@ from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutGate, LibraryStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputStore
 from scadbuddy.library.presets import PresetStore
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
@@ -152,7 +152,8 @@ def build_state(settings: Settings) -> AppState:
         catalogue=catalogue,
         outputs=outputs,
         presets=PresetStore(paths),
-        settings_store=SettingsStore(paths.root / SETTINGS_NAME, settings, events=events),
+        # Nothing connects here either: the lifespan opens it first thing.
+        settings_store=SettingsStore(settings, events=events),
         fonts=FontService(
             paths.root,
             api_key=config.google_fonts_api_key,

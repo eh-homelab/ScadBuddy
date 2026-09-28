@@ -83,6 +83,9 @@ DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
 # How old a duplicate's staging folder must be before a sweep treats it as a crashed
 # copy rather than another replica's copy in flight (#212).
 DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
+# The largest template video (#274) or print attachment (#309) one upload may carry.
+# Settings > Uploads overrides it; the upload route streams it to disk either way.
+DEFAULT_MEDIA_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True)

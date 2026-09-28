@@ -361,14 +361,19 @@ async def test_a_restart_announces_the_jobs_it_failed(tmp_path: Path) -> None:
     assert [(e.kind, e.job_id) for e in seen if isinstance(e, JobEvent)] == [("job.failed", job.id)]
 
 
-def test_every_settings_write_is_announced_with_its_section(tmp_path: Path) -> None:
+def test_every_settings_write_is_announced_with_its_section(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
     bus = InProcessEventBus()
     seen = _record(bus)
-    store = SettingsStore(tmp_path / "settings.json", Settings(data_dir=tmp_path), events=bus)
-
-    store.save(SettingsPatch(public_url="https://scad.example"))
-    store.set_model_pipeline("demo", 3)
-    store.remember_project(7)
+    store = SettingsStore(Settings(data_dir=tmp_path, database_url=pg_conninfo), events=bus)
+    store.open()
+    try:
+        store.save(SettingsPatch(public_url="https://scad.example"))
+        store.set_model_pipeline("demo", 3)
+        store.remember_project(7)
+    finally:
+        store.close()
 
     assert [e.section for e in seen if isinstance(e, SettingsChanged)] == [
         "connection",

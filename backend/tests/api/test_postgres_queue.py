@@ -18,7 +18,7 @@ from tests.api.conftest import wait_for_job
 def test_the_app_queues_renders_in_postgres(
     settings: Settings, model: str, pg_conninfo: str
 ) -> None:
-    app = create_app(settings.model_copy(update={"database_url": pg_conninfo}))
+    app = create_app(settings)
     with TestClient(app) as client:
         accepted = client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}})
         assert accepted.status_code == 202
@@ -33,8 +33,3 @@ def test_the_app_queues_renders_in_postgres(
         row = conn.execute("SELECT state FROM render_jobs WHERE id = %s", (job_id,)).fetchone()
     assert row is not None and row[0] == settled["status"]
     assert "scadbuddy_render_queue_depth 0.0" in metrics
-
-
-def test_without_a_database_url_the_queue_uses_files(settings: Settings) -> None:
-    app = create_app(settings)
-    assert not isinstance(app.state.scadbuddy.queue.store, PostgresJobStore)

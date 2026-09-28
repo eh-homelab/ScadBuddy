@@ -134,6 +134,9 @@ async def _asset_sweeper(state: AppState) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
+    # First: without its database ScadBuddy has no settings, so it does not start.
+    # It also brings the schema up to date, before the queue's store opens.
+    await asyncio.to_thread(state.settings_store.open)
     state.paths.ensure()
     # Before the built-in sync: an existing models directory becomes revision 1,
     # so what a newer image changes in a built-in is a commit on top of it rather
@@ -209,6 +212,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 await sweeper
         await state.queue.aclose()
         await state.events.aclose()
+        await asyncio.to_thread(state.settings_store.close)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -246,6 +250,3 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     else:
         logger.info("no frontend bundle found; serving the API only")
     return app
-
-
-app = create_app()

@@ -12,12 +12,11 @@ from typing import Any
 
 import httpx
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS
-from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
 from tests.api.test_send import (
     API,
     PRESETS,
@@ -391,15 +390,14 @@ def test_the_targeted_printers_override_still_takes_the_queue_path(
 
 @respx.mock
 def test_a_models_stored_pipeline_is_ignored_for_the_settings_one(
-    client: TestClient, model: str, paths: DataPaths, settings: Settings
+    client: TestClient, app: FastAPI, model: str
 ) -> None:
     """Final review 3: a per-model pipeline (#86) can no longer be set or seen — its
-    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale entry in an
-    existing ``settings.json`` must not quietly override the one Settings shows. It stays
-    stored, unread.
+    routes went with the pipeline picker (spec 2026-09-27 §4) — so a stale stored entry
+    must not quietly override the one Settings shows. It stays stored, unread.
     """
     configure(client, pipeline_id=4)
-    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
+    getattr(app.state, STATE_ATTR).settings_store.set_model_pipeline(model, 9)
     remember(client, "global", {"timelapse": False})
     output_id = make_output(client, model)
     upload_route()

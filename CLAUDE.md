@@ -20,9 +20,16 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. Tests marked `requires_postgres` (the render queue's Postgres store) skip
-unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
-CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
+PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
+live only in Postgres), so every test that builds the app takes the `pg_conninfo`
+fixture (a throwaway schema), and it and the `requires_postgres` tests skip unless
+`SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in, e.g.
+`docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
+postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
+container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Backend schema changes are appended to `MIGRATIONS` in `render/pg_store.py` (numbered by
+position, recorded in `scadbuddy_migrations`); the settings tables are there too. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):
