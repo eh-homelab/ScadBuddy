@@ -49,7 +49,7 @@ RUN apt-get update \\
  && rm -rf /var/lib/apt/lists/*
 DOCKERFILE
 fi
-if ! docker run --rm "$IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
+if ! docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" "$IMAGE" fc-list : family | grep -F "$FONT_FAMILY" >/dev/null; then
     echo "FAIL: $IMAGE has no '$FONT_FAMILY'" >&2
     exit 1
 fi
@@ -101,6 +101,14 @@ CASES = [
                            clearance=1.0, tray_wall=5), [], []),
     ("glyphs-3-tray", dict(set="letters", letters="YZ0123456789", layout="tray",
                            clearance=0.3), [], []),
+    # Every glyph's colour hint at the smallest size: hint_inset is a fixed
+    # 1.5 mm, so a thin stroke at piece_size 35 is where a hint would vanish.
+    ("glyphs-1-tray-small", dict(set="letters", letters="ABCDEFGHIJKL", layout="tray",
+                                 piece_size=35), [], []),
+    ("glyphs-2-tray-small", dict(set="letters", letters="MNOPQRSTUVWX", layout="tray",
+                                 piece_size=35), [], []),
+    ("glyphs-3-tray-small", dict(set="letters", letters="YZ0123456789", layout="tray",
+                                 piece_size=35), [], []),
     # Big numbers: the pieces shrink so the tray fits, then the tray prints alone.
     ("numbers-big", dict(set="numbers", piece_size=80),
      ["pieces are 71 mm (80 asked)", "do not fit one plate together"], []),
@@ -130,7 +138,7 @@ def defines(ov):
 
 
 def docker(script):
-    r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w",
+    r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", os.getcwd() + ":/w", "-w", "/w",
                         IMAGE, "bash", "-ec", script], capture_output=True, text=True)
     if r.returncode or "WARNING" in r.stderr or "ERROR" in r.stderr:
         print(r.stderr[-4000:])
@@ -311,6 +319,9 @@ for name, ov, want_notes, bad_notes in CASES:
         jobs.append("openscad --backend=Manifold %s %s -o %s/%s_%s.stl model.scad"
                     % (d, extra, OUT, name, tag))
     for col in [TRAY] + PIECE:
+        # An empty colour writes no file, so drop a previous run's.
+        if os.path.exists("%s/%s_%s.stl" % (OUT, name, col[1:])):
+            os.remove("%s/%s_%s.stl" % (OUT, name, col[1:]))
         jobs.append("openscad --backend=Manifold %s -D '_sb_t=\"%s\"' -o %s/%s_%s.stl %s/wrap.scad"
                     " 2>&1 | grep -v 'Current top level object is empty' >&2 || true"
                     % (d, col, OUT, name, col[1:], OUT))
@@ -337,6 +348,13 @@ for name, ov, want_notes, bad_notes in CASES:
         tz = [v[2] for t in read_stl("%s/%s_%s.stl" % (OUT, name, TRAY[1:])) for v in t]
         check(abs(max(tz) - tray_h) < 1e-3, "tray is %.1f mm tall, full height to its top edge (%.3f)"
               % (tray_h, max(tz)))
+    if tray_shown and not pieces_shown and p["color_hints"] and n <= len(PIECE):
+        # One colour per hole, so each colour's part is exactly that hole's hint.
+        def hint_holes(k):
+            f = "%s/%s_%s.stl" % (OUT, name, PIECE[k][1:])
+            return holes_hit(real_points(read_stl(f))) if os.path.exists(f) else set()
+        bad = [k for k in range(n) if hint_holes(k) != {k}]
+        check(not bad, "every hole has its own colour hint (missing or misplaced: %s)" % bad)
     total = sum(volume(read_stl("%s/%s_%s.stl" % (OUT, name, col[1:]))) for col in want)
     union = volume(read_stl("%s/%s_all.stl" % (OUT, name)))
     check(abs(union - total) <= 0.001 * union,
