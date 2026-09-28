@@ -409,7 +409,10 @@ only fetches, vets and stores the pin with its review. Nothing loads until the a
 approves that exact `commit_sha` and `content_hash` through
 `POST /api/v1/ai/plugin-packages/:name/approve`. Enabling needs an approved pin (also a
 `CHECK` on `ai_plugin_packages`). A re-pin stays pending, and the old pin keeps loading,
-until the admin approves the new one after seeing its file diff. The routes use the
+until the admin approves the new one after seeing its file diff. A re-pin fetched from
+another repository or path than the current pin (a marketplace entry that moved) is
+shown as such in the review, and approving it leaves the package disabled: the new
+source loads only once the admin enables it again. The routes use the
 same UI guard as credential writes, with the same limitation (Known limitations, 1).
 
 **Pin and cache.** The content hash is SHA-256 over a sorted list of path, executable bit
