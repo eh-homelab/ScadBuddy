@@ -13,14 +13,14 @@ open. Anything the spec plans but `main` does not have is marked **not built**.
 - **The agent service has no authentication.** Its credential writes are *gated*, but
   not authenticated (see [Origin gate](#dns-rebinding-defence)). The limitation is
   stated in the header of [`agent/src/routes/guard.ts`](../../agent/src/routes/guard.ts).
-- **`/mcp`, the tool registry and approvals** are on `main` (#368, #471):
-  [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts),
+- **`/mcp`, the tool registry and approvals are on `main`** (#251's registry in
   [`agent/src/tools/`](../../agent/src/tools/) and
-  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts). The tool
-  paths are `/mcp`, the harness's in-process `scadbuddy` server (every session's
-  queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)),
-  and the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
-  `/mcp` is authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)).
+  [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts); #258's approval store in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts)). `/mcp` is
+  authenticated by bearer tokens (see [MCP bearer tokens](#mcp-bearer-tokens)). The
+  other tool paths are the harness's in-process `scadbuddy` server (every session's
+  queries get it, [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)) and
+  the browser bridge in the user's own tab ([browser-bridge.md](browser-bridge.md)).
   Nothing starts a session over HTTP yet (#266, #300).
 
 ## MCP bearer tokens
@@ -44,7 +44,32 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
-- **Not built:** the Settings routes and UI to mint, list and revoke tokens (#251).
+- **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
+  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
+  over `/api/v1/ai/mcp-tokens`
+  ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
+  routes in [operating.md §4.1](operating.md#41-mcp-access-tokens)):
+  - `GET` returns metadata only (name, tier, created, expires, last used, revoked and a
+    derived `status`), never the token or its hash. The store keeps no last-4 hint, so
+    none is shown. It passes `uiReadProblem()` (HTTPS, and an `Origin` or `Host` on the
+    allowlist; a cross-site `Sec-Fetch-Site` is refused).
+  - `POST` returns the plaintext once, in the `201` body, with `Cache-Control:
+    no-store`. The route never logs it. `DELETE /:id` sets `revoked_at`; a revoked
+    token stays listed and never verifies again.
+  - Both writes pass `uiRequestProblem()`, as credential writes do: minting a
+    token is an outward write (spec §8.1). `POST` also needs `Content-Type:
+    application/json` (`415` otherwise). The same limitation applies: this is a gate, not
+    authentication (spec §8.3, "Stated plainly").
+  - In the browser, the plaintext is held only in the section's React state until
+    **Done**. It is rendered as text in a `<code>` element, not as a field value, so the
+    browser agent's snapshot ([`frontend/src/agent/snapshot.ts`](../../frontend/src/agent/snapshot.ts)),
+    which reads field values and `role=status`/`alert` text, never sees it. Create,
+    Copy and Revoke are `USER_ONLY`, so the browser agent cannot press them.
+  - Every auth mode allows managing tokens. In `disabled` mode `/mcp` does not check
+    them; they are kept for when the mode returns to `bearer`, and Settings shows a
+    warning. In `oidc` mode (#262) bearer tokens keep working alongside the IdP
+    (spec §8.3). `GET` reports `auth_mode` for this.
 
 ## Risk tiers and the permission seam
 
@@ -56,11 +81,11 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
 
 - `decide(toolName, tierOf)`: an unknown tool (`tierOf` returns `undefined`) is treated
   as `outward`. `read` and `write` are allowed. `outward` gets `needs_approval`.
-- **Approvals** (#258, `ai_approvals`). In a session turn, `needs_approval` parks the
-  call in `canUseTool` until a human decides in the UI
-  ([`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts) `gate()`).
-  A query with no approval gate answers it with a **deny**, whose message tells the
-  model to explain rather than retry. An outward tool therefore never runs unattended.
+- **Approvals** (#258): in a session, `needs_approval` parks the call until a human
+  decides it in the UI (`approvalGate`, [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  with no gate (outside a session) it is answered with a **deny**, whose message tells
+  the model to explain rather than retry. An outward tool therefore never runs
+  unattended. External MCP clients use prepare/confirm instead (below).
 - **The registry's tiers.** Sessions get `tierOf` from
   [`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts): each registry tool
   under its harness name `mcp__scadbuddy__<name>` maps to its `risk`, and every other
@@ -82,55 +107,6 @@ The implementation is in [`agent/src/harness/permissions.ts`](../../agent/src/ha
   sets both on every query, together with `permissionMode: 'default'`. If `tierOf`
   is omitted, every tool resolves to `outward`.
 
-## MCP auth mode
-
-Spec §8.3 makes the mode "a database setting", and §9 lists "MCP auth mode" with the
-AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
-`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts):
-
-- `mcp_auth_mode`: `"bearer"` (the default when unset), `"disabled"` or `"oidc"` (501
-  until #262);
-- `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
-  `"outward"` by default (spec §8.3, "full access by default").
-
-It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
-warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
-verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
-While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
-and again whenever the settings change, not on every request. Outward calls still stop
-at the approval gate in every mode. There is no Settings route or UI for these keys yet
-(#255); [operating.md](operating.md#9-mcp-auth-mode) shows how to set them.
-
-## Prepare and confirm over `/mcp`
-
-Spec §8.2: external MCP clients get "a two-step `prepare` ... then `confirm`, where the
-confirm completes only after the UI approval". As built:
-
-- **Prepare.** An outward tool called over `/mcp` runs nothing. `runTool()` in
-  [`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts) keeps the call (the
-  tool and a copy of its parsed arguments) in memory
-  ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)) and records a
-  pending approval in `ai_approvals` under the same id: no session, no turn, requested
-  by the caller's principal, with the scrubbed summary and the input HMAC that session
-  approvals use. The UI decides it like any other (`GET /api/v1/ai/approvals`, then
-  `POST /api/v1/ai/approvals/{id}/approve` or `/deny`, in
-  [`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)).
-- **Confirm.** `confirm_action` in
-  [`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts) runs the call only
-  when all of these hold: the pending action is the caller's; the approval row is
-  visible to the caller as its requester; the row's tool and `input_hash` match the
-  prepared call; the row is approved and usable; and `consumeById()` marks it used.
-  That last step is one conditional `UPDATE`, so of two concurrent confirms one runs
-  and the other is refused. A pending, denied, expired, cancelled or used approval is
-  refused with the reason, and nothing is sent.
-- **The arguments are never stored.** They live only in the agent's memory, as
-  `ai_approvals` holds no inputs. An approval approved after a restart, or confirmed on
-  another replica, has nothing to run, and the caller prepares again.
-- **Without a database** outward calls are still prepared, and every confirm is
-  refused.
-
-Measured in [`agent/test/confirm.pg.test.ts`](../../agent/test/confirm.pg.test.ts).
-
 **Least privilege** (spec D7, §4.4). `buildQueryOptions()` in
 [`agent/src/harness/options.ts`](../../agent/src/harness/options.ts) sets:
 
@@ -150,6 +126,68 @@ outside the gateway path").
 **Runaway limits.** Each query gets `maxTurns` (25) and `maxBudgetUsd` (1 USD), plus an
 abort signal (`run.ts`). Sessions spend one budget across all their turns, and any
 watcher can interrupt (PR #377 body, "Budget and turns", "Interrupt").
+
+## MCP auth mode
+
+Spec §8.3 makes the mode "a database setting", and §9 lists "MCP auth mode" with the
+AI state in Postgres. It is read from `ai_settings` on every `/mcp` request, by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts):
+
+- `mcp_auth_mode`: `"bearer"` (the default when unset), `"disabled"` or `"oidc"` (501
+  until #262);
+- `mcp_anonymous_cap`: the highest tier an `anonymous` caller gets in `disabled` mode,
+  `"outward"` by default (spec §8.3, "full access by default").
+
+It fails closed. An unknown mode is `bearer` and an unknown cap is `read`, each with a
+warning in the log. A read that fails makes `/mcp` answer as `bearer` with no token that
+verifies (`resolveAuth()` in [`agent/src/mcp/http.ts`](../../agent/src/mcp/http.ts)).
+While the mode is `disabled`, the agent logs a warning naming the cap. It logs it once,
+and again whenever the settings change, not on every request. Outward calls still stop
+at the approval gate in every mode. There is no Settings route or UI for these keys yet
+(#255); [operating.md](operating.md#9-mcp-auth-mode) shows how to set them.
+
+## MCP prepare/confirm on the approval store
+
+Spec §8.2 gives external MCP clients "a two-step `prepare` (returns a pending action
+id and a human-readable summary) then `confirm`, where the confirm completes only after
+the UI approval". As built:
+
+- **Prepare.** `runTool` ([`agent/src/tools/registry.ts`](../../agent/src/tools/registry.ts))
+  does not run a gated outward tool. `ApprovalActions.prepare`
+  ([`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts)) records a pending
+  row in `ai_approvals` through `ApprovalService.create()`, with no session and no turn.
+  The row holds the MCP principal (`requested_by`), the tool, the HMAC-SHA256 input hash
+  under the KEK-derived key (`approvalHashKey`) and the scrubbed input summary. It never
+  holds the full input. The row id is the `pending_action_id`.
+- **Bounds.** A caller keeps at most 50 pending actions; a 51st cancels that caller's
+  oldest. At 10,000 pending sessionless rows, a new prepare is refused and nobody's row
+  is evicted. These are the in-memory store's bounds from #368, applied to the table.
+  `ApprovalService.createPrepared` checks and applies both bounds in the insert's own
+  transaction, under one `pg_advisory_xact_lock`, so concurrent prepares cannot
+  overshoot them (covered by a concurrent-burst test in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Anonymous callers.** In `disabled` mode the principal id is
+  `anonymous:<Mcp-Session-Id>`, and the session id is that client's capability
+  (`mcp/http.ts`). `requested_by` therefore stores `anonymous:` plus the first 128 bits
+  of a SHA-256 of that id (`ownerOf`). The approval routes and the table never show the
+  session id itself.
+- **Decide.** The UI approves or denies it with `POST /api/v1/ai/approvals/:id/approve`
+  or `/deny` ([`agent/src/routes/approvals.ts`](../../agent/src/routes/approvals.ts)), as
+  the browser user. `authorize` refuses a principal deciding its own request even with
+  an approval grant, so an MCP client cannot approve what it prepared (covered in
+  `agent/test/mcpConfirm.pg.test.ts`).
+- **Confirm.** `confirm_action` ([`agent/src/tools/approvals.ts`](../../agent/src/tools/approvals.ts))
+  takes the `pending_action_id` and the same `arguments` again, because the table has
+  only the hash. It answers `pending_approval` while the row is undecided. It runs the
+  tool only when `ApprovalService.consumePrepared` marks the row used. That is one
+  `UPDATE` requiring: no session, the same `requested_by`, the same input hash,
+  `decision = 'approved'`, not consumed, not revoked, and `usable_until > now()`. Two
+  confirms cannot both win. A replay, another principal, a changed input, a denial or an
+  expiry is refused and nothing is sent. The approval is used up before the tool runs,
+  so a call that then fails is not retried on the same approval.
+- **No database.** `main.ts` falls back to the in-memory `PendingActionStore`
+  ([`agent/src/tools/pending.ts`](../../agent/src/tools/pending.ts)). Nothing can approve
+  its actions, so its `confirm_action` always refuses.
 
 ## Envelope encryption and AAD binding
 
@@ -280,17 +318,10 @@ It checks the default files (`hooks/hooks.json`, `.mcp.json`, `.lsp.json`,
 not checked, because it only extends the Bash tool's PATH. `buildHarness()` calls
 `assertPluginAllowed()` for every `pluginPaths` entry.
 
-**ScadBuddy's own plugin is loaded** in every session query (#299, spec §10). The
-agent image carries `plugins/scadbuddy/` at `/app/plugins/scadbuddy`
-([`Dockerfile`](../../Dockerfile), `agent` stage), and `main.ts` passes
-`bundledPluginPaths()` from `plugins.ts`. That vets it once at start and leaves it
-out, with a log line, if it is missing or refused. Every query then vets it again.
-Its `.mcp.json`, the remote `scadbuddy` server for Claude Code installs, is not started
-in the harness, because `strictMcpConfig` ignores plugin MCP configurations
-(`sdk.d.ts` 0.3.283). The harness reaches the same tools in-process. The init message
-reports the plugin with no `plugin_errors`
-([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts)).
-Fetching, pinning and reviewing user plugins (spec §10) is **not built** (open PR #464).
+ScadBuddy's own plugin passes (PR #379, row 8), but `main.ts` does not load it: with
+`tools: []` there is no `Skill` or `Agent` tool to use its skills or subagents
+([`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) asserts
+the registry tools are the only ones offered). Fetching, pinning and reviewing user plugins (spec §10) is **not built** (open PR #464).
 
 ## Event-log scrubbing (#377)
 
@@ -340,15 +371,11 @@ From the merged code and PR bodies:
    - a fork during a running turn is allowed but not tested;
    - `mirror_error` is not surfaced;
    - `waiting_input`, `waiting_approval` and `done` are never set yet.
-7. **Only ScadBuddy's own plugin is loaded.** `main.ts` passes the bundled
-   `plugins/scadbuddy` and nothing else (see [Plugin vetting](#plugin-vetting)); user
-   plugins are open PR #464.
+7. **No local plugin is loaded in production.** `main.ts` passes no plugin path: with
+   `tools: []` a query has no `Skill` or `Agent` tool, so a plugin's skills and
+   subagents could not be used (see [Plugin vetting](#plugin-vetting)).
 8. **Rotation leaves unopenable rows** as they are, and counts them in the log
    (`rewrapFrom()`).
-9. **Prepared `/mcp` calls live in one process.** Their arguments are kept in memory
-   only, so an approval decided after a restart, or confirmed through another replica,
-   cannot run and the call has to be prepared again (see
-   [Prepare and confirm](#prepare-and-confirm-over-mcp)).
 
 ## Spec §3.2 items still open
 

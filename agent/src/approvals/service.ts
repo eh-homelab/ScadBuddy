@@ -1,5 +1,5 @@
 import { createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
-import type { Sql } from 'postgres'
+import type { Sql, TransactionSql } from 'postgres'
 import type { ApprovalGate, ApprovalRequest, ApprovalVerdict, RiskTier } from '../harness/permissions.js'
 import { isUuid } from '../harness/stateDirs.js'
 import type { Kek } from '../secrets.js'
@@ -98,15 +98,15 @@ import { scrubForLog } from '../sessions/sdkEvents.js'
 //     periodically, and list/decide run it first).
 //   - a shutdown leaves the approval pending (it survives the restart).
 //
-// #251's MCP `prepare` / `confirm_action` pair (tools/registry.ts `runTool`,
-// tools/approvals.ts) uses this store: `prepare` → `create()` with no session
-// and no turn, under the pending action's id, requested by the caller's
-// principal; the UI decides through `decide()` (a sessionless approval is
-// visible to the browser user, grant holders and the principal that asked);
-// `confirm_action` → `get()` as that principal, a hash check against the
-// prepared input, then `consumeById()`, running the tool only when that
-// returns the approved row. It does not `waitFor()`: an MCP call answers at
-// once and says the decision is still pending.
+// MCP PREPARE / CONFIRM (#251's tools, wired in approvals/mcp.ts): an outward
+// tool called over /mcp is not run but `create()`d with no session and no
+// turn, requested by the MCP principal; the UI decides it through `decide()`
+// like any other (so `authorize` refuses self-approval here too); and
+// `confirm_action` runs it only when `consumePrepared()` returns the row:
+// approved, unused, not voided, within `usable_until`, same principal, same
+// input hash, in one UPDATE, so it is used exactly once. Nothing parks for
+// these: a confirm before the decision answers "pending" and the client asks
+// again.
 
 /** ai_settings key: seconds an approval waits for a decision. */
 export const SETTING_APPROVAL_EXPIRY_SECONDS = 'approval_expiry_seconds'
@@ -116,6 +116,8 @@ export const MAX_APPROVAL_EXPIRY_SECONDS = 86_400
 export const DEFAULT_APPROVAL_POLL_MS = 1000
 /** The longest `approval.required` summary. */
 export const APPROVAL_SUMMARY_MAX = 500
+/** The advisory-lock key MCP prepares serialise on (`createPrepared`). */
+const PREPARE_LOCK = 'scadbuddy:ai_approvals:mcp_prepare'
 
 export const DECISIONS = ['approved', 'denied', 'expired', 'cancelled'] as const
 export type Decision = (typeof DECISIONS)[number]
@@ -337,8 +339,6 @@ type SessionAccess = {
 }
 
 export type CreateApproval = {
-  /** A UUID for the row; a random one when omitted. #251's prepare passes its pending action's id. */
-  id?: string
   sessionId: string | null
   turnId: string | null
   toolUseId: string
@@ -494,20 +494,17 @@ export class ApprovalService {
     await this.deps.events.append(sessionId, events.map((e) => scrubForLog(e, secrets)))
   }
 
-  /** Records a pending approval (and, in a session, emits `approval.required`). */
-  async create(request: CreateApproval): Promise<ApprovalRecord> {
-    const secrets = request.secrets ?? []
-    const id = request.id ?? randomUUID()
-    const summary = summariseInput(request.tool, request.input, secrets)
+  /** The INSERT of a pending approval, on `db` (the pool, or a transaction). */
+  private async insert(db: Sql | TransactionSql, request: CreateApproval, summary: string): Promise<Row | undefined> {
     const ttl = await this.expirySeconds()
     const { requestedBy: by } = request
-    const [row] = await this.deps.sql.unsafe<Row[]>(
+    const [row] = await db.unsafe<Row[]>(
       `INSERT INTO ai_approvals (id, session_id, turn_id, tool_use_id, tool, input_summary, input_hash, tier,
                                  requested_by_kind, requested_by_id, requested_by_label, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now() + ($12 * interval '1 second'))
        RETURNING ${COLUMNS}`,
       [
-        id,
+        randomUUID(),
         request.sessionId,
         request.turnId,
         request.toolUseId,
@@ -521,8 +518,17 @@ export class ApprovalService {
         ttl,
       ],
     )
-    if (!row) throw new Error(`approval ${id} vanished after insert`)
+    return row
+  }
+
+  /** Records a pending approval (and, in a session, emits `approval.required`). */
+  async create(request: CreateApproval): Promise<ApprovalRecord> {
+    const secrets = request.secrets ?? []
+    const summary = summariseInput(request.tool, request.input, secrets)
+    const row = await this.insert(this.deps.sql, request, summary)
+    if (!row) throw new Error('approval vanished after insert')
     const approval = record(row)
+    const id = approval.id
     if (approval.sessionId !== null) {
       const tail: ServerEvent[] = [
         event({
@@ -795,6 +801,83 @@ export class ApprovalService {
     const [row] = await this.deps.sql.unsafe<Row[]>(
       `UPDATE ai_approvals SET consumed_at = now() WHERE id = $1 AND ${USABLE} RETURNING ${COLUMNS}`,
       [id],
+    )
+    return row ? record(row) : undefined
+  }
+
+  // -- prepared actions (MCP prepare / confirm_action, approvals/mcp.ts) ------
+
+  /** A principal's sessionless approvals still waiting for a decision, oldest first. */
+  async listPrepared(by: Owner): Promise<ApprovalRecord[]> {
+    const rows = await this.deps.sql.unsafe<Row[]>(
+      `SELECT ${COLUMNS} FROM ai_approvals
+       WHERE session_id IS NULL AND requested_by_kind = $1 AND requested_by_id = $2
+         AND decision IS NULL AND expires_at > now()
+       ORDER BY created_at, id LIMIT 500`,
+      [by.kind, by.id],
+    )
+    return rows.map(record)
+  }
+
+  /**
+   * Records a sessionless pending approval (an MCP prepare) within bounds, in
+   * one transaction under one advisory lock, so concurrent prepares cannot
+   * overshoot them: the requester's oldest pending ones are cancelled to keep
+   * it under `perPrincipal`; at `total` pending sessionless rows from anyone,
+   * nothing is inserted and `undefined` is returned (nobody's row is evicted).
+   */
+  async createPrepared(
+    request: Omit<CreateApproval, 'sessionId' | 'turnId'>,
+    bounds: { perPrincipal: number; total: number; evictReason: string },
+  ): Promise<ApprovalRecord | undefined> {
+    const summary = summariseInput(request.tool, request.input, request.secrets ?? [])
+    const by = request.requestedBy
+    const row = await this.deps.sql.begin(async (tx) => {
+      // One key for every MCP prepare: the per-principal and the global
+      // bound are both read and written under it. Held until commit.
+      await tx`SELECT pg_advisory_xact_lock(hashtextextended(${PREPARE_LOCK}, 0))`
+      const own = await tx<{ id: string }[]>`
+        SELECT id FROM ai_approvals
+        WHERE session_id IS NULL AND requested_by_kind = ${by.kind} AND requested_by_id = ${by.id}
+          AND decision IS NULL AND expires_at > now()
+        ORDER BY created_at, id`
+      const evict = own.slice(0, Math.max(own.length - bounds.perPrincipal + 1, 0)).map((r) => r.id)
+      if (evict.length > 0) {
+        await tx`
+          UPDATE ai_approvals SET decision = 'cancelled', decided_at = now(), reason = ${bounds.evictReason}
+          WHERE id = ANY(${evict}::uuid[]) AND decision IS NULL`
+      } else {
+        const [n] = await tx<{ n: number }[]>`
+          SELECT count(*)::int AS n FROM ai_approvals
+          WHERE session_id IS NULL AND decision IS NULL AND expires_at > now()`
+        if ((n?.n ?? 0) >= bounds.total) return undefined
+      }
+      const inserted = await this.insert(tx, { ...request, sessionId: null, turnId: null }, summary)
+      if (!inserted) throw new Error('approval vanished after insert')
+      return inserted
+    })
+    return row ? record(row) : undefined
+  }
+
+  /** Expires this one approval if it is pending and past its time. */
+  async expireIfDue(id: string): Promise<void> {
+    if ((await this.row(id))?.due) await this.expire(id)
+  }
+
+  /**
+   * Uses a sessionless approval once (`confirm_action`): only the principal
+   * that asked for it, only for the input it was asked (and approved) for,
+   * only while it is approved, unused, not voided and within `usable_until`.
+   * One UPDATE decides all of that, so two confirms cannot both win.
+   */
+  async consumePrepared(id: string, by: Owner, hash: string): Promise<ApprovalRecord | undefined> {
+    if (!isUuid(id)) return undefined
+    const [row] = await this.deps.sql.unsafe<Row[]>(
+      `UPDATE ai_approvals SET consumed_at = now()
+       WHERE id = $1 AND session_id IS NULL AND requested_by_kind = $2 AND requested_by_id = $3
+         AND input_hash = $4 AND ${USABLE}
+       RETURNING ${COLUMNS}`,
+      [id, by.kind, by.id, hash],
     )
     return row ? record(row) : undefined
   }

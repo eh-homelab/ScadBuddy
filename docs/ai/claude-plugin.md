@@ -7,8 +7,8 @@ The plugin's own README, [`plugins/scadbuddy/README.md`](../../plugins/scadbuddy
 is the primary reference. This page is the user-facing summary, and says what works
 today.
 
-> **Status.** The skills and subagents load, in your Claude Code and in ScadBuddy's own
-> harness ([Inside ScadBuddy](#inside-scadbuddy)). The MCP server the plugin connects to,
+> **Status.** The skills and subagents load in your Claude Code. ScadBuddy's own
+> harness does not load them ([Inside ScadBuddy](#inside-scadbuddy-not-loaded)). The MCP server the plugin connects to,
 > `<your ScadBuddy>/mcp`, is on `main` (#368), but nothing deploys the agent sidecar or
 > routes `/mcp` to it yet, and tokens cannot be minted in Settings yet (#251).
 
@@ -62,7 +62,7 @@ What the server does (spec §8.2–§8.4; [`agent/src/mcp/http.ts`](../../agent/
 - outward actions (send, print, delete, settings writes) always need a human approval
   in the ScadBuddy UI, whatever the token allows. The tool returns a
   `pending_action_id`; once the user approves it, `confirm_action` runs it, once
-  ([security.md](security.md#prepare-and-confirm-over-mcp)).
+  ([security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 
 Token minting in Settings is not built yet (#251).
 
@@ -72,27 +72,20 @@ The subagents' `tools` field lists both `mcp__scadbuddy` and
 `mcp__plugin_scadbuddy_scadbuddy`, so the same files work inside ScadBuddy's own harness
 and in an external install.
 
-## Inside ScadBuddy
+## Inside ScadBuddy (not loaded)
 
-The agent service loads this directory by path (spec §10), through the Agent SDK
+The spec (§10) has the agent service load this directory by path, through the Agent SDK
 `plugins: [{ type: "local", path }]` option
-([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)):
-
-- The agent image carries it at `/app/plugins/scadbuddy` ([`Dockerfile`](../../Dockerfile),
-  `agent` stage). `main.ts` passes it to every session as `pluginPaths`, through
-  `bundledPluginPaths()` in [`agent/src/harness/plugins.ts`](../../agent/src/harness/plugins.ts).
-  That vets it once at start and leaves it out, with a log line, if it is missing or
-  refused. `runHarness()` vets it again on every query
-  ([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)).
-- Its skills and subagents load. Its `.mcp.json` does not: `strictMcpConfig` ignores
-  plugin MCP configurations (`sdk.d.ts` 0.3.283). The tools come from the harness's
-  in-process `scadbuddy` server instead, as `mcp__scadbuddy__<tool>`
-  ([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts)). That is the first
-  of the two names the subagents allow.
-- On Claude Code 2.1.283 the init message lists the plugin (`scadbuddy`, version
-  `0.1.0`), its skills `scadbuddy:authoring`, `scadbuddy:customize` and
-  `scadbuddy:print`, and no `plugin_errors`. Measured against the fake Anthropic endpoint
-  in [`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts).
+([Agent SDK plugins](https://code.claude.com/docs/en/agent-sdk/plugins)). The harness can
+do this: `pluginPaths` in `runHarness()`
+([`agent/src/harness/run.ts`](../../agent/src/harness/run.ts)) vets and passes local
+plugins. But `main.ts` passes no plugin path, on purpose: every query runs with
+`tools: []` ([`agent/src/harness/options.ts`](../../agent/src/harness/options.ts)), so
+there is no `Skill` or `Agent` tool, and the plugin's skills and subagents would be
+listed but never usable. The harness's own tools reach the model directly as
+`mcp__scadbuddy__<tool>` ([`agent/src/tools/harness.ts`](../../agent/src/tools/harness.ts));
+[`agent/test/harnessWiring.test.ts`](../../agent/test/harnessWiring.test.ts) asserts that
+they are the only tools offered.
 
 Vetting is described in [security.md](security.md#plugin-vetting).
 

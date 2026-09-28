@@ -593,16 +593,16 @@ including `disabled`. Where it is enforced:
   `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
-  approval. As built (#255): the prepare records an `ai_approvals` row with no session
-  and no turn, requested by the caller's principal, under the pending action's id, and
-  keeps the call itself (tool and parsed arguments) in the agent's memory only, since
-  the table stores no inputs. `confirm_action` runs it only when the action is the
-  caller's, the row is the caller's, the row's tool and input hash match the prepared
-  call, and the row is approved and still usable. Using it is one conditional update
-  (`consumeById`), so it runs once. It does not wait: a pending approval is refused with
-  the reason, and the client confirms again once the user has decided. A call prepared
-  before a restart, or on another replica, cannot be confirmed and is prepared again.
-  The code is `agent/src/tools/registry.ts` `prepare` and `agent/src/tools/approvals.ts`.
+  approval. The prepare is a pending row in `ai_approvals` with no session. It records
+  the MCP principal, the tool, the input hash and the scrubbed summary, and its id is the
+  pending action id. The UI decides it like any other approval, and self-approval is
+  refused. `confirm_action` takes the id and the same arguments, because only the hash
+  is stored. It answers "pending" until a decision. It runs the call only when a single
+  `UPDATE` marks the row used, and that `UPDATE` requires the row to be approved,
+  unused, not voided and within its usable window, with the same principal and the same
+  input hash. So the call runs at most once, and a replay, another principal or a
+  changed input is refused. The code is `agent/src/approvals/mcp.ts` and
+  `agent/src/tools/approvals.ts`.
 - **Headless browser (#349):** the backend refuses outward routes on requests that carry
   the agent-actor marker unless an approved outward action authorises them (§5.3). Until
   the §3.2 items for that mechanism are verified, the headless browser stays off.
@@ -721,14 +721,10 @@ explains that they need the database.
   customizing, printing, analyzers), subagents (`model-author`, `print-analyst`), hooks,
   and a `.mcp.json` for external installs. It is baked into the image and loaded by path.
   A marketplace file at the repo root lets users install it in their own Claude Code.
-  As built (#299): the agent image carries it at `/app/plugins/scadbuddy` (Dockerfile
-  `agent` stage), and every session query gets it as a local plugin after
-  `agent/src/harness/plugins.ts` vets it (`bundledPluginPaths`, once at start, then
-  per query). Its `.mcp.json` is not started there: `strictMcpConfig` ignores
-  "plugins" among "all other MCP configurations" (`sdk.d.ts` 0.3.283), and the tools
-  come from the in-process server (§5.1). Measured on Claude Code 2.1.283: the init
-  message lists `scadbuddy` 0.1.0 in `plugins`, with its three skills and no
-  `plugin_errors` (`agent/test/harnessWiring.test.ts`).
+  As built (#526): the harness does not load it yet. Every query runs with `tools: []`
+  (§4.4), which leaves no `Skill` or `Agent` tool, so its skills and subagents would be
+  listed but unusable; exposing them needs those tools and a tier for them (§8.1)
+  first (`agent/test/harnessWiring.test.ts`).
 - **User plugins** are Claude plugins from a git URL, fetched into the data volume at a
   pinned commit. They are reviewed before enabling; their MCP servers must be Streamable
   HTTPS, with credentials in Settings. Command hooks are refused, because the harness has

@@ -1,6 +1,5 @@
 import { existsSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 
 // Vetting a local plugin before the harness loads it (spec §8.6, "Malicious or
 // changed plugin | ... command hooks refused"; §10, "Command hooks are
@@ -184,35 +183,4 @@ export function pluginProblems(pluginPath: string): string[] {
 export function assertPluginAllowed(pluginPath: string): void {
   const problems = pluginProblems(pluginPath)
   if (problems.length > 0) throw new PluginRefusedError(pluginPath, problems)
-}
-
-/**
- * ScadBuddy's own plugin (#299; spec §10, "baked into the image and loaded by
- * path"): `/app/plugins/scadbuddy` in the image (Dockerfile `agent` stage
- * copies it beside `/app/agent`), and the repository's `plugins/scadbuddy` in
- * a checkout. Both are three levels above this module (`dist/harness/` or
- * `src/harness/`), so the path is fixed by the layout, not configured: spec §9
- * keeps AI configuration out of the environment.
- */
-export const BUNDLED_PLUGIN_DIR = fileURLToPath(new URL('../../../plugins/scadbuddy', import.meta.url))
-
-/**
- * The plugin paths every session's queries load: the bundled plugin, once it
- * passes the same vetting run.ts applies per query. Missing or refused, it is
- * left out and `log` says why, so sessions still run without its skills
- * rather than every turn failing on PluginRefusedError.
- *
- * Its `.mcp.json` (the remote `scadbuddy` server for Claude Code installs) is
- * not started in the harness: `strictMcpConfig` ignores "all other MCP
- * configurations: project `.mcp.json`, user settings, plugins" (sdk.d.ts
- * 0.3.283), so the harness reaches the same tools through its in-process
- * server (tools/harness.ts) instead of over /mcp.
- */
-export function bundledPluginPaths(log: (message: string) => void, dir: string = BUNDLED_PLUGIN_DIR): string[] {
-  const problems = pluginProblems(dir)
-  if (problems.length > 0) {
-    log(`the ScadBuddy plugin at ${dir} is not loaded: ${problems.join('; ')}`)
-    return []
-  }
-  return [dir]
 }
