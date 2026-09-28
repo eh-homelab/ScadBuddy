@@ -11,8 +11,6 @@ ALTER TABLE render_jobs
     ADD COLUMN pipeline_version text NOT NULL DEFAULT 'default',
     ADD COLUMN steps jsonb NOT NULL DEFAULT '[]'::jsonb;
 UPDATE render_jobs SET inputs = jsonb_build_object('params', params);
-CREATE INDEX render_jobs_stale_pending ON render_jobs (created_at)
-    WHERE state = 'pending' AND started_at IS NULL;
 CREATE TABLE blob_refs (
     key         text NOT NULL,
     holder_kind text NOT NULL,
@@ -20,3 +18,4 @@ CREATE TABLE blob_refs (
     PRIMARY KEY (key, holder_kind, holder_id)
 );
 CREATE INDEX blob_refs_key ON blob_refs (key);
+CREATE INDEX blob_refs_holder ON blob_refs (holder_kind, holder_id);
