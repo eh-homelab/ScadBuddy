@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import functools
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,6 +12,13 @@ DEFAULT_DATA_DIR = Path("/data")
 DEFAULT_RENDER_TIMEOUT = 120.0
 # Jobs rendered at once by each process: each is one or more `openscad` processes.
 DEFAULT_RENDER_CONCURRENCY = 2
+# Per-colour wrapper renders one job runs at once (spec §6.3). 0 (the default) derives
+# it from the CPUs this process may use -- see `default_solid_concurrency`.
+DEFAULT_SOLID_CONCURRENCY = 0
+# The derived default never goes past this, however many cores the host has: past a
+# handful of colours at once the gain is gone and the memory is not.
+MAX_DEFAULT_SOLID_CONCURRENCY = 8
+CGROUP_ROOT = Path("/sys/fs/cgroup")
 # Admission control, OFF by default: 0 accepts every render. Set, a render that would
 # be a new job while this many already wait is refused with 503 + Retry-After.
 # Superseded and coalesced submits never count against it.
@@ -60,6 +69,7 @@ class Config:
     data_dir: Path = DEFAULT_DATA_DIR
     render_timeout: float = DEFAULT_RENDER_TIMEOUT
     render_concurrency: int = DEFAULT_RENDER_CONCURRENCY
+    solid_concurrency: int = DEFAULT_SOLID_CONCURRENCY
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
@@ -93,6 +103,7 @@ class Config:
                 f"SCADBUDDY_RENDER_CONCURRENCY must be at least 1, not {self.render_concurrency}"
             )
         for name, value in (
+            ("SCADBUDDY_SOLID_CONCURRENCY", self.solid_concurrency),
             ("SCADBUDDY_RENDER_QUEUE_MAX", self.render_queue_max),
             ("SCADBUDDY_RENDER_QUEUE_TIMEOUT", self.render_queue_timeout),
             ("SCADBUDDY_RENDER_QUEUE_DEPTH_SLO", self.render_queue_depth_slo),
@@ -120,6 +131,50 @@ class Config:
                 f"SCADBUDDY_LIBRARY_MAX_BYTES must be at least 1, not {self.library_max_bytes}"
             )
 
+    def solid_slots(self) -> int:
+        """How many of one job's per-colour wrapper renders may run at once."""
+        if self.solid_concurrency:
+            return self.solid_concurrency
+        return default_solid_concurrency(available_cpus(), self.render_concurrency)
+
+
+def default_solid_concurrency(cpus: int, render_concurrency: int) -> int:
+    """The CPUs this process may use, shared out between its render workers.
+
+    Every worker can be in its solids stage at once, so the pod's worst case is
+    ``render_concurrency`` x this many `openscad` processes. Splitting the CPUs keeps
+    that at one process per core rather than oversubscribing them, and the timeout is
+    why that matters: each wrapper render gets its own `SCADBUDDY_RENDER_TIMEOUT`, so
+    a colour slowed by contention is one that times out and falls back to its open
+    split mesh. Never below one (sequential, as before #282), never above
+    `MAX_DEFAULT_SOLID_CONCURRENCY`.
+    """
+    return max(1, min(MAX_DEFAULT_SOLID_CONCURRENCY, cpus // max(1, render_concurrency)))
+
+
+@functools.cache
+def available_cpus(cgroup_root: Path = CGROUP_ROOT) -> int:
+    """The CPUs this process may actually use: its affinity mask, capped by a cgroup
+    v2 CPU limit (a Kubernetes `limits.cpu`) where there is one.
+
+    `os.cpu_count()` alone is the node's core count, which inside a pod limited to two
+    CPUs would size the pool for the whole host. A fractional limit rounds up: 1.5
+    CPUs can keep two processes busy for most of a period.
+    """
+    cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else os.cpu_count()
+    cpus = cpus or 1
+    try:
+        quota, period = (cgroup_root / "cpu.max").read_text(encoding="utf-8").split()[:2]
+    except (OSError, ValueError):
+        return cpus
+    if quota == "max":
+        return cpus
+    try:
+        limit = math.ceil(int(quota) / int(period))
+    except (ValueError, ZeroDivisionError):
+        return cpus
+    return max(1, min(cpus, limit))
+
 
 def load_config(env: Mapping[str, str] | None = None) -> Config:
     source: Mapping[str, str] = os.environ if env is None else env
@@ -130,6 +185,9 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         render_timeout=float(source.get("SCADBUDDY_RENDER_TIMEOUT") or DEFAULT_RENDER_TIMEOUT),
         render_concurrency=int(
             source.get("SCADBUDDY_RENDER_CONCURRENCY") or DEFAULT_RENDER_CONCURRENCY
+        ),
+        solid_concurrency=int(
+            source.get("SCADBUDDY_SOLID_CONCURRENCY") or DEFAULT_SOLID_CONCURRENCY
         ),
         render_queue_max=int(source.get("SCADBUDDY_RENDER_QUEUE_MAX") or DEFAULT_RENDER_QUEUE_MAX),
         render_queue_timeout=float(

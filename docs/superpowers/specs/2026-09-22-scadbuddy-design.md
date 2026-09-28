@@ -725,6 +725,32 @@ runs. Models that recolour a subtree get the fallback's open parts for the
 affected colour, not wrong geometry, since the outer colour still renders its
 own subtree.
 
+**Concurrency (#282).** The wrapper renders of one job run up to
+`SCADBUDDY_SOLID_CONCURRENCY` at a time rather than one after another: a colour
+costs one whole-model `openscad` run, and dollhouse-kit's window piece has 16 live
+colours (an AMS template can have 28). The default, `0`, derives the bound from the
+CPUs the process may use — its affinity mask, capped by a cgroup v2 `cpu.max` limit
+(a pod's `limits.cpu`, rounded up) — divided by `SCADBUDDY_RENDER_CONCURRENCY`, since
+every worker can be in this stage at once; at least 1, at most 8. With the 8-CPU
+limit the eh-homelab/clusters deployment runs today and two workers that is 4; under
+a 2-CPU limit it is 1, the old sequential loop. The bound deliberately never oversubscribes the
+CPUs: each wrapper render has its own `SCADBUDDY_RENDER_TIMEOUT`, so contention that
+stretched every child would turn closed parts into timed-out fallbacks. The clock
+starts when a colour's process does, not while it waits for a slot, so a 28-colour
+job is not charged for the queue. Set it explicitly to size memory as well; the
+derivation reads only CPUs.
+
+The semantics are unchanged from the sequential loop:
+
+- **Order.** Parts, meshes and warnings come back in colour order, whatever order
+  the renders finish in, and each colour still writes `solid_<n>.3mf`.
+- **Fallback.** An OpenSCAD failure — including a timeout — is still that colour's
+  fallback, and its siblings carry on.
+- **Failure.** Anything else (a 3MF that cannot be read, a cancelled job) fails the
+  job with that colour's own error, not an exception group, and cancels the
+  siblings: their `openscad` processes are killed and colours still waiting for a
+  slot never start. The wrapper is deleted only after every render has stopped.
+
 ## 7. Bambuddy integration
 
 Settings (stored in `settings.json` on the PVC, editable in the UI):
@@ -821,8 +847,11 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
   `nodeSelector: kubernetes.io/arch: amd64` (image is multi-arch but keep it
   next to the slicer), requests 250m/512Mi, limits 2/2Gi (Manifold is
   multi-threaded; OpenSCAD text rendering allocates freely).
-- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` + `SCADBUDDY_CHECK_CONCURRENCY`
-  concurrent `openscad` processes** (default 2 + 1), not the render figure alone. The
+- **The pod's worst case is `SCADBUDDY_RENDER_CONCURRENCY` × the solid concurrency +
+  `SCADBUDDY_CHECK_CONCURRENCY` concurrent `openscad` processes**, not the render figure
+  alone: each worker in its closed-parts stage runs up to `SCADBUDDY_SOLID_CONCURRENCY`
+  wrapper renders at once (§6.3; by default the CPUs divided between the workers, so
+  about one process per CPU plus the check). The
   editor's parse check (#92) does not go through the render queue — the queue caps
   itself with N worker tasks, so there is no semaphore to share — and it is reached on
   a 700 ms debounce from every open editor tab. It therefore carries its own declared
