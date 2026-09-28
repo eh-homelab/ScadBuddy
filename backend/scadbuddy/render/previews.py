@@ -74,8 +74,8 @@ async def render_preview(
     """The plate image of ``slug`` rendered at its default parameters.
 
     The same pipeline as a render job up to its cover image, and no further: no
-    closed solids, no 3MF, no output. Its scratch space is its own, under the
-    previews directory, and gone when this returns. As `render_job`, it holds a
+    closed solids, no 3MF, no output. Its scratch space is its own, under
+    ``cache/preview-work/``, and gone when this returns. As `render_job`, it holds a
     lease on the library checkouts it resolved for every openscad run (#253), and
     stages a `// file` parameter's default from the shared upload store (#204).
     """
@@ -230,8 +230,8 @@ class PreviewScheduler:
                 )
             )
             return True
-        # Re-checked under the store's lock, so a thumbnail set or a delete landing
-        # while this finishes cannot leave a record behind without its image.
+        # Re-checked under the model's preview lock, so a thumbnail set or a delete
+        # landing while this finishes is never undone by it.
         await asyncio.to_thread(
             lambda: self.store.write(slug, key, png, wanted=lambda: self._still_wanted(slug, key))
         )
@@ -253,9 +253,9 @@ class PreviewScheduler:
             return None
         # A delete landing after the `exists` check above makes this None, and
         # nothing here drops the preview. That is safe only because
-        # `Catalogue.delete` runs `sweep_orphans` synchronously, which removes the
-        # preview by path whether or not this ever sees the model go.
-        key = source_key(self.store.paths, slug)
+        # `Catalogue.delete` drops the model's preview row synchronously, whether or
+        # not this ever sees the model go.
+        key = source_key(self.catalogue.paths, slug)
         if key is None or self.store.current(slug, key):
             return None
         return key
@@ -271,5 +271,5 @@ class PreviewScheduler:
             self.catalogue.exists(slug)
             and not self.catalogue.thumbnail_path(slug).is_file()
             and not self.catalogue.has_output_cover(slug)
-            and source_key(self.store.paths, slug) == key
+            and source_key(self.catalogue.paths, slug) == key
         )

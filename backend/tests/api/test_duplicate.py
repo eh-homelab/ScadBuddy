@@ -28,7 +28,7 @@ from scadbuddy.library.history import GitTimeoutError, ModelHistory, RevisionNot
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 pytestmark = pytest.mark.requires_git
 
@@ -409,7 +409,7 @@ def test_a_sweep_failure_after_a_duplicate_is_not_the_duplicates_failure(
 def test_a_staging_the_sweep_cannot_read_does_not_keep_the_rest(
     paths: DataPaths, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    catalogue = Catalogue(paths)
+    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
     old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
     for name in ("a", "b"):
         staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}{name}"
@@ -515,7 +515,7 @@ def test_an_unreadable_base_fails_the_duplicate(
 
 
 def test_without_history_a_duplicate_copies_the_working_tree(paths: DataPaths) -> None:
-    catalogue = Catalogue(paths)
+    catalogue = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX)
     catalogue.create(
         "keychain", SOURCE, ModelMeta(name="Keychain", tags=["t"]), thumbnail=THUMBNAIL
     )
@@ -555,7 +555,7 @@ def _generate_with_cover(client: TestClient, paths: DataPaths, model_id: str, co
     """Render and save an output whose 3MF carries ``cover`` as its plate image."""
     job_id = client.post(f"/api/v1/models/{model_id}/render", json={"params": {}}).json()["job_id"]
     assert wait_for_job(client, job_id)["status"] == "done"
-    with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
         archive.writestr(PLATE_THUMBNAIL, cover)
     saved = client.post(f"/api/v1/models/{model_id}/outputs", json={"job_id": job_id})
     assert saved.status_code == 201, saved.text
@@ -655,3 +655,39 @@ def test_a_dropped_model_json_cannot_claim_an_upstream(client: TestClient) -> No
     )
     assert response.status_code == 201, response.text
     assert response.json()["upstream"] is None
+
+
+def test_the_boot_sweeps_a_claim_a_crashed_create_stranded(app: FastAPI, paths: DataPaths) -> None:
+    """A create or duplicate killed between claiming its slug and writing it leaves an
+    empty directory: 404 to a GET, 409 to a retry. The boot moves an old one to the
+    tombstones and leaves a fresh one, which another replica may be claiming (#218)."""
+    stranded = paths.model_dir("stranded")
+    stranded.mkdir(parents=True)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(stranded, (old, old))
+    fresh = paths.model_dir("fresh")
+    fresh.mkdir()
+
+    with TestClient(app) as client:
+        assert not stranded.exists()
+        assert fresh.is_dir()
+        created = client.post("/api/v1/models", json={"name": "Stranded", "source": SOURCE})
+        assert created.status_code == 201, created.text
+        taken = client.post("/api/v1/models", json={"name": "Fresh", "source": SOURCE})
+        assert taken.status_code == 409
+
+
+def test_the_claim_sweep_leaves_a_model_whose_source_is_only_missing_from_disk(
+    paths: DataPaths,
+) -> None:
+    """Tracked at HEAD, it is a model to restore, not a claim to sweep."""
+    history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
+    history.ensure_repo()
+    catalogue = Catalogue(
+        paths, history, duplicate_staging_max_age=0, wrapper_prefix=WRAPPER_PREFIX
+    )
+    catalogue.create("kept", SOURCE, ModelMeta(name="Kept"))
+    paths.model_source("kept").unlink()
+
+    assert catalogue.sweep_stranded_claims() == []
+    assert paths.model_dir("kept").is_dir()

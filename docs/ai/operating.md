@@ -287,6 +287,12 @@ The agent owns and migrates its `ai_*` tables (spec §9;
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
   [security.md](security.md#prepare-and-confirm-over-mcp)).
+- `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
+  name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
+  SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
+  `CHECK`); the plaintext is shown once when minted. `PostgresTokenStore` in
+  [`agent/src/auth/tokens.ts`](../../agent/src/auth/tokens.ts). There is no file or
+  in-memory store: without `SCADBUDDY_DATABASE_URL`, `/mcp` answers 503.
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).

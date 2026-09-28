@@ -139,6 +139,13 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
 
 export class ToolError extends Error {
   override name = 'ToolError'
+  /** The backend's HTTP status, when the error is a backend answer (call.ts `ok`). */
+  readonly status: number | undefined
+
+  constructor(message: string, status?: number) {
+    super(message)
+    this.status = status
+  }
 }
 
 export function errorResult(message: string): CallToolResult {
