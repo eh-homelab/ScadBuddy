@@ -27,6 +27,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     every_plate,
     gather_options,
+    normalise_colour,
     queue_filaments,
 )
 from scadbuddy.bambuddy.hardware import (
@@ -177,6 +178,21 @@ async def filament_options_for_output(
     return options
 
 
+async def _spool_colours(
+    client: BambuddyClient, meta: OutputMeta, plan: FilamentPlan
+) -> list[str] | None:
+    """One colour per filament of the output: the chosen spool's, or the model's own
+    for a slot with no spool (#476). ``None`` when no spool is chosen at all, which
+    leaves the file in the model's colours."""
+    if not plan.slots:
+        return None
+    rgba = {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+    return [
+        rgba.get(plan.spool_for(index + 1) or 0) or colour
+        for index, colour in enumerate(meta.colors)
+    ]
+
+
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -220,6 +236,7 @@ async def run_for_output(
         meta.slug,
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
+        colours=await _spool_colours(client, meta, request.filament_plan),
     )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because

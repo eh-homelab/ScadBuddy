@@ -263,6 +263,7 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
           const rows = matched.some((spool) => spool.spool_id === chosen)
             ? matched
             : [...spools.filter((spool) => spool.spool_id === chosen), ...matched]
+          const chosenSpool = spools.find((spool) => spool.spool_id === chosen)
           return (
             <fieldset key={slot.slot_id} data-testid={`filament-slot-${slot.slot_id}`}>
               <legend className="flex items-center gap-2 text-[13px] text-ink">
@@ -270,6 +271,18 @@ export function FilamentPicker({ options, plan, onChange, copies }: Props) {
                 Slot {slot.slot_id}
                 {slot.material ? <span className="text-muted">{slot.material}</span> : null}
                 <span className="text-[12px] text-faint">{needLabel(slot, copies)}</span>
+                {/* The colour this part will actually come out in: the file is recoloured
+                    to it before slicing, so the plate thumbnail shows it too (#476). */}
+                {chosenSpool && (
+                  <span
+                    className="flex items-center gap-1.5 text-[12px] text-muted"
+                    data-testid={`slot-prints-in-${slot.slot_id}`}
+                  >
+                    <span aria-hidden="true">→</span>
+                    <Swatch colour={chosenSpool.colour} size="sm" />
+                    prints in {chosenSpool.color_name ?? normalizeHex(chosenSpool.colour ?? '#000000')}
+                  </span>
+                )}
               </legend>
 
               <ul className="mt-1.5 max-h-56 overflow-y-auto rounded-[6px] border border-line">
