@@ -66,7 +66,13 @@ function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>)
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
     event.preventDefault()
     event.stopPropagation()
-    go(index + (event.key === 'ArrowRight' ? 1 : -1))
+    const target = Math.min(Math.max(index + (event.key === 'ArrowRight' ? 1 : -1), 0), count - 1)
+    go(target)
+    // Roving focus: from a dot, the arrow keys carry focus to the new current dot.
+    if (event.target instanceof HTMLElement && event.target.dataset.carouselDot !== undefined) {
+      const dots = event.currentTarget.querySelectorAll<HTMLElement>('[data-carousel-dot]')
+      dots[target]?.focus()
+    }
   }
 
   return (
@@ -123,6 +129,9 @@ function Carousel({ slides, onOpen, className, label }: Omit<Props, 'fallback'>)
             type="button"
             aria-label={`Go to slide ${position + 1}`}
             aria-current={position === index ? 'true' : undefined}
+            // Only the current dot is a tab stop; the others are a click or an arrow key away.
+            tabIndex={position === index ? 0 : -1}
+            data-carousel-dot=""
             onClick={(event) => {
               contained(event)
               go(position)
