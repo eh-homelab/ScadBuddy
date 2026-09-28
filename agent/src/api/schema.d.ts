@@ -5824,8 +5824,6 @@ export interface operations {
     get_print_options_api_v1_settings_print_options_get: {
         parameters: {
             query?: {
-                /** @description The model about to be printed */
-                slug?: string | null;
                 /** @description The pipeline about to run, when the caller has already chosen one */
                 pipeline_id?: number | null;
             };

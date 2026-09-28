@@ -9246,24 +9246,6 @@
         "operationId": "get_print_options_api_v1_settings_print_options_get",
         "parameters": [
           {
-            "description": "The model about to be printed",
-            "in": "query",
-            "name": "slug",
-            "required": false,
-            "schema": {
-              "anyOf": [
-                {
-                  "type": "string"
-                },
-                {
-                  "type": "null"
-                }
-              ],
-              "description": "The model about to be printed",
-              "title": "Slug"
-            }
-          },
-          {
             "description": "The pipeline about to run, when the caller has already chosen one",
             "in": "query",
             "name": "pipeline_id",

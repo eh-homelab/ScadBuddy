@@ -143,10 +143,6 @@ def _options_view(settings: StoredSettings) -> PrintOptionsView:
 )
 async def get_print_options(
     store: SettingsStoreDep,
-    slug: Annotated[
-        str | None,
-        Query(description="The model about to be printed"),
-    ] = None,
     pipeline_id: Annotated[
         int | None,
         Query(description="The pipeline about to run, when the caller has already chosen one"),
@@ -154,9 +150,9 @@ async def get_print_options(
 ) -> PrintOptionsState:
     settings = store.load()
     printer_id = settings.printer_id
-    # The Settings pipeline, for every model (a legacy per-model one is no longer read,
-    # so ``slug`` does not change it). A caller that has already chosen one passes it
-    # (#145), and the run keys the scope on that pipeline's target.
+    # The Settings pipeline, for every model (a legacy per-model one is no longer read).
+    # A caller that has already chosen one passes it (#145), and the run keys the scope
+    # on that pipeline's target.
     if pipeline_id is None:
         pipeline_id = settings.pipeline_id
     if printer_id is None and pipeline_id is not None:

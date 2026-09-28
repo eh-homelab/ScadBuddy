@@ -583,15 +583,7 @@ export const api = {
   putSettings: (body: SettingsUpdate) =>
     request<Settings>('/settings', { method: 'PUT', body: JSON.stringify(body) }),
 
-  /**
-   * `slug` so the server resolves the per-model scope and the printer it keys on.
-   */
-  getPrintOptions: (slug?: string) => {
-    const query = new URLSearchParams()
-    if (slug) query.set('slug', slug)
-    const qs = query.toString()
-    return request<PrintOptionsState>(`/settings/print-options${qs ? `?${qs}` : ''}`)
-  },
+  getPrintOptions: () => request<PrintOptionsState>('/settings/print-options'),
 
   /** Replaces one scope wholesale; an all-unset `options` clears it. */
   putPrintOptions: (body: PrintOptionsUpdate) =>
