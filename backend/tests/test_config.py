@@ -79,3 +79,17 @@ def test_an_asset_sweep_grace_under_an_hour_is_refused(tmp_path: Path) -> None:
         load_config({"SCADBUDDY_ASSET_SWEEP_GRACE": "60"})
     with pytest.raises(ValueError, match="SCADBUDDY_ASSET_SWEEP_GRACE must be at least 3600"):
         Settings(data_dir=tmp_path, asset_sweep_grace=0).to_config()
+
+
+def test_the_duplicate_staging_max_age_defaults_to_an_hour_and_is_read() -> None:
+    assert load_config({}).duplicate_staging_max_age == 3600
+    config = load_config({"SCADBUDDY_DUPLICATE_STAGING_MAX_AGE": "600"})
+    assert config.duplicate_staging_max_age == 600
+
+
+@pytest.mark.parametrize("value", ["0", "0.5", "-1"])
+def test_a_duplicate_staging_max_age_under_one_is_refused(tmp_path: Path, value: str) -> None:
+    with pytest.raises(ValueError, match="SCADBUDDY_DUPLICATE_STAGING_MAX_AGE must be at least 1"):
+        load_config({"SCADBUDDY_DUPLICATE_STAGING_MAX_AGE": value})
+    with pytest.raises(ValueError, match="SCADBUDDY_DUPLICATE_STAGING_MAX_AGE must be at least 1"):
+        Settings(data_dir=tmp_path, duplicate_staging_max_age=float(value)).to_config()
