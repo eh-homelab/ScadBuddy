@@ -121,5 +121,12 @@ async def install_font(
     emit(events, FontInstalled(family=installed.family))
     store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
     if store is not None and store.fonts is not None:
-        await store.fonts.publish(body.family)
+        try:
+            await store.fonts.publish(body.family)
+        except Exception:
+            # The family is installed here; the next boot's `backfill` publishes it, so
+            # a Bambuddy error does not fail an install that worked.
+            logger.exception(
+                "could not publish an installed font family", extra={"family": body.family}
+            )
     return installed

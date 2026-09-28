@@ -6,24 +6,53 @@ from __future__ import annotations
 
 import asyncio
 import re
+from collections.abc import Collection, Mapping
 from pathlib import Path
 
 from scadbuddy.library.fonts import FontService
+from scadbuddy.library.googlefonts import licence_slug
 from scadbuddy.store.archive import pack_dir, unpack_dir
 from scadbuddy.store.bambuddy import SHARED_TITLE
 from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
+from scadbuddy.store.locks import KeyLocks
 
 SHARED = BlobScope(slug=None, title=SHARED_TITLE)
+
+
+_STRING = re.compile(r'"((?:[^"\\]|\\.)*)"')
 
 
 def font_key(directory_name: str) -> str:
     return "font-" + re.sub(r"[^A-Za-z0-9._-]", "_", directory_name)[:100]
 
 
+def _family_dir_name(value: str) -> str:
+    # An OpenSCAD font string: "Family:style=Bold". The directory is the family's
+    # licence slug (`FontService.family_dir`).
+    return licence_slug(value.split(":", 1)[0].strip())
+
+
+def wanted_families(source: Path, params: Mapping[str, object]) -> set[str]:
+    """The family directories a template could name: every string literal in its
+    `.scad` files (a `// font` parameter's default, a `text(font=...)`) and every
+    string parameter value. Loose on purpose: a string that is no family matches no
+    row."""
+    names = {value for value in params.values() if isinstance(value, str)}
+    for path in sorted(source.rglob("*.scad")):
+        if any(part.startswith(".") for part in path.relative_to(source).parts):
+            continue
+        names.update(_STRING.findall(path.read_text(encoding="utf-8", errors="replace")))
+    return {slug for slug in map(_family_dir_name, names) if slug}
+
+
 class FontMirror:
-    def __init__(self, content: ContentStore, fonts: FontService) -> None:
+    def __init__(
+        self, content: ContentStore, fonts: FontService, *, locks: KeyLocks | None = None
+    ) -> None:
         self.content = content
         self.fonts = fonts
+        #: Shared with the worker's `SnapshotStore` (Task 8 passes one `KeyLocks`).
+        self.locks = locks or KeyLocks()
 
     async def _publish_dir(self, directory: Path) -> None:
         data = await asyncio.to_thread(pack_dir, directory)
@@ -55,8 +84,10 @@ class FontMirror:
                 done += 1
         return done
 
-    async def sync(self) -> list[str]:
-        """Install every mirrored family this process lacks; one index query when none."""
+    async def sync(self, families: Collection[str] | None = None) -> list[str]:
+        """Install the mirrored families this process lacks: only ``families`` (family
+        directory names, `wanted_families`) when given, else every one. One index query
+        when there is nothing to do."""
         added: list[str] = []
         # This backend's rows only: `read` downloads from this backend.
         stats = await asyncio.to_thread(
@@ -66,16 +97,21 @@ class FontMirror:
             name = str(stat.meta.get("dir", ""))
             if not name or "/" in name or name.startswith("."):
                 continue
+            if families is not None and name not in families:
+                continue
             target = self.fonts.root / name
             if target.is_dir():
                 continue
-            try:
-                data = await self.content.read(stat.ref)
-            except (BlobMissingError, BlobCorruptError):
-                # Gone or altered: forget it; the API's `backfill` publishes it again.
-                await self.content.forget(stat.key)
-                continue
-            await asyncio.to_thread(unpack_dir, data, target)
+            async with self.locks.hold(stat.key):
+                if target.is_dir():
+                    continue
+                try:
+                    data = await self.content.read(stat.ref)
+                except (BlobMissingError, BlobCorruptError):
+                    # Gone or altered: forget it; the API's `backfill` publishes it again.
+                    await self.content.forget(stat.key)
+                    continue
+                await asyncio.to_thread(unpack_dir, data, target)
             added.append(name)
         if added:
             await asyncio.to_thread(self.fonts.prepare)
