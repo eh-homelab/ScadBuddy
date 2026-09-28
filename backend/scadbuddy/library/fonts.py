@@ -19,7 +19,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field, ValidationError
 
-from scadbuddy.core.fontconfig import env_for, fonts_dir, write_conf
+from scadbuddy.core.fontconfig import env_for, fonts_dir, minimal_env, write_conf
 from scadbuddy.library.googlefonts import (
     CatalogueFont,
     FamilyFiles,
@@ -93,6 +93,7 @@ def parse_fc_list(output: str) -> list[FontFamily]:
 
 
 def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
+    """Run an fc-* tool on the allowlisted environment (#281), whatever ``env`` holds."""
     if shutil.which(argv[0]) is None:
         logger.warning("%s is not on PATH", argv[0])
         return None
@@ -103,7 +104,7 @@ def _run_fc(argv: list[str], env: Mapping[str, str]) -> str | None:
             text=True,
             timeout=FC_TIMEOUT,
             check=True,
-            env=dict(env),
+            env=minimal_env(env),
         )
     except (subprocess.SubprocessError, OSError):
         logger.exception("%s failed", argv[0])

@@ -119,6 +119,38 @@ def _format_number(value: ParamValue) -> str:
     return repr(float(value))
 
 
+def path_like(value: str) -> str | None:
+    """Why ``value`` would take ``import()``/``surface()`` out of the model's
+    directory, or None when it would not.
+
+    OpenSCAD opens whatever path a string hands those two calls, relative to the
+    calling file or absolute (#281). A value with neither a leading ``/`` nor a
+    ``..`` component can only name something at or below the directory of the file
+    that reads it, so those are the two shapes refused. Judged by path component,
+    not substring, so ordinary text such as ``"Wait..."`` or ``"3/4 inch"`` passes;
+    the false positives left are text that genuinely starts with ``/`` (``"/r/foo"``)
+    or has ``..`` between slashes.
+    """
+    if value.startswith("/"):
+        return "an absolute path"
+    if ".." in value.split("/"):
+        return "a '..' path component"
+    return None
+
+
+def _refuse_path_like(parameter: Parameter, value: str) -> None:
+    # The template's own values are its business, as for a file parameter: only a
+    # value the template did not write itself is judged.
+    if value == parameter.initial or any(option.value == value for option in parameter.options):
+        return
+    reason = path_like(value)
+    if reason is not None:
+        raise ValueError(
+            f"parameter {parameter.name!r} looks like a file path ({reason}), which a "
+            f"template could read outside its own directory; got {value!r}"
+        )
+
+
 def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
     if parameter.type == "boolean":
         if not isinstance(value, bool):
@@ -138,6 +170,7 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
     if parameter.type in ("string", "color", "font"):
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
+        _refuse_path_like(parameter, value)
         return quote_string(value)
     if parameter.type == "integer":
         if isinstance(value, bool) or not isinstance(value, int | float):
@@ -147,6 +180,7 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
         if any(isinstance(option.value, str) for option in parameter.options):
             if not isinstance(value, str):
                 raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
+            _refuse_path_like(parameter, value)
             return quote_string(value)
         return _format_number(value)
     return _format_number(value)
@@ -189,11 +223,12 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
+    # Built from an allowlist, not copied (#281): a template can read
+    # /proc/self/environ, so nothing the backend holds may be in it.
     env = env_for(config.data_dir)
-    # Set or removed, never inherited: a model sees exactly the libraries it
-    # declares (#93), so one that forgot to declare BOSL2 fails here the same way
-    # it would on a fresh install, instead of working by accident.
-    env.pop("OPENSCADPATH", None)
+    # Set or absent, never inherited (the allowlist drops it): a model sees exactly
+    # the libraries it declares (#93), so one that forgot to declare BOSL2 fails
+    # here the same way it would on a fresh install, instead of working by accident.
     if config.library_path:
         env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
     process = await asyncio.create_subprocess_exec(

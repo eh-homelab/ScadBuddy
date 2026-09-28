@@ -53,8 +53,37 @@ Non-goals (v1):
 - Running OpenSCAD in the browser (openscad-wasm). Server-side render is
   simpler and uses the Manifold nightly; the door stays open.
 - Sandboxing OpenSCAD beyond a timeout and resource limits. `.scad` is a
-  scripting language, but it cannot touch the network and its file access is
-  limited to `import()`/`include` under the model's directory.
+  scripting language that cannot touch the network, but its file access is
+  **not** confined by OpenSCAD: `import()` and `surface()` open whatever path a
+  string hands them, relative or absolute, with the backend's uid (#281). What
+  bounds it is ScadBuddy, not the binary:
+  - A template is trusted code. Its own source, its `include`/`use`, and the
+    values it writes itself (a parameter's initial, a select's options) can name
+    any path the process can read.
+  - A value a *client* supplies cannot steer those calls out of the directory of
+    the file that reads it. A `// file:` parameter takes only a bare name — a
+    staged upload or a shipped sample (#204, #231). Every other string-valued
+    parameter (`string`, `font`, `color`, a string `select`) is refused with a
+    422 when its value starts with `/` or has a `..` path component; relative
+    names below that directory still pass. The check is by path component, so
+    ordinary text (`"Wait..."`, `"3/4 inch"`, `"AC/DC"`) is unaffected; the cost
+    is that text which genuinely starts with a slash (`"/r/3dprinting"`) or
+    contains `/../` cannot be rendered. It judges the value, not what the
+    template does with it: a template that builds a path by concatenation
+    (`str("/", name)`) must guard its own input, as `flexi-fabric`'s and
+    `bookmark`'s `safe_file()` do.
+  - openscad (and openscad-lsp, and fontconfig's `fc-*`) gets an allowlisted
+    environment — `PATH`, `HOME`, the `XDG_*` directories, locale (`LANG`,
+    `LANGUAGE`, `LC_*`), `TZ`, `TMPDIR` and fontconfig's own variables — never a
+    copy of the backend's (`core/fontconfig.py`), so `/proc/self/environ` holds
+    no API key or database URL.
+
+  Kernel-level confinement (a mount namespace, Landlock, a read-only bind of the
+  model directory) would close the rest — what a template itself reads. It stays
+  a non-goal for the same reason authentication is: anyone who can reach this
+  LAN-only instance can already upload or paste a template (#92), so the
+  boundary that matters is what the process can read at all, which is why the
+  environment is the part that is locked down.
 
 ## 3. Verified facts the design rests on
 
