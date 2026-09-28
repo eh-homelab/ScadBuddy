@@ -270,7 +270,9 @@ Top to bottom, the dialog is:
   If neither nozzle is the chosen size, the print is refused before upload.
 - **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
   there is no per-side size control. Sizes installed in the rack are marked
-  "(installed)"; picking one that isn't warns you to install it first. Advanced adds
+  "(installed)". A size neither mounted nozzle has is refused before upload; if the
+  printer doesn't report what's mounted, picking one the rack lacks warns you to install
+  it first. Advanced adds
   Standard or High Flow per side. Bambuddy has no High Flow presets yet, so a High Flow
   choice slices as Standard and the dialog says so: "Bambuddy slices this as Standard
   flow; High Flow presets aren't supported by Bambuddy yet."
