@@ -66,6 +66,11 @@ the backend refuses to start and says so. Settings and the render queue live
 there; the schema is created and migrated at startup, so an empty database is
 enough.
 
+Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
+[Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
+**Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
+for the project picker).
+
 **Renders on Temporal** (#424) are behind `SCADBUDDY_TEMPORAL_ADDRESS` (the
 Temporal frontend's `host:port`). Empty, renders run on the legacy in-process
 queue described below. Set, they run on Temporal: the API submits and a separate
@@ -77,20 +82,19 @@ a one-process dev run, let the API host the worker itself:
 temporal server start-dev --namespace scadbuddy      # listens on 127.0.0.1:7233
 cd backend
 SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy \
+SCADBUDDY_DATA_DIR=$HOME/.scadbuddy-data \
 SCADBUDDY_TEMPORAL_ADDRESS=127.0.0.1:7233 \
 SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true \
   uv run --frozen uvicorn --factory scadbuddy.main:create_app --port 8080
 ```
 
+`SCADBUDDY_DATA_DIR` must be writable (its default is `/data`), and a real `openscad`
+must be on `PATH` (or named by `SCADBUDDY_OPENSCAD`). The API serves the UI only once
+`frontend/dist` is built (`pnpm build` in `frontend/`); otherwise it serves only the API.
 `SCADBUDDY_TEMPORAL_NAMESPACE` defaults to `scadbuddy` (hence `--namespace` above)
 and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS` is for dev and tests only; it does not drain
 on shutdown.
-
-Then open `http://<host>:8080`, go to **Settings** and connect Bambuddy (see
-[Connecting Bambuddy](docs/user-guide.md#connecting-bambuddy): the API key needs
-**Manage Library**, **Manage Queue** and **Read Status**, plus **Manage Projects**
-for the project picker).
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
@@ -207,8 +211,7 @@ for the project picker).
   - `SCADBUDDY_RENDER_QUEUE_TIMEOUT` (0 = never): fail a render that waited longer
     than this for a worker, unrendered.
   - `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s): how often an idle worker checks for
-    jobs it was not woken for. With Postgres, only while the listener below is
-    disconnected.
+    jobs it was not woken for, only while the listener below is disconnected.
   - `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s), Postgres only: each process
     `LISTEN`s on `scadbuddy_render_queue`, and a submit or requeue on any replica
     sends `NOTIFY` in the same transaction, so an idle worker starts the job at
@@ -226,7 +229,7 @@ for the project picker).
   object (`address`, `namespace`, `task_queue`, `worker_inprocess`); on the legacy
   queue that key is absent.
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
-  (read from the store, so across replicas with Postgres), wait time and latency
+  (read from the store in Postgres, so across replicas), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
   the queue's store can be read (`scadbuddy_render_store_up`), the
   SLO targets, the upload store's files and bytes against its caps
@@ -336,9 +339,12 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
 - **Shutdown:** SIGTERM (tini forwards it; no `preStop` needed) starts the
   drain. The worker keeps polling until no workflow pinned to its build is
   running, for at most `2 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` s. Then the
-  SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. Set
-  `terminationGracePeriodSeconds` ≥ `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120`,
-  which is **660 s** at the default 120 s timeout. While a single replica drains
+  SDK gives in-flight activities up to `SCADBUDDY_RENDER_TIMEOUT + 60` s. If the
+  drain's bound passes first, the worker exits anyway (it logs "drain timed out"):
+  workflows still pinned to its build then have no poller, and their jobs stay
+  `running` until that build polls again. Set `terminationGracePeriodSeconds` ≥
+  `3 × (SCADBUDDY_RENDER_TIMEOUT + 60) + 120` plus a little slack for teardown
+  (e.g. 30 s): **690 s** at the default 120 s timeout. While a single replica drains
   it is still current, so new renders keep landing on it; a rollout that starts
   the new pod first (surge) lets it drain promptly.
 - **Temporal itself** comes from the Temporal operator with a CNPG Postgres in
