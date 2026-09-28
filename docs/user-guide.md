@@ -260,12 +260,14 @@ Top to bottom, the dialog is:
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
   presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
-  the first option. On the H2C each AMS feeds one extruder, so every spool loaded in the
-  chosen printer carries an **L** or **R** badge for its side, and the print is sliced
-  with each color on its spool's side. A spool on a side whose fitted nozzle is not the
-  chosen size is grayed out with the reason (for example "L · 0.4 fitted"), and printing
-  one anyway is refused before upload. A spool that isn't loaded in the chosen printer
-  has no side, so the slicer picks the extruders and the dialog says so.
+  the first option. Every color is sliced for an extruder whose nozzle is
+  the chosen size. With the Filament Track Switch fitted, any spool can reach either
+  nozzle: a loaded spool's badge only says where it rests ("rests on L"), each color
+  shows the extruder it will print on ("→ R (0.2)"), and when both nozzles are the
+  chosen size you can pick L or R per color, or leave it on Auto. Without the switch,
+  each AMS feeds one side: a spool on a side whose nozzle is another size is grayed out
+  with the reason (for example "L · 0.4 fitted"), and the dialog never opens on one.
+  If neither nozzle is the chosen size, the print is refused before upload.
 - **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
   there is no per-side size control. Sizes installed in the rack are marked
   "(installed)"; picking one that isn't warns you to install it first. Advanced adds
@@ -289,8 +291,8 @@ Top to bottom, the dialog is:
   completion.
 
 **Errors that keep the dialog open.** A combination ScadBuddy cannot turn into presets —
-a filament slot with no resolvable preset, mixed nozzle sizes, or a spool on the side
-whose nozzle doesn't match — comes back as an
+a filament slot with no resolvable preset, mixed nozzle sizes, no nozzle of the chosen
+size, or a spool wired to the side whose nozzle doesn't match — comes back as an
 error shown above Print and disables the button until something changes. Any other
 failure (Bambuddy unreachable, a timeout) shows the same way but leaves Print enabled to
 retry as it stands.

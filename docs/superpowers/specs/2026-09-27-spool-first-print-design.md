@@ -191,34 +191,42 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
-**Extruder per spool (#469).** On a dual-nozzle H2C each AMS is wired to one side, so a
-spool's extruder is fixed by where it is loaded — physical 0 is the right (main)
-extruder, 1 the left, and `status.nozzles` is indexed the same way. The side comes from
-the external holder's tray (assignment `ams_id` 255: tray 0 left, tray 1 right), else
-`ams_extruder_map`, else, with the Filament Track Switch fitted (`fila_switch.installed`,
-`ams_extruder_map: {}`), `ams_switch_inlet` — inlet A left, B right, as upstream
-`fts_routing.py`. Anything else is unknown, never "right". Left at the 3MF's default
-`filament_map_mode: "Auto For Flush"` the slicer spread filaments over both extruders and
-sliced both for the chosen size, which paused queue item 108 with HMS 05FE8053. So:
+**Extruder per filament (#469).** Left at the 3MF's default `filament_map_mode: "Auto
+For Flush"` the slicer spread filaments over both extruders and sliced both for the
+chosen size, which paused queue item 108 with HMS 05FE8053 ("the left nozzle is not
+matched"). So the run pins every filament to an extruder whose fitted nozzle is the
+chosen size, or refuses before upload. Extruders are physical: 0 is the right (main), 1
+the left, and `status.nozzles` is indexed the same way.
 
-- **Before upload**, a slot whose spool feeds a side with another nozzle size fitted is a
-  422: "Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
-  0.2 mm. Pick a spool on the right, or choose 0.4." (`extruders.mismatch_errors`, called
-  from `run_for_output` right after the printer check — the same place #472's
-  `choice_errors` refusal sits). An unknown side, or a side whose nozzle the status does
-  not report, is not refused.
-- **The upload is pinned**: `pin_extruders_3mf` writes `filament_map_mode: "Manual"` and
-  `filament_map` (each filament's 1-based *logical* extruder, through
-  `physical_extruder_map` — the file's, else the H2C preset's `["1","0"]`) beside #476's
-  recolor, and `Target.key` includes the map so a side change re-uploads. One unknown
-  side leaves the whole file on Auto, with a `side-unknown` warning that the slicer
-  chooses.
-- **The picker** gets each loaded spool's `extruder` and `side` (`L`/`R`) from the
-  filament step and grays out a spool whose side's nozzle is not the chosen size.
+- **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
+  switch routes any AMS to either nozzle (user ruling, 2026-09-28), so where a spool is
+  loaded constrains nothing. Its side, from `ams_switch_inlet` (inlet A left, B right,
+  as upstream `fts_routing.py`), is shown only as "rests on L/R". Every filament goes to
+  the side with the chosen size. When both sides have it, the dialog offers Auto / L / R
+  per color (`PrintChoices.extruders`), and Auto, the default, leaves the slicer to
+  choose.
+- **Without the switch**, each AMS is wired to one side: the external holder's tray
+  (assignment `ams_id` 255, tray 0 left, tray 1 right), else `ams_extruder_map`, where
+  anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
+  a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
+  0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
+  never pre-selects it.
+- **Either way:** one side fitted with the size pins every filament there, even a spool
+  of unknown side, which gets a warning saying why its side is unknown. Neither side
+  fitted is a 422 ("Neither nozzle is 0.6 mm: …"). A picked side without the size fitted
+  is a 422. Nozzles the printer doesn't report leave the file on Auto with a warning.
+  Both fitted and not switched: each spool's side, or Auto with a warning if one is
+  unknown (safe, as both nozzles match).
+- `extruders.plan_extruders` decides all of it, from one status read per run, right
+  after #472's `choice_errors` in `run_for_output`. `pin_extruders_3mf` writes
+  `filament_map_mode: "Manual"` and `filament_map` (each filament's 1-based *logical*
+  extruder, through `physical_extruder_map`: the file's, else the H2C preset's
+  `["1","0"]`) beside #476's recolor, and `Target.key` includes the pin.
+- Only the nozzle **diameter** is compared, not its flow type (HS vs HH).
 
 `filament_map_mode` and `filament_map` are project options in Bambu Studio, not part of
-any printer or process preset, so the CLI's `--load-settings` does not overwrite them;
-this is read from Bambu Studio's source, not yet confirmed on the printer.
+any printer or process preset, so the CLI's `--load-settings` should not overwrite them.
+This is read from the source and is to be confirmed with a real slice.
 
 ### 4.4 Plate
 
