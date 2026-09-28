@@ -749,8 +749,7 @@ class Catalogue:
         """
         self._require(slug)
         if merge_base is None:
-            self._replace_source(slug, source)
-            self._commit(message or f"Edit {slug} source", slug)
+            self._write_edit(slug, source, message or f"Edit {slug} source")
             return self.record(slug)
         history = self._require_history()
         upstream_id = self._upstream(slug).id
@@ -763,6 +762,35 @@ class Catalogue:
 
         self._commit_change(message or f"Merge {upstream_id} into {slug}", resolve, slug)
         return self.record(slug)
+
+    def _write_edit(self, slug: str, source: str, message: str) -> None:
+        """A plain edit: written under the history's write lock, with its commit (#370),
+        so it cannot land between another write's check and its write -- a merge's
+        ``still_applies``, say -- nor be overwritten by one before it is committed.
+
+        Failures as :meth:`_commit`: a failed commit after the write is logged, not
+        raised. When the lock itself cannot be had, the edit is written without it
+        and only its revision is lost, as it always was.
+        """
+        if self.history is None or not self.history.available:
+            self._replace_source(slug, source)
+            return
+        started = written = False
+
+        def write() -> None:
+            nonlocal started, written
+            started = True
+            self._replace_source(slug, source)
+            written = True
+
+        try:
+            self.history.commit(message, slug, prepare=write)
+        except (GitError, OSError):
+            if started and not written:
+                raise
+            if not started:
+                self._replace_source(slug, source)
+            logger.exception("could not record a revision", extra={"revision_message": message})
 
     def _replace_source(self, slug: str, source: str) -> None:
         """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
