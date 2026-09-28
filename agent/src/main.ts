@@ -10,7 +10,6 @@ import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
 import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
-import { bundledPluginPaths } from './harness/plugins.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
@@ -18,12 +17,14 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
+import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
 import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
+import type { ToolServices } from './tools/registry.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -103,20 +104,22 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
-// One store for Settings (routes/mcpTokens.ts) and /mcp.
-const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 // The /mcp auth mode and anonymous cap (ai_settings keys, auth/authenticate.ts
 // `mcpAuthSettings`): one reader for /mcp, per request, and for Settings
 // (routes/mcpAuthMode.ts), so both report the same thing.
 const authSettings = mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`))
-// The registry's services (#251), shared by /mcp and every session's in-process tools.
-const toolServices = {
+// The registry's services (#251), shared by /mcp and every session's
+// in-process tools. `pending` is swapped for the ai_approvals store below once
+// the sessions (and so the approval service) exist.
+const toolServices: ToolServices = {
   backend,
   pending: new PendingActionStore(),
   pollIntervalMs: 1000,
   renderWaitMs: 10 * 60_000,
   publicBaseUrl: config.publicUrl,
 }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
@@ -128,10 +131,11 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
-        // ScadBuddy's tools and their tiers (tools/harness.ts), and its own
-        // plugin, vetted once here and again per query (harness/plugins.ts).
+        // ScadBuddy's tools and their tiers (tools/harness.ts). No plugin is
+        // loaded: with `tools: []` (harness/options.ts) a query has no Skill
+        // or Agent tool, so plugins/scadbuddy's skills and subagents could not
+        // be used (test/harnessWiring.test.ts).
         ...harnessTools(toolServices),
-        pluginPaths: bundledPluginPaths((message) => console.error(message)),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
@@ -150,6 +154,9 @@ const sessions =
         },
       })
     : undefined
+// MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
+// the in-memory store above, whose actions are never confirmed.
+if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
@@ -180,11 +187,7 @@ const app = createApp({
   mcp: {
     tools: ALL_TOOLS,
     resources,
-    services: {
-      ...toolServices,
-      // Prepared outward calls wait for the UI in ai_approvals (tools/approvals.ts).
-      ...(sessions ? { approvals: sessions.approvals } : {}),
-    },
+    services: toolServices,
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway. The mode and

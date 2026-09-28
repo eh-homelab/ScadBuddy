@@ -196,7 +196,7 @@ reports AI available, which today is the msw-mocked build: nothing routes
 
 | Route | Guarded | What it does |
 |---|---|---|
-| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first, each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
+| `GET /api/v1/ai/mcp-tokens` | Read guard | Returns `{ auth_mode, tokens }`. Tokens are newest first by `created_at` (two minted in the same microsecond come in no fixed order), each with `id`, `name`, `tier`, `created_at`, `expires_at`, `last_used_at`, `revoked_at` and `status` (`active`, `expired` or `revoked`). It never returns the token or its hash. `auth_mode` is `null` when the auth settings cannot be read. |
 | `POST /api/v1/ai/mcp-tokens` | Yes | Body `{ name, tier, expires_in? }`, strict. `name` is 1–100 characters after trimming, with no control characters. `tier` is `read`, `write` or `outward`. `expires_in` is whole seconds from now, 60 to ten years; leave it out for a token that never expires. Answers `201` with `{ token, record }` and `Cache-Control: no-store`. **`token` appears here only.** Answers `415` for a body that is not `application/json`. |
 | `DELETE /api/v1/ai/mcp-tokens/:id` | Yes | Revokes the token: `204`. Answers `404` for an unknown id or one already revoked. The row stays, so the list shows when it was revoked. |
 
@@ -333,7 +333,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   route starts a session yet (#266, #300).
 - `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
   prepares (#471, `20260928T0734Z_approvals.sql`; see
-  [security.md](security.md#prepare-and-confirm-over-mcp)).
+  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
   name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
@@ -374,8 +374,10 @@ Change them in Settings → **MCP authentication** (shown where AI is available,
 the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
 ([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
 choice is "Require an access token" (`bearer`) or "Allow calls without a token"
-(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token
-asks for a confirmation first. `PUT` writes both keys in one transaction, logs
+(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
+or raising the anonymous access while they are allowed, asks for a confirmation first.
+That confirmation is in the UI only; the route does not require it (a server-side
+approval for settings writes is #258). `PUT` writes both keys in one transaction, logs
 `mcp auth: set to mode … (was …; from <peer>)`, and is guarded like the other Settings
 writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
 switched on with its own configuration once the discovery check passes (#262). The
@@ -390,15 +392,4 @@ DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
 ```
 
 Outward tools still need a human approval in the UI in every mode (spec §8.2; see
-[security.md](security.md#prepare-and-confirm-over-mcp)).
-
-## 10. The bundled ScadBuddy plugin
-
-The image carries ScadBuddy's own Claude plugin (#299) at `/app/plugins/scadbuddy`
-([`Dockerfile`](../../Dockerfile), `agent` stage), and every session query loads it
-(spec §10). The path is fixed by the image layout, not configured: `BUNDLED_PLUGIN_DIR`
-in [`agent/src/harness/plugins.ts`](../../agent/src/harness/plugins.ts). At start,
-`bundledPluginPaths()` vets it. If it is missing or refused, the agent logs
-`the ScadBuddy plugin at ... is not loaded: ...` and sessions run without its skills.
-Contents and vetting are in [claude-plugin.md](claude-plugin.md) and
-[security.md](security.md#plugin-vetting).
+[security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).

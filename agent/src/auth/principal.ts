@@ -35,14 +35,6 @@ export function hasTier(principal: Principal, tier: Tier): boolean {
 }
 
 /**
- * The principal as session and approval records name it (sessions/protocol.ts
- * `Owner`). A principal carries no display name, so its id is the label.
- */
-export function ownerOf(principal: Principal): Owner {
-  return { kind: principal.kind, id: principal.id, label: principal.id }
-}
-
-/**
  * The principal a session's harness tools run as (spec §8.1: the browser
  * user, or a flow's declared permissions). The browser user holds every tier;
  * its outward calls still park for its own approval (harness/permissions.ts).

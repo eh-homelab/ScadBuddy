@@ -1,133 +1,86 @@
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
-import type { ApprovalRecord } from '../approvals/service.js'
-import { ownerOf } from '../auth/principal.js'
-import { defineTool, errorResult, json, type Tool, type ToolContext } from './registry.js'
+import { hasTier } from '../auth/principal.js'
+import { defineTool, errorResult, json, type Tool } from './registry.js'
 
 // The `confirm` half of spec §8.2's prepare/confirm flow for external MCP
-// clients. An outward tool call (the `prepare`, registry.ts `runTool`) records
-// a pending action (pending.ts) and its approval in `ai_approvals`
-// (approvals/service.ts), both under one id. A human decides the approval in
-// the ScadBuddy UI; `confirm_action` then runs the prepared call, once.
-//
-// What a confirm checks, in order:
-//   - the pending action is this caller's (pending.ts `get` by principal id);
-//   - its approval row is visible to this caller as the principal that asked
-//     (service.ts `get`: a sessionless approval is the requester's own);
-//   - the row is for this tool and this input: the HMAC of the prepared
-//     arguments must equal the row's `input_hash`, so a decision applies to
-//     exactly the call it was shown for (spec §8.2, "A decision binds to the
-//     input hash");
-//   - the row is approved and still usable, and using it succeeds
-//     (`consumeById`, one conditional UPDATE on `consumed_at IS NULL`), so two
-//     confirms of one approval cannot both run it.
-// Without an approval store (no database) every confirm is refused.
-
-const NOT_SENT = 'Nothing was sent.'
-
-function why(approval: ApprovalRecord): string {
-  switch (approval.decision) {
-    case 'denied':
-      return `The user denied it in the ScadBuddy UI. ${NOT_SENT} Do not retry it unless the user asks you to.`
-    case 'expired':
-      return `Nobody decided on it before it expired. ${NOT_SENT} Prepare it again if it is still wanted.`
-    case 'cancelled':
-      return `Its approval was cancelled (${approval.reason ?? 'no reason given'}). ${NOT_SENT}`
-    case 'approved':
-      return approval.consumedAt
-        ? `It was already confirmed and ran (approvals are used once). ${NOT_SENT}`
-        : `Its approval no longer applies (${approval.reason ?? 'its usable window has passed'}). ${NOT_SENT} Prepare it again.`
-    default:
-      return `It is still waiting for a human approval in the ScadBuddy UI. ${NOT_SENT} Ask the user to approve it, then call confirm_action again.`
-  }
-}
-
-/** The approval row behind a pending action, as the caller sees it; undefined when there is none. */
-async function approvalOf(id: string, ctx: ToolContext): Promise<ApprovalRecord | undefined> {
-  try {
-    return await ctx.approvals?.get(id, ownerOf(ctx.principal))
-  } catch (err) {
-    if ((err as { code?: string }).code === 'not_found') return undefined
-    throw err
-  }
-}
-
-async function confirm(id: string, ctx: ToolContext): Promise<CallToolResult> {
-  const { pending, principal, approvals } = ctx
-  const action = pending.get(id, principal.id)
-  if (!action?.run) {
-    return errorResult(
-      `no pending action ${id} for this caller (it may have expired, or been prepared before a restart or on ` +
-        'another ScadBuddy agent); prepare it again',
-    )
-  }
-  if (!approvals) {
-    return errorResult(
-      `Not confirmed: "${action.summary}" needs a human approval in the ScadBuddy UI, and this agent has no ` +
-        `database to record approvals in (#258). ${NOT_SENT} Ask the user to do this in ScadBuddy instead.`,
-    )
-  }
-  const approval = await approvalOf(id, ctx)
-  if (!approval) {
-    pending.remove(id)
-    return errorResult(`no approval ${id} for this caller. ${NOT_SENT} Prepare it again.`)
-  }
-  if (approval.tool !== action.tool || approval.inputHash !== approvals.hash(action.tool, action.args as Record<string, unknown>)) {
-    pending.remove(id)
-    return errorResult(`approval ${id} is for a different call than the one prepared. ${NOT_SENT} Prepare it again.`)
-  }
-  if (approval.decision !== 'approved' || approval.consumedAt !== null || approval.revokedAt !== null) {
-    if (approval.decision !== null) pending.remove(id)
-    return errorResult(`Not confirmed: "${action.summary}". ${why(approval)}`)
-  }
-  const used = await approvals.consumeById(id)
-  if (!used) {
-    pending.remove(id)
-    return errorResult(`Not confirmed: "${action.summary}". ${why((await approvalOf(id, ctx)) ?? approval)}`)
-  }
-  pending.remove(id)
-  return action.run(ctx)
-}
+// clients. An outward tool call (the `prepare`, registry.ts runTool) records
+// a pending approval in `ai_approvals` and returns its id; `confirm_action`
+// runs the call once a human has approved it in the ScadBuddy UI. The rules
+// (same principal, same input hash, approved, unused, unexpired, used once)
+// are the store's: approvals/mcp.ts `claim`. Without a database the store is
+// pending.ts's in-memory one, which never confirms.
 
 export const approvalTools: Tool[] = [
   defineTool({
     name: 'list_pending_actions',
-    description:
-      'Outward actions this caller has prepared, with the state of their approval in the ScadBuddy UI ' +
-      '(pending, approved, denied, expired, cancelled, used).',
+    description: 'Outward actions this caller has prepared and that are waiting for a human approval.',
     input: z.object({}),
     risk: 'read',
     routes: [],
-    handler: async (_args, ctx) => {
-      const listed = []
-      for (const a of ctx.pending.list(ctx.principal.id)) {
-        const approval = ctx.approvals ? await approvalOf(a.id, ctx) : undefined
-        listed.push({
+    handler: async (_args, { pending, principal }) =>
+      json(
+        (await pending.list(principal)).map((a) => ({
           pending_action_id: a.id,
           tool: a.tool,
           summary: a.summary,
-          approval: !approval
-            ? 'unavailable'
-            : approval.consumedAt
-              ? 'used'
-              : (approval.decision ?? 'pending'),
-          expires_at: approval?.decision === 'approved' && approval.usableUntil ? approval.usableUntil : (approval?.expiresAt ?? a.expiresAt.toISOString()),
-        })
-      }
-      return json(listed)
-    },
+          expires_at: a.expiresAt.toISOString(),
+        })),
+      ),
   }),
 
   defineTool({
     name: 'confirm_action',
     description:
-      'Run an outward action prepared earlier, once a human has approved it in the ScadBuddy UI. ' +
-      'Refused while the approval is pending, and after it was denied, expired or used: each approval runs its call once.',
-    input: z.object({ pending_action_id: z.string().min(1) }),
+      'Complete an outward action prepared earlier (an outward tool answered pending_approval), once a human ' +
+      'has approved it in the ScadBuddy UI. Pass the pending_action_id and exactly the same arguments the tool ' +
+      'was called with: the approval covers that input only. Answers pending_approval until the human decides; ' +
+      'runs the action once when approved.',
+    input: z.object({
+      pending_action_id: z.string().min(1),
+      // `catchall`, not `z.record`: see `params` in common.ts.
+      arguments: z
+        .object({})
+        .catchall(z.unknown())
+        .default({})
+        .describe('The same arguments the outward tool was called with when it was prepared.'),
+    }),
     risk: 'outward',
     // This is the approval path itself; gating it would only prepare another pending action.
     approval: 'none',
     routes: [],
-    handler: async ({ pending_action_id }, ctx) => confirm(pending_action_id, ctx),
+    handler: async ({ pending_action_id, arguments: args }, ctx) => {
+      const { pending, principal } = ctx
+      const action = await pending.find(pending_action_id, principal)
+      if (!action) return errorResult(`no pending action ${pending_action_id} for this caller (it may have expired)`)
+      const tool = ctx.lookup?.(action.tool)
+      if (!tool?.gated) return errorResult(`pending action ${pending_action_id} is for ${action.tool}, which this server cannot run`)
+      if (!hasTier(principal, tool.risk)) return errorResult(`${tool.name} needs the "${tool.risk}" tier`)
+      // Parsed as the prepare parsed them, so the hash compares like with like.
+      // The tool's own schema, as the prepare parsed it (runTool: `tool.parse`),
+      // so the hash compares like with like and no top-level refinement is lost.
+      let input: Record<string, unknown>
+      try {
+        input = tool.parse(args)
+      } catch (err) {
+        if (!(err instanceof z.ZodError)) throw err
+        return errorResult(
+          `Not confirmed: these arguments are not valid for ${tool.name} (${z.prettifyError(err)}). ` +
+            'Pass exactly the arguments the action was prepared with. Nothing was sent.',
+        )
+      }
+      const claim = await pending.claim(pending_action_id, principal, input)
+      if (claim.status === 'refused') return errorResult(claim.reason)
+      if (claim.status === 'pending') {
+        return json({
+          status: 'pending_approval',
+          pending_action_id: claim.action.id,
+          summary: claim.action.summary,
+          expires_at: claim.action.expiresAt.toISOString(),
+          next: 'Not approved yet: nothing was sent. Ask the user to approve it in the ScadBuddy UI, then call confirm_action again.',
+        })
+      }
+      // Approved and now used up: whatever happens next, this approval never runs again.
+      return tool.execute(input, ctx)
+    },
   }),
 ]

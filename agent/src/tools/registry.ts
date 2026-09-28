@@ -2,9 +2,8 @@ import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/
 import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
-import type { ApprovalService } from '../approvals/service.js'
-import { hasTier, ownerOf, type Principal, type Tier } from '../auth/principal.js'
-import { type PendingActionStore, PendingStoreFullError } from './pending.js'
+import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import { type OutwardActions, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
 // (docs/superpowers/specs/2026-09-27-ai-integration-design.md): every tool is
@@ -29,22 +28,15 @@ export type Operation = { [P in keyof paths]: `${MethodsOf<P>} ${P & string}` }[
 /** Long-running tools report here; a no-op when the caller sent no progress token. */
 export type Progress = (progress: number, total?: number, message?: string) => Promise<void>
 
-/**
- * The part of the approval store (#258, approvals/service.ts `ApprovalService`)
- * the prepare/confirm pair uses.
- */
-export type ToolApprovals = Pick<ApprovalService, 'create' | 'get' | 'hash' | 'consumeById'>
-
 /** Shared by every call: what `main.ts` (or a test) wires up once. */
 export type ToolServices = {
   backend: BackendClient
-  pending: PendingActionStore
   /**
-   * Where a prepared outward call waits for a human (`ai_approvals`). Without
-   * it (no database) outward calls are still prepared, and `confirm_action`
-   * refuses every one.
+   * Where a gated outward call is prepared and later confirmed (spec §8.2):
+   * `ai_approvals` through approvals/mcp.ts when there is a database, else
+   * the in-memory store in pending.ts, whose actions can never be confirmed.
    */
-  approvals?: ToolApprovals
+  pending: OutwardActions
   /** How often a render is polled while `render_model` waits. */
   pollIntervalMs: number
   /** How long `render_model` waits before handing back the still-running job. */
@@ -59,6 +51,8 @@ export type ToolContext = ToolServices & {
   principal: Principal
   progress: Progress
   signal: AbortSignal
+  /** The projection's own tools by name, so `confirm_action` can run the approved one. */
+  lookup?: (name: string) => Tool | undefined
   /**
    * `harness`: the call came through the harness's permission seam
    * (harness/permissions.ts), which runs before any tool and parks every
@@ -104,6 +98,8 @@ export type Tool = {
   readonly gated: boolean
   readonly annotations: ToolAnnotations
   summarize(args: unknown): string
+  /** The arguments as the handler would see them (defaults applied): what an approval's input hash covers. */
+  parse(args: unknown): Record<string, unknown>
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
   execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
 }
@@ -131,6 +127,9 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
       const parsed = spec.input.parse(args)
       return spec.summarize ? spec.summarize(parsed) : `${spec.name} ${JSON.stringify(parsed)}`
     },
+    parse(args) {
+      return spec.input.parse(args) as Record<string, unknown>
+    },
     execute(args, ctx) {
       return spec.handler(spec.input.parse(args), ctx)
     },
@@ -153,62 +152,6 @@ export function errorResult(message: string): CallToolResult {
 }
 
 /**
- * The `prepare` half of spec §8.2's flow for external MCP clients: records the
- * call (pending.ts) and, when there is a database, its approval in
- * `ai_approvals` under the same id, requested by the caller's principal, for
- * the UI to decide. Nothing runs; `confirm_action` (approvals.ts) does, once.
- */
-async function prepare(tool: Tool, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
-  const summary = tool.summarize(args)
-  // A copy taken now is what runs, and what the approval's hash binds to.
-  const input = structuredClone((args ?? {}) as Record<string, unknown>)
-  const action = ctx.pending.prepare({
-    tool: tool.name,
-    args: input,
-    summary,
-    principalId: ctx.principal.id,
-    run: (runCtx) => tool.execute(input, runCtx),
-  })
-  if (!ctx.approvals) {
-    return json({
-      status: 'pending_approval',
-      pending_action_id: action.id,
-      summary,
-      expires_at: action.expiresAt.toISOString(),
-      next:
-        'Outward actions need a human approval in the ScadBuddy UI, and this agent has no database to ' +
-        'record one in, so confirm_action will refuse it. Nothing was sent.',
-    })
-  }
-  let expiresAt: string
-  try {
-    const approval = await ctx.approvals.create({
-      id: action.id,
-      sessionId: null,
-      turnId: null,
-      toolUseId: action.id,
-      tool: tool.name,
-      input,
-      tier: 'outward',
-      requestedBy: ownerOf(ctx.principal),
-    })
-    expiresAt = approval.expiresAt
-  } catch (err) {
-    ctx.pending.remove(action.id)
-    throw err
-  }
-  return json({
-    status: 'pending_approval',
-    pending_action_id: action.id,
-    summary,
-    expires_at: expiresAt,
-    next:
-      'Nothing was sent. Ask the user to approve this in the ScadBuddy UI before expires_at, then call ' +
-      'confirm_action with this pending_action_id to run it.',
-  })
-}
-
-/**
  * The one entry point both projections use: tier check, then the approval
  * gate for outward tools, then the handler. Errors become `isError` results
  * so the model sees them; they are never thrown into the transport.
@@ -220,7 +163,21 @@ export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Prom
     )
   }
   try {
-    if (tool.gated && ctx.gate !== 'harness') return await prepare(tool, args, ctx)
+    if (tool.gated && ctx.gate !== 'harness') {
+      // The prepare half of spec §8.2's prepare/confirm: record, do not act.
+      const input = tool.parse(args)
+      const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })
+      return json({
+        status: 'pending_approval',
+        pending_action_id: action.id,
+        summary: action.summary,
+        expires_at: action.expiresAt.toISOString(),
+        next:
+          'Nothing was sent. Outward actions need a human approval in the ScadBuddy UI. Once the user has ' +
+          'approved it there, call confirm_action with this pending_action_id and exactly the same arguments; ' +
+          'until then confirm_action answers pending_approval.',
+      })
+    }
     return await tool.execute(args, ctx)
   } catch (err) {
     if (err instanceof z.ZodError) return errorResult(`invalid arguments: ${z.prettifyError(err)}`)

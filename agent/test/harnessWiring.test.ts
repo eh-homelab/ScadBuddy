@@ -9,7 +9,6 @@ import { createBackendClient } from '../src/api/backend.js'
 import { harnessPrincipal } from '../src/auth/principal.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { ApprovalGate, ToolDecision } from '../src/harness/permissions.js'
-import { BUNDLED_PLUGIN_DIR, bundledPluginPaths } from '../src/harness/plugins.js'
 import { type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
 import { harnessTools } from '../src/tools/harness.js'
@@ -19,10 +18,11 @@ import type { ToolServices } from '../src/tools/registry.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { browser } from './support/sessions.js'
 
-// The harness as main.ts wires it (#255, #299): the registry's in-process
-// server and tiers (tools/harness.ts) and the bundled ScadBuddy plugin
-// (harness/plugins.ts bundledPluginPaths), run through the real SDK and its
-// bundled Claude Code against the fake Anthropic endpoint. The backend is msw.
+// The harness as main.ts wires it (#255): the registry's in-process server and
+// tiers (tools/harness.ts), run through the real SDK and its bundled Claude
+// Code against the fake Anthropic endpoint. The backend is msw. No plugin is
+// passed, as in main.ts: with `tools: []` there is no Skill or Agent tool, so a
+// plugin's skills and subagents would be listed but unusable.
 
 const BACKEND = 'http://backend.test'
 const GATEWAY_TOKEN = 'gw-wiring-test-token-777788889999'
@@ -49,25 +49,6 @@ function services(): ToolServices {
     renderWaitMs: 5000,
   }
 }
-
-describe('bundledPluginPaths', () => {
-  it("is the repository's plugins/scadbuddy in a checkout, and it passes vetting", () => {
-    expect(BUNDLED_PLUGIN_DIR).toBe(path.resolve('../plugins/scadbuddy'))
-    const log: string[] = []
-    expect(bundledPluginPaths((m) => log.push(m))).toEqual([BUNDLED_PLUGIN_DIR])
-    expect(log).toEqual([])
-  })
-
-  it('leaves out a missing or refused plugin and says why', () => {
-    const log: string[] = []
-    expect(bundledPluginPaths((m) => log.push(m), '/nonexistent/scadbuddy')).toEqual([])
-    expect(bundledPluginPaths((m) => log.push(m), 'test/fixtures/plugins/command-hook')).toEqual([])
-    expect(log).toEqual([
-      expect.stringContaining('/nonexistent/scadbuddy is not loaded: not a directory'),
-      expect.stringMatching(/command-hook is not loaded: .*hook/),
-    ])
-  })
-})
 
 describe('harnessTools', () => {
   it('maps every registry tool to its risk under its harness name, and nothing else', () => {
@@ -121,7 +102,6 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
         model: 'claude-sonnet-4-5',
         tierOf: wired.tierOf,
         mcpServers: wired.mcpServers({ owner: browser }),
-        pluginPaths: bundledPluginPaths((m) => stderr.push(m)),
         onDecision: (name, d) => decisions.push([name, d.decision]),
         stderr: (l) => stderr.push(l),
         ...extra,
@@ -139,7 +119,7 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
   }
 
   // One query for both, to spawn Claude Code as few times as the suite can.
-  it('reports the ScadBuddy plugin loaded with no plugin errors, and runs a read tool within its tier', async () => {
+  it('offers only the registry tools (no Skill, no Agent, no plugin) and runs a read tool within its tier', async () => {
     script = (r) =>
       lastContent(r).includes('tool_result')
         ? { text: 'done' }
@@ -148,17 +128,15 @@ describe.skipIf(cliMissing !== undefined)(`the wired harness against a fake Anth
     expect(result.subtype).toBe('success')
     expect(decisions).toEqual([['mcp__scadbuddy__list_models', 'allow']])
     expect(lastContent(fake.messageCalls().at(-1)!)).toContain('keychain')
-    // Beside Claude Code's own built-in ones (`agents-md@builtin` on 2.1.283).
-    expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([
-      expect.objectContaining({ name: 'scadbuddy', path: BUNDLED_PLUGIN_DIR, version: '0.1.0' }),
-    ])
-    expect(init.plugin_errors).toBeUndefined()
-    // Its skills are there; its .mcp.json (the remote server for Claude Code
-    // installs) is not started: strictMcpConfig (harness/plugins.ts).
-    expect(init.skills).toEqual(expect.arrayContaining(['scadbuddy:authoring', 'scadbuddy:customize', 'scadbuddy:print']))
+    // Claude Code's own built-in ones only (`agents-md@builtin` on 2.1.283).
+    expect(init.plugins.filter((p) => p.path !== 'builtin')).toEqual([])
+    expect(init.skills.filter((s) => s.startsWith('scadbuddy:'))).toEqual([])
     expect(init.mcp_servers.map((s) => [s.name, s.status])).toEqual([['scadbuddy', 'connected']])
-    // Every registry tool is offered, by its harness name, and no built-in.
+    // Every registry tool is offered, by its harness name, and no built-in:
+    // nothing that could invoke a skill or a subagent.
     expect([...init.tools].sort()).toEqual(ALL_TOOLS.map((t) => `mcp__scadbuddy__${t.name}`).sort())
+    expect(init.tools).not.toContain('Skill')
+    expect(init.tools).not.toContain('Agent')
   }, 60_000)
 
   it('parks an outward tool at the gate, and once approved runs it (not a second prepare)', async () => {
