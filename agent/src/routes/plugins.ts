@@ -14,7 +14,7 @@ import {
 } from '../plugins/registry.js'
 import type { PluginTest } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
-import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
 
 // /api/v1/ai/plugins (issue #297): the admin surface of the plugin registry
 // (src/plugins/registry.ts, table `ai_plugins`).
@@ -130,6 +130,14 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       subject: 'plugin changes',
       jsonMethods: ['PUT', 'PATCH', ...(c.req.path.endsWith('/test') ? [] : ['POST'])],
     })
+    if (problem) return c.json({ detail: problem }, 403)
+    await next()
+  })
+
+  // Reads show endpoints, header names and tier maps (never the secret):
+  // same-origin or loopback only (guard.ts `uiReadProblem`).
+  app.on('GET', [base, `${base}/*`], async (c, next) => {
+    const problem = uiReadProblem(c, deps.origins, deps.remoteAddress, 'plugin reads')
     if (problem) return c.json({ detail: problem }, 403)
     await next()
   })

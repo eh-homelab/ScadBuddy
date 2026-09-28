@@ -394,7 +394,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   | `POST /api/v1/ai/plugins/{name}/test` | through the forwarder: connect, one `tools/list` (10 s timeout), and report each tool with its harness name and tier |
 
   Writes and the test go through the same guard as credential writes (next
-  bullet). A generic example against a loopback peer (a shell in the pod, or
+  bullet). Reads are guarded too (`uiReadProblem`): HTTPS through the trusted
+  proxy or loopback, addressed to the public origin (or loopback), `Origin`
+  checked when present, and a cross-site `Sec-Fetch-Site` refused. A generic example against a loopback peer (a shell in the pod, or
   `kubectl port-forward … 8081`; the `Origin` must match the address used):
 
   ```bash

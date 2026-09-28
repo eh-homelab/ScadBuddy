@@ -107,13 +107,74 @@ describe('plugin write routes are guarded', () => {
     expect(repo.calls).toEqual([])
   })
 
-  it('lets reads through without the write guard, and answers 503 without a database', async () => {
-    const list = vi.fn(() => Promise.resolve([]))
-    const repo = { ...untouchable(), list }
-    const res = await app(repo).request('/api/v1/ai/plugins')
-    expect(res.status).toBe(200)
-    expect(list).toHaveBeenCalledOnce()
-    const none = await app(undefined).request('/api/v1/ai/plugins')
+  it('answers 503 on a read without a database', async () => {
+    const none = await app(undefined).request('/api/v1/ai/plugins', { headers: SAME_ORIGIN_GET })
     expect(none.status).toBe(503)
+  })
+})
+
+/** A same-origin fetch() GET through the ingress: browsers send no Origin on it. */
+const SAME_ORIGIN_GET = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
+
+describe('plugin reads are guarded (uiReadProblem)', () => {
+  const READS = ['/api/v1/ai/plugins', '/api/v1/ai/plugins/mem']
+
+  function readable() {
+    const list = vi.fn(() => Promise.resolve([]))
+    const get = vi.fn(() => Promise.resolve(undefined))
+    return { repo: { ...untouchable(), list, get }, list, get }
+  }
+
+  it.each(READS)('allows a same-origin GET of %s through the ingress, with or without Origin', async (path) => {
+    const { repo } = readable()
+    for (const headers of [SAME_ORIGIN_GET, { ...SAME_ORIGIN_GET, origin: 'https://scadbuddy.example' }]) {
+      const res = await app(repo).request(path, { headers })
+      expect([200, 404]).toContain(res.status) // 404: no plugin "mem" in the stub
+    }
+    expect(repo.calls).toEqual([])
+  })
+
+  it('allows a loopback GET (local development), and a navigation (Sec-Fetch-Site: none)', async () => {
+    const { repo, list } = readable()
+    const loopback = await app(repo, { remoteAddress: () => '127.0.0.1' }).request('/api/v1/ai/plugins', {
+      headers: { host: '127.0.0.1:8081' },
+    })
+    expect(loopback.status).toBe(200)
+    const typed = await app(repo).request('/api/v1/ai/plugins', {
+      headers: { ...SAME_ORIGIN_GET, 'sec-fetch-site': 'none' },
+    })
+    expect(typed.status).toBe(200)
+    expect(list).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(READS)('refuses a cross-site GET of %s before the registry', async (path) => {
+    const cases: Record<string, string>[] = [
+      // a page on another site, no Origin (e.g. an <img> or no-cors fetch)
+      { ...SAME_ORIGIN_GET, 'sec-fetch-site': 'cross-site' },
+      { ...SAME_ORIGIN_GET, 'sec-fetch-site': 'same-site' },
+      // a CORS fetch from another origin
+      { ...SAME_ORIGIN_GET, origin: 'https://evil.example', 'sec-fetch-site': 'cross-site' },
+      // DNS rebinding: the attacker's name as Host
+      { host: 'evil.example', 'x-forwarded-proto': 'https' },
+      // plain HTTP through the proxy
+      { host: 'scadbuddy.example', 'x-forwarded-proto': 'http' },
+    ]
+    for (const headers of cases) {
+      const { repo, list, get } = readable()
+      const res = await app(repo).request(path, { headers })
+      expect(res.status, JSON.stringify(headers)).toBe(403)
+      expect(((await res.json()) as { detail: string }).detail).toMatch(/^plugin reads must/)
+      expect(list).not.toHaveBeenCalled()
+      expect(get).not.toHaveBeenCalled()
+    }
+  })
+
+  it('refuses a GET from a LAN peer that is not the trusted proxy', async () => {
+    const { repo, list } = readable()
+    const res = await app(repo, { remoteAddress: () => '192.168.1.50' }).request('/api/v1/ai/plugins', {
+      headers: SAME_ORIGIN_GET,
+    })
+    expect(res.status).toBe(403)
+    expect(list).not.toHaveBeenCalled()
   })
 })

@@ -21,6 +21,8 @@ const kek = kekFromBase64(randomBytes(32).toString('base64'))
 const otherKek = kekFromBase64(randomBytes(32).toString('base64'))
 const TOKEN = 'hs-pg-test-token-9999888877776666'
 const UI = { host: 'scadbuddy.example', origin: 'https://scadbuddy.example', 'x-forwarded-proto': 'https' }
+/** A same-origin GET through the ingress: browsers send no Origin on it. */
+const READ = { host: 'scadbuddy.example', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 const PUBLIC = () => Promise.resolve(['203.0.113.10'])
 
 describe.skipIf(!TEST_DATABASE_URL)(
@@ -211,10 +213,10 @@ describe.skipIf(!TEST_DATABASE_URL)(
           tool_tiers: { recall: 'read' },
         })
 
-        const list = await a.request('/api/v1/ai/plugins')
+        const list = await a.request('/api/v1/ai/plugins', { headers: READ })
         expect(list.status).toBe(200)
         bodies.push(await list.text())
-        const one = await a.request('/api/v1/ai/plugins/hindsight')
+        const one = await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })
         bodies.push(await one.text())
 
         const patched = await a.request('/api/v1/ai/plugins/hindsight', json('PATCH', { enabled: true }))
@@ -234,7 +236,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         for (const body of bodies) expect(body).not.toContain(TOKEN)
 
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(204)
-        expect((await a.request('/api/v1/ai/plugins/hindsight')).status).toBe(404)
+        expect((await a.request('/api/v1/ai/plugins/hindsight', { headers: READ })).status).toBe(404)
         expect((await a.request('/api/v1/ai/plugins/hindsight', { method: 'DELETE', headers: UI })).status).toBe(404)
       })
 
