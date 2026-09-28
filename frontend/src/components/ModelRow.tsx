@@ -47,7 +47,23 @@ export function ModelRow({ model, onOpen, onTag }: Props) {
             onClick={() => onOpen(slides, coverIndex >= 0 ? coverIndex : 0)}
             className="block w-full cursor-zoom-in rounded-[4px] focus-visible:outline-2 focus-visible:outline-accent"
           >
-            <ModelThumbnail src={src} alt="" />
+            {src ? (
+              <ModelThumbnail src={src} alt="" />
+            ) : (
+              // Only poster-less videos: a neutral tile with a play badge, as a card
+              // shows, rather than the never-generated placeholder.
+              <span
+                data-testid="video-tile"
+                aria-hidden="true"
+                className="relative flex aspect-[4/3] w-full items-center justify-center rounded-[4px] bg-surface-2"
+              >
+                <span className="flex h-7 w-7 items-center justify-center rounded-full bg-black/60 text-white">
+                  <svg viewBox="0 0 16 16" className="ml-0.5 h-3.5 w-3.5">
+                    <path d="M4 2.5v11l9-5.5z" fill="currentColor" />
+                  </svg>
+                </span>
+              </span>
+            )}
             {slides.length > 1 && (
               <span
                 data-testid="media-count"

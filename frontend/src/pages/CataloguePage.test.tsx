@@ -951,6 +951,20 @@ describe('CataloguePage list mode (#278)', () => {
     const bin = list.find((model) => model.slug === 'gridfinity-bin')!
     expect(thumbnail.querySelector(`img[src="${api.modelThumbnailUrl(bin)}"]`)).toBeNull()
     expect(thumbnail.querySelector('img')).toBeNull()
+    // A neutral video tile, as a card shows, not the never-generated placeholder.
+    expect(within(thumbnail).getByTestId('video-tile')).toBeInTheDocument()
+    expect(within(thumbnail).queryByRole('img', { name: /not generated yet/ })).not.toBeInTheDocument()
+    expect(thumbnail).toHaveAccessibleName('View media of Gridfinity Bin')
+  })
+
+  it('names the models list the same in both views', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(4)
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(4)
+    expect(within(screen.getByRole('list', { name: 'Models' })).getAllByRole('heading', { level: 2 })).toHaveLength(4)
   })
 
   it('names an uncaptioned image after the template in the lightbox, as a card does', async () => {
