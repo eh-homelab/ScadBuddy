@@ -520,15 +520,20 @@ class AssetStore:
                 # crash in between leaves the ledger to be rebuilt, not trusted.
                 self._write_ledger(count, total, dirty=True)
                 try:
-                    size = blob.stat().st_size
+                    size: int | None = blob.stat().st_size
+                except FileNotFoundError:
+                    # Gone behind the store's back. Its metadata still goes (the
+                    # sweep lists blobs, so nothing would ever revisit it), and the
+                    # ledger stays dirty for the next read to recount.
+                    size = None
+                try:
                     self._meta_path(asset_id).unlink(missing_ok=True)
-                    blob.unlink()
+                    blob.unlink(missing_ok=True)
                 except OSError:
-                    # A FileNotFoundError too: gone behind the store's back, so the
-                    # ledger stays dirty and the next read recounts.
                     logger.exception("could not remove an unused asset", extra={"asset": asset_id})
                     continue
-                self._write_ledger(count - 1, total - size)
+                if size is not None:
+                    self._write_ledger(count - 1, total - size)
             removed.append(asset_id)
         return removed
 

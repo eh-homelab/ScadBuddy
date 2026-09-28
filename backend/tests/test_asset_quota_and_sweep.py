@@ -412,3 +412,26 @@ def test_a_missing_or_damaged_ledger_is_recounted(store: AssetStore) -> None:
     usage = store.usage()
     assert (usage.count, usage.bytes) == (1, meta.size)
     assert json.loads(store.ledger_path.read_text(encoding="utf-8"))["dirty"] is False
+
+
+def test_the_sweep_removes_the_metadata_of_a_blob_already_gone(
+    store: AssetStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A blob removed behind the store's back between the sweep's listing and its
+    removal: the metadata must still go, and the total is recounted."""
+    gone = store.put(svg(1), "gone.svg")
+    kept = store.put(svg(2), "kept.svg")
+    age(store, gone, GRACE + DAY)
+    real_last_used = AssetStore._last_used
+
+    def vanish_first(self: AssetStore, asset_id: str, blob: Path) -> float | None:
+        stamp = real_last_used(self, asset_id, blob)
+        if asset_id == gone.id:
+            blob.unlink(missing_ok=True)
+        return stamp
+
+    monkeypatch.setattr(AssetStore, "_last_used", vanish_first)
+    assert store.sweep(set(), grace=GRACE) == [gone.id]
+    assert not (store.root / f"{gone.id}.json").exists()
+    usage = store.usage()
+    assert (usage.count, usage.bytes) == (1, kept.size)
