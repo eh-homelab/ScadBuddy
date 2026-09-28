@@ -407,7 +407,7 @@ class ProgressObserver:
     """Turns the progress reads the backend makes into ``print.*`` events.
 
     Until the per-print watcher (#268) exists, the only time the backend sees a
-    print move is when someone asks: the progress route, a send or a run. Each
+    print move is when someone asks: the progress route or a run. Each
     read is compared with the last one seen for that output, so a poll that finds
     nothing new publishes nothing, and ``print.settled`` is published once, on the
     read that first finds the print settled.

@@ -81,6 +81,39 @@ def test_a_per_printer_option_applies_to_the_chosen_printer(client: TestClient, 
 
 
 @respx.mock
+def test_a_per_printer_override_for_another_printer_is_ignored(
+    client: TestClient, model: str
+) -> None:
+    """Printer 7's override must not leak onto a print on printer 1: the global value
+    stands. Applying every remembered printer's options would queue ``False``."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "printer", {"timelapse": False}, key="7")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request(printer_id=1))
+
+    queued = json.loads(queue.calls.last.request.read())
+    assert queued["printer_id"] == 1
+    assert queued["timelapse"] is True
+
+
+@respx.mock
+def test_a_per_model_override_for_another_model_is_ignored(client: TestClient, model: str) -> None:
+    """Another model's override must not leak onto this one: the global value stands."""
+    configure(client)
+    remember(client, "global", {"timelapse": True})
+    remember(client, "model", {"timelapse": False}, key="some-other-model")
+    output_id = _prepared(client, model)
+    queue = queue_route()
+
+    client.post(f"/api/v1/print/outputs/{output_id}/run", json=body())
+
+    assert json.loads(queue.calls.last.request.read())["timelapse"] is True
+
+
+@respx.mock
 def test_with_no_printer_named_the_configured_one_prints_with_its_options(
     client: TestClient, model: str
 ) -> None:

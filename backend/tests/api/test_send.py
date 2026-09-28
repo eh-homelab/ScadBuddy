@@ -204,9 +204,9 @@ def test_an_old_clients_extra_fields_are_ignored(client: TestClient, model: str)
 
 @respx.mock
 def test_a_stored_pipeline_is_never_read_by_the_send(client: TestClient, model: str) -> None:
-    """Until Task 6 removes the field, a stored ``pipeline_id`` must change nothing: the
-    plate is the Settings printer's, and no ``/slicer-pipelines/`` route is mocked, so
-    reading one would fail this test."""
+    """Until ``pipeline_id`` is removed from Settings (#312), a stored one must change
+    nothing: the plate is the Settings printer's, and no ``/slicer-pipelines/`` route is
+    mocked, so reading one would fail this test."""
     configure(client, pipeline_id=4, printer_id=1)
     plate_routes(printer_id=1, model="H2C")
     output_id = make_output(client, model)
