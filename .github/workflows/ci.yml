@@ -47,6 +47,13 @@ name: CI
 # build-image.yml, so no job here needs a bigger or different runner.
 on:
   pull_request:
+  # The merge queue (#508): a queued PR is re-checked on the queue's own commit --
+  # main plus every PR ahead of it -- which is what catches two PRs that pass
+  # alone and break main together (#488 + #490). `CI Summary` has to report
+  # there or the queue never merges anything. `claude-review` is carried onto
+  # that commit by merge-queue-review.yml; `freshness` and `dispatch-review` stay
+  # PR-only.
+  merge_group:
   push:
     branches: [main]
   # Weekly, and on demand, so every template's verify.sh runs against the image
@@ -125,8 +132,8 @@ jobs:
           if [ -d models ]; then models=true; fi
 
           # Can the image actually SERVE yet? The Dockerfile's CMD is
-          # `uvicorn scadbuddy.main:app`. When this gate was written the API
-          # epic had not landed and starting the container died with
+          # `uvicorn --factory scadbuddy.main:create_app`. When this gate was
+          # written the API epic had not landed and starting the container died with
           # `exec uvicorn failed`; it has landed since, so this now reads true.
           # Kept because it is the honest precondition for the container smoke
           # test, and because it costs one `[ -f ]`.
@@ -241,6 +248,9 @@ jobs:
 
       - name: Test the issue-intake failure check
         run: .github/scripts/intake-verify.test.sh
+
+      - name: Test the OpenSCAD bump script
+        run: .github/scripts/openscad-bump.test.sh
 
       # ScadBuddy's Claude plugin (#299) is Markdown and JSON that nothing else
       # in CI reads: a skill that loses its frontmatter still loads with its
@@ -494,9 +504,11 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # For the `requires_postgres` tests: the render queue's Postgres store. The
-    # test container reaches it on the runner's loopback (`--network host`), and
-    # each test works in a schema of its own.
+    # For the backend tests that need Postgres: every one that builds the app
+    # (the settings live there, #401) and the render queue's store. The test
+    # container reaches it on the runner's loopback (`--network host`), and each
+    # test works in a schema of its own. The container smoke test below uses it
+    # too, since the app will not start without it.
     services:
       postgres:
         image: postgres:17
@@ -586,7 +598,13 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: |
           set -euo pipefail
-          docker run -d --name scadbuddy-ci -p 18080:8080 scadbuddy:ci
+          # The database is required (#401). The service container is on the
+          # runner, reached through the host gateway; the app migrates the
+          # default schema, which the pytest step's per-test schemas never touch.
+          docker run -d --name scadbuddy-ci -p 18080:8080 \
+            --add-host=host.docker.internal:host-gateway \
+            -e SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/scadbuddy_test \
+            scadbuddy:ci
 
           # `|| true` on the inspect: under `bash -e` a failed inspect (the
           # container exited and was reaped, or the image somehow carries no
@@ -773,18 +791,25 @@ jobs:
         id: select
         env:
           EVENT_NAME: ${{ github.event_name }}
+          QUEUE_BASE: ${{ github.event.merge_group.base_sha }}
         run: |
           set -euo pipefail
           list="$RUNNER_TEMP/models.txt"
           # The `rev-parse HEAD^2` guard: without a merge commit there is no
           # base parent to diff against, and diffing HEAD^1 of a non-merge
           # would silently compare against the wrong commit. Fail open.
+          # A merge-queue commit is diffed against the main it was built on:
+          # every queued PR ahead of this one is in the diff, as it should be.
           if [ "$EVENT_NAME" = "pull_request" ] \
             && git rev-parse -q --verify 'HEAD^2' >/dev/null \
             && git diff --name-only 'HEAD^1' HEAD >"$RUNNER_TEMP/changed.txt"; then
             .github/scripts/select-models.sh changed <"$RUNNER_TEMP/changed.txt" >"$list"
+          elif [ "$EVENT_NAME" = "merge_group" ] \
+            && git fetch -q --depth=1 origin "$QUEUE_BASE" \
+            && git diff --name-only "$QUEUE_BASE" HEAD >"$RUNNER_TEMP/changed.txt"; then
+            .github/scripts/select-models.sh changed <"$RUNNER_TEMP/changed.txt" >"$list"
           else
-            if [ "$EVENT_NAME" = "pull_request" ]; then
+            if [ "$EVENT_NAME" = "pull_request" ] || [ "$EVENT_NAME" = "merge_group" ]; then
               echo "::warning::Could not compute this PR's changed files; verifying every template."
             fi
             .github/scripts/select-models.sh all >"$list"

@@ -22,9 +22,18 @@ uv run --frozen pytest
 ```
 
 Tests marked `requires_openscad` / `requires_git` skip when the binary is not on
-PATH. Tests marked `requires_postgres` (the render queue's Postgres store) skip
-unless `SCADBUDDY_TEST_DATABASE_URL` points at a Postgres they can create schemas in;
-CI runs them against a `postgres:17` service container. The only place a real `openscad` exists is the image:
+PATH. The backend will not start without `SCADBUDDY_DATABASE_URL` (#401: the settings
+live only in Postgres), so every test that builds the app takes the `pg_conninfo`
+fixture (a throwaway schema), and it and the `requires_postgres` tests (the render
+queue, template media's `template_media`) skip unless `SCADBUDDY_TEST_DATABASE_URL`
+points at a Postgres they can create schemas in, e.g.
+`docker run -d -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=scadbuddy_test -p 5432:5432
+postgres:17` and `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test`.
+Without it most of `tests/api` skips. CI runs them against a `postgres:17` service
+container. A `Settings` for an app that never starts uses `tests.conftest.UNUSED_DATABASE_URL`.
+Backend schema changes are new files in `backend/scadbuddy/migrations/`
+(`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
+`20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
 `docker build --target test -t scadbuddy:test . && docker run --rm scadbuddy:test`.
 
 Frontend (`frontend/`, Node 24, pnpm via corepack from `packageManager`):
@@ -99,14 +108,17 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per-triangle material), `solids.py` (one closed solid per colour via a `color()`
   wrapper), `bambu3mf.py` (Bambu-style 3MF writer), `glb.py`, `thumbnail.py` (numpy
   rasteriser for plate cover images), `plate.py`/`plate_profiles.py`, `jobs.py`
-  (`render_job` ties the steps together; job queue).
+  (`render_job` ties the steps together; job queue), `render_cache.py` (finished
+  renders kept under `models/<slug>/.renders/<key>/`; a resubmit of the same
+  parameters at the same revision is answered without OpenSCAD).
 - `backend/scadbuddy/bambuddy/` — httpx client (`client.py`), send/print routes
   (`send.py`, `dispatch.py`, `pipelines.py`, `filaments.py`, `projects.py`), scope-aware
   error mapping (`errors.py`).
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
-  (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
-  template's revision; a template's own read-only ones in the `presets` list of its
+  (`presets.py`: saved ones in Postgres, the `saved_presets` table (#332), outside git so
+  a save never moves a template's revision, and a 503 to save one without
+  `SCADBUDDY_DATABASE_URL`; a template's own read-only ones in the `presets` list of its
   `model.json`, with a legacy `presets.json` still read).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
@@ -148,6 +160,14 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.
+  - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
+    `src/routes/plugins.ts` under `/api/v1/ai/plugins`). Claude Code never gets a
+    plugin's URL or secret: it gets `http://127.0.0.1:<port>/p/<token>` on the loopback
+    forwarder (`src/plugins/forwarder.ts`), which pins the checked address, refuses
+    redirects and 401/OAuth discovery, and adds the header (Claude Code's own MCP client
+    follows both with the header). Claude Code renames tool-name characters outside
+    `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
+    colliding tools are hidden. Unlisted plugin tools are `outward`.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless
@@ -184,11 +204,13 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 
-- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-23@sha256:…`
+- Base image is a pinned dated nightly, `openscad/openscad:dev.2026-09-28@sha256:…`
   (tag plus index digest; the only stable release, 2021.01, has no Manifold). The
-  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.23). Bump
+  Dockerfile also asserts `OPENSCAD_VERSION` (currently 2026.09.28). Bump
   deliberately: re-verify spec §3 against the new build, then change the tag,
-  digest and `OPENSCAD_VERSION` in the same commit.
+  digest and `OPENSCAD_VERSION` in the same commit. The weekly `OpenSCAD Bump`
+  workflow (`openscad-bump.yml`) opens that PR when a newer nightly exists; its CI
+  is the re-verification, and it is never auto-merged.
 - **No Python in the base image.** The Dockerfile `apt install`s `python3` and uv
   provides 3.12. Do not switch to a Python base with OpenSCAD installed beside it —
   the facts below were measured on this exact image.

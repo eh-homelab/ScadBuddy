@@ -6,7 +6,7 @@ the print routes' tests do. Nothing here posts to Bambuddy: the analyzers only r
 
 from __future__ import annotations
 
-from pathlib import Path
+import asyncio
 from typing import Any
 
 import httpx
@@ -21,7 +21,8 @@ from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
-from scadbuddy.core.events import Event, InProcessEventBus
+from scadbuddy.bambuddy.uploads import LibraryCopy
+from tests.api.test_events import Recorded
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -30,11 +31,10 @@ SILK_SPOOL = 5  # "Tri Color" subtype, preset "Bambu PLA Silk" (inventory-spools
 
 
 @pytest.fixture
-def events(app: FastAPI) -> list[Event]:
+def events(app: FastAPI) -> Recorded:
     bus = getattr(app.state, STATE_ATTR).events
-    assert isinstance(bus, InProcessEventBus)
-    seen: list[Event] = []
-    bus.add_listener(seen.append)
+    seen = Recorded(bus)
+    bus.add_listener(seen.record)
     return seen
 
 
@@ -237,6 +237,7 @@ VERIFIED = Analyzer(
 )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_uploaded_output_is_judged_on_the_inventory_too(
     client: TestClient, model: str, app: FastAPI
@@ -244,7 +245,8 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
     configure(client)
     bambuddy_routes()
     output_id = make_output(client, model)
-    getattr(app.state, STATE_ATTR).outputs.record_send(output_id, library_file_id=41)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
     respx.get(f"{API}/library/files/41/filament-requirements").mock(
         return_value=httpx.Response(
             200,
@@ -275,46 +277,8 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
     assert all(call.request.method == "GET" for call in respx.calls)
 
 
-# --- without a database -------------------------------------------------------------
-
-
-def test_without_a_database_the_run_says_no_decisions_were_read(
-    client: TestClient, model: str
-) -> None:
-    report = _run(client, make_output(client, model))
-    assert report["decisions_available"] is False
-    assert "SCADBUDDY_DATABASE_URL" in report["decisions_reason"]
-
-
-def test_without_a_database_nothing_is_recorded_and_nothing_is_written(
-    client: TestClient, model: str, events: list[Event], data_dir: Path
-) -> None:
-    output_id = make_output(client, model)
-    before = sorted(str(path) for path in data_dir.rglob("*") if "analyzer" in path.name)
-    decision = {"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}}
-    apply = {
-        "target": {"output_id": output_id},
-        "diagnostic_key": "SB1003",
-        "fix_id": "enable-support",
-        "fingerprint": "0" * 64,
-        "confirm": True,
-    }
-    events.clear()
-    for response in (
-        client.post("/api/v1/analyzers/decisions", json=decision),
-        client.get("/api/v1/analyzers/decisions"),
-        client.delete(f"/api/v1/analyzers/decisions/{'0' * 32}"),
-        client.post("/api/v1/analyzers/fixes/apply", json=apply),
-    ):
-        problem = _ok(response, 503)
-        assert problem["type"].endswith("/database-required")
-        assert "SCADBUDDY_DATABASE_URL" in problem["detail"]
-    assert [event for event in events if event.kind == "analyzer.decision"] == []
-    assert sorted(str(path) for path in data_dir.rglob("*") if "analyzer" in path.name) == before
-
-
 def test_a_database_that_cannot_be_reached_degrades_to_a_503(
-    client: TestClient, model: str, app: FastAPI, events: list[Event]
+    client: TestClient, model: str, app: FastAPI, events: Recorded
 ) -> None:
     # Nothing listens on port 1: every connect is refused, and the store gives up
     # within its connect timeout instead of hanging the request.
@@ -335,6 +299,7 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
         ):
             problem = _ok(response, 503)
             assert problem["type"].endswith("/database-unavailable")
+        events.settle()
         assert [event for event in events if event.kind == "analyzer.decision"] == []
     finally:
         state.decisions.close()

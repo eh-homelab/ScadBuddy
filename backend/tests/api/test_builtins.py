@@ -20,7 +20,7 @@ from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 pytestmark = pytest.mark.requires_git
 
@@ -86,6 +86,7 @@ def test_every_read_route_takes_a_built_in(client: TestClient) -> None:
     assert client.get(f"/api/v1/models/{BUILTIN}/thumbnail").content == THUMBNAIL
 
 
+@pytest.mark.requires_postgres
 def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: DataPaths) -> None:
     job_id = _finished_job(client, BUILTIN)
 
@@ -104,6 +105,7 @@ def test_a_built_in_renders_and_keeps_its_outputs(client: TestClient, paths: Dat
     assert 'filename="keychain-blue.3mf"' in download.headers["content-disposition"]
 
 
+@pytest.mark.requires_postgres
 def test_a_built_in_and_a_same_slug_template_of_mine_stay_apart(
     client: TestClient, paths: DataPaths
 ) -> None:
@@ -319,7 +321,7 @@ def test_a_built_in_without_a_thumbnail_shows_its_first_plate_image(
     with TestClient(app) as client:
         assert client.get(f"/api/v1/models/{BUILTIN}").json()["has_thumbnail"] is False
         job_id = _finished_job(client, BUILTIN)
-        with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+        with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
             archive.writestr(PLATE_THUMBNAIL, cover)
         saved = client.post(f"/api/v1/models/{BUILTIN}/outputs", json={"job_id": job_id})
         assert saved.status_code == 201, saved.text

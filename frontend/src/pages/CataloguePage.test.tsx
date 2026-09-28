@@ -4,6 +4,7 @@ import { Route, Routes, useLocation } from 'react-router'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { BUILTIN_SLUG, models } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
 import { renderPage } from '../test/utils'
@@ -421,5 +422,27 @@ describe('CataloguePage', () => {
     ) as HTMLElement
     expect(within(copy).getByTestId('upstream-gone')).toHaveTextContent('Upstream gone')
     expect((await api.getModel(COPY)).upstream_state).toBe('gone')
+  })
+})
+
+describe('CataloguePage, live (#269)', () => {
+  it('shows a model created elsewhere, and drops one deleted elsewhere', async () => {
+    renderPage(<CataloguePage />)
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+
+    await api.createModelFromSource({
+      name: 'Made By An Agent',
+      description: '',
+      source: 'cube(1);\n',
+      force: false,
+    })
+    emitRealtime('model.created', ['models'], { slug: 'made-by-an-agent' })
+    expect(await screen.findByRole('heading', { name: 'Made By An Agent' })).toBeInTheDocument()
+
+    await api.deleteModel('made-by-an-agent')
+    emitRealtime('model.deleted', ['models'], { slug: 'made-by-an-agent' })
+    await waitFor(() =>
+      expect(screen.queryByRole('heading', { name: 'Made By An Agent' })).not.toBeInTheDocument(),
+    )
   })
 })

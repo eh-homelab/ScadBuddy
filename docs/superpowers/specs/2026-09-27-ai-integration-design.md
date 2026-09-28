@@ -96,6 +96,45 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
+- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
+  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+  the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
+  argv (`sdk.mjs`), so a header value written there would be on the command line; a
+  header written as `${VAR}` with the value in the query's `env` is expanded by Claude
+  Code and reaches the server, and the argv holds only the reference. A configured
+  `{ type: 'http' }` server named `my-memory` gives tools `mcp__my-memory__<tool>` and
+  reports `{ name, status: 'connected', source: 'dynamic' }` in the init message;
+  `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
+  `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
+  server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
+  tools in the first turn. The permission seam applies to them as to in-process tools: a
+  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
+  server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  - **Tool-name normalisation.** Claude Code names an MCP tool
+    `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    `files_list` therefore collide on one name, and a name with a space or a dot cannot be
+    matched literally. The registry now tiers only names in that alphabet, maps disabled
+    names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
+    `harnessToolName`, `agent/src/plugins/forwarder.ts`). This is measured end to end in
+    `agent/test/plugins.e2e.test.ts`: `files.delete` is disabled as
+    `mcp__my-memory__files_delete`, the colliding pair is never offered, and a call to
+    the colliding name never reaches the server.
+  - **Redirects and OAuth discovery.** Claude Code's own MCP client follows 30x redirects
+    and a `WWW-Authenticate` `resource_metadata` URL, and sends the configured header
+    there too. The probe showed a 307 to another origin receiving every request with the
+    header, and `resource_metadata="http://169.254.169.254/…"` receiving a GET with it.
+    Claude Code is therefore never given a plugin's URL or secret. A loopback forwarder
+    in the agent (`agent/src/plugins/forwarder.ts`):
+    - connects to the egress-checked address;
+    - refuses redirects;
+    - turns a 401 into a 502;
+    - adds the header itself.
+
+    The e2e test measures that a redirecting plugin is not `connected` and that the
+    redirect target and metadata URL are never contacted. That supersedes the `${VAR}`
+    header mechanism above.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -186,13 +225,24 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   `render_poll_interval`.
 - TLS is terminated in front of the app (`README.md` checks
   `https://scadbuddy.internal.nullreference.io/healthz`).
+- *Read 2026-09-28, for #268.* Bambuddy 1.2.5.5 has a push socket, `WS /api/v1/ws`. It
+  takes a token minted by `POST /api/v1/auth/ws-token`, and an API key with
+  `can_read_status` may mint one (bambuddy `v1.2.5.5`
+  `backend/app/api/routes/websocket.py`, `backend/app/api/routes/auth.py`
+  `mint_websocket_token`). It cannot stand in for reading a print's progress:
+  - nothing is broadcast for slice jobs;
+  - completion arrives as `print_complete` per *printer*, not per queue item;
+  - `pipeline_run_updated` goes through `broadcast_to_user(run.created_by)`
+    (`backend/app/core/websocket.py` `send_*`, `backend/app/api/routes/pipeline_runs.py`).
+
+  So the print watcher polls with back-off (§7).
 
 ### 3.2 To verify (each item names who verifies it)
 
 | Item | Where it matters | Verified by |
 |---|---|---|
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
-| Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
+| ~~Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas~~ **Answered in #264:** only that every service connects to the primary. `LISTEN` and `NOTIFY` are refused on a hot standby ("`LISTEN`, `NOTIFY`" are among the commands not allowed, <https://www.postgresql.org/docs/current/hot-standby.html>), and CloudNativePG's `-rw` service "Points to the primary instance of the cluster" (<https://cloudnative-pg.io/docs/devel/service_management>), so `SCADBUDDY_DATABASE_URL` must name the `-rw` service, never `-ro` or `-r`. Any number of agent and backend replicas can then listen: a NOTIFY reaches every listening session (<https://www.postgresql.org/docs/current/sql-notify.html>). Measured on `postgres:17` by `agent/test/eventBus.pg.test.ts` | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
 | Which keys `filament_overrides` accepts on `PrintQueueItemCreate` (can it carry nozzle temperature and fan?) | §11 | #284 |
 | Whether Bambuddy's `/local-presets/` can create a process preset that inherits from a base preset plus a diff | §11 | #284 |
@@ -391,6 +441,31 @@ print progress, Bambuddy printers, queue, inventory, history and stats, librarie
 settings, sessions, and the browser snapshot) use the same principal and tier checks as
 tools.
 
+Decided while building #264 (`agent/src/resources/`; MCP
+[resources][mcp-resources], protocol 2025-11-25 as `@modelcontextprotocol/sdk` 1.30.1
+implements it):
+
+- **Every resource is backed by a `read` tool of the registry**
+  (`catalog.ts` `RESOURCES`): reading `scadbuddy://models/{slug}/source` runs
+  `get_source`. So there is one typed backend client, one argument validation and one
+  redaction path, and the openapi coverage check needs no resource entries.
+- **Tiers.** A resource needs its tool's tier (`read`), raised to `write` for
+  `scadbuddy://settings`. `resources/list` and `resources/templates/list` leave out
+  what the caller may not read; `resources/read` and `resources/subscribe` refuse it.
+- **URIs** are RFC 6570 level-1 templates, one path segment per variable,
+  percent-encoded (`builtin:x` is `builtin%3Ax`); subscriptions and notifications use
+  that canonical spelling whichever one the client sent.
+- **Errors** follow the resources page: `-32002` for an unknown URI or a backend 404,
+  `-32602` for an argument the tool refuses, `-32603` otherwise.
+- **Binary** content is a base64 `blob`; above the tools' inline cap (8 MiB,
+  `tools/binary.ts`) the content is the same JSON note, with `application/json`.
+- **Completion** (`completion/complete`) offers slugs, and commits and output ids
+  for a slug given in `context.arguments`.
+- **Not built in #264**, for want of a backend route or event source on `main`: the
+  Bambuddy printers, queue, inventory, history and stats resources (print watcher,
+  #268), the browser snapshot (#254), `scadbuddy://docs/authoring` (#252), and
+  sessions (#300).
+
 ## 6. Sessions (#300)
 
 - **Storage.** A Postgres `SessionStore` adapter (§3.1) mirrors SDK transcripts, so any
@@ -437,13 +512,27 @@ Two independent consumers `LISTEN` on the channel, each on its own connection
   (`notifications/resources/updated`, #264), plugin event hooks (#297), and its own
   sockets under `/api/v1/ai/*`.
 
-The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). The
-UI socket does not replay: on every (re)subscribe the server confirms with
+The event log used for MCP `Last-Event-ID` resumption belongs to the bus (#264). As
+built (`agent/src/events/pgListener.ts`), the agent LISTENs on a dedicated connection
+and keeps its place in the backend's `events` log by `seq`; when that connection drops
+and comes back, it replays the rows after its place, skipping event ids it has already
+delivered, and when the gap is larger than 1000 events or the log cannot be read it
+tells every subscriber to resync (each subscribed URI gets `resources/updated`, plus one
+`list_changed`). Resource notifications are coalesced to at most one per URI per 250 ms
+per session (`agent/src/resources/hub.ts`). The UI socket does not replay: on every (re)subscribe the server confirms with
 `subscribed` only once it is listening, and the client re-reads then, so a reconnect
 cannot leave a gap.
 
-Print progress comes from **one server-side watcher per active print** (#268), not from
-one poll per open dialog. #270 moves #241's render workers from interval polling to the
+Print progress comes from **one server-side watcher per active print** (#268,
+`backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
+back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
+socket can't replace the read (§3.1). When each print started is kept in Postgres
+(`print_watches`, `backend/scadbuddy/migrations/20260928T0718Z_print_watches.sql`; nothing on disk), so the watcher resumes recent
+prints after a restart; a settled print is forgotten. A session advisory lock per print
+means one replica follows each print. Reading a print's progress re-arms its watcher,
+and an open dialog reads at least every 30 s while the socket is up, so it never waits
+on a watcher that is not there. With Postgres, `print.*` events cross replicas on the
+event bus. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
 **The database is required** (decided while building #266; tracked in #401). The
@@ -560,7 +649,15 @@ agent service:
 - MCP auth mode, tokens (hashed), and OIDC configuration;
 - plugins: source, pinned commit, enabled parts, endpoint credentials (encrypted), and
   tier map;
-- sessions (§6), MCP subscriptions, and the resumability event log;
+- sessions (§6);
+- ~~MCP subscriptions, and the resumability event log~~ (decided in #264: these live
+  with the MCP session, in memory on the replica that holds it. An MCP session is
+  in-memory state, so after a restart its id answers 404 and the transport spec
+  requires the client to start a new session ("When a client receives HTTP 404 in
+  response to a request containing an `MCP-Session-Id`, it MUST start a new session",
+  [Streamable HTTP][mcp-transport]), which re-subscribes. A durable copy would replay
+  into a session that no longer exists. What is durable is the backend's `events`
+  table, which covers the agent's own LISTEN gaps, §7);
 - approvals of outward actions (§8.2, `ai_approvals`);
 - the audit log.
 
@@ -684,6 +781,8 @@ Each of these is in §3.2 until verified.
 [sdk-hooks]: https://code.claude.com/docs/en/agent-sdk/hooks
 [gateways]: https://code.claude.com/docs/en/llm-gateway
 [mcp-auth]: https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization
+[mcp-resources]: https://modelcontextprotocol.io/specification/2025-11-25/server/resources
+[mcp-transport]: https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#session-management
 [a2a]: https://github.com/a2aproject
 [pw-plugin-mcp]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.mcp.json
 [pw-plugin-json]: https://github.com/anthropics/claude-plugins-official/blob/main/external_plugins/playwright/.claude-plugin/plugin.json
