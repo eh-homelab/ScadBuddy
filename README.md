@@ -41,8 +41,8 @@ multi-colour rules, connecting Bambuddy and each feature.
   you set copies, a project, and print options.
 - **Library**: print any file already in Bambuddy's library through the same print
   picker, printed exactly as its author left it — never replated, recolored or
-  uploaded again. Advanced also lists STLs and sliced `.gcode.3mf` files (printed
-  from Bambuddy directly).
+  uploaded again. Advanced also lists STLs, which print as one plate, and sliced
+  `.gcode.3mf` files, which print from Bambuddy directly.
 - **Fonts**: the image's fonts, plus any Google Fonts family, which is installed on
   demand.
 - **Paste source / upload**: add models from a `.scad` file or pasted source,
