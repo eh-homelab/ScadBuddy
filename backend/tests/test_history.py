@@ -28,6 +28,7 @@ from scadbuddy.library.history import (
 )
 from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.jobs import prune_revision_exports
+from scadbuddy.render.render_cache import RENDERS_DIR_NAME
 from scadbuddy.render.solids import WRAPPER_PREFIX
 
 pytestmark = pytest.mark.requires_git
@@ -132,6 +133,20 @@ def test_ensure_repo_ignores_the_render_wrapper(models: Path, history: ModelHist
     assert WRAPPER_PREFIX in (models / GITIGNORE_NAME).read_text(encoding="utf-8")
 
     (models / "keychain" / f"{WRAPPER_PREFIX}abc123.scad").write_text("// wrapper\n")
+
+    assert history.commit("should record nothing", "keychain") is None
+
+
+def test_ensure_repo_ignores_the_kept_renders(models: Path, history: ModelHistory) -> None:
+    """A finished render is kept under its template (`render_cache`); it is derived
+    from the source, so it must never move the template's revision."""
+    write_model(models, "keychain", "cube(10);\n")
+    history.ensure_repo()
+
+    entry = models / "keychain" / RENDERS_DIR_NAME / "0123abcd"
+    entry.mkdir(parents=True)
+    (entry / "model.3mf").write_bytes(b"3mf")
+    (entry / "render.json").write_text("{}\n", encoding="utf-8")
 
     assert history.commit("should record nothing", "keychain") is None
 
@@ -514,7 +529,7 @@ def catalogue(tmp_path: Path) -> Catalogue:
     paths.ensure()
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX)
     history.ensure_repo()
-    return Catalogue(paths, history)
+    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
 
 
 def test_every_catalogue_action_is_exactly_one_commit(catalogue: Catalogue) -> None:
@@ -1011,6 +1026,33 @@ def test_a_template_with_no_seed_commit_is_left_alone(
         getattr(record, "slug", None) for record in caplog.records if "not seeded" in record.msg
     ]
     assert sorted(slug for slug in skipped if slug) == ["name-keychain", "tag"]
+
+
+def test_a_seed_subject_by_another_author_is_not_the_seed(catalogue: Catalogue) -> None:
+    """Any commit can carry the subject; only ScadBuddy's own identity makes it the
+    seed a merge can take as its base (#224)."""
+    assert catalogue.history is not None
+    catalogue.create("name-keychain", KEYCHAIN, ModelMeta(name="Mine"))
+    catalogue.paths.model_source("name-keychain").write_text("cube(3);\n", encoding="utf-8")
+    env = {
+        **os.environ,
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_SYSTEM": "/dev/null",
+        "GIT_AUTHOR_NAME": "Someone",
+        "GIT_AUTHOR_EMAIL": "someone@example.com",
+        "GIT_COMMITTER_NAME": "Someone",
+        "GIT_COMMITTER_EMAIL": "someone@example.com",
+    }
+    models = catalogue.paths.models
+    subprocess.run(["git", "add", "name-keychain"], cwd=models, env=env, check=True)
+    subprocess.run(
+        ["git", "commit", "--quiet", "-m", "Seed name-keychain from the image"],
+        cwd=models,
+        env=env,
+        check=True,
+    )
+
+    assert catalogue.history.seed_commit("name-keychain") is None
 
 
 def test_a_template_that_already_has_an_upstream_is_left_alone(
