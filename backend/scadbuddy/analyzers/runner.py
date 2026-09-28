@@ -92,6 +92,10 @@ class AnalysisReport(BaseModel):
     inputs: list[InputStatus]
     #: The scopes a decision about this print can be stored at, broadest first.
     scopes: list[ScopeRef]
+    #: False when no decision store could be read (no database, #401); then no
+    #: decision was applied and ``decisions_reason`` says why.
+    decisions_available: bool = True
+    decisions_reason: str | None = None
     base: BaseProfile
 
 
@@ -247,6 +251,7 @@ def build_report(
     *,
     detail: Detail = "simple",
     analyzers: Sequence[Analyzer] | None = None,
+    decisions_unavailable: str | None = None,
 ) -> AnalysisReport:
     scopes = context.scopes()
     diagnostics, skipped = run_checks(context, analyzers)
@@ -273,6 +278,8 @@ def build_report(
             for name in INPUT_NAMES
         ],
         scopes=scopes,
+        decisions_available=decisions_unavailable is None,
+        decisions_reason=decisions_unavailable,
         base=BaseProfile(
             pipeline=context.pipeline,
             printer_id=printer.id if printer else None,

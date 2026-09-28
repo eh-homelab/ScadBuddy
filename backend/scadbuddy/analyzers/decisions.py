@@ -1,10 +1,11 @@
 """Where decisions live, and how the one that applies is chosen (#284 "Scopes").
 
-Two stores behind one protocol, as the render queue has (#241): Postgres when
-``SCADBUDDY_DATABASE_URL`` is set, so every replica sees the same decisions, and a
-JSON file on the data volume otherwise, so a single pod needs no database. The table
-is a backend migration (``render/pg_store.py``'s ledger), not an ``ai_*`` one: script
-analyzers run with AI off, and so must their decisions.
+Postgres only: the ``analyzer_decisions`` table, a backend migration in
+``render/pg_store.py``'s ``scadbuddy_migrations`` ledger (not an ``ai_*`` one:
+script analyzers run with AI off, and so must their decisions). There is no file
+fallback. Until the database is required everywhere (#401), a ScadBuddy without
+``SCADBUDDY_DATABASE_URL`` has no store; the routes that persist answer 503 saying
+so, and a run reports that no decisions could be read.
 
 Resolution: of the decisions matching a diagnostic at the scopes a print falls in,
 the narrowest scope wins, and at one scope a decision about this instance wins over
@@ -21,14 +22,12 @@ import re
 import threading
 import uuid
 from collections.abc import Collection, Sequence
-from pathlib import Path
 from typing import Any, Protocol
 
 from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import TypeAdapter
 
 from scadbuddy.analyzers.model import Decision, ScopeKind, ScopeRef
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN
@@ -36,9 +35,6 @@ from scadbuddy.library.slugs import MODEL_ID_PATTERN
 from scadbuddy.render.pg_store import migrate
 
 logger = logging.getLogger(__name__)
-
-DECISIONS_NAME = "decisions.json"
-_DECISIONS = TypeAdapter(list[Decision])
 
 _SLUG = MODEL_ID_PATTERN.removeprefix("^").removesuffix("$")
 #: What a key must look like for each scope. Loose where the value is someone else's
@@ -83,79 +79,6 @@ class DecisionStore(Protocol):
     def remove(self, decision_id: str) -> Decision | None: ...
 
     def close(self) -> None: ...
-
-
-def _same_target(left: Decision, right: Decision) -> bool:
-    return (
-        left.diagnostic_id == right.diagnostic_id
-        and left.instance == right.instance
-        and left.scope == right.scope
-    )
-
-
-class FileDecisionStore:
-    """``data/analyzers/decisions.json``: every decision in one file, rewritten whole.
-
-    A handful of decisions per template is the expected size; a lock serialises this
-    process's writers and a rename makes each write atomic for readers.
-    """
-
-    backend = "file"
-
-    def __init__(self, directory: Path) -> None:
-        self.path = directory / DECISIONS_NAME
-        self._lock = threading.Lock()
-
-    def _read(self) -> list[Decision]:
-        try:
-            raw = self.path.read_bytes()
-        except FileNotFoundError:
-            return []
-        return _DECISIONS.validate_json(raw)
-
-    def _write(self, decisions: Sequence[Decision]) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        partial = self.path.with_name(f".{self.path.name}.{uuid.uuid4().hex}")
-        partial.write_bytes(_DECISIONS.dump_json(list(decisions), indent=2) + b"\n")
-        partial.replace(self.path)
-
-    def list(
-        self,
-        *,
-        scopes: Collection[ScopeRef] | None = None,
-        diagnostic_id: str | None = None,
-    ) -> list[Decision]:
-        with self._lock:
-            decisions = self._read()
-        wanted = {(scope.kind, scope.key) for scope in scopes} if scopes is not None else None
-        return [
-            decision
-            for decision in decisions
-            if (wanted is None or (decision.scope.kind, decision.scope.key) in wanted)
-            and (diagnostic_id is None or decision.diagnostic_id == diagnostic_id)
-        ]
-
-    def get(self, decision_id: str) -> Decision | None:
-        with self._lock:
-            return next((row for row in self._read() if row.id == decision_id), None)
-
-    def put(self, decision: Decision) -> Decision:
-        with self._lock:
-            kept = [row for row in self._read() if not _same_target(row, decision)]
-            kept.append(decision)
-            self._write(kept)
-        return decision
-
-    def remove(self, decision_id: str) -> Decision | None:
-        with self._lock:
-            decisions = self._read()
-            gone = next((row for row in decisions if row.id == decision_id), None)
-            if gone is not None:
-                self._write([row for row in decisions if row.id != decision_id])
-        return gone
-
-    def close(self) -> None:
-        return None
 
 
 class PostgresDecisionStore:

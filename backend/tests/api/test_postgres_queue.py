@@ -8,7 +8,7 @@ import psycopg
 import pytest
 from fastapi.testclient import TestClient
 
-from scadbuddy.analyzers.decisions import FileDecisionStore, PostgresDecisionStore
+from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.pg_store import PostgresJobStore
@@ -59,6 +59,7 @@ def test_analyzer_decisions_are_kept_in_postgres(settings: Settings, pg_conninfo
     assert row is not None and row[0] == "ignore"
 
 
-def test_without_a_database_url_decisions_use_a_file(settings: Settings) -> None:
+def test_without_a_database_url_there_is_no_decision_store(settings: Settings) -> None:
+    # No file fallback: the routes that persist answer 503 (tests/api/test_analyzers.py).
     app = create_app(settings)
-    assert isinstance(app.state.scadbuddy.decisions, FileDecisionStore)
+    assert app.state.scadbuddy.decisions is None

@@ -208,7 +208,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             with suppress(asyncio.CancelledError):
                 await sweeper
         await state.queue.aclose()
-        await asyncio.to_thread(state.decisions.close)
+        if state.decisions is not None:
+            await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
 
 

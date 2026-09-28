@@ -45,6 +45,22 @@
           "base": {
             "$ref": "#/components/schemas/BaseProfile"
           },
+          "decisions_available": {
+            "default": true,
+            "title": "Decisions Available",
+            "type": "boolean"
+          },
+          "decisions_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decisions Reason"
+          },
           "detail": {
             "enum": [
               "simple",
@@ -7866,7 +7882,7 @@
     },
     "/api/v1/analyzers/run": {
       "post": {
-        "description": "Judge an output or a configuration against the print request it would go out\nwith (the #84 base: pipeline, printer, filament plan, plate, options).\n\nReads only: nothing is uploaded, sliced or queued. An input that cannot be read\n(no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is\nlisted in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.\n\n``detail=simple`` returns the headline and the open findings with their sources and\nfixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,\nignored and ``hidden`` findings with the decision behind each.",
+        "description": "Judge an output or a configuration against the print request it would go out\nwith (the #84 base: pipeline, printer, filament plan, plate, options).\n\nReads only: nothing is uploaded, sliced or queued. An input that cannot be read\n(no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is\nlisted in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.\n\n``detail=simple`` returns the headline and the open findings with their sources and\nfixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,\nignored and ``hidden`` findings with the decision behind each.\n\nWithout a database the analyzers still run; ``decisions_available`` is false and\n``decisions_reason`` says why, and the routes that record decisions answer 503.",
         "operationId": "post_run_api_v1_analyzers_run_post",
         "requestBody": {
           "content": {

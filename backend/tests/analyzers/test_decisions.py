@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
 from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest, configuration_key
 from scadbuddy.analyzers.decisions import (
     DecisionStore,
-    FileDecisionStore,
     PostgresDecisionStore,
     new_decision_id,
     resolve,
@@ -208,11 +206,6 @@ def test_the_report_lists_inputs_and_the_base() -> None:
 
 
 @pytest.fixture
-def file_store(tmp_path: Path) -> DecisionStore:
-    return FileDecisionStore(tmp_path / "analyzers")
-
-
-@pytest.fixture
 def pg_store(pg_conninfo: str) -> Iterator[DecisionStore]:
     store = PostgresDecisionStore(pg_conninfo, pool_size=2)
     yield store
@@ -242,13 +235,6 @@ def _exercise(store: DecisionStore) -> None:
     assert store.remove(replacement.id) == replacement
     assert store.remove(replacement.id) is None
     assert store.list() == [other]
-
-
-def test_the_file_store(file_store: DecisionStore, tmp_path: Path) -> None:
-    _exercise(file_store)
-    assert (tmp_path / "analyzers" / "decisions.json").is_file()
-    # A second store over the same file sees the same decisions.
-    assert FileDecisionStore(tmp_path / "analyzers").list() == file_store.list()
 
 
 @pytest.mark.requires_postgres

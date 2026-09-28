@@ -139,6 +139,9 @@ export interface paths {
          *     ``detail=simple`` returns the headline and the open findings with their sources and
          *     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
          *     ignored and ``hidden`` findings with the decision behind each.
+         *
+         *     Without a database the analyzers still run; ``decisions_available`` is false and
+         *     ``decisions_reason`` says why, and the routes that record decisions answer 503.
          */
         post: operations["post_run_api_v1_analyzers_run_post"];
         delete?: never;
@@ -1620,6 +1623,13 @@ export interface components {
             /** Accepted Changes */
             accepted_changes?: components["schemas"]["AcceptedChange"][];
             base: components["schemas"]["BaseProfile"];
+            /**
+             * Decisions Available
+             * @default true
+             */
+            decisions_available: boolean;
+            /** Decisions Reason */
+            decisions_reason?: string | null;
             /**
              * Detail
              * @enum {string}
