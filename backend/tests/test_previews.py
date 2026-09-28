@@ -1,4 +1,5 @@
-"""The default-render preview store (#179 follow-up) and its place in the catalogue."""
+"""The default-render preview store (#179 follow-up; in Postgres since #454) and its
+place in the catalogue."""
 
 from __future__ import annotations
 
@@ -6,9 +7,12 @@ import json
 import os
 import threading
 import time
+from collections.abc import Iterator
 from pathlib import Path
+from typing import NoReturn
 from unittest import mock
 
+import psycopg
 import pytest
 import trimesh
 
@@ -26,6 +30,7 @@ from scadbuddy.library.previews import (
 )
 from scadbuddy.render import previews as previews_module
 from scadbuddy.render.jobs import ModelSource
+from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import render_preview
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter
@@ -61,10 +66,20 @@ def test_the_source_key_follows_the_source_and_its_libraries_only(paths: DataPat
     assert source_key(paths, "gone") is None
 
 
+@pytest.fixture
+def store(pg_conninfo: str, paths: DataPaths) -> Iterator[PreviewStore]:
+    database = PostgresJobStore(pg_conninfo, paths, pool_size=3)
+    database.open()
+    try:
+        yield PreviewStore(database.connection)
+    finally:
+        database.close()
+
+
+@pytest.mark.requires_postgres
 def test_a_preview_is_served_only_once_rendered_and_a_failure_serves_nothing(
-    paths: DataPaths,
+    store: PreviewStore,
 ) -> None:
-    store = PreviewStore(paths)
     assert (store.image(SLUG), store.preview_id(SLUG)) == (None, None)
 
     store.write(SLUG, "a" * 64, b"png")
@@ -81,36 +96,54 @@ def test_a_preview_is_served_only_once_rendered_and_a_failure_serves_nothing(
     assert store.record(SLUG) is None
 
 
-def test_an_unreadable_record_is_no_preview(paths: DataPaths) -> None:
-    store = PreviewStore(paths)
-    store.write(SLUG, "a" * 64, b"png")
-    paths.model_preview_record(SLUG).write_text("{not json", encoding="utf-8")
+@pytest.mark.requires_postgres
+def test_a_builtin_id_is_a_key_like_any_other(store: PreviewStore) -> None:
+    store.write("builtin:widget", "a" * 64, b"builtin")
+    store.write(SLUG, "b" * 64, b"mine")
 
-    assert store.record(SLUG) is None
-    assert store.preview_id(SLUG) is None
+    assert store.image("builtin:widget") == b"builtin"
+    assert store.slugs() == ["builtin:widget", SLUG]
 
 
-def test_the_orphan_sweep_takes_a_gone_models_preview_but_not_a_write_in_flight(
-    paths: DataPaths,
+@pytest.mark.requires_postgres
+def test_the_orphan_sweep_takes_a_gone_models_preview_only(
+    store: PreviewStore, paths: DataPaths
 ) -> None:
-    store = PreviewStore(paths)
     store.write("gone", "a" * 64, b"png")
     store.write(SLUG, "a" * 64, b"png")
-    in_flight = paths.previews / ".gone-abc123.png"
-    in_flight.write_bytes(b"half")
 
-    removed = Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans()
+    removed = Catalogue(
+        paths, previews=store, wrapper_prefix=WRAPPER_PREFIX
+    ).sweep_orphan_previews()
 
-    assert sorted(removed) == ["cache/previews/gone.json", "cache/previews/gone.png"]
+    assert removed == ["gone"]
+    assert store.record("gone") is None
     assert store.image(SLUG) == b"png"
-    assert in_flight.exists()
+    # The file sweep has nothing of the previews' to look at.
+    assert Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans() == []
+
+
+def test_the_orphan_sweep_logs_and_skips_when_the_database_cannot_list(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    """As `sweep_orphans` skips a root it cannot list: a database error costs this
+    sweep, never the boot."""
+
+    def unreachable() -> NoReturn:
+        raise psycopg.OperationalError("the database went away")
+
+    with caplog.at_level("ERROR"):
+        removed = Catalogue(
+            paths, previews=PreviewStore(unreachable), wrapper_prefix=WRAPPER_PREFIX
+        ).sweep_orphan_previews()
+
+    assert removed == []
+    assert "could not list the previews to sweep" in caplog.text
 
 
 def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
     paths: DataPaths,
 ) -> None:
-    store = PreviewStore(paths)
-    store.write(SLUG, "a" * 64, b"png")
     crashed = new_work_dir(paths)
     (crashed / "parts").mkdir(parents=True)
     (crashed / "parts" / "raw.3mf").write_bytes(b"raw")
@@ -123,65 +156,65 @@ def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
     assert removed == [crashed.name]
     assert not crashed.exists()
     assert live.exists()
-    assert store.image(SLUG) == b"png"
 
 
-def test_the_catalogue_ranks_its_own_image_over_the_preview(paths: DataPaths) -> None:
-    store = PreviewStore(paths)
+@pytest.mark.requires_postgres
+def test_the_catalogue_ranks_its_own_image_over_the_preview(
+    store: PreviewStore, paths: DataPaths
+) -> None:
     catalogue = Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX)
     store.write(SLUG, "a" * 64, b"preview")
 
     origin = catalogue.thumbnail_source(SLUG)
     assert (origin.source, origin.preview_id) == ("preview", "a" * PREVIEW_ID_LENGTH)
-    assert catalogue.thumbnail(SLUG) == b"preview"
+    assert catalogue.thumbnail(SLUG) == (b"preview", "image/png")
 
     catalogue.write_thumbnail(SLUG, b"own")
     assert catalogue.thumbnail_source(SLUG).source == "model"
-    assert catalogue.thumbnail(SLUG) == b"own"
+    assert catalogue.thumbnail(SLUG) == (b"own", "image/png")
     assert store.image(SLUG) is None
 
 
-def test_a_write_no_longer_wanted_writes_nothing(paths: DataPaths) -> None:
-    store = PreviewStore(paths)
+@pytest.mark.requires_postgres
+def test_a_catalogue_not_serving_previews_shows_none(store: PreviewStore, paths: DataPaths) -> None:
+    store.write(SLUG, "a" * 64, b"preview")
+    catalogue = Catalogue(
+        paths, previews=store, serve_previews=False, wrapper_prefix=WRAPPER_PREFIX
+    )
 
+    assert catalogue.thumbnail_source(SLUG).source is None
+    assert catalogue.thumbnail(SLUG) is None
+
+
+@pytest.mark.requires_postgres
+def test_a_write_no_longer_wanted_writes_nothing(store: PreviewStore) -> None:
     assert store.write(SLUG, "a" * 64, b"png", wanted=lambda: False) is False
     assert store.record_failure(SLUG, "a" * 64, "boom", wanted=lambda: False) is False
     assert store.record(SLUG) is None
     assert store.image(SLUG) is None
 
 
-def test_a_record_whose_image_is_gone_is_not_current(paths: DataPaths) -> None:
-    store = PreviewStore(paths)
+@pytest.mark.requires_postgres
+def test_a_preview_or_a_failure_is_current_for_its_own_source_only(store: PreviewStore) -> None:
     store.write(SLUG, "a" * 64, b"png")
     assert store.current(SLUG, "a" * 64)
+    assert not store.current(SLUG, "b" * 64)
 
-    paths.model_preview(SLUG).unlink()
-
-    assert not store.current(SLUG, "a" * 64)
-    # A failure never had an image; it stays current, so it is not retried.
+    # A failure has no image; it stays current, so it is not retried.
     store.record_failure(SLUG, "b" * 64, "boom")
     assert store.current(SLUG, "b" * 64)
     assert not store.current(SLUG, "c" * 64)
+    assert not store.current("gone", "a" * 64)
 
 
-def test_a_drop_cannot_land_between_the_check_and_the_write(paths: DataPaths) -> None:
+@pytest.mark.requires_postgres
+def test_a_drop_cannot_land_between_the_check_and_the_write(store: PreviewStore) -> None:
     """The render's liveness check and its write are one step against a drop: a drop
-    that arrives mid-write waits, then removes both files -- never just the image."""
-    store = PreviewStore(paths)
-    checking = threading.Event()
-    release = threading.Event()
-
-    def wanted() -> bool:
-        checking.set()
-        release.wait(5)
-        return True
-
-    writer = threading.Thread(target=lambda: store.write(SLUG, "a" * 64, b"png", wanted=wanted))
-    writer.start()
-    assert checking.wait(5)
+    that arrives mid-write waits, then removes the preview."""
+    writer, _, release = _held_write(store)
     dropper = threading.Thread(target=lambda: store.drop(SLUG))
     dropper.start()
-    dropper.join(0.1)
+    dropper.join(0.2)
     assert dropper.is_alive()  # held behind the write in progress
 
     release.set()
@@ -222,7 +255,7 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
     # Nothing passed: every parameter at the value the source declares.
     assert rendered_with == [{}]
     # Its scratch space is gone, and nothing was written beside the model.
-    assert not any(paths.previews.iterdir())
+    assert not any(paths.preview_work.iterdir())
     assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == ["model.scad"]
 
 
@@ -244,11 +277,11 @@ async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) 
         await render_preview(
             SLUG, config=CONFIG, paths=paths, history=None, assets=AssetStore(paths.assets)
         )
-    assert not any(paths.previews.iterdir())
+    assert not any(paths.preview_work.iterdir())
 
 
 def _held_write(store: PreviewStore) -> tuple[threading.Thread, threading.Event, threading.Event]:
-    """A write stopped inside the preview lock, at its "still wanted?" check."""
+    """A write stopped inside the model's preview lock, at its "still wanted?" check."""
     checking = threading.Event()
     release = threading.Event()
 
@@ -263,22 +296,22 @@ def _held_write(store: PreviewStore) -> tuple[threading.Thread, threading.Event,
     return writer, checking, release
 
 
-@pytest.mark.parametrize("attached", [True, False], ids=["store attached", "previews off"])
+@pytest.mark.requires_postgres
+@pytest.mark.parametrize("serving", [True, False], ids=["serving", "previews off"])
 def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
-    paths: DataPaths, attached: bool
+    store: PreviewStore, paths: DataPaths, serving: bool
 ) -> None:
     """`_clear_derived` (a create or duplicate reusing the slug) takes the same lock as
-    a render's write, with or without a store attached, so it removes both files or
-    neither -- never the image alone."""
-    store = PreviewStore(paths)
+    a render's write, whether or not previews are served, so the previous model's
+    preview never survives it."""
     catalogue = Catalogue(
-        paths, previews=store if attached else None, wrapper_prefix=WRAPPER_PREFIX
+        paths, previews=store, serve_previews=serving, wrapper_prefix=WRAPPER_PREFIX
     )
     writer, _, release = _held_write(store)
 
     clearing = threading.Thread(target=lambda: catalogue._clear_derived(SLUG))
     clearing.start()
-    clearing.join(0.1)
+    clearing.join(0.2)
     assert clearing.is_alive()  # held behind the write in progress
 
     release.set()
@@ -288,23 +321,73 @@ def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
     assert store.image(SLUG) is None
 
 
-def test_the_orphan_sweep_waits_behind_a_write_in_progress(paths: DataPaths) -> None:
-    store = PreviewStore(paths)
+@pytest.mark.requires_postgres
+def test_the_orphan_sweep_leaves_a_live_model_being_written(
+    store: PreviewStore, paths: DataPaths
+) -> None:
     store.write("gone", "a" * 64, b"png")
     writer, _, release = _held_write(store)
 
     sweeping = threading.Thread(
-        target=lambda: Catalogue(paths, wrapper_prefix=WRAPPER_PREFIX).sweep_orphans()
+        target=Catalogue(paths, previews=store, wrapper_prefix=WRAPPER_PREFIX).sweep_orphan_previews
     )
     sweeping.start()
-    sweeping.join(0.1)
-    assert sweeping.is_alive()
-
+    sweeping.join(0.2)
     release.set()
     writer.join(5)
     sweeping.join(5)
+
     assert store.image("gone") is None
     assert store.image(SLUG) == b"png"
+
+
+@pytest.mark.requires_postgres
+def test_previews_outlive_the_process_and_are_locked_across_processes(
+    pg_conninfo: str, paths: DataPaths
+) -> None:
+    """A second pool is a second process: it reads what the first wrote after the
+    first is gone, and its drop waits behind the first one's write in progress."""
+    first = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    first.open()
+    second = PostgresJobStore(pg_conninfo, paths, pool_size=2)
+    second.open()
+    try:
+        mine, theirs = (
+            PreviewStore(first.connection),
+            PreviewStore(second.connection),
+        )
+        writer, _, release = _held_write(mine)
+        dropper = threading.Thread(target=lambda: theirs.drop(SLUG))
+        dropper.start()
+        dropper.join(0.2)
+        assert dropper.is_alive()
+        release.set()
+        writer.join(5)
+        dropper.join(5)
+        assert theirs.record(SLUG) is None
+
+        mine.write(SLUG, "a" * 64, b"png")
+    finally:
+        first.close()
+    try:
+        assert PreviewStore(second.connection).image(SLUG) == b"png"
+    finally:
+        second.close()
+
+
+@pytest.mark.requires_postgres
+def test_a_row_has_its_image_exactly_when_it_rendered(pg_conninfo: str, paths: DataPaths) -> None:
+    database = PostgresJobStore(pg_conninfo, paths, pool_size=1)
+    database.open()
+    database.close()
+    insert = (
+        "INSERT INTO model_previews (model_id, source_key, ok, png, rendered_at)"
+        " VALUES (%s, 'k', %s, %s, now())"
+    )
+    with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+        for slug, ok, png in (("rendered", True, None), ("failed", False, b"png")):
+            with pytest.raises(psycopg.errors.CheckViolation):
+                conn.execute(insert, (slug, ok, png))
 
 
 async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
