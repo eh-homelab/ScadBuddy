@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import psycopg
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 import scadbuddy.api.params as params_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
+from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.presets import (
     MAX_PRESET_DESCRIPTION,
@@ -22,10 +26,16 @@ from scadbuddy.library.presets import (
     MAX_PRESET_TAG,
     MAX_PRESET_TAGS,
     MAX_PRESETS,
+    PRESET_LOCK_PREFIX,
     ParamPresetCreate,
     PresetStore,
+    SavedPresetsUnavailableError,
 )
+from scadbuddy.main import sweep_assets
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
+
+# Saved presets are rows in Postgres (#332): every test here runs on a throwaway schema.
+pytestmark = pytest.mark.requires_postgres
 
 BUILTIN = "builtin:keychain"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
@@ -40,6 +50,27 @@ def bundled(seed_dir: Path) -> Path:
     meta = {"name": "Keychain", "presets": SHIPPED}
     (directory / MODEL_META_NAME).write_text(json.dumps(meta), encoding="utf-8")
     return directory
+
+
+@pytest.fixture
+def settings(settings: Settings, pg_conninfo: str) -> Settings:
+    return settings.model_copy(update={"database_url": pg_conninfo})
+
+
+@pytest.fixture
+def store(paths: DataPaths, pg_conninfo: str) -> Iterator[PresetStore]:
+    presets = PresetStore(paths, pg_conninfo)
+    presets.open()
+    yield presets
+    presets.close()
+
+
+def _rows(conninfo: str, model_id: str) -> list[str]:
+    with psycopg.connect(conninfo) as conn:
+        rows = conn.execute(
+            "SELECT name FROM saved_presets WHERE model_id = %s ORDER BY position", (model_id,)
+        ).fetchall()
+    return [row[0] for row in rows]
 
 
 @pytest.fixture
@@ -85,10 +116,11 @@ def test_a_saved_preset_is_listed_with_its_values(client: TestClient, model: str
 
 
 def test_presets_are_kept_outside_the_template(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, paths: DataPaths, pg_conninfo: str
 ) -> None:
     _save(client, model, "Big", {"width": 25})
-    assert paths.model_presets(model).is_file()
+    assert _rows(pg_conninfo, model) == ["Big"]
+    assert not (paths.root / "presets").exists()
     assert "presets" not in json.loads(paths.model_meta(model).read_text(encoding="utf-8"))
 
 
@@ -166,11 +198,11 @@ def test_an_update_is_checked_too(client: TestClient, model: str) -> None:
     assert client.get(_url(model)).json()[0]["params"] == {"width": 25}
 
 
-def test_a_preset_can_be_deleted(client: TestClient, model: str, paths: DataPaths) -> None:
+def test_a_preset_can_be_deleted(client: TestClient, model: str, pg_conninfo: str) -> None:
     saved = _save(client, model, "Big", {"width": 25})
     assert client.delete(_url(model, saved["id"])).status_code == 204
     assert client.get(_url(model)).json() == []
-    assert not paths.model_presets(model).exists()
+    assert _rows(pg_conninfo, model) == []
     assert client.delete(_url(model, saved["id"])).status_code == 404
 
 
@@ -232,16 +264,6 @@ def test_a_broken_preset_list_costs_only_the_template_presets(
     assert client.get(f"/api/v1/models/{model}").json()["name"] == "Demo"
 
 
-def test_a_broken_saved_file_is_a_409_and_is_not_overwritten(
-    client: TestClient, model: str, paths: DataPaths
-) -> None:
-    paths.model_presets(model).write_text("[1, 2", encoding="utf-8")
-    assert client.get(_url(model)).status_code == 409
-    response = client.post(_url(model), json={"name": "Big", "params": {}})
-    assert response.status_code == 409
-    assert paths.model_presets(model).read_text(encoding="utf-8") == "[1, 2"
-
-
 @pytest.mark.requires_git
 def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
     saved = _save(client, BUILTIN, "Mine", {"label": "Bo"})
@@ -260,11 +282,36 @@ def test_a_duplicate_takes_the_saved_presets_along(client: TestClient) -> None:
 
 
 def test_deleting_a_model_takes_its_presets(
-    client: TestClient, model: str, paths: DataPaths
+    client: TestClient, model: str, pg_conninfo: str
 ) -> None:
     _save(client, model, "Big", {"width": 25})
     assert client.delete(f"/api/v1/models/{model}").status_code == 204
-    assert not paths.model_presets(model).exists()
+    assert _rows(pg_conninfo, model) == []
+
+
+def test_the_orphan_sweep_forgets_a_gone_template_s_presets(
+    store: PresetStore, pg_conninfo: str
+) -> None:
+    # A delete whose own cleanup failed: rows left for a template that is gone.
+    store.create("gone", ParamPresetCreate(name="Big", params={}))
+    store.create("kept", ParamPresetCreate(name="Big", params={}))
+    assert store.sweep_orphans(lambda slug: slug == "kept") == ["gone"]
+    assert _rows(pg_conninfo, "gone") == []
+    assert _rows(pg_conninfo, "kept") == ["Big"]
+
+
+def test_an_upload_a_saved_preset_names_is_kept_by_the_sweep(
+    client: TestClient, app: FastAPI, model: str
+) -> None:
+    state = app.state.scadbuddy
+    kept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg'/>", "kept.svg")
+    swept = state.assets.put(b"<svg xmlns='http://www.w3.org/2000/svg' width='2'/>", "gone.svg")
+    _save(client, model, "Logo", {"label": kept.id})
+    then = time.time() - 10 * state.config.asset_sweep_grace
+    for meta in (kept, swept):
+        for path in (state.assets.blob_path(meta), state.assets.root / f"{meta.id}.json"):
+            os.utime(path, (then, then))
+    assert sweep_assets(state) == [swept.id]
 
 
 def _duplicate(client: TestClient, model_id: str, preset_id: str, name: str) -> Any:
@@ -433,31 +480,37 @@ def test_a_template_preset_cannot_take_a_saved_one_s_name(
 
 
 def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
-    paths: DataPaths,
+    store: PresetStore, pg_conninfo: str
 ) -> None:
-    store = PresetStore(paths)
-    held: list[bool] = []
+    held: list[tuple[bool, bool]] = []
 
     def write() -> None:
-        held.append(store._locks["m"].lock.locked())
+        # From another session: this template's lock is taken, another template's free.
+        with psycopg.connect(pg_conninfo, autocommit=True) as conn:
+            mine, other = (
+                conn.execute(
+                    "SELECT pg_try_advisory_lock(hashtextextended(%s, 0))",
+                    (f"{PRESET_LOCK_PREFIX}{model_id}",),
+                ).fetchone()
+                for model_id in ("m", "n")
+            )
+            assert mine is not None and other is not None
+            held.append((mine[0], other[0]))
 
     # Held from the check to the write, so a save cannot land between them.
     assert store.with_names_free("m", ["A"], write) is None
-    assert held == [True]
-    # And gone once released: a template nobody holds keeps no lock.
-    assert store._locks == {}
+    assert held == [(False, True)]
 
 
-def test_a_template_s_lock_goes_with_its_last_user(paths: DataPaths) -> None:
+def test_without_a_database_nothing_is_saved_and_the_template_s_own_still_list(
+    paths: DataPaths,
+) -> None:
     store = PresetStore(paths)
-    inside: list[set[str]] = []
-    with store._lock("a"), store._lock("b"):
-        inside.append(set(store._locks))
-    assert inside == [{"a", "b"}]
-    # Released, even when the body raised.
-    with pytest.raises(RuntimeError), store._lock("c"):
-        raise RuntimeError
-    assert store._locks == {}
+    assert not store.saves
+    assert store.saved_presets("m") == []
+    assert store.with_names_free("m", ["A"], lambda: "written") == "written"
+    with pytest.raises(SavedPresetsUnavailableError):
+        store.create("m", ParamPresetCreate(name="A", params={}))
 
 
 @pytest.mark.requires_git
@@ -549,14 +602,14 @@ def test_a_template_preset_file_value_is_checked_as_a_saved_one(
     assert _patch_presets(client, model, empty).status_code == 200
 
 
-def test_a_template_write_does_not_hold_up_a_save_on_another(tmp_path: Path) -> None:
+def test_a_template_write_does_not_hold_up_a_save_on_another(
+    store: PresetStore, paths: DataPaths
+) -> None:
     """``with_names_free`` holds its lock across a git commit; that lock is the
     template's, so a save on some other template goes ahead meanwhile."""
-    paths = DataPaths(tmp_path)
     for slug in ("a", "b"):
         paths.model_dir(slug).mkdir(parents=True)
         (paths.model_dir(slug) / MODEL_META_NAME).write_text("{}")
-    store = PresetStore(paths)
     committing, saved = threading.Event(), threading.Event()
 
     def slow_write() -> None:

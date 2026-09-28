@@ -53,7 +53,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
-from scadbuddy.library.presets import TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -332,6 +332,7 @@ class Catalogue:
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
         media_store: MediaStore | None = None,
+        presets: PresetStore | None = None,
         *,
         serve_previews: bool = True,
         wrapper_prefix: str,
@@ -351,6 +352,9 @@ class Catalogue:
         #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
         self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: Whose saved presets a template that is gone, or whose slug is reused,
+        #: takes with it. None: nothing is saved beside the templates.
+        self.presets = presets
         #: A render's colour wrapper file prefix, which a duplicate leaves out.
         self.wrapper_prefix = wrapper_prefix
         #: Called with a model's id after every catalogue change to it, from
@@ -1560,9 +1564,7 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        # The saved presets are not derived, but they are keyed and orphaned the same
-        # way: a template that is gone takes its presets with it.
-        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
+        keyed_by_file = (self.paths.schema_cache,)
         roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
@@ -1587,6 +1589,17 @@ class Catalogue:
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        if self.presets is not None:
+            try:
+                forgotten = self.presets.sweep_orphans(
+                    lambda slug: self.paths.model_dir(slug).exists()
+                )
+            except (OSError, psycopg.Error):
+                logger.exception("could not sweep saved presets for orphans")
+            else:
+                removed.extend(f"saved presets of {slug}" for slug in forgotten)
         return removed
 
     def sweep_stranded_claims(self) -> list[str]:
@@ -1704,14 +1717,18 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
-            # Not derived, but the previous model's: its saved presets.
-            self.paths.model_presets(slug),
         ):
             _remove_tree(path)
         # Under the model's preview lock: a render of the previous model finishing
         # now is either dropped here or discarded by its own "still wanted?" check.
         self._drop_preview(slug)
         self._forget_cover(slug)
+        # Not derived, but the previous model's: its saved presets.
+        if self.presets is not None:
+            try:
+                self.presets.forget(slug)
+            except psycopg.Error:
+                logger.exception("could not forget saved presets", extra={"slug": slug})
 
     def _forget_cover(self, slug: str) -> None:
         """Drop the output store's resolved fallback cover for ``slug``, whose

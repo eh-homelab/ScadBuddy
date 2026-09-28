@@ -95,12 +95,13 @@ def sweep_assets(state: AppState) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the queue's store, then every
-    output, preset and template (`referenced_asset_ids`) -- and any failure to read
+    saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
     """
     jobs = state.queue.store.list_jobs()
-    referenced = referenced_asset_ids(state.paths, [job.params for job in jobs])
+    params = [job.params for job in jobs] + state.presets.saved_params()
+    referenced = referenced_asset_ids(state.paths, params)
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
@@ -201,6 +202,9 @@ async def _prepare_catalogue(state: AppState) -> None:
     # A duplicate the process died in the middle of left its staging copy. Nothing
     # is duplicating yet: no request has been served.
     await _sweep_duplicate_staging_logged(state)
+    # Before the orphan sweep, which forgets the saved presets of templates that are
+    # gone: the database, and its migrations, as the render queue's store opens it.
+    await asyncio.to_thread(state.presets.open)
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
@@ -335,6 +339,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.queue.aclose()
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)
+        await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
