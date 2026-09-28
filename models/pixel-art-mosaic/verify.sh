@@ -13,6 +13,9 @@
 #     pixel landed in the band its brightness says
 #   - on z=0, as tall as the layers imply, the bounding box the grid, frame
 #     and mount imply, inside the 300 x 320 mm plate
+#   - every magnet pocket is a real pocket: straight up from the bed at its
+#     centre the first material is its roof (magnet_thickness + 0.2 up), and
+#     just outside its rim there is backing from the bed up
 #   - a refused name never reaches surface(); a missing file leaves only the
 #     backing; "image_threshold" (the PNG choice's name before #318) renders
 #     the same parts as "png_threshold"
@@ -49,6 +52,10 @@ CASES+=(
     'heart-empty-bg-grooves|pattern="heart";background_mode="empty";pixel_gap=0.4'
     'star-cut-keyring|pattern="star";background_mode="cut";mount="keyring";frame_width=2'
     'smiley-magnets-4|pattern="smiley";mount="magnet";magnet_count=4;magnet_diameter=8;magnet_thickness=2'
+    # The heart's corners are empty: with the background cut away, the corner
+    # pockets used to be cut from nothing (review on #417).
+    'heart-cut-magnets-4|pattern="heart";background_mode="cut";mount="magnet";magnet_count=4'
+    'star-cut-magnets-2|pattern="star";background_mode="cut";mount="magnet";magnet_count=2;magnet_diameter=15'
     'no-frame-no-mount|pattern="blocky_face";frame_width=0;mount="none";pixel_size=8'
     'cat-5-bands-cut-magnet|image_file="sample-cat.png";bands=5;png_background="lightest";background_mode="cut";mount="magnet"'
     'cat-5-bands-fill|image_file="sample-cat.png";bands=5;png_background="lightest"'
@@ -148,6 +155,22 @@ def stl_volume(path):
     n = struct.unpack("<I", data[80:84])[0]
     return sum(tetvol(*[struct.unpack("<3f", data[84 + 50 * k + 12 * j: 96 + 50 * k + 12 * j]) for j in (1, 2, 3)])
                for k in range(n))
+
+
+def first_hit_up(tris, x, y):
+    """Lowest z at which the vertical line through (x, y) meets a triangle."""
+    best = None
+    for a, b, c in tris:
+        d = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        if abs(d) < 1e-12:
+            continue
+        u = ((x - a[0]) * (c[1] - a[1]) - (y - a[1]) * (c[0] - a[0])) / d
+        v = ((b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0])) / d
+        if u < -1e-9 or v < -1e-9 or u + v > 1 + 1e-9:
+            continue
+        z = a[2] + u * (b[2] - a[2]) + v * (c[2] - a[2])
+        best = z if best is None else min(best, z)
+    return best
 
 
 def png_grey(path):
@@ -285,6 +308,20 @@ for line in open(os.path.join(OUT, "cases.txt")):
         check(name, len(by_col) == 1, "missing picture leaves only the backing")
     else:
         check(name, "WARNING" not in log and "ERROR" not in log, "no OpenSCAD warnings or errors")
+
+    # Magnet pockets: a roof over each, backing round each.
+    if p["mount"] == "magnet":
+        tris = [(V[a], V[b], V[c]) for a, b, c, _ in T]
+        n = int(p["magnet_count"])
+        at = ([(-GW / 4, -GH / 4), (GW / 4, -GH / 4), (-GW / 4, GH / 4), (GW / 4, GH / 4)] if n == 4
+              else [(-GW / 4, 0), (GW / 4, 0)] if n == 2 else [(0, 0)])
+        depth = p["magnet_thickness"] + 0.2
+        rim = (p["magnet_diameter"] + p["magnet_clearance"]) / 2 + 0.8
+        for mx, my in at:
+            roof = first_hit_up(tris, mx + 0.013, my + 0.017)
+            ring = [first_hit_up(tris, mx + rim * math.cos(a), my + rim * math.sin(a)) for a in (0.1, 1.7, 3.3, 4.9)]
+            check(name, roof is not None and abs(roof - depth) <= 1e-3 and all(z is not None and abs(z) <= 1e-3 for z in ring),
+                  "magnet pocket at (%.1f, %.1f): roof at z %s == %.2f, backing all round" % (mx, my, roof, depth))
 
     # Closed parts: no overlap, and every colour holds exactly its pixels.
     whole = sum(tetvol(V[a], V[b], V[c]) for a, b, c, _ in T)

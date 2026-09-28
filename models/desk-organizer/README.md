@@ -112,6 +112,10 @@ Each 3MF is checked for:
   least half the cup height wide in every direction. The empty cup's centre
   of mass leaves at least 25° of tip margin (measured 28.8°–53.5°).
 - the name's part reaches the front face exactly (flush, neither raised nor
-  sunk), and a `NOTE:` reports every clamp
+  sunk). It is centred and fits the face box. Measured on the mesh rather
+  than from the model's formulas, the surface under both ends of the name
+  faces forward, within 40° in plan, so the name never wraps round a
+  corner or a curved end.
+- a `NOTE:` reports every clamp
 
 Output lands in `.verify/`.

@@ -18,7 +18,9 @@
 #     margin
 #   - the name is flush: its text part reaches the front face exactly; it
 #     is centred on the piece and at text_z, fits inside the face box
-#     (face_w x face_h) and fills it in one direction; `NOTE:` lines report
+#     (face_w x face_h) and fills it in one direction; and, measured on
+#     the mesh rather than from those formulas, the surface under both ends
+#     of the name faces forward (within 40 degrees sideways); `NOTE:` lines report
 #     every clamp
 #
 # The checking runs on the host with python3 and the standard library.
@@ -183,6 +185,30 @@ def hits(tris, o, d):
     out.sort()
     # Merge crossings on shared edges.
     return [t for i, t in enumerate(out) if i == 0 or t - out[i - 1] > 1e-4]
+
+
+def first_hit_normal(tris, o, d):
+    """Unit normal of the first triangle the ray o + t d (t > 0) meets."""
+    best = None
+    for a, b, c in tris:
+        e1 = [b[i] - a[i] for i in range(3)]
+        e2 = [c[i] - a[i] for i in range(3)]
+        p = [d[1] * e2[2] - d[2] * e2[1], d[2] * e2[0] - d[0] * e2[2], d[0] * e2[1] - d[1] * e2[0]]
+        det = sum(e1[i] * p[i] for i in range(3))
+        if abs(det) < 1e-12:
+            continue
+        s = [o[i] - a[i] for i in range(3)]
+        u = sum(s[i] * p[i] for i in range(3)) / det
+        q = [s[1] * e1[2] - s[2] * e1[1], s[2] * e1[0] - s[0] * e1[2], s[0] * e1[1] - s[1] * e1[0]]
+        v = sum(d[i] * q[i] for i in range(3)) / det
+        if u < 0 or v < 0 or u + v > 1:
+            continue
+        t = sum(e2[i] * q[i] for i in range(3)) / det
+        if t > 0 and (best is None or t < best[0]):
+            n = [e1[1] * e2[2] - e1[2] * e2[1], e1[2] * e2[0] - e1[0] * e2[2], e1[0] * e2[1] - e1[1] * e2[0]]
+            ln = math.sqrt(sum(x * x for x in n))
+            best = (t, [x / ln for x in n])
+    return best[1] if best else None
 
 
 def hull(pts):
@@ -391,6 +417,18 @@ for line in open(os.path.join(OUT, "cases.txt")):
             # on it, so the text's middle is text_z; allow for glyph asymmetry.
             check(name, abs((x0 + x1) / 2 - cx) <= 0.05 * fwid and abs((z0 + z1) / 2 - tz) <= 0.15 * fhgt,
                   "%s name centred at x %.1f z %.1f (piece x %.1f, text_z %.1f)" % (kind, (x0 + x1) / 2, (z0 + z1) / 2, cx, tz))
+            # Independent of those formulas: measured on the mesh, both ends
+            # of the name (and its middle) sit on a part of the front
+            # surface that faces forward, within 40 degrees of straight
+            # ahead in plan -- never round a corner or a curved end.
+            for xe in (x0 + 0.05, (x0 + x1) / 2, x1 - 0.05):
+                for ze in (z0 + 0.3, z1 - 0.3):
+                    nrm = first_hit_normal(tris, (xe, cy - front - 5, ze), (0, 1, 0))
+                    # Sideways only: a ring's crest tilts up and down by design.
+                    side = math.degrees(math.atan2(abs(nrm[0]), -nrm[1])) if nrm and nrm[1] < 0 else 180
+                    check(name, side <= 40,
+                          "%s front faces forward under the name at x %.1f z %.1f (%.0f degrees sideways)"
+                          % (kind, xe, ze, side))
             check(name, x1 - x0 <= fwid + 0.05 and z1 - z0 <= fhgt + 0.05
                   and (x1 - x0 >= 0.97 * fwid or z1 - z0 >= 0.6 * fhgt),
                   "%s name %.1f x %.1f mm fits the %.1f x %.1f mm face" % (kind, x1 - x0, z1 - z0, fwid, fhgt))

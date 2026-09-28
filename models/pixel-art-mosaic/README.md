@@ -74,7 +74,7 @@ resampling.
 | `mount` | `hanger` | `none`, `hanger` (tab at the top centre), `keyring` (loop at the top-left corner) or `magnet` (pockets in the back). The tab is joined to the middle of the backing, so it holds on even when the art is cut away. |
 | `hole_diameter` | `5` | Hole in the tab. |
 | `magnet_diameter` / `magnet_thickness` | `10` / `3` | Magnet size; the pocket is `+ magnet_clearance` wide and 0.2 mm deeper. |
-| `magnet_count` | `1` | 1 in the middle, 2 side by side, or 4 in a square. |
+| `magnet_count` | `1` | 1 in the middle, 2 side by side, or 4 in a square. Each pocket sits in a pad of backing at least 1.6 mm wide all round, so it holds even where the art is cut away. |
 | `magnet_clearance` | `0.2` | Extra pocket diameter. |
 
 ## Colours and extruders
@@ -108,7 +108,7 @@ Defaults: `color_1` black, `color_2` red, `color_3` white, `color_4` beige,
 ./verify.sh
 ```
 
-Renders 24 cases:
+Renders 26 cases:
 
 - the defaults and every built-in pattern
 - the sample PNGs with 3, 5 and 8 bands, threshold mode, inverted, and the
@@ -127,6 +127,10 @@ Each 3MF is checked for:
   itself, decoded with Python's standard library. So every pixel landed in the
   band its brightness puts it in.
 - sits on z = 0, has the expected height and bounding box, and fits the plate
+- every magnet pocket is a real pocket: straight up from the bed at its
+  centre, the first material is its roof, and there is backing all round
+  its rim. Each pocket gets a 1.6 mm pad of backing, so this holds even
+  when the art is cut away (the heart's empty corners)
 - refused names never reach `surface()`
 - the legacy `image_threshold` value renders the same parts as `png_threshold`
 

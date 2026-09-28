@@ -144,6 +144,7 @@ PIN = 0.004;          // probe size, in mosaic pixels
 TAB_WALL = 2.5;       // material around the mount hole
 HOLE_CLEAR = 1.2;     // hole edge to the mosaic, at least
 MAGNET_SKIN = 0.6;    // backing left above a magnet pocket
+MAGNET_WALL = 1.6;    // backing left round a magnet pocket, at least
 COLORS = [color_1, color_2, color_3, color_4, color_5, color_6, color_7, color_8];
 
 // ===========================================================================
@@ -393,6 +394,11 @@ module backing() {
         union() {
             linear_extrude(B) plate_2d();
             if (TAB) linear_extrude(B) tab_2d();
+            // A pad of backing round every magnet pocket, so a pocket is
+            // never cut from empty space where the art (background cut) or
+            // a small plate does not reach.
+            if (MAGNET) for (m = MAGNETS)
+                translate([m[0], m[1], 0]) cylinder(d = magnet_diameter + magnet_clearance + 2 * MAGNET_WALL, h = B);
             if (frame_width > 0)
                 translate([0, 0, B]) linear_extrude(FRAME_TOP - B) difference() {
                     plate_2d();
