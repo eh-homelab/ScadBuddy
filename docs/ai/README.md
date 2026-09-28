@@ -27,8 +27,8 @@ The spec's end state (§1) is an agent service in the ScadBuddy pod that externa
 clients reach over `/mcp`, plus an in-app assistant. What is merged is the foundation
 for that; **no AI feature is user-visible in a production build yet**:
 
-- The assistant panel is hidden outside the msw-mocked build.
-  `useAiAvailability()` in
+- The assistant panel, and Settings → "MCP access tokens" (#251), are hidden outside
+  the msw-mocked build. `useAiAvailability()` in
   [`frontend/src/agent/chat/availability.ts`](../../frontend/src/agent/chat/availability.ts)
   returns `available: true` only when `VITE_MOCK_API === '1'`, and
   `loadChatTransportFactory()` in

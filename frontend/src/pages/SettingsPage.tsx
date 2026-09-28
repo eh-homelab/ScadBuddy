@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { useAiAvailability } from '../agent/chat/availability'
 import { USER_ONLY } from '../agent/dom'
 import { committed, touchAfterRender } from '../agent/highlight'
 import { AgentToolError } from '../agent/types'
@@ -7,6 +8,7 @@ import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
+import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { useSubscription } from '../lib/realtime'
@@ -62,6 +64,7 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
+  const ai = useAiAvailability()
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -533,6 +536,11 @@ export function SettingsPage() {
         </section>
 
         <HeadlessBrowserSetting />
+
+        {/* Applied at once, not part of the saved form (#251). The agent service serves
+            these routes, so the section shows only where the assistant would: hidden in
+            a production build until the service is deployed and routed. */}
+        {ai.available && <McpTokensSection />}
 
         <section className="mt-4 rounded-[6px] border border-line bg-surface">
           <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">

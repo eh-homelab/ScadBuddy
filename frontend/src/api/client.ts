@@ -56,6 +56,7 @@ import type {
   UrlImport,
   VersionDiff,
 } from './types'
+import type { McpTokenCreate, McpTokenList, MintedMcpToken } from './mcpTokens'
 
 export const API_BASE = '/api/v1'
 
@@ -700,4 +701,14 @@ export const api = {
       method: 'PUT',
       body: JSON.stringify({ enabled }),
     }),
+
+  /** #251 — the agent service's MCP bearer tokens: metadata only. */
+  listMcpTokens: () => request<McpTokenList>('/ai/mcp-tokens'),
+
+  /** The plaintext token is in this response and nowhere else. */
+  createMcpToken: (body: McpTokenCreate) =>
+    request<MintedMcpToken>('/ai/mcp-tokens', { method: 'POST', body: JSON.stringify(body) }),
+
+  revokeMcpToken: (id: string) =>
+    request<undefined>(`/ai/mcp-tokens/${seg(id)}`, { method: 'DELETE' }),
 }
