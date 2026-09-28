@@ -16,6 +16,7 @@ from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
+from scadbuddy.core.components import Components, discover_components
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (
     EventBus,
@@ -81,6 +82,9 @@ class AppState:
     #: Uploads for `// file` parameters, with their caps (#296).
     assets: AssetStore
     queue: RenderQueue
+    #: Every feature service that is a component (`core/components.py`), built over
+    #: this state by `build_state`: a new service goes there, not in a field here.
+    components: Components = field(init=False)
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
     previews: PreviewScheduler | None
@@ -155,6 +159,14 @@ def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, l
 
 
 def build_state(settings: Settings) -> AppState:
+    """The core services, then every discovered component over them."""
+    state = _build_core(settings)
+    state.components = Components(state, discover_components())
+    state.components.build_all()
+    return state
+
+
+def _build_core(settings: Settings) -> AppState:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     history = ModelHistory(paths.models, wrapper_prefix=WRAPPER_PREFIX, timeout=config.git_timeout)
