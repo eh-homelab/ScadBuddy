@@ -13,12 +13,13 @@ import trimesh
 from scadbuddy.core.config import Config, load_config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render import geometry
-from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.bambu3mf import PlateParts, write_bambu_3mf, write_plates_3mf
 from scadbuddy.render.geometry import (
     MAX_REPORTED_EDGES,
     WALL_MIN_SAMPLES,
     WALL_SAMPLES,
     GeometryAnalysis,
+    NoSuchPlateError,
     OverhangBucket,
     Unreadable3MFError,
     analyze_3mf,
@@ -218,6 +219,53 @@ def test_the_3mf_round_trips_to_the_same_parts(tmp_path: Path) -> None:
     # Model coordinates, not the plate placement the build item carries.
     assert analysis.bbox.min == pytest.approx((0, 0, 0))
     assert analysis.bbox.max == pytest.approx((30, 10, 10))
+
+
+def _two_plates_sharing_a_colour(path: Path) -> Path:
+    """Plate 1: a red 10 mm cube and a blue one beside it. Plate 2: a red 30 mm cube.
+    Both plates are drawn at the origin, so their meshes overlap in model space."""
+    write_plates_3mf(
+        [
+            PlateParts(
+                (_part(_cube(), "#FF0000", 1), _part(_cube(at=(20, 0, 0)), "#0000FF", 2)), (1, 2)
+            ),
+            PlateParts((_part(_cube(30), "#FF0000", 1),), (1,)),
+        ],
+        ["#FF0000", "#0000FF"],
+        path,
+        thumbnails=None,
+    )
+    return path
+
+
+def test_each_plate_is_measured_on_its_own(tmp_path: Path) -> None:
+    path = _two_plates_sharing_a_colour(tmp_path / "model.3mf")
+
+    first = analyze_3mf(path)
+    assert (first.plate, first.plates) == (1, 2)
+    assert [(p.part, p.colour) for p in first.parts] == [(1, "#FF0000"), (2, "#0000FF")]
+    assert first.bbox.max == pytest.approx((30, 10, 10))
+
+    second = analyze_3mf(path, plate=2)
+    assert (second.plate, second.plates) == (2, 2)
+    # The red part is extruder 1 on plate 2 too, and only plate 2's cube is measured.
+    assert [(p.part, p.colour) for p in second.parts] == [(1, "#FF0000")]
+    assert second.bbox.max == pytest.approx((30, 30, 30))
+    assert second.thinnest_wall is not None
+    assert second.thinnest_wall.thickness_mm == pytest.approx(30)
+    assert [p.material_index for p in parts_from_3mf(path, 2)] == [1]
+
+
+def test_a_plate_the_3mf_does_not_have_is_its_own_error(tmp_path: Path) -> None:
+    path = _two_plates_sharing_a_colour(tmp_path / "model.3mf")
+    with pytest.raises(NoSuchPlateError, match="no plate 3; the 3MF has 2"):
+        analyze_3mf(path, plate=3)
+
+    single = tmp_path / "single.3mf"
+    write_bambu_3mf([_part(_cube())], single, thumbnails=None)
+    assert (analyze_3mf(single).plate, analyze_3mf(single).plates) == (1, 1)
+    with pytest.raises(NoSuchPlateError):
+        parts_from_3mf(single, 2)
 
 
 def test_nothing_to_analyse_is_an_error() -> None:

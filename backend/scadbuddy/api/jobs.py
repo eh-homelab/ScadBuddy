@@ -41,6 +41,7 @@ from scadbuddy.render.jobs import (
     JobState,
     ModelSource,
     PartInfo,
+    PlateInfo,
     QueueFullError,
     RenderQueue,
     resolve_source,
@@ -111,6 +112,8 @@ class JobStatus(BaseModel):
     #: What the template echoed as `NOTE:`/`WARNING:` on a successful render (#285).
     notes: list[str] | None = None
     parts: list[PartInfo] | None = None
+    #: Every plate of a multi-plate render (spec §6.4); empty for a one-plate one.
+    plates: list[PlateInfo] | None = None
     #: OpenSCAD's ERROR/WARNING lines, parsed, on a failed job as well as a done one.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     #: How many more OpenSCAD printed past the cap; 0 when ``diagnostics`` is all.
@@ -153,6 +156,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         warnings=result.warnings if result else None,
         notes=result.notes if result else None,
         parts=result.parts if result else None,
+        plates=result.plates if result else None,
         diagnostics=job.diagnostics,
         diagnostics_dropped=job.diagnostics_dropped,
     )

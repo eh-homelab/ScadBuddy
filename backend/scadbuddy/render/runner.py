@@ -40,6 +40,9 @@ _MISSING_FILE = re.compile(
     r"|WARNING: The file '(?P<surface>[^']*)' couldn't be opened)"
 )
 
+#: A template's plate count, as `echo(plates = N)` logs it (spec §6.4, #289).
+_PLATES = re.compile(r"^ECHO: plates = (?P<count>\d+)$")
+
 
 #: A message a template echoes for the person customizing it (#285): `NOTE:` by
 #: convention, `WARNING:` in the templates that predate it. A single string, so
@@ -100,6 +103,16 @@ class ProcessOutput:
     #: What the template echoed for the user (`template_note`), in first-seen order
     #: and once each. Read off the whole log for the same reason as `missing_files`.
     notes: tuple[str, ...] = ()
+    #: The last `echo(plates = N)` the run logged, or ``None`` when it logged none.
+    #: Also read off the whole log: an echo at the top of a long model is not in
+    #: the tail.
+    plates: int | None = None
+
+
+def plate_count(line: str) -> int | None:
+    """The plate count ``line`` states, if it is a template's `echo(plates = N)`."""
+    match = _PLATES.match(line)
+    return int(match["count"]) if match else None
 
 
 def template_note(line: str) -> str | None:
@@ -162,6 +175,38 @@ def _require_option(parameter: Parameter, value: ParamValue) -> None:
     )
 
 
+def path_like(value: str) -> str | None:
+    """Why ``value`` would take ``import()``/``surface()`` out of the model's
+    directory, or None when it would not.
+
+    OpenSCAD opens whatever path a string hands those two calls, relative to the
+    calling file or absolute (#281). A value with neither a leading ``/`` nor a
+    ``..`` component can only name something at or below the directory of the file
+    that reads it, so those are the two shapes refused. Judged by path component,
+    not substring, so ordinary text such as ``"Wait..."`` or ``"3/4 inch"`` passes;
+    the false positives left are text that genuinely starts with ``/`` (``"/r/foo"``)
+    or has ``..`` between slashes.
+    """
+    if value.startswith("/"):
+        return "an absolute path"
+    if ".." in value.split("/"):
+        return "a '..' path component"
+    return None
+
+
+def _refuse_path_like(parameter: Parameter, value: str) -> None:
+    # The template's own values are its business, as for a file parameter: only a
+    # value the template did not write itself is judged.
+    if value == parameter.initial or any(option.value == value for option in parameter.options):
+        return
+    reason = path_like(value)
+    if reason is not None:
+        raise ValueError(
+            f"parameter {parameter.name!r} looks like a file path ({reason}), which a "
+            f"template could read outside its own directory; got {value!r}"
+        )
+
+
 def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
     """``value`` as an OpenSCAD literal for ``-D``; raises `ParameterValueError`
     unless ``parameter`` takes it."""
@@ -192,11 +237,13 @@ def _format_checked(parameter: Parameter, value: ParamValue) -> str:
     if parameter.type in ("string", "color", "font"):
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
+        _refuse_path_like(parameter, value)
         return quote_string(value)
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
             if not isinstance(value, str):
                 raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
+            _refuse_path_like(parameter, value)
             _require_option(parameter, value)
             return quote_string(value)
         formatted = _format_number(value)
@@ -230,6 +277,7 @@ async def _drain(
     missing: list[str],
     notes: list[str],
     diagnostics: DiagnosticCollector,
+    plates: list[int],
 ) -> None:
     async for raw in stream:
         line = raw.decode("utf-8", "replace").rstrip("\n")
@@ -241,17 +289,21 @@ async def _drain(
         note = template_note(line)
         if note is not None and note not in notes and len(notes) < MAX_NOTES:
             notes.append(note)
+        count = plate_count(line)
+        if count is not None:
+            plates.append(count)
 
 
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
     # the data volume and not only the ones baked into the image (issue #82).
+    # Built from an allowlist, not copied (#281): a template can read
+    # /proc/self/environ, so nothing the backend holds may be in it.
     env = env_for(config.data_dir)
-    # Set or removed, never inherited: a model sees exactly the libraries it
-    # declares (#93), so one that forgot to declare BOSL2 fails here the same way
-    # it would on a fresh install, instead of working by accident.
-    env.pop("OPENSCADPATH", None)
+    # Set or absent, never inherited (the allowlist drops it): a model sees exactly
+    # the libraries it declares (#93), so one that forgot to declare BOSL2 fails
+    # here the same way it would on a fresh install, instead of working by accident.
     if config.library_path:
         env["OPENSCADPATH"] = os.pathsep.join(str(path) for path in config.library_path)
     process = await asyncio.create_subprocess_exec(
@@ -265,9 +317,10 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     missing: list[str] = []
     notes: list[str] = []
+    plates: list[int] = []
     collector = DiagnosticCollector(roots=(cwd, *config.library_path))
     assert process.stdout is not None
-    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector))
+    drain = asyncio.create_task(_drain(process.stdout, tail, missing, notes, collector, plates))
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
@@ -305,6 +358,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         diagnostics=tuple(collector.diagnostics),
         diagnostics_dropped=collector.dropped,
         notes=tuple(notes),
+        plates=plates[-1] if plates else None,
     )
 
 
