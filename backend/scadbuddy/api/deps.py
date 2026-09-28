@@ -189,7 +189,7 @@ def build_state(settings: Settings) -> AppState:
     # The bytes on the volume, the rest on the render queue's pool (#591).
     assets = AssetStore(
         paths.assets,
-        store.pool if isinstance(store, PostgresJobStore) else None,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
