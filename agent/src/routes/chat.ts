@@ -66,17 +66,11 @@ const DRAIN_POLL_MS = 20
 /** Frames one connection may have waiting to be handled; past this a frame is refused with `busy`. */
 export const MAX_QUEUED_FRAMES = 32
 
-/** New sessions one connection may start per `NEW_SESSION_WINDOW_MS`; past this, `rate_limited`. */
-export const MAX_NEW_SESSIONS = 10
-export const NEW_SESSION_WINDOW_MS = 60_000
-
 export type ChatLimits = {
   highWater: number
   bufferMax: number
   drainStallMs: number
   maxQueued: number
-  maxNewSessions: number
-  newSessionWindowMs: number
 }
 
 export type ChatConnectionOptions = {
@@ -132,8 +126,6 @@ export class ChatConnection {
   private readonly follows = new Map<string, AbortController>()
   private queue: Promise<void> = Promise.resolve()
   private queued = 0
-  /** When this connection's recent new sessions started, oldest first. */
-  private readonly started: number[] = []
   private closed = false
   private readonly snapshotMs: number
   private snapshotTimer: NodeJS.Timeout | undefined
@@ -156,8 +148,6 @@ export class ChatConnection {
       bufferMax: SEND_BUFFER_MAX,
       drainStallMs: DRAIN_STALL_MS,
       maxQueued: MAX_QUEUED_FRAMES,
-      maxNewSessions: MAX_NEW_SESSIONS,
-      newSessionWindowMs: NEW_SESSION_WINDOW_MS,
       ...options.limits,
     }
   }
@@ -233,24 +223,10 @@ export class ChatConnection {
       )
       return Promise.resolve()
     }
-    if (message.type === 'user.message' && !message.sessionId && !this.takeNewSession()) {
-      this.emit(
-        event({ type: 'error', code: 'rate_limited', message: 'too many new chats from this connection; wait a minute' }),
-      )
-      return Promise.resolve()
-    }
+    // New sessions are rate-limited per owner by the manager (sessions/manager.ts
+    // MAX_NEW_SESSIONS), not per connection, so reconnecting does not reset it;
+    // a refusal comes back as an `error` frame with code `rate_limited`.
     return this.enqueue(() => this.handle(message))
-  }
-
-  /** Counts a new session against the per-connection window, or refuses it. */
-  private takeNewSession(): boolean {
-    const now = Date.now()
-    while (this.started.length > 0 && now - (this.started[0] ?? now) >= this.limits.newSessionWindowMs) {
-      this.started.shift()
-    }
-    if (this.started.length >= this.limits.maxNewSessions) return false
-    this.started.push(now)
-    return true
   }
 
   close(): void {

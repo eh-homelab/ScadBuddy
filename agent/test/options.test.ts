@@ -35,6 +35,10 @@ describe('buildQueryOptions', () => {
     )
   })
 
+  it('turns off inline shell execution in skills and commands', () => {
+    expect(options.settings).toEqual({ disableSkillShellExecution: true })
+  })
+
   it('grants no tool permissions up front', () => {
     expect(options.allowedTools).toBeUndefined()
     expect(options.permissionMode).toBeUndefined()

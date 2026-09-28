@@ -161,3 +161,21 @@ def test_a_positional_row_main_never_had_is_refused_and_nothing_changes(
     ):
         migrate(conn)
     assert "id" not in _columns(pg_conninfo)
+
+
+@pytest.mark.requires_postgres
+def test_the_projection_migration_backfills_inputs_of_existing_rows(pg_conninfo: str) -> None:
+    # Applies every file before the projection one, inserts a row as the legacy queue
+    # wrote it then (no inputs column), and then applies the rest: the real UPDATE runs.
+    projection = next(
+        i for i, m in enumerate(MIGRATIONS) if m.id.endswith("_render_jobs_projection")
+    )
+    with psycopg.connect(pg_conninfo) as conn:
+        migrate(conn, MIGRATIONS[:projection])
+        conn.execute(
+            "INSERT INTO render_jobs (id, slug, params, state, created_at, render_key)"
+            " VALUES ('old', 'demo', '{\"width\": 7}', 'done', now(), 'k')"
+        )
+        assert migrate(conn)[0] == MIGRATIONS[projection].id
+        row = conn.execute("SELECT inputs FROM render_jobs WHERE id = 'old'").fetchone()
+    assert row == ({"params": {"width": 7}},)

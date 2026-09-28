@@ -379,7 +379,19 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment.
+  credential's environment. The one exception is the headless browser (#349,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
+  writes that plugin itself and starts its server under `env -i`. It is off
+  until switched on in Settings ("AI headless browser", stored through
+  `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
+  writes), and the image carries its Chromium (about 600 MB of the image). The
+  backend refuses its outward requests unless a human approved that exact one
+  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
+  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
+  Chromium keeps its sandbox only where the pod's seccomp profile allows user
+  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
+  browser turn and runs it with `--no-sandbox`
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session
@@ -470,21 +482,26 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   |---|---|
   | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
   | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
-  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`), one |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
-  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `?after=` or `Last-Event-ID`, then live |
+  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`
-  before it is read; the socket caps a frame at 256 KiB. Approvals
+  before it is read; the socket caps a frame at 256 KiB. New sessions, from the
+  socket or `POST`, are limited per owner (`MAX_NEW_SESSIONS` in
+  `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
+  another replica does not reset it); the socket answers an `error` frame with
+  code `rate_limited`. Approvals
   are decided on the socket or through `/api/v1/ai/approvals`. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries
   `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
+  Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
-  recreates `claude/` and `work/` in that volume, and it exits 1 with a
+  recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
 - **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
   agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
