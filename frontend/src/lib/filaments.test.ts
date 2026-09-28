@@ -6,6 +6,7 @@ import {
   facets,
   filterSpools,
   loadedLabel,
+  nozzleMismatch,
   seedPlan,
   slotNeed,
   spoolLabel,
@@ -286,5 +287,28 @@ describe('seedPlan', () => {
 
   it('ignores a remembered slot this plate does not have', () => {
     expect(seedPlan(options, [{ slot_id: 3, spool_id: 3 }])).toEqual(options.suggested)
+  })
+})
+
+describe('nozzleMismatch (#469)', () => {
+  // printers/1/status: nozzles[0] is the right extruder, nozzles[1] the left.
+  const nozzles = [
+    { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
+    { nozzle_type: 'HH01', nozzle_diameter: '0.4' },
+  ]
+
+  it('names the side and the nozzle fitted there when it is not the chosen size', () => {
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), nozzles, '0.2')).toBe('L · 0.4 fitted')
+    expect(nozzleMismatch(spool({ extruder: 0, side: 'R' }), nozzles, '0.4')).toBe('R · 0.2 fitted')
+  })
+
+  it('says nothing when the side fits the chosen size', () => {
+    expect(nozzleMismatch(spool({ extruder: 0, side: 'R' }), nozzles, '0.2')).toBeNull()
+  })
+
+  it('says nothing when the side or its nozzle is unknown', () => {
+    expect(nozzleMismatch(spool({ extruder: null, side: null }), nozzles, '0.2')).toBeNull()
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), nozzles.slice(0, 1), '0.2')).toBeNull()
+    expect(nozzleMismatch(spool({ extruder: 1, side: 'L' }), nozzles, undefined)).toBeNull()
   })
 })

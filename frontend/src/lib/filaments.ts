@@ -1,4 +1,11 @@
-import type { FilamentOptions, FilamentWarning, SlotChoice, SlotNeed, SpoolOption } from '../api/types'
+import type {
+  FilamentOptions,
+  FilamentWarning,
+  NozzleInfo,
+  SlotChoice,
+  SlotNeed,
+  SpoolOption,
+} from '../api/types'
 
 /**
  * View-model helpers for the filament picker (#87). No React and no fetching: the
@@ -46,6 +53,28 @@ export function loadedLabel(spool: SpoolOption, printerId?: number | null): stri
     where += ` · on ${loaded.printer_name ?? 'another printer'}`
   }
   return where
+}
+
+/**
+ * Why a spool cannot print at `size`, as a badge reads (`"L · 0.4 fitted"`), or `null`
+ * when it can or nobody knows (#469).
+ *
+ * A spool's extruder is fixed by the AMS it is loaded in, and the run slices each
+ * filament for that extruder, so a spool on the side with another nozzle fitted would
+ * be sliced for the wrong nozzle — the printer pauses at the first layer. `nozzles` is
+ * the printer's own list, indexed by extruder: `[0]` right, `[1]` left. An unknown side
+ * or an unreported nozzle is not a mismatch; the slicer chooses there.
+ */
+export function nozzleMismatch(
+  spool: SpoolOption,
+  nozzles: NozzleInfo[],
+  size: string | undefined,
+): string | null {
+  const extruder = spool.extruder
+  if (extruder === null || extruder === undefined || !size || !spool.side) return null
+  const fitted = nozzles[extruder]?.nozzle_diameter
+  if (!fitted || fitted === size) return null
+  return `${spool.side} · ${fitted} fitted`
 }
 
 /**
