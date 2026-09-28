@@ -17,7 +17,10 @@ import re
 
 from scadbuddy.core.paths import DataPaths, model_path
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.render.jobs import export_revision
+from scadbuddy.render.jobs import (
+    SnapshotUnavailableError as SnapshotUnavailableError,  # defined beside resolve_source
+)
+from scadbuddy.render.jobs import export_revision, touch_export
 from scadbuddy.store.archive import pack_dir, unpack_dir
 from scadbuddy.store.content import (
     BlobCorruptError,
@@ -31,10 +34,6 @@ from scadbuddy.store.locks import KeyLocks
 
 def snapshot_key(slug: str, revision: str) -> str:
     return f"src-{re.sub(r'[^A-Za-z0-9._-]', '_', slug)}-{revision}"
-
-
-class SnapshotUnavailableError(RuntimeError):
-    """No snapshot is stored and this process has no git history to make one."""
 
 
 class SnapshotStore:
@@ -87,12 +86,15 @@ class SnapshotStore:
     async def materialize(self, slug: str, revision: str) -> bool:
         directory = self.paths.model_revision_dir(slug, revision)
         if directory.is_dir():
+            # A hit is a use: the prune's TTL runs from the last render that read it.
+            await asyncio.to_thread(touch_export, directory)
             return True
         key = snapshot_key(slug, revision)
         # One unpack per key in this process: a second one, arriving after the first
         # finished, would swap the export out from under a render reading it.
         async with self.locks.hold(key):
             if directory.is_dir():
+                await asyncio.to_thread(touch_export, directory)
                 return True
             stat = await asyncio.to_thread(self.content.index.get, key)
             # This backend's row only: `read` downloads from this backend.
