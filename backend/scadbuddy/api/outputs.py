@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import zipfile
 from pathlib import Path
@@ -40,6 +39,7 @@ from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
+from scadbuddy.library.libraries import LibraryError, model_search_path
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -51,7 +51,7 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.schema import CustomizerSchema, ParamValue, source_sha256
+from scadbuddy.render.schema import ParamValue, load_cached_schema, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
 logger = logging.getLogger(__name__)
@@ -442,19 +442,24 @@ async def send_output_to_bambuddy(
 
 
 def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
-    """The model's param defaults from its cached schema, or ``{}`` when none matching
-    the live source is cached.
+    """The model's param defaults from its cached schema, or ``{}`` when the renderer
+    would not use that cache entry (:func:`load_cached_schema`: another source, cache
+    version, schema format or set of library pins).
 
-    Only read: a name hangs on them, so neither openscad nor a library checkout (which
-    may clone) is run for them. Every render of the live model caches the schema.
+    Only read: a name hangs on them, so neither openscad nor a library fetch (which may
+    clone) is run for them; a pinned checkout missing from the volume means no defaults.
+    Every render of the live model caches the schema.
     """
     try:
         source = paths.model_source(slug).read_text(encoding="utf-8")
-        body = json.loads(paths.model_schema_cache(slug).read_text(encoding="utf-8"))
-        schema = CustomizerSchema.model_validate(body["schema"])
-    except (OSError, ValueError, KeyError, TypeError):
+        schema = load_cached_schema(
+            paths.model_schema_cache(slug),
+            source_sha256(source),
+            library_path=model_search_path(paths, slug),
+        )
+    except (OSError, ValueError, LibraryError):
         return {}
-    if schema.source_sha256 != source_sha256(source):
+    if schema is None:
         return {}
     return {param.name: param.initial for param in schema.parameters}
 

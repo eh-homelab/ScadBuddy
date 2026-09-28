@@ -291,6 +291,57 @@ def test_filing_after_a_print_in_the_models_colours_reuses_the_prints_copy(
     assert uploaded.call_count == 1
 
 
+def rewrite_cached_defaults(paths: DataPaths, model: str, **entry: Any) -> None:
+    """Cached defaults under which ``width`` (12, against 5) is the one changed value, so
+    a name read from them is ``Demo — 12``; ``entry`` overrides the cache entry's keys."""
+    cache = paths.model_schema_cache(model)
+    body = json.loads(cache.read_text(encoding="utf-8"))
+    initials = {"width": 5}
+    for param in body["schema"]["parameters"]:
+        param["initial"] = initials.get(param["name"], param["initial"])
+    body.update(entry)
+    cache.write_text(json.dumps(body), encoding="utf-8")
+
+
+@respx.mock
+def test_the_name_reads_the_defaults_from_a_valid_cached_schema(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    configure(client)
+    output_id = named_output(client, model)
+    rewrite_cached_defaults(paths, model)
+    project_folder_routes()
+    uploaded = uploads(41)
+
+    file_into_project(client, output_id)
+    assert uploaded_name(uploaded) == "Demo — 12.3mf"
+
+
+@pytest.mark.parametrize(
+    "stale",
+    [
+        pytest.param({"version": -1}, id="cache-version"),
+        pytest.param({"format": -1}, id="schema-format"),
+        pytest.param({"library_path": ["/elsewhere/lib"]}, id="library-pins"),
+    ],
+)
+@respx.mock
+def test_a_cached_schema_the_renderer_would_not_use_does_not_name_the_file(
+    client: TestClient, model: str, paths: DataPaths, stale: dict[str, Any]
+) -> None:
+    """The same validity as ``load_cached_schema`` (#540 review): an entry for another
+    cache version, schema format or set of library pins is not this model's schema,
+    so its defaults are not read, and the name falls back to the output's own."""
+    configure(client)
+    output_id = named_output(client, model)
+    rewrite_cached_defaults(paths, model, **stale)
+    project_folder_routes()
+    uploaded = uploads(41)
+
+    file_into_project(client, output_id)
+    assert uploaded_name(uploaded) == "Demo — Elan.3mf"
+
+
 @respx.mock
 def test_the_name_runs_no_openscad_when_no_schema_is_cached(
     client: TestClient, model: str, tmp_path: Path
