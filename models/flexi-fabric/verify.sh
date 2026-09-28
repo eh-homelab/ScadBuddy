@@ -78,6 +78,7 @@ CASES+=(
     "big-links-thin-layers|link_size=15;layer_height=0.12;bar_layers=6;bar_width=2;clearance=0.2;width=80;height=60"
     # Second audit: every silent adjustment says so with a NOTE.
     "note-star-fallback|shape=\"star\";width=40;height=40;link_size=15;colour_mode=\"single\""
+    "note-cap-then-raise|pattern=\"triflex_triangles\";width=40;height=40;link_size=15;clearance=0.6;colour_mode=\"single\""
     "note-checker-hex-2|pattern=\"hex_scales\";colour_mode=\"checker\";colour_count=2;width=70;height=70"
     "largest|width=300;height=300;link_size=5;colour_mode=\"checker\""
 )
@@ -320,6 +321,9 @@ NOTES = {
     "small-sheet-big-links": ["NOTE: link_size reduced to 10 mm to keep four links across the 40 mm side"],
     "note-star-fallback": ["NOTE: a 40 x 40 mm star has room for fewer than two 10 mm links; made a rectangle instead",
                            "NOTE: link_size reduced to 10 mm"],
+    # Capped to 10 for four across, then raised to 11.5 for clearance: both said.
+    "note-cap-then-raise": ["NOTE: link_size reduced to 10 mm to keep four links across the 40 mm side",
+                            "NOTE: link_size raised to 11.5 mm so links keep 0.6 mm clearance (fewer than four links fit across)"],
     "note-checker-hex-2": ["NOTE: checker uses 3 colours for this pattern (colour_count 2 is ignored)"],
 }
 

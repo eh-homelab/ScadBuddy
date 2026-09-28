@@ -296,7 +296,8 @@ function fit_L(p, L) =
     (L >= 40 || pattern_spec(p, L, W_MIN)[S_GAP] >= clearance) ? L : fit_L(p, L + 0.5);
 
 // Keep at least four links across the narrower side of the sheet.
-LINK = fit_L(pattern, min(link_size, min(width, height) / 4));
+LINK_CAP = min(link_size, min(width, height) / 4);
+LINK = fit_L(pattern, LINK_CAP);
 BAR_W = fit_w(pattern, LINK, max(W_MIN, bar_width));
 SPEC = pattern_spec(pattern, LINK, BAR_W);
 
@@ -572,9 +573,12 @@ module overlay_part() {
 
 echo(FLEXI = [pattern, len(CELLS), LINK, BAR_W, SPEC[S_GAP], LEVELS, TOTAL_H, HB, VG,
               norm(A), CLS[0], len(VARIANTS)]);
-if (LINK > link_size) echo(str("NOTE: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance"));
-if (LINK < link_size) echo(str("NOTE: link_size reduced to ", LINK, " mm to keep four links across the ",
-                               min(width, height), " mm side"));
+// Two separate steps, reported separately: the cap to four links across, then
+// the raise that keeps the clearance (which may undo part of the cap).
+if (LINK_CAP < link_size) echo(str("NOTE: link_size reduced to ", LINK_CAP, " mm to keep four links across the ",
+                                   min(width, height), " mm side"));
+if (LINK > LINK_CAP) echo(str("NOTE: link_size raised to ", LINK, " mm so links keep ", clearance, " mm clearance",
+                              LINK_CAP < link_size ? " (fewer than four links fit across)" : ""));
 if (colour_mode == "checker" && colour_count != CLS[0])
     echo(str("NOTE: checker uses ", CLS[0], " colours for this pattern (colour_count ", colour_count, " is ignored)"));
 if (BAR_W < bar_width) echo(str("NOTE: bar width reduced to ", BAR_W, " mm to keep ", clearance, " mm clearance"));

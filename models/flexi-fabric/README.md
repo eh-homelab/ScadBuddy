@@ -77,7 +77,8 @@ most fabric-like spacing that still keeps every gap at least `clearance`.
 come closer than `clearance`, the bar width is reduced in 0.1 mm steps down to
 0.8 mm (two 0.4 mm lines); if that is still not enough, `link_size` is raised
 in 0.5 mm steps. `link_size` is also capped at a quarter of the sheet's
-narrower side, so there are always several links across. Every one of these
+narrower side, so there are several links across (a clearance raise after
+that cap can leave fewer than four; the NOTE says so). Every one of these
 adjustments is reported with a `NOTE:` line, which ScadBuddy shows beside the
 preview.
 
@@ -241,7 +242,7 @@ is checked for:
   through a `color()`-filtering wrapper like ScadBuddy's closed-part renderer,
   and the closed parts' volumes add up to the whole render's.
 
-Last run: `OK: all cases passed` (39 cases). Sampled minimum gaps at 0.3 mm
+Last run: `OK: all cases passed` (40 cases). Sampled minimum gaps at 0.3 mm
 clearance: square 0.600 (the vertical gap), rings 0.404, diamond 0.419, hexagon
 0.458, TriFlex 0.353.
 
