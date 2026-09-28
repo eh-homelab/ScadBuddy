@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react'
 import { API_BASE } from '../api/client'
 import { socketUrl } from './lsp'
 
@@ -301,77 +301,4 @@ export function useRealtimeStatus(): { status: RealtimeStatus; following: boolea
   const status = useSyncExternalStore(subscribe, () => client.status)
   const following = useSyncExternalStore(subscribe, () => client.following)
   return { status, following }
-}
-
-export interface LiveQuery<T> {
-  data: T | undefined
-  error: Error | undefined
-  loading: boolean
-  refetch: () => void
-}
-
-/**
- * `fetcher`'s result, fetched now and again whenever something under `topics`
- * changes. Signals that arrive together are read once; a slower, older read never
- * overwrites a newer one. `key` names what is fetched: a new key starts over.
- */
-export function useLiveQuery<T>(
-  key: string,
-  fetcher: () => Promise<T>,
-  topics: readonly string[],
-): LiveQuery<T> {
-  const [state, setState] = useState<{ key: string; data?: T; error?: Error; loading: boolean }>(
-    { key, loading: true },
-  )
-  const latestFetcher = useRef(fetcher)
-  useEffect(() => {
-    latestFetcher.current = fetcher
-  })
-  const generation = useRef(0)
-  const pending = useRef(false)
-
-  const refetch = useCallback(() => {
-    if (pending.current) return
-    pending.current = true
-    queueMicrotask(() => {
-      pending.current = false
-      const mine = ++generation.current
-      latestFetcher.current().then(
-        (data) => {
-          if (generation.current === mine) setState({ key, data, loading: false })
-        },
-        (cause: unknown) => {
-          if (generation.current !== mine) return
-          const error = cause instanceof Error ? cause : new Error(String(cause))
-          setState((previous) => ({ ...previous, key, error, loading: false }))
-        },
-      )
-    })
-  }, [key])
-
-  useEffect(() => {
-    refetch()
-    return () => {
-      // Whatever is still in flight belongs to the old key.
-      generation.current += 1
-    }
-  }, [refetch])
-
-  const topicList = topics.join('\n')
-  useEffect(() => {
-    if (!topicList) return
-    const client = getRealtime()
-    const stops = topicList.split('\n').map((topic) => client.subscribe(topic, refetch))
-    return () => {
-      for (const stop of stops) stop()
-    }
-  }, [topicList, refetch])
-
-  const current = state.key === key
-  return {
-    data: current ? state.data : undefined,
-    error: current ? state.error : undefined,
-    loading: current ? state.loading : true,
-    refetch,
-  }
 }

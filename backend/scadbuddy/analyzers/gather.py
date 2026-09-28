@@ -50,7 +50,10 @@ async def gather_context(
     params: dict[str, ParamValue],
     request: AnalysisRequest,
     meta: OutputMeta | None,
+    library_file_id: int | None = None,
 ) -> AnalysisContext:
+    """``library_file_id`` is one of the output's copies in Bambuddy's library (#316):
+    the plate's filament slots are read off an uploaded file."""
     context = AnalysisContext(slug=slug, params=params, request=request, output=meta)
     if meta is None:
         context.unavailable["output"] = "this configuration has not been rendered yet"
@@ -65,7 +68,7 @@ async def gather_context(
         _read_choices(context, settings, request.printer_id or settings.printer_id)
     else:
         async with client_for(settings) as client:
-            await _read_bambuddy(context, client, settings)
+            await _read_bambuddy(context, client, settings, library_file_id)
 
     model = context.printer.model if context.printer and context.printer.model else None
     plate = plate_for(model)
@@ -99,7 +102,10 @@ async def _read_geometry(context: AnalysisContext, outputs: OutputStore, meta: O
 
 
 async def _read_bambuddy(
-    context: AnalysisContext, client: BambuddyClient, settings: StoredSettings
+    context: AnalysisContext,
+    client: BambuddyClient,
+    settings: StoredSettings,
+    library_file_id: int | None,
 ) -> None:
     request = context.request
     meta = context.output
@@ -142,7 +148,6 @@ async def _read_bambuddy(
     if request.filament_plan is None:
         context.unavailable["inventory"] = "no filament plan was chosen"
         return
-    library_file_id = meta.library_file_id if meta is not None else None
     if library_file_id is None:
         context.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
         return

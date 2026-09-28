@@ -36,6 +36,8 @@ class QueueOutcome(BaseModel):
 
     slice_job_id: int
     sliced_library_file_id: int
+    #: :attr:`SliceRequest.preset_key` of the slice, recorded with the sliced file (#316).
+    preset_key: str | None = None
     queue_item_ids: list[int] = Field(default_factory=list)
     printer_id: int
 
@@ -75,17 +77,15 @@ async def slice_and_queue(
     still win over the quantity and project they carry, because those two are what
     the caller asked for on this request.
     """
-    accepted = await client.slice(
-        library_file_id,
-        SliceRequest(
-            printer_preset=plan.printer_preset,
-            process_preset=plan.process_preset,
-            filament_presets=plan.filament_presets,
-            filament_colours=plan.filament_colours,
-            bed_type=plan.bed_type,
-            plate=plate_id,
-        ),
+    request = SliceRequest(
+        printer_preset=plan.printer_preset,
+        process_preset=plan.process_preset,
+        filament_presets=plan.filament_presets,
+        filament_colours=plan.filament_colours,
+        bed_type=plan.bed_type,
+        plate=plate_id,
     )
+    accepted = await client.slice(library_file_id, request)
     job = await client.await_slice(accepted.job_id)
     failure = job.failure
     if failure is not None:
@@ -124,6 +124,7 @@ async def slice_and_queue(
     return QueueOutcome(
         slice_job_id=accepted.job_id,
         sliced_library_file_id=sliced,
+        preset_key=request.preset_key,
         queue_item_ids=[item.id],
         printer_id=printer_id,
     )
