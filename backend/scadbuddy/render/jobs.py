@@ -535,7 +535,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
 
 
 @asynccontextmanager
-async def _library_lease(
+async def library_lease(
     checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease on the checkouts a render resolved, when there are any to hold.
@@ -601,7 +601,7 @@ async def render_job(
             # Held from here for every openscad run below -- the schema derivation
             # included: those are what read the checkouts on OPENSCADPATH, and a
             # removal must not take one out from under them (#253).
-            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            await held.enter_async_context(library_lease(checkouts, job.id, source.library_path))
             schema = await cached_schema(scad, source.schema_cache, config=config)
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)

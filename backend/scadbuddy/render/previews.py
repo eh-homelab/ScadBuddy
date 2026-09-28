@@ -19,7 +19,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import shutil
-import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from concurrent.futures import Executor
 from contextlib import suppress
@@ -29,11 +28,13 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.previews import PreviewStore, source_key
+from scadbuddy.library.libraries import CheckoutGate
+from scadbuddy.library.previews import PreviewStore, new_work_dir, source_key
 from scadbuddy.render.jobs import (
     RAW_RENDER_NAME,
     RenderQueue,
     extruder_order,
+    library_lease,
     plate_thumbnails,
     resolve_source,
     staged_assets,
@@ -66,35 +67,40 @@ async def render_preview(
     config: Config,
     paths: DataPaths,
     history: ModelHistory | None,
+    assets: AssetStore,
     executor: Executor | None = None,
+    checkouts: CheckoutGate | None = None,
 ) -> bytes:
     """The plate image of ``slug`` rendered at its default parameters.
 
     The same pipeline as a render job up to its cover image, and no further: no
     closed solids, no 3MF, no output. Its scratch space is its own, under
-    ``cache/preview-work/``, and gone when this returns.
+    ``cache/preview-work/``, and gone when this returns. As `render_job`, it holds a
+    lease on the library checkouts it resolved for every openscad run (#253), and
+    stages a `// file` parameter's default from the shared upload store (#204).
     """
     source = await resolve_source(slug, None, paths=paths, history=history)
     config = source.configure(config)
-    schema = await cached_schema(source.scad, source.schema_cache, config=config)
-    work = paths.preview_work / uuid.uuid4().hex
-    work.mkdir(parents=True)
-    try:
-        raw = work / RAW_RENDER_NAME
-        # As `render_job`: a `// file` parameter's default is staged beside the
-        # source for the render to read (#204).
-        store = AssetStore(paths.assets)
-        with staged_assets(schema, {}, source.scad.parent, store) as params:
-            await render_3mf(source.scad, schema, params, raw, config=config)
-            parts = extruder_order(await asyncio.to_thread(split_by_material, raw), schema, params)
-        if not parts:
-            raise OpenSCADError("the render produced no geometry", [])
-        thumbnails, warnings = await plate_thumbnails(parts, config=config, executor=executor)
-        if thumbnails is None:
-            raise PreviewFailedError(warnings[0] if warnings else "no plate image")
-        return thumbnails.plate
-    finally:
-        await asyncio.to_thread(lambda: shutil.rmtree(work, ignore_errors=True))
+    work = new_work_dir(paths)
+    async with library_lease(checkouts, f"preview:{slug}", source.library_path):
+        schema = await cached_schema(source.scad, source.schema_cache, config=config)
+        work.mkdir(parents=True)
+        try:
+            raw = work / RAW_RENDER_NAME
+            with staged_assets(schema, {}, source.scad.parent, assets) as params:
+                await render_3mf(source.scad, schema, params, raw, config=config)
+                parts = extruder_order(
+                    await asyncio.to_thread(split_by_material, raw), schema, params
+                )
+        finally:
+            await asyncio.to_thread(lambda: shutil.rmtree(work, ignore_errors=True))
+    # Rasterising reads the meshes in memory, not the checkouts: out of the lease.
+    if not parts:
+        raise OpenSCADError("the render produced no geometry", [])
+    thumbnails, warnings = await plate_thumbnails(parts, config=config, executor=executor)
+    if thumbnails is None:
+        raise PreviewFailedError(warnings[0] if warnings else "no plate image")
+    return thumbnails.plate
 
 
 class PreviewScheduler:
@@ -245,6 +251,10 @@ class PreviewScheduler:
         if self.catalogue.has_output_cover(slug):
             self.store.drop(slug)
             return None
+        # A delete landing after the `exists` check above makes this None, and
+        # nothing here drops the preview. That is safe only because
+        # `Catalogue.delete` drops the model's preview row synchronously, whether or
+        # not this ever sees the model go.
         key = source_key(self.catalogue.paths, slug)
         if key is None or self.store.current(slug, key):
             return None

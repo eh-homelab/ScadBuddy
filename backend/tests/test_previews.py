@@ -4,7 +4,9 @@ place in the catalogue."""
 from __future__ import annotations
 
 import json
+import os
 import threading
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from unittest import mock
@@ -15,9 +17,18 @@ import trimesh
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.catalogue import Catalogue
-from scadbuddy.library.previews import PREVIEW_ID_LENGTH, PreviewStore, source_key
+from scadbuddy.library.libraries import CheckoutGate
+from scadbuddy.library.previews import (
+    PREVIEW_ID_LENGTH,
+    PreviewStore,
+    new_work_dir,
+    source_key,
+    sweep_work_dirs,
+)
 from scadbuddy.render import previews as previews_module
+from scadbuddy.render.jobs import ModelSource
 from scadbuddy.render.pg_store import PostgresJobStore
 from scadbuddy.render.previews import render_preview
 from scadbuddy.render.runner import OpenSCADError
@@ -108,6 +119,23 @@ def test_the_orphan_sweep_takes_a_gone_models_preview_only(
     assert Catalogue(paths, previews=store).sweep_orphans() == []
 
 
+def test_the_boot_sweep_takes_a_crashed_renders_scratch_but_not_a_live_one(
+    paths: DataPaths,
+) -> None:
+    crashed = new_work_dir(paths)
+    (crashed / "parts").mkdir(parents=True)
+    (crashed / "parts" / "raw.3mf").write_bytes(b"raw")
+    os.utime(crashed, (time.time() - 3600, time.time() - 3600))
+    live = new_work_dir(paths)
+    live.mkdir()
+
+    removed = sweep_work_dirs(paths, max_age=600)
+
+    assert removed == [crashed.name]
+    assert not crashed.exists()
+    assert live.exists()
+
+
 @pytest.mark.requires_postgres
 def test_the_catalogue_ranks_its_own_image_over_the_preview(
     store: PreviewStore, paths: DataPaths
@@ -195,7 +223,9 @@ async def test_a_preview_is_the_plate_image_of_a_render_at_the_default_parameter
         mock.patch.object(previews_module, "render_3mf", one_box),
         mock.patch.object(previews_module, "cached_schema", cached_schema),
     ):
-        png = await render_preview(SLUG, config=CONFIG, paths=paths, history=None)
+        png = await render_preview(
+            SLUG, config=CONFIG, paths=paths, history=None, assets=AssetStore(paths.assets)
+        )
 
     assert png.startswith(b"\x89PNG\r\n\x1a\n")
     # Nothing passed: every parameter at the value the source declares.
@@ -220,7 +250,9 @@ async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) 
         mock.patch.object(previews_module, "cached_schema", cached_schema),
         pytest.raises(OpenSCADError, match="no geometry"),
     ):
-        await render_preview(SLUG, config=CONFIG, paths=paths, history=None)
+        await render_preview(
+            SLUG, config=CONFIG, paths=paths, history=None, assets=AssetStore(paths.assets)
+        )
     assert not any(paths.preview_work.iterdir())
 
 
@@ -328,3 +360,49 @@ def test_a_row_has_its_image_exactly_when_it_rendered(pg_conninfo: str, paths: D
         for slug, ok, png in (("rendered", True, None), ("failed", False, b"png")):
             with pytest.raises(psycopg.errors.CheckViolation):
                 conn.execute(insert, (slug, ok, png))
+
+
+async def test_a_preview_holds_a_lease_on_the_checkouts_it_renders_with(
+    paths: DataPaths,
+) -> None:
+    """As a render job (#253): a library removal refuses while a preview reads the
+    checkouts on its OPENSCADPATH, and the lease is gone once the render is done."""
+    checkout = paths.libraries / "BOSL2" / ("a" * 40)
+    (checkout / "BOSL2").mkdir(parents=True)
+    gate = CheckoutGate()
+    leased_during: list[list[str]] = []
+
+    async def one_box(*args: object, **kwargs: object) -> object:
+        leased_during.append(gate.leased(checkout))
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=())
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return CustomizerSchema()
+
+    async def resolved(*args: object, **kwargs: object) -> object:
+        return ModelSource(
+            scad=paths.model_source(SLUG),
+            schema_cache=paths.model_schema_cache(SLUG),
+            version=None,
+            library_path=(checkout,),
+        )
+
+    with (
+        mock.patch.object(previews_module, "render_3mf", one_box),
+        mock.patch.object(previews_module, "cached_schema", cached_schema),
+        mock.patch.object(previews_module, "resolve_source", resolved),
+    ):
+        await render_preview(
+            SLUG,
+            config=CONFIG,
+            paths=paths,
+            history=None,
+            assets=AssetStore(paths.assets),
+            checkouts=gate,
+        )
+
+    assert leased_during == [[f"preview:{SLUG}"]]
+    assert gate.leased(checkout) == []

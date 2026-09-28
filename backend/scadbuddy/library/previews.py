@@ -20,9 +20,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import shutil
+import time
+import uuid
 from collections.abc import Callable
 from contextlib import AbstractContextManager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from psycopg import Connection
@@ -30,6 +35,46 @@ from psycopg.rows import DictRow
 from pydantic import BaseModel
 
 from scadbuddy.core.paths import DataPaths
+
+logger = logging.getLogger(__name__)
+
+#: A default render's scratch directory under ``cache/preview-work/``. The PNG it
+#: produces goes to the database; the directory is on disk, like any render's.
+WORK_PREFIX = ".work-"
+
+
+def new_work_dir(paths: DataPaths) -> Path:
+    """A fresh name for one default render's scratch directory. Not created."""
+    return paths.preview_work / f"{WORK_PREFIX}{uuid.uuid4().hex}"
+
+
+def sweep_work_dirs(paths: DataPaths, max_age: float) -> list[str]:
+    """Remove the scratch directories of default renders the process died in.
+
+    A render removes its own on the way out, but not when it is killed mid-render,
+    and nothing records one, so this is the only thing that ever will. Another
+    replica sharing ``/data`` may be rendering into one, so only those older than
+    ``max_age`` -- longer than any render may run -- go. One that cannot be read or
+    removed is logged and the rest still go.
+    """
+    root = paths.preview_work
+    if not root.is_dir():
+        return []
+    cutoff = time.time() - max_age
+    removed: list[str] = []
+    for entry in sorted(root.glob(f"{WORK_PREFIX}*")):
+        try:
+            if entry.stat().st_mtime > cutoff:
+                continue
+            shutil.rmtree(entry)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            logger.exception("could not remove a preview's scratch", extra={"path": str(entry)})
+            continue
+        removed.append(entry.name)
+    return removed
+
 
 #: How much of the source key names a preview to a client -- enough to tell two
 #: renders of one model apart, which is all its cache key needs.

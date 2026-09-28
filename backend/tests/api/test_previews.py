@@ -503,3 +503,67 @@ def test_without_a_database_there_are_no_previews(settings: Settings, paths: Dat
         assert _model(client)["thumbnail_source"] is None
     assert booted.previews is None
     assert booted.catalogue.previews is None
+
+
+# ── startup: the backfill never leaks the queue ───────────────────────────────
+
+
+def _failing_backfill(
+    booted: AppState, monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> list[str]:
+    """`list_models` fails on its second call -- the preview backfill's, after the
+    queue has opened; the first is the lockfile migration's, before it. Returns
+    the log of what was closed."""
+    real = booted.catalogue.list_models
+    calls = 0
+
+    def listing() -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise error
+        return real()
+
+    monkeypatch.setattr(booted.catalogue, "list_models", listing)
+    closed: list[str] = []
+    for name, part in (("previews", scheduler(booted)), ("queue", booted.queue)):
+        aclose = part.aclose
+
+        async def recording(name: str = name, aclose: Any = aclose) -> None:
+            closed.append(name)
+            await aclose()
+
+        monkeypatch.setattr(part, "aclose", recording)
+    return closed
+
+
+def test_a_failing_backfill_at_startup_still_closes_the_queue_and_previews(
+    settings: Settings, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Anything the backfill raises past the queue opening is cleaned up as a
+    shutdown is: the queue's store (a Postgres pool) and workers are released."""
+    app, booted = _boot(settings, StubRender(paths))
+    closed = _failing_backfill(booted, monkeypatch, RuntimeError("listing blew up"))
+
+    with pytest.raises(RuntimeError, match="listing blew up"), TestClient(app):
+        pass
+
+    assert closed == ["previews", "queue"]
+    assert booted.queue._tasks == []
+
+
+def test_a_listing_error_costs_the_backfill_not_the_boot(
+    settings: Settings,
+    paths: DataPaths,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    app, booted = _boot(settings, StubRender(paths))
+    closed = _failing_backfill(booted, monkeypatch, OSError("volume went away"))
+
+    with TestClient(app) as client:
+        assert client.get("/healthz").status_code == 200
+    # `_boot` configures logging after `caplog` would have hooked in; the app logs
+    # JSON to stdout, which is captured here.
+    assert "could not list the models to render their previews" in capsys.readouterr().out
+    assert closed == ["previews", "queue"]

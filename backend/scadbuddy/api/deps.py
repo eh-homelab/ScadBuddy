@@ -182,7 +182,9 @@ def build_state(settings: Settings) -> AppState:
                 config=config,
                 paths=paths,
                 history=history,
+                assets=assets,
                 executor=queue.thumbnail_executor,
+                checkouts=checkouts,
             ),
             timeout=config.render_timeout * TIMEOUT_FACTOR,
         )
