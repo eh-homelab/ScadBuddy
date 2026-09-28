@@ -5,7 +5,7 @@ Every copy of an output's ``model.3mf`` ScadBuddy has put in Bambuddy's *file li
 the only pointers ScadBuddy has to those files, so they live in the database rather
 than in the output's ``meta.json``. The tables are migration
 ``20260928T0720Z_output_bambuddy_uploads``. Beside them, the printer and nozzle each
-Bambuddy project last printed on (``20260928T1317Z_project_print_targets``, #317): what
+Bambuddy project last printed on (``20260928T0937Z_project_print_targets``, #317): what
 the project's file is laid out for when Generate files it there.
 
 The database is required (#401): without ``SCADBUDDY_DATABASE_URL`` there is no
