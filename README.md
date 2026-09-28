@@ -414,7 +414,8 @@ what makes the running image knowable.
   `frontend/public/mockServiceWorker.js` is committed and checked against
   msw in CI (`pnpm exec msw init public --save`).
 
-The base image is a rolling nightly, so the Dockerfile asserts the OpenSCAD
-version it was verified against (`OPENSCAD_VERSION`). When that assertion
-fails, re-verify §3 of the design spec against the new build and bump it in
-the same commit.
+The base image is a dated OpenSCAD nightly pinned by tag and digest, and the
+Dockerfile asserts the OpenSCAD version it was verified against
+(`OPENSCAD_VERSION`). To move to a newer nightly, re-verify §3 of the design
+spec against it, then change the tag, digest and `OPENSCAD_VERSION` in the same
+commit.
