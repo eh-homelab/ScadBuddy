@@ -22,7 +22,7 @@ from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from fastapi import APIRouter, Query, status
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
 from scadbuddy.api.deps import (
     ArchiveCacheDep,
@@ -80,14 +80,21 @@ CURSOR_PATTERN = r"^[1-9][0-9]{0,17}$"
 _PHOTO = re.compile(PHOTO_NAME)
 
 
-class PrintCover(BaseModel):
+class _Response(BaseModel):
+    """A field with a default is still always sent, so the schema lists it as
+    required and the generated clients need no ``?? []`` (#310, #311)."""
+
+    model_config = ConfigDict(json_schema_serialization_defaults_required=True)
+
+
+class PrintCover(_Response):
     """The image a history card shows: a photo of the print, else Bambuddy's thumbnail."""
 
     kind: Literal["photo", "thumbnail"]
     url: str
 
 
-class PrintSummary(BaseModel):
+class PrintSummary(_Response):
     archive_id: int
     output_id: str
     slug: str
@@ -111,16 +118,18 @@ class PrintSummary(BaseModel):
     run_count: int
 
 
-class PrintPage(BaseModel):
+class PrintPage(_Response):
     items: list[PrintSummary]
     #: Pass as ``cursor`` for the next page; None on the last. A next page can be
     #: empty when the remaining prints all fail the filters.
     next_cursor: str | None = None
 
 
-class PrintProvenance(BaseModel):
+class PrintProvenance(_Response):
     # "model_version" trips pydantic's reserved "model_" prefix; see OutputMeta.
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(
+        protected_namespaces=(), json_schema_serialization_defaults_required=True
+    )
 
     slug: str
     model_version: str | None
@@ -130,38 +139,38 @@ class PrintProvenance(BaseModel):
     edit_url: str
 
 
-class PrintFile(BaseModel):
+class PrintFile(_Response):
     kind: Literal["output_3mf", "sliced", "source", "preview_glb"]
     name: str
     size: int | None
     url: str
 
 
-class PrintPhoto(BaseModel):
+class PrintPhoto(_Response):
     name: str
     url: str
 
 
-class PosterFrame(BaseModel):
+class PosterFrame(_Response):
     """A still of the timelapse, inline (Bambuddy's are base64 JPEGs, plan M4)."""
 
     timestamp: float
     data_url: str
 
 
-class PrintTimelapse(BaseModel):
+class PrintTimelapse(_Response):
     url: str
     #: None when Bambuddy could not probe the video; it still plays.
     info: TimelapseInfo | None
-    poster_frames: list[PosterFrame] = Field(default_factory=list)
+    poster_frames: list[PosterFrame] = []
 
 
-class PlateThumbnail(BaseModel):
+class PlateThumbnail(_Response):
     index: int
     url: str
 
 
-class PrintAttachment(BaseModel):
+class PrintAttachment(_Response):
     """A photo or video added in ScadBuddy (#309, plan §2.5)."""
 
     id: int
@@ -170,17 +179,17 @@ class PrintAttachment(BaseModel):
     url: str
 
 
-class PrintMedia(BaseModel):
+class PrintMedia(_Response):
     #: Always None for now: which photo is the finish photo is unverified (plan
     #: §2.4), so every photo is in ``photos``.
     finish_photo: PrintPhoto | None = None
-    photos: list[PrintPhoto] = Field(default_factory=list)
+    photos: list[PrintPhoto] = []
     timelapse: PrintTimelapse | None = None
-    plate_thumbnails: list[PlateThumbnail] = Field(default_factory=list)
-    attachments: list[PrintAttachment] = Field(default_factory=list)
+    plate_thumbnails: list[PlateThumbnail] = []
+    attachments: list[PrintAttachment] = []
 
 
-class PrintOutcome(BaseModel):
+class PrintOutcome(_Response):
     status: str
     failure_reason: str | None = None
     #: The slicer's estimate.
@@ -193,10 +202,10 @@ class PrintOutcome(BaseModel):
     printer_id: int | None = None
     printer_name: str | None = None
     #: Every run of the archive: a reprint inside Bambuddy is a run, not an archive.
-    runs: list[ArchiveRun] = Field(default_factory=list)
+    runs: list[ArchiveRun] = []
 
 
-class PrintLinks(BaseModel):
+class PrintLinks(_Response):
     #: Bambuddy's archives page; None when the archive is gone from it.
     bambuddy_url: str | None
     #: The template's customizer in the UI, relative to it.
