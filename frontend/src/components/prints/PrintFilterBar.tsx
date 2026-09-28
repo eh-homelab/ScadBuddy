@@ -171,7 +171,7 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
           />
         </label>
         {isFiltered(query) && (
-          <Button size="sm" variant="ghost" onClick={() => commit(clearPrintFilters({ ...query, q: '' }))}>
+          <Button size="sm" variant="ghost" onClick={() => commit(clearPrintFilters(query))}>
             Clear filters
           </Button>
         )}
