@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -20,8 +20,7 @@ from starlette.routing import Route
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from scadbuddy.api.deps import INSTALL_CONCURRENCY
-from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN
+from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, INSTALL_CONCURRENCY
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import Metrics
 from scadbuddy.core.paths import DataPaths
@@ -36,11 +35,13 @@ from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
-from scadbuddy.workflows.client import connect, make_current, render_worker
+from scadbuddy.workflows.client import connect, drained, make_current, render_worker
 
 logger = logging.getLogger(__name__)
 
 HEALTH_PORT = 9090
+#: Seconds between drain checks after stop.
+DRAIN_POLL = 5.0
 
 
 def build_worker_deps(settings: Settings) -> WorkerDeps:
@@ -84,30 +85,66 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
     )
 
 
+async def _wait_drained(
+    is_drained: Callable[[], Awaitable[bool]], *, timeout: float, poll: float
+) -> bool:
+    """Poll `is_drained` until it says so (True) or `timeout` passes (False)."""
+    try:
+        async with asyncio.timeout(timeout):
+            while not await is_drained():
+                await asyncio.sleep(poll)
+    except TimeoutError:
+        return False
+    return True
+
+
 async def _poll(settings: Settings, deps: WorkerDeps, client: Client, stop: asyncio.Event) -> None:
     config = deps.config
+    build_id = settings.revision
     worker = render_worker(
         client,
         settings.temporal_task_queue_render,
         RenderActivities(deps),
-        build_id=settings.revision,
+        build_id=build_id,
         max_concurrent_activities=config.render_concurrency,
         graceful_shutdown_timeout=timedelta(
             seconds=config.render_timeout + ACTIVITY_TIMEOUT_MARGIN
         ),
     )
+
+    async def is_drained() -> bool:
+        try:
+            return await drained(client, namespace=client.namespace, build_id=build_id)
+        except RPCError:
+            logger.warning("could not count this build's running workflows", exc_info=True)
+            return False
+
     async with worker:
         # Phase 1 runs one replica: the newest worker is current.
         try:
-            await make_current(client, namespace=client.namespace, build_id=settings.revision)
+            await make_current(client, namespace=client.namespace, build_id=build_id)
         except RPCError:
             logger.exception(
-                "could not make this build current; polling anyway",
-                extra={"build_id": settings.revision},
+                "could not make this build current; polling anyway", extra={"build_id": build_id}
             )
         else:
-            logger.info("made this build current", extra={"build_id": settings.revision})
+            logger.info("made this build current", extra={"build_id": build_id})
         await stop.wait()
+
+        # A workflow is PINNED to the build that started it: one waiting between two
+        # activities is served by no other build, so keep polling until none is left.
+        drain_timeout = 2 * config.activity_timeout + 120
+        logger.info(
+            "stopping: draining this build's workflows",
+            extra={"build_id": build_id, "timeout_s": drain_timeout},
+        )
+        if await _wait_drained(is_drained, timeout=drain_timeout, poll=DRAIN_POLL):
+            logger.info("drained", extra={"build_id": build_id})
+        else:
+            logger.warning(
+                "drain timed out; exiting with workflows still running on this build",
+                extra={"build_id": build_id, "timeout_s": drain_timeout},
+            )
 
 
 class _HealthServer(uvicorn.Server):
@@ -161,7 +198,7 @@ async def run_worker(
                 await serving
     finally:
         deps.projection.close()
-        deps.thumbnail_executor.shutdown()
+        deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
 
 async def run_inprocess_worker(
