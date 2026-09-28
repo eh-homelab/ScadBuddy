@@ -33,6 +33,7 @@ from scadbuddy.library.catalogue import Catalogue
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import COMMIT_ID_PATTERN, ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
@@ -187,12 +188,16 @@ def build_state(settings: Settings) -> AppState:
     preview_store = PreviewStore(paths)
     # Off, the catalogue serves no preview at all -- including ones rendered while it
     # was on, which stay on disk until their model goes (the sweeps work by path).
+    # The media list (#274) shares the render queue's pool, opened in the lifespan.
     catalogue = Catalogue(
         paths,
         history,
         outputs,
         preview_store if settings.preview_renders else None,
         duplicate_staging_max_age=config.duplicate_staging_max_age,
+        media_store=(
+            PostgresMediaStore(store.pool) if isinstance(store, PostgresJobStore) else None
+        ),
     )
     history.on_commit = announce_commits(events, catalogue)
     queue = RenderQueue(

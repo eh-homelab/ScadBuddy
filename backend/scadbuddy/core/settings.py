@@ -20,6 +20,7 @@ from scadbuddy.core.config import (
     DEFAULT_JOB_TTL,
     DEFAULT_LIBRARY_MAX_BYTES,
     DEFAULT_LSP_SESSIONS,
+    DEFAULT_MEDIA_UPLOAD_MAX_BYTES,
     DEFAULT_OPENSCAD,
     DEFAULT_OPENSCAD_LSP,
     DEFAULT_REALTIME_SOCKETS,
@@ -78,6 +79,9 @@ class Settings(BaseSettings):
     asset_sweep_grace: float = DEFAULT_ASSET_SWEEP_GRACE
     asset_sweep_interval: float = DEFAULT_ASSET_SWEEP_INTERVAL
     duplicate_staging_max_age: float = DEFAULT_DUPLICATE_STAGING_MAX_AGE
+    # The largest media upload (#274). Environment only: GET /settings reports it
+    # read-only, and nothing stores an override.
+    media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # SCADBUDDY_GOOGLE_FONTS_API_KEY. Unset is supported: the catalogue then comes
     # from the keyless fonts.google.com metadata instead of the Developer API.
