@@ -113,7 +113,7 @@ export function Preview({
   }, [job])
 
   const theme = useViewerTheme()
-  const failed = job?.status === 'failed'
+  const failed = job?.status === 'failed' || job?.status === 'cancelled'
   const clear = covered ? { left: covered } : undefined
 
   return (

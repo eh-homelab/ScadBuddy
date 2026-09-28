@@ -63,6 +63,25 @@ describe('Preview', () => {
     expect(screen.getByTestId('render-log')).toHaveTextContent('ERROR: boom')
   })
 
+  it('gives a cancelled render the log instead, same as a failure', () => {
+    const { rerender } = render(<Preview job={job({ notes: TEMPLATE_NOTES })} rendering={false} />)
+    rerender(
+      <Preview
+        job={job({
+          id: 'b'.repeat(32),
+          status: 'cancelled',
+          error: 'superseded by a newer request',
+          log_tail: ['Render cancelled: superseded by a newer request'],
+        })}
+        rendering={false}
+      />,
+    )
+    expect(screen.queryByTestId('render-notes')).not.toBeInTheDocument()
+    expect(screen.getByTestId('render-log')).toHaveTextContent(
+      'Render cancelled: superseded by a newer request',
+    )
+  })
+
   it('names the step a running render is on (#267)', () => {
     render(<Preview job={undefined} rendering stage="solids" />)
     expect(screen.getByTestId('render-stage')).toHaveTextContent('building each colour')

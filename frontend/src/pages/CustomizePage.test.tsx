@@ -48,7 +48,7 @@ vi.mock('../components/Preview', () => ({
           {plate.name} {plate.size[0]} × {plate.size[1]}
         </span>
       )}
-      {job?.status === 'failed' && (
+      {(job?.status === 'failed' || job?.status === 'cancelled') && (
         <pre data-testid="render-log">{(job.log_tail ?? []).join('\n')}</pre>
       )}
       {job?.bbox_mm && (
@@ -207,6 +207,18 @@ describe('CustomizePage', () => {
 
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
     expect(log).toHaveTextContent('Compilation failed')
+  })
+
+  it('shows the log when a render is cancelled, same as a failure', async () => {
+    const { user } = render()
+    await firstRender()
+
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'superseded')
+
+    const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
+    expect(log).toHaveTextContent('Render cancelled')
   })
 
   it('disables Generate while a render is in flight', async () => {

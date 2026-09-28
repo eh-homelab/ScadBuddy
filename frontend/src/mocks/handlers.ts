@@ -163,6 +163,13 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_LOG_TAIL[0]
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        announce('job.cancelled')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
