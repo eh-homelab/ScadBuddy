@@ -34,7 +34,7 @@ from scadbuddy.library.history import (
     RevisionNotFoundError,
 )
 from scadbuddy.library.libraries import ModelLibrary, entry_name
-from scadbuddy.library.previews import PreviewStore
+from scadbuddy.library.previews import PreviewStore, drop_preview, remove_preview_file
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -1030,7 +1030,13 @@ class Catalogue:
             except OSError:
                 logger.exception("could not check a model for orphans", extra={"slug": slug})
                 continue
-            if _remove_tree(path):
+            # A preview file goes under the preview lock, as every other change to one.
+            gone = (
+                remove_preview_file(path)
+                if path.parent == self.paths.previews
+                else _remove_tree(path)
+            )
+            if gone:
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
@@ -1067,10 +1073,11 @@ class Catalogue:
             self.paths.outputs / slug,
             # Not derived, but the previous model's: its saved presets.
             self.paths.model_presets(slug),
-            self.paths.model_preview(slug),
-            self.paths.model_preview_record(slug),
         ):
             _remove_tree(path)
+        # Under the preview lock, with or without a store attached: a render of the
+        # previous model finishing now must not interleave with this.
+        drop_preview(self.paths, slug)
         self._forget_cover(slug)
 
     def _forget_cover(self, slug: str) -> None:

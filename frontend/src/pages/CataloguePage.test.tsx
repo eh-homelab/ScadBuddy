@@ -159,6 +159,25 @@ describe('CataloguePage', () => {
     expect(own).toContain(`/api/v1/models/name-keychain/thumbnail?v=`)
   })
 
+  it('shows a model created without a thumbnail by its preview once that has rendered', async () => {
+    // The mock answers the create first and has the preview on the next read, as
+    // the backend's background render does.
+    const created = await api.createModelFromSource({
+      name: 'Fresh Widget',
+      source: 'cube(1);\n',
+      description: '',
+      force: false,
+    })
+    expect(created.has_thumbnail).toBe(false)
+
+    renderPage(<CataloguePage />)
+
+    const image = await screen.findByRole('img', { name: 'Fresh Widget' })
+    const preview = (await api.getModel(created.slug)).thumbnail_preview_id ?? ''
+    expect(preview).not.toBe('')
+    expect(image.getAttribute('src')).toContain(preview)
+  })
+
   it('refetches a default-render preview re-rendered after a source edit', async () => {
     const base = {
       ...(models[0] as (typeof models)[number]),

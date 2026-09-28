@@ -209,3 +209,59 @@ async def test_a_default_render_with_no_geometry_is_a_failure(paths: DataPaths) 
     ):
         await render_preview(SLUG, config=CONFIG, paths=paths, history=None)
     assert not any(paths.previews.iterdir())
+
+
+def _held_write(store: PreviewStore) -> tuple[threading.Thread, threading.Event, threading.Event]:
+    """A write stopped inside the preview lock, at its "still wanted?" check."""
+    checking = threading.Event()
+    release = threading.Event()
+
+    def wanted() -> bool:
+        checking.set()
+        release.wait(5)
+        return True
+
+    writer = threading.Thread(target=lambda: store.write(SLUG, "a" * 64, b"png", wanted=wanted))
+    writer.start()
+    assert checking.wait(5)
+    return writer, checking, release
+
+
+@pytest.mark.parametrize("attached", [True, False], ids=["store attached", "previews off"])
+def test_a_reused_slugs_cleanup_waits_behind_a_write_in_progress(
+    paths: DataPaths, attached: bool
+) -> None:
+    """`_clear_derived` (a create or duplicate reusing the slug) takes the same lock as
+    a render's write, with or without a store attached, so it removes both files or
+    neither -- never the image alone."""
+    store = PreviewStore(paths)
+    catalogue = Catalogue(paths, previews=store if attached else None)
+    writer, _, release = _held_write(store)
+
+    clearing = threading.Thread(target=lambda: catalogue._clear_derived(SLUG))
+    clearing.start()
+    clearing.join(0.1)
+    assert clearing.is_alive()  # held behind the write in progress
+
+    release.set()
+    writer.join(5)
+    clearing.join(5)
+    assert store.record(SLUG) is None
+    assert store.image(SLUG) is None
+
+
+def test_the_orphan_sweep_waits_behind_a_write_in_progress(paths: DataPaths) -> None:
+    store = PreviewStore(paths)
+    store.write("gone", "a" * 64, b"png")
+    writer, _, release = _held_write(store)
+
+    sweeping = threading.Thread(target=lambda: Catalogue(paths).sweep_orphans())
+    sweeping.start()
+    sweeping.join(0.1)
+    assert sweeping.is_alive()
+
+    release.set()
+    writer.join(5)
+    sweeping.join(5)
+    assert store.image("gone") is None
+    assert store.image(SLUG) == b"png"

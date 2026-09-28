@@ -101,6 +101,12 @@ const state = {
   catalogueOffline: false,
   sidebarLinkId: 0,
   seq: 0,
+  /**
+   * Models whose default-render preview is "rendering": the backend makes one in the
+   * background for a model created with no thumbnail, so the create answers without
+   * it and a later read has it (`landPreviews`).
+   */
+  pendingPreviews: new Set<string>(),
 }
 
 /** Reset every mutable fixture. Call between tests. */
@@ -133,6 +139,32 @@ export function resetMockState(): void {
   state.catalogueOffline = false
   state.sidebarLinkId = 0
   state.seq = 0
+  state.pendingPreviews.clear()
+}
+
+/** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
+function renderPreviewLater(model: ModelSummary): void {
+  if (!model.thumbnail_source) state.pendingPreviews.add(model.slug)
+}
+
+/**
+ * The pending previews "finish": each model that still has no image of its own and no
+ * output to fall back on shows its default-render preview, keyed by a new render id --
+ * the precedence `Catalogue.thumbnail_source` applies. Called on every read of a model.
+ */
+function landPreviews(): void {
+  for (const slug of state.pendingPreviews) {
+    state.pendingPreviews.delete(slug)
+    const model = state.models.find((m) => m.slug === slug)
+    if (!model || model.thumbnail_source || state.outputs.some((o) => o.slug === slug)) continue
+    state.seq += 1
+    Object.assign(model, {
+      has_thumbnail: true,
+      thumbnail_source: 'preview',
+      thumbnail_output_id: null,
+      thumbnail_preview_id: state.seq.toString(16).padStart(16, '0'),
+    })
+  }
 }
 
 /** Replaces a template's presets, so a test can start at a state that is slow to build. */
@@ -624,7 +656,10 @@ function refusal(check: SourceCheck) {
 }
 
 export const handlers = [
-  http.get(`${base}/models`, () => HttpResponse.json(state.models.map(view))),
+  http.get(`${base}/models`, () => {
+    landPreviews()
+    return HttpResponse.json(state.models.map(view))
+  }),
 
   http.post(`${base}/models`, async ({ request }) => {
     if ((request.headers.get('content-type') ?? '').includes('application/json')) {
@@ -653,6 +688,7 @@ export const handlers = [
         origin: 'mine',
       }
       state.models = [pasted, ...state.models]
+      renderPreviewLater(pasted)
       // A forced save stores source OpenSCAD cannot parse, so no schema is derived —
       // the customizer then opens onto the 422 the real backend answers.
       if (check.ok) state.schemas[pastedSlug] = fixtures.keychainSchema
@@ -739,6 +775,7 @@ export const handlers = [
     }
     if (readmePart) state.readmes[slug] = await readmePart.text()
     state.models = [model, ...state.models.filter((m) => m.slug !== slug)]
+    renderPreviewLater(model)
     state.schemas[slug] = fixtures.keychainSchema
     await delay(150)
     return HttpResponse.json(model, { status: 201 })
@@ -786,6 +823,7 @@ export const handlers = [
       origin: 'mine',
     }
     state.models = [imported, ...state.models]
+    renderPreviewLater(imported)
     state.schemas[slug] = fixtures.keychainSchema
     state.sources[slug] = 'width = 10;\ncube(width);\n'
     return HttpResponse.json(imported, { status: 201 })
@@ -833,6 +871,7 @@ export const handlers = [
       },
     }
     state.models = [copy, ...state.models]
+    renderPreviewLater(copy)
     const schema = state.schemas[id]
     if (schema) state.schemas[slug] = { ...schema, title: body.name }
     // #179: the copy is the upstream's directory, so its README comes too.
@@ -1100,6 +1139,7 @@ export const handlers = [
   }),
 
   http.get(`${base}/models/:slug`, ({ params }) => {
+    landPreviews()
     const model = state.models.find((m) => m.slug === params['slug'])
     return model ? HttpResponse.json(view(model)) : problem(404, 'Model not found')
   }),

@@ -20,6 +20,7 @@ import logging
 import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 
 from pydantic import BaseModel, ValidationError
 
@@ -27,6 +28,40 @@ from scadbuddy.core.files import write_atomic
 from scadbuddy.core.paths import DataPaths
 
 logger = logging.getLogger(__name__)
+
+#: The one gate for every change to a preview file in this process: a store's writes
+#: and drops, and the catalogue's cleanup of a gone or reused slug, which runs
+#: whether or not a store is attached (previews off). A render finishing, a
+#: thumbnail being set and a slug being reused are separate threads; without one
+#: lock, a removal landing between a render's "still wanted?" check and its write --
+#: or between its image and its record -- leaves a record with no image. Writes are
+#: rare and small, so one lock costs nothing and keeps no key per model.
+_LOCK = threading.Lock()
+
+
+def drop_preview(paths: DataPaths, slug: str) -> None:
+    """Remove ``slug``'s preview image and record, under the preview lock."""
+    with _LOCK:
+        for path in (paths.model_preview(slug), paths.model_preview_record(slug)):
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                logger.exception("could not remove a preview", extra={"path": str(path)})
+
+
+def remove_preview_file(path: Path) -> bool:
+    """Remove one file under ``cache/previews/``, under the preview lock -- for the
+    orphan sweep, which finds them one by one. True when it removed one."""
+    with _LOCK:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            logger.exception("could not remove a preview", extra={"path": str(path)})
+            return False
+        return True
+
 
 #: How much of the source key names a preview to a client -- enough to tell two
 #: renders of one model apart, which is all its cache key needs.
@@ -69,12 +104,9 @@ class PreviewStore:
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        #: Serialises every write and drop, store-wide. A render finishing and a
-        #: thumbnail being set are separate threads; without this, a drop landing
-        #: between a render's "still wanted?" check and its write -- or between its
-        #: image and its record -- leaves a record with no image. Writes are rare
-        #: and small, so one lock costs nothing and keeps no key per model.
-        self._lock = threading.Lock()
+        #: The process-wide preview lock (`_LOCK`), shared with the catalogue's
+        #: cleanup, which may have no store to go through.
+        self._lock = _LOCK
 
     def record(self, slug: str) -> PreviewRecord | None:
         path = self.paths.model_preview_record(slug)
@@ -135,12 +167,7 @@ class PreviewStore:
             return True
 
     def drop(self, slug: str) -> None:
-        with self._lock:
-            for path in (self.paths.model_preview(slug), self.paths.model_preview_record(slug)):
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    logger.exception("could not remove a preview", extra={"path": str(path)})
+        drop_preview(self.paths, slug)
 
     def current(self, slug: str, key: str) -> bool:
         """Whether the preview on record was made -- or failed -- from ``key``.

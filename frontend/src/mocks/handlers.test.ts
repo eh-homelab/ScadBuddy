@@ -369,6 +369,33 @@ describe('mock API: a built-in template (#192)', () => {
     expect(await response.json()).toMatchObject({ status: 403, detail: refusal })
   })
 
+  it('gives a new model with no thumbnail its preview on a later read, as the backend does', async () => {
+    const created = await api.createModelFromSource({
+      name: 'Fresh Widget',
+      source: 'cube(1);\n',
+      description: '',
+      force: false,
+    })
+    // The render runs in the background: the create answers before it.
+    expect(created).toMatchObject({ has_thumbnail: false })
+    expect(created.thumbnail_source ?? null).toBeNull()
+
+    const read = await api.getModel(created.slug)
+    expect(read).toMatchObject({ has_thumbnail: true, thumbnail_source: 'preview' })
+    expect(read.thumbnail_preview_id).toMatch(/^[0-9a-f]{16}$/)
+    const listed = (await api.listModels()).find((model) => model.slug === created.slug)
+    expect(listed?.thumbnail_preview_id).toBe(read.thumbnail_preview_id)
+
+    // Each model's render is its own.
+    const other = await api.createModelFromSource({
+      name: 'Other Widget',
+      source: 'cube(2);\n',
+      description: '',
+      force: false,
+    })
+    expect((await api.getModel(other.slug)).thumbnail_preview_id).not.toBe(read.thumbnail_preview_id)
+  })
+
   it('lists its default-render preview, having no thumbnail of its own', async () => {
     const builtin = await api.getModel(BUILTIN_SLUG)
     expect(builtin).toMatchObject({
