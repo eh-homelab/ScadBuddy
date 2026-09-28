@@ -191,6 +191,35 @@ the 72 imported ones in this Bambuddy were widened to all variants, copying the 
 values (the same values Bambu's Generic profiles use for every variant). §5 test 4
 checks the slicer uses them.
 
+**Extruder per spool (#469).** On a dual-nozzle H2C each AMS is wired to one side, so a
+spool's extruder is fixed by where it is loaded — physical 0 is the right (main)
+extruder, 1 the left, and `status.nozzles` is indexed the same way. The side comes from
+the external holder's tray (assignment `ams_id` 255: tray 0 left, tray 1 right), else
+`ams_extruder_map`, else, with the Filament Track Switch fitted (`fila_switch.installed`,
+`ams_extruder_map: {}`), `ams_switch_inlet` — inlet A left, B right, as upstream
+`fts_routing.py`. Anything else is unknown, never "right". Left at the 3MF's default
+`filament_map_mode: "Auto For Flush"` the slicer spread filaments over both extruders and
+sliced both for the chosen size, which paused queue item 108 with HMS 05FE8053. So:
+
+- **Before upload**, a slot whose spool feeds a side with another nozzle size fitted is a
+  422: "Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
+  0.2 mm. Pick a spool on the right, or choose 0.4." (`extruders.mismatch_errors`, called
+  from `run_for_output` right after the printer check — the same place #472's
+  `choice_errors` refusal sits). An unknown side, or a side whose nozzle the status does
+  not report, is not refused.
+- **The upload is pinned**: `pin_extruders_3mf` writes `filament_map_mode: "Manual"` and
+  `filament_map` (each filament's 1-based *logical* extruder, through
+  `physical_extruder_map` — the file's, else the H2C preset's `["1","0"]`) beside #476's
+  recolor, and `Target.key` includes the map so a side change re-uploads. One unknown
+  side leaves the whole file on Auto, with a `side-unknown` warning that the slicer
+  chooses.
+- **The picker** gets each loaded spool's `extruder` and `side` (`L`/`R`) from the
+  filament step and grays out a spool whose side's nozzle is not the chosen size.
+
+`filament_map_mode` and `filament_map` are project options in Bambu Studio, not part of
+any printer or process preset, so the CLI's `--load-settings` does not overwrite them;
+this is read from Bambu Studio's source, not yet confirmed on the printer.
+
 ### 4.4 Plate
 
 Preselect order (amendment 4): the printer's last print's `bed_type` (§3) → ScadBuddy's

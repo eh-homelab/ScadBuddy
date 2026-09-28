@@ -260,7 +260,12 @@ Top to bottom, the dialog is:
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
   presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
-  the first option.
+  the first option. On the H2C each AMS feeds one extruder, so every spool loaded in the
+  chosen printer carries an **L** or **R** badge for its side, and the print is sliced
+  with each color on its spool's side. A spool on a side whose fitted nozzle is not the
+  chosen size is grayed out with the reason (for example "L · 0.4 fitted"), and printing
+  one anyway is refused before upload. A spool that isn't loaded in the chosen printer
+  has no side, so the slicer picks the extruders and the dialog says so.
 - **Nozzle size** — one choice for both sides; Bambuddy can't slice mixed sizes, so
   there is no per-side size control. Sizes installed in the rack are marked
   "(installed)"; picking one that isn't warns you to install it first. Advanced adds
@@ -284,7 +289,8 @@ Top to bottom, the dialog is:
   completion.
 
 **Errors that keep the dialog open.** A combination ScadBuddy cannot turn into presets —
-a filament slot with no resolvable preset, or mixed nozzle sizes — comes back as an
+a filament slot with no resolvable preset, mixed nozzle sizes, or a spool on the side
+whose nozzle doesn't match — comes back as an
 error shown above Print and disables the button until something changes. Any other
 failure (Bambuddy unreachable, a timeout) shows the same way but leaves Print enabled to
 retry as it stands.
