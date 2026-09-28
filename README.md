@@ -379,29 +379,42 @@ workers restart.
 
   The workers then need no shared volume:
   - Give each one an `emptyDir` at `/data`. It holds the worker's piece cache (`blobs/`)
-    and the snapshots, fonts and uploads it fetched.
-  - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. A worker
-    trims its cache to `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first)
-    **only** on that interval, and nothing trims it between passes. On a worker the
-    variable drives nothing else; `0` turns eviction off, and the cache then grows
-    until the volume is full.
-  - Size the `emptyDir`'s `sizeLimit` for one interval's writes on top of the caps.
-    Past it, the kubelet evicts the pod mid-render, with no drain.
+    and the snapshots, fonts, uploads and library checkouts it fetched.
+  - Previews (the catalogue's default renders) render on the workers too, from the
+    snapshot of the template's last commit, which the API stores before it asks.
+  - At start a worker seeds the image's libraries (BOSL2 and the rest of the curated
+    set) onto its volume, as the API does. A library a template pins outside the
+    image is cloned on **each worker pod**, the first time it renders that template,
+    so the workers need network access (egress) to those libraries' Git remotes.
+  - On the workers, set `SCADBUDDY_ASSET_SWEEP_INTERVAL` short, e.g. `900`. On that
+    interval, and **only** then, a worker trims its cache to
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES` (least recently used first), removes the
+    revision exports it has not used for `SCADBUDDY_JOB_TTL` (a day by default), and
+    removes the uploads it has not used for `SCADBUDDY_ASSET_SWEEP_GRACE` (at least an
+    hour; it fetches one again when a render names it). `0` turns all of that off,
+    and the volume then grows until it is full.
+  - Size the `emptyDir`'s `sizeLimit` for what bounds each part, plus one interval's
+    writes. Past it, the kubelet evicts the pod mid-render, with no drain.
 
-    | Part | Default bound |
-    |---|---|
-    | the cache after a trim, `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
-    | one interval's new pieces: render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
-    | uploads fetched, at most `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
-    | snapshots (`cache/`) and fonts (`fonts/`); not capped, so measure with `du -sh /data/cache /data/fonts` on a running worker | ~1 GiB |
-    | **sum; `sizeLimit` with slack** | **≈ 13.1 GiB; `14Gi`** |
+    | Part | What bounds it | Default bound |
+    |---|---|---|
+    | the cache after a trim | `SCADBUDDY_WORKER_CACHE_MAX_BYTES` | 10 GiB |
+    | one interval's new pieces | render slots × (interval ÷ time per piece) × piece size, e.g. 2 × (900 s ÷ 30 s) × 20 MiB | 1.2 GiB |
+    | uploads fetched (`assets/`) | last use: those a render named within `SCADBUDDY_ASSET_SWEEP_GRACE`; in practice no more than the API's `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
+    | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` | measure |
+    | fonts (`fonts/`) and library checkouts (`libraries/`) | nothing: the families and libraries the rendered templates name, kept for the pod's life | measure |
+    | **sum; `sizeLimit` with slack** | | **≈ 13.1 GiB plus the measured rows; `14Gi` at ~1 GiB for them** |
 
     Use your own render timings and piece sizes for the second row; a longer interval
-    scales it linearly.
+    scales it linearly. Measure the last two rows with
+    `du -sh /data/cache /data/fonts /data/libraries` on a running worker. A trim may
+    not bring the cache down to its cap while crash-left staging directories are
+    counted (follow-up #8), so watch `scadbuddy_worker_cache_bytes` against
+    `SCADBUDDY_WORKER_CACHE_MAX_BYTES`.
   - Scale the Deployment freely.
 
   **Sweeps.** The API runs the store's sweep on its own `SCADBUDDY_ASSET_SWEEP_INTERVAL`.
-  A piece or snapshot that no job, output or preset references is deleted from the
+  A piece or snapshot that no job references is deleted from the
   store (on `bambuddy`, from Bambuddy's library) once nothing has used it for
   `SCADBUDDY_ASSET_SWEEP_GRACE` (a week by default). The API's own upload sweep uses the
   same grace.
