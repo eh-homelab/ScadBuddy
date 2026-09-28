@@ -238,13 +238,20 @@ def _same_name(a: str, b: str) -> bool:
 class PresetStore:
     """Reads a template's presets and writes the saved ones.
 
-    One lock for the store: every write is a read-modify-write of one small file, and
-    this process is the only writer.
+    One lock per template: every write is a read-modify-write of that template's one
+    small file, and this process is the only writer. Per template, not one for the
+    store, because :meth:`with_names_free` holds it across a git commit, and that must
+    not stall a save on some other template.
     """
 
     def __init__(self, paths: DataPaths) -> None:
         self.paths = paths
-        self._lock = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+        self._locks_lock = threading.Lock()
+
+    def _lock(self, model_id: str) -> threading.Lock:
+        with self._locks_lock:
+            return self._locks.setdefault(model_id, threading.Lock())
 
     def _defined(self, model_id: str, name: str, raw: Any) -> list[TemplatePreset]:
         """``raw`` as a checked preset list, or none when it is not one (logged)."""
@@ -350,9 +357,9 @@ class PresetStore:
     def with_names_free(self, model_id: str, names: Iterable[str], write: Callable[[], T]) -> T:
         """Run ``write`` -- a change to the template's own presets -- once none of
         ``names`` is a saved preset's, ignoring case: the other direction of
-        :meth:`_require_free`. Under the store's lock, as a save is, so a save and the
+        :meth:`_require_free`. Under the template's lock, as a save is, so a save and the
         template's list can never each pass their check before the other lands."""
-        with self._lock:
+        with self._lock(model_id):
             saved = [preset.name for preset in self._read(model_id).presets]
             for name in names:
                 if any(_same_name(name, other) for other in saved):
@@ -368,7 +375,7 @@ class PresetStore:
 
     def create(self, model_id: str, body: ParamPresetCreate) -> ParamPreset:
         now = datetime.now(UTC)
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             if len(stored.presets) >= MAX_PRESETS:
                 raise TooManyPresetsError(f"a template keeps at most {MAX_PRESETS} presets")
@@ -385,7 +392,7 @@ class PresetStore:
         return self._view(preset)
 
     def update(self, model_id: str, preset_id: str, patch: ParamPresetUpdate) -> ParamPreset:
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             preset = next((p for p in stored.presets if p.id == preset_id), None)
             if preset is None:
@@ -400,7 +407,7 @@ class PresetStore:
         return self._view(preset)
 
     def delete(self, model_id: str, preset_id: str) -> None:
-        with self._lock:
+        with self._lock(model_id):
             stored = self._read(model_id)
             kept = [p for p in stored.presets if p.id != preset_id]
             if len(kept) == len(stored.presets):
@@ -413,7 +420,9 @@ class PresetStore:
         The duplicate's own template presets came with its directory; these are the
         ones kept beside it. Fresh ids, so the two sets are edited independently.
         """
-        with self._lock:
+        # Both, in a fixed order, so two copies the other way round cannot deadlock.
+        first, second = sorted((source_id, target_id))
+        with self._lock(first), self._lock(second):
             source = self._read(source_id)
             if not source.presets:
                 return

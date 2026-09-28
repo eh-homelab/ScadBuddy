@@ -766,14 +766,20 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
     // Over-long before blank, as the server checks them: 81 spaces is a length problem.
     await expect(
       api.updateModel('name-keychain', { presets: [{ name: ' '.repeat(MAX_PRESET_NAME + 1) }] }),
-    ).rejects.toMatchObject({ detail: expect.stringContaining('at most') })
+    ).rejects.toMatchObject({
+      detail: 'the request did not match the expected shape',
+      problem: { errors: [expect.objectContaining({ msg: expect.stringContaining('at most') })] },
+    })
     // The list's shape before any value: a repeated name after an unknown parameter is
     // still the name the server reports.
     await expect(
       api.updateModel('name-keychain', {
         presets: [{ name: 'A', params: { nope: 1 } }, { name: 'B' }, { name: 'b' }],
       }),
-    ).rejects.toMatchObject({ detail: expect.stringContaining('two presets are named') })
+    ).rejects.toMatchObject({
+      detail: 'the request did not match the expected shape',
+      problem: { errors: [expect.objectContaining({ msg: expect.stringContaining('two presets are named') })] },
+    })
     // Nothing was written by any of them.
     const presets = await api.listPresets('name-keychain')
     expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([

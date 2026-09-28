@@ -492,6 +492,17 @@ function problem(status: number, title: string, detail?: string, extensions: obj
 
 
 /**
+ * A body FastAPI refused while parsing it, before any route ran: `_validation_error`
+ * in core/problems.py answers every one with the same detail and puts the reason in
+ * `errors`, so a caller reads the field's message there, never in `detail`.
+ */
+function shapeRefusal(msg: string) {
+  return problem(422, 'Unprocessable Content', 'the request did not match the expected shape', {
+    errors: [{ loc: ['body', 'presets'], msg }],
+  })
+}
+
+/**
  * As `_require_png`, on create and on PUT alike: a model thumbnail is a PNG by its
  * bytes -- not its name or type -- and at most `MAX_THUMBNAIL_BYTES`. The 422 the
  * backend answers, or null when the upload passes.
@@ -1122,59 +1133,52 @@ export const handlers = [
     // #326: the template's own presets, replaced whole, checked in the server's order.
     // First the body's shape -- each preset's name and id, then the list's length and
     // uniqueness -- which is FastAPI parsing it into `ModelPatch` before the route runs,
-    // so it is refused (422) even for a built-in or a model that is not there.
+    // so it is refused (422) even for a built-in or a model that is not there -- with
+    // the generic detail every `RequestValidationError` gets, the reason in `errors`.
     const cleaned: NonNullable<typeof defined> = []
     if (defined) {
       for (const preset of defined) {
         // The raw length first, as pydantic checks `max_length` before `_clean_name`
         // collapses the whitespace.
         if (preset.name.length > MAX_PRESET_NAME) {
-          return problem(
-            422,
-            'Unprocessable Content',
-            `a preset name is at most ${MAX_PRESET_NAME} characters`,
-          )
+          return shapeRefusal(`a preset name is at most ${MAX_PRESET_NAME} characters`)
         }
         const name = preset.name.trim().replace(/\s+/g, ' ')
-        if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+        if (!name) return shapeRefusal('a preset needs a name')
         if (
           preset.id !== undefined &&
           preset.id !== null &&
           (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID)
         ) {
-          return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
+          return shapeRefusal(`'${preset.id}' is not a preset id`)
         }
         if ((preset.description ?? '').length > MAX_PRESET_DESCRIPTION) {
-          return problem(
-            422,
-            'Unprocessable Content',
+          return shapeRefusal(
             `a preset description is at most ${MAX_PRESET_DESCRIPTION} characters`,
           )
         }
         const tags = preset.tags ?? []
         if (tags.length > MAX_PRESET_TAGS || tags.some((tag) => tag.length > MAX_PRESET_TAG)) {
-          return problem(
-            422,
-            'Unprocessable Content',
+          return shapeRefusal(
             `a preset has at most ${MAX_PRESET_TAGS} tags of at most ${MAX_PRESET_TAG} characters`,
           )
         }
         cleaned.push({ ...preset, name })
       }
       if (cleaned.length > MAX_PRESETS) {
-        return problem(422, 'Unprocessable Content', `a template defines at most ${MAX_PRESETS} presets`)
+        return shapeRefusal(`a template defines at most ${MAX_PRESETS} presets`)
       }
       const names = new Set<string>()
       const ids = new Set<string>()
       for (const preset of cleaned) {
         const folded = preset.name.toLowerCase()
         if (names.has(folded)) {
-          return problem(422, 'Unprocessable Content', `two presets are named '${preset.name}'`)
+          return shapeRefusal(`two presets are named '${preset.name}'`)
         }
         names.add(folded)
         if (preset.id) {
           if (ids.has(preset.id)) {
-            return problem(422, 'Unprocessable Content', `two presets have the id '${preset.id}'`)
+            return shapeRefusal(`two presets have the id '${preset.id}'`)
           }
           ids.add(preset.id)
         }

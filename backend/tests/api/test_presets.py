@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from scadbuddy.library.presets import (
     MAX_PRESET_TAG,
     MAX_PRESET_TAGS,
     MAX_PRESETS,
+    ParamPresetCreate,
     PresetStore,
 )
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter
@@ -436,9 +438,9 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
     store = PresetStore(paths)
     held: list[bool] = []
     # Held from the check to the write, so a save cannot land between them.
-    assert store.with_names_free("m", ["A"], lambda: held.append(store._lock.locked())) is None
+    assert store.with_names_free("m", ["A"], lambda: held.append(store._lock("m").locked())) is None
     assert held == [True]
-    assert not store._lock.locked()
+    assert not store._lock("m").locked()
 
 
 @pytest.mark.requires_git
@@ -528,3 +530,26 @@ def test_a_template_preset_file_value_is_checked_as_a_saved_one(
     )
     empty = [{"name": "X", "params": {"overlay": ""}}]
     assert _patch_presets(client, model, empty).status_code == 200
+
+
+def test_a_template_write_does_not_hold_up_a_save_on_another(tmp_path: Path) -> None:
+    """``with_names_free`` holds its lock across a git commit; that lock is the
+    template's, so a save on some other template goes ahead meanwhile."""
+    paths = DataPaths(tmp_path)
+    for slug in ("a", "b"):
+        paths.model_dir(slug).mkdir(parents=True)
+        (paths.model_dir(slug) / MODEL_META_NAME).write_text("{}")
+    store = PresetStore(paths)
+    committing, saved = threading.Event(), threading.Event()
+
+    def slow_write() -> None:
+        committing.set()
+        assert saved.wait(timeout=5), "the save on 'b' waited for 'a'"
+
+    writer = threading.Thread(target=store.with_names_free, args=("a", ["X"], slow_write))
+    writer.start()
+    assert committing.wait(timeout=5)
+    store.create("b", ParamPresetCreate(name="X", params={}))
+    saved.set()
+    writer.join(timeout=5)
+    assert [preset.name for preset in store.saved_presets("b")] == ["X"]
