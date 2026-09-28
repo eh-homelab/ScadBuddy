@@ -255,9 +255,10 @@ async def test_cancelling_one_parent_leaves_a_shared_piece_running() -> None:
             await hb.result()
         assert acts.calls.count("render_main") == 1
         assert acts.calls.count("finish_piece") == 1
-        assert [p.state for p in acts.projections if p.job_id == a.id and p.state][
-            -1
-        ] == "cancelled"
+        cancelled = [p for p in acts.projections if p.job_id == a.id and p.state][-1]
+        assert cancelled.state == "cancelled"
+        # The job's own step says so too, not the "running" it was projected with.
+        assert cancelled.steps is not None and cancelled.steps[0].state == "cancelled"
         assert [p.state for p in acts.projections if p.job_id == b.id and p.state][-1] == "done"
 
 
@@ -362,6 +363,27 @@ async def test_a_piece_resumes_from_the_activity_it_was_on() -> None:
             await handle.result()
         assert "render_main" not in second.calls
         assert second.calls == ["render_solids", "finish_piece"]
+
+
+async def test_an_unexpected_error_in_the_pipeline_projects_failed_and_closes_the_run() -> None:
+    async with temporal_client() as client:
+        queue = f"t-{uuid.uuid4().hex[:8]}"
+        acts = FakeActivities()
+        async with _worker(client, queue, acts):
+            job = _job(width=31)
+            # Hand-authored inputs (spec §4.3): `params` present but not a mapping.
+            job.inputs = {"params": None}
+            handle = await client.start_workflow(
+                TemplatePipeline.run, job, id=f"render-{job.id}", task_queue=queue
+            )
+            # Closed, not retried as a workflow task forever with the row at `running`.
+            with pytest.raises(WorkflowFailureError):
+                await asyncio.wait_for(handle.result(), timeout=30)
+        last = [p for p in acts.projections if p.job_id == job.id and p.state][-1]
+        assert last.state == "failed"
+        assert last.failure is not None and last.failure.error.startswith("TypeError: ")
+        assert last.steps is not None and last.steps[0].state == "failed"
+        assert acts.calls == []
 
 
 async def test_a_job_with_a_slug_the_api_would_refuse_projects_failed_unrendered() -> None:
