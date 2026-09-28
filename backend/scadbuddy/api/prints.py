@@ -13,7 +13,7 @@ for an archive one of ScadBuddy's outputs printed (#306).
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack
 from typing import Annotated, Any
 
@@ -50,9 +50,6 @@ FORWARDED_HEADERS = (
 PHOTO_NAME = r"^[A-Za-z0-9_-]+\.(jpg|jpeg|png|webp)$"
 
 ArchiveIdPath = Annotated[int, Path(ge=1)]
-
-#: A media route answers these; nothing here writes.
-READ_METHODS = ["GET", "HEAD"]
 
 
 async def require_linked_archive(archive_id: ArchiveIdPath, links: PrintLinksDep) -> None:
@@ -116,9 +113,22 @@ async def _proxy(store: SettingsStore, request: Request, path: str, *, what: str
     return StreamingResponse(body(), status_code=upstream.status_code, headers=headers)
 
 
-@router.api_route(
-    "/timelapse", methods=READ_METHODS, summary="The print's timelapse video (Range supported)"
-)
+_Handler = Callable[..., Awaitable[Response]]
+
+
+def _media_route(path: str, summary: str) -> Callable[[_Handler], _Handler]:
+    """A GET, and a HEAD with the same handler left out of the schema. One route with
+    both methods takes its ``operationId`` from whichever method its set yields first,
+    which changes with the hash seed, and gives both operations that one id."""
+
+    def register(handler: _Handler) -> _Handler:
+        router.head(path, include_in_schema=False)(handler)
+        return router.get(path, summary=summary)(handler)
+
+    return register
+
+
+@_media_route("/timelapse", "The print's timelapse video (Range supported)")
 async def get_timelapse(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
@@ -127,7 +137,7 @@ async def get_timelapse(
     )
 
 
-@router.api_route("/photos/{filename}", methods=READ_METHODS, summary="A photo of the print")
+@_media_route("/photos/{filename}", "A photo of the print")
 async def get_photo(
     archive_id: ArchiveIdPath,
     filename: Annotated[str, Path(pattern=PHOTO_NAME)],
@@ -139,7 +149,7 @@ async def get_photo(
     )
 
 
-@router.api_route("/thumbnail", methods=READ_METHODS, summary="The print's thumbnail")
+@_media_route("/thumbnail", "The print's thumbnail")
 async def get_thumbnail(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
@@ -148,9 +158,7 @@ async def get_thumbnail(
     )
 
 
-@router.api_route(
-    "/plates/{index}/thumbnail", methods=READ_METHODS, summary="One plate's image from the slicer"
-)
+@_media_route("/plates/{index}/thumbnail", "One plate's image from the slicer")
 async def get_plate_thumbnail(
     archive_id: ArchiveIdPath,
     index: Annotated[int, Path(ge=1)],
@@ -165,7 +173,7 @@ async def get_plate_thumbnail(
     )
 
 
-@router.api_route("/files/sliced", methods=READ_METHODS, summary="The sliced file that was printed")
+@_media_route("/files/sliced", "The sliced file that was printed")
 async def get_sliced_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
@@ -174,9 +182,7 @@ async def get_sliced_file(
     )
 
 
-@router.api_route(
-    "/files/source", methods=READ_METHODS, summary="The slicer project 3MF, when there is one"
-)
+@_media_route("/files/source", "The slicer project 3MF, when there is one")
 async def get_source_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:
