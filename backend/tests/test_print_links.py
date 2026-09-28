@@ -166,3 +166,39 @@ async def test_a_filtered_page_keeps_each_archive_with_the_output_that_saw_it_fi
     assert (owned.archive_id, owned.output_id) == (35, OUTPUT)
     found = await links.linked(35)
     assert found is not None and found.output_id == OUTPUT
+
+
+async def test_every_lookup_agrees_on_the_owner_when_two_links_tie(
+    links: PrintLinkStore, jobs: PostgresJobStore
+) -> None:
+    # #609 review: `output_for`, `linked` and `page` break a first_seen tie the same
+    # way (the lower output id), so the proxy and the prints API name one owner.
+    await links.record(OTHER, link(35))
+    await links.record(OUTPUT, link(35))
+    with jobs.pool.connection() as conn:
+        conn.execute(
+            "UPDATE output_bambuddy_prints SET first_seen = '2026-09-28T10:00:00Z'"
+            " WHERE archive_id = 35"
+        )
+
+    assert await links.output_for(35) == OUTPUT
+    found = await links.linked(35)
+    assert found is not None and found.output_id == OUTPUT
+    [row] = await links.page(limit=10)
+    assert row.output_id == OUTPUT
+
+
+def test_the_owner_lookup_has_an_index_in_its_order(
+    jobs: PostgresJobStore, pg_conninfo: str
+) -> None:
+    # #609 review: the page's DISTINCT ON walks (archive_id DESC, first_seen,
+    # output_id); an index in that order spares it a sort of the whole table.
+    with psycopg.connect(pg_conninfo) as conn:
+        definitions = [
+            row[0]
+            for row in conn.execute(
+                "SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema()"
+                " AND tablename = 'output_bambuddy_prints'"
+            )
+        ]
+    assert any("(archive_id DESC, first_seen, output_id)" in d for d in definitions), definitions

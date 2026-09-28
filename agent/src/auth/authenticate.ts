@@ -23,6 +23,11 @@ export type McpAuthMode = 'bearer' | 'disabled' | 'oidc'
 
 export type McpAuthSettings = {
   mode: McpAuthMode
+  /**
+   * What the `mcp_auth_mode` key alone gives: the mode while OIDC is off. It
+   * differs from `mode` while an enabled OIDC configuration overrides it.
+   */
+  configuredMode?: Exclude<McpAuthMode, 'oidc'> | undefined
   /** The most an `anonymous` caller may do in `disabled` mode. Full access by default (spec §8.3). */
   anonymousCap: Tier
   /** The IdP, in `oidc` mode (#262). */
@@ -59,6 +64,7 @@ export function quoted(value: string): string {
 
 export const DEFAULT_MCP_AUTH: McpAuthSettings = {
   mode: 'bearer',
+  configuredMode: 'bearer',
   anonymousCap: 'outward',
 }
 
@@ -103,6 +109,7 @@ export function mcpAuthSettings(
     ])
     const warnings: string[] = []
     const resolved: McpAuthSettings = { ...DEFAULT_MCP_AUTH }
+    if (mode === 'disabled') resolved.configuredMode = 'disabled'
     if (oidcConfig?.enabled) {
       resolved.mode = 'oidc'
       resolved.oidc = oidcConfig

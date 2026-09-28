@@ -556,3 +556,26 @@ def test_the_output_preview_mesh_is_served(client: TestClient, model: str) -> No
     assert response.status_code == 200
     assert response.headers["content-type"] == "model/gltf-binary"
     assert response.content.startswith(b"glTF")
+
+
+def test_a_print_is_dated_by_its_utc_day_whatever_the_clock_says() -> None:
+    # #609 review: Bambuddy's times are naive and read as UTC (as `hardware.py` does);
+    # an aware one, and Postgres's first_seen, are converted to UTC before the day is
+    # taken, so one moment is one day however it was written.
+    from datetime import UTC, date, datetime, timedelta, timezone
+
+    from scadbuddy.api.print_history import _day
+    from scadbuddy.bambuddy.models import ArchiveDetail
+    from scadbuddy.bambuddy.print_links import LinkedPrint
+
+    perth = timezone(timedelta(hours=8))
+    seen = datetime(2026, 9, 27, 2, 0, tzinfo=perth)  # 2026-09-26 18:00 UTC
+    link = LinkedPrint(output_id="a" * 32, archive_id=35, matched_by="queue_item", first_seen=seen)
+
+    def dated(started_at: datetime | None) -> ArchiveDetail:
+        return ArchiveDetail(id=35, started_at=started_at)
+
+    assert _day(link, dated(datetime(2026, 9, 26, 23, 30))) == date(2026, 9, 26)
+    assert _day(link, dated(datetime(2026, 9, 27, 2, 0, tzinfo=perth))) == date(2026, 9, 26)
+    assert _day(link, dated(datetime(2026, 9, 26, 23, 30, tzinfo=UTC))) == date(2026, 9, 26)
+    assert _day(link, None) == date(2026, 9, 26)

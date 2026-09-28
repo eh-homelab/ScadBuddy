@@ -1098,8 +1098,10 @@ export const filamentOptions: FilamentOptions = {
 function printOf(
   archive_id: number,
   output: Output,
-  fields: Partial<PrintDetail> & Pick<PrintDetail, 'status'>,
-  failureReason: string | null = null,
+  fields: Partial<PrintSummary> & Pick<PrintSummary, 'status'>,
+  { failureReason = null, ...detail }: Partial<Omit<PrintDetail, keyof PrintSummary>> & {
+    failureReason?: string | null
+  } = {},
 ): PrintDetail {
   const prints = `/api/v1/prints/${archive_id}`
   const download = `name-keychain-${(output.name ?? output.id).toLowerCase()}`
@@ -1151,7 +1153,8 @@ function printOf(
     },
     printer_media: null,
     links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
-    ...fields,
+    // The summary's own fields went in above; these are the detail's, a disjoint set.
+    ...detail,
   }
 }
 
@@ -1168,6 +1171,7 @@ export const prints: PrintDetail[] = [
     filament_used_grams: null,
     cover: null,
     run_count: 0,
+  }, {
     files: [
       { kind: 'output_3mf', name: 'name-keychain-workshop.3mf', size: 45120, url: `/api/v1/outputs/${workshop.id}/model.3mf` },
     ],
@@ -1191,12 +1195,13 @@ export const prints: PrintDetail[] = [
       actual_time_seconds: 2590,
       filament_used_grams: 4.1,
     },
-    'Spaghetti detected',
+    { failureReason: 'Spaghetti detected' },
   ),
   printOf(35, reagan, {
     status: 'completed',
     cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
     has_timelapse: true,
+  }, {
     media: {
       finish_photo: { name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
       photos: [],
