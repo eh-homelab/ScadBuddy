@@ -1028,15 +1028,14 @@ export const handlers = [
     const slug = String(params['slug'])
     const refused = refuseBuiltin(slug)
     if (refused) return refused
+    // The model first, as the server's `require_model` runs before anything else.
+    if (!state.models.some((m) => m.slug === slug)) return problem(404, 'Model not found')
     const { presets: defined, ...patch } = (await request.json()) as ModelPatch
     if (defined) {
-      // #326: the template's own presets, replaced whole and checked as the server's
-      // `TemplatePresets` and `require_valid_preset_params` check them.
-      if (defined.length > MAX_PRESETS) {
-        return problem(422, 'Unprocessable Content', `a template defines at most ${MAX_PRESETS} presets`)
-      }
-      const names = new Set<string>()
-      const ids = new Set<string>()
+      // #326: the template's own presets, replaced whole. Two passes, as the server
+      // makes them: the body's shape (each preset's name and id, then the list's
+      // length and uniqueness) is `TemplatePresets` parsing it before the route runs;
+      // only then are the values checked, by `require_valid_preset_params`.
       const cleaned: typeof defined = []
       for (const preset of defined) {
         // The raw length first, as pydantic checks `max_length` before `_clean_name`
@@ -1050,23 +1049,36 @@ export const handlers = [
         }
         const name = preset.name.trim().replace(/\s+/g, ' ')
         if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
-        const folded = name.toLowerCase()
+        if (
+          preset.id !== undefined &&
+          preset.id !== null &&
+          (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID)
+        ) {
+          return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
+        }
+        cleaned.push({ ...preset, name })
+      }
+      if (cleaned.length > MAX_PRESETS) {
+        return problem(422, 'Unprocessable Content', `a template defines at most ${MAX_PRESETS} presets`)
+      }
+      const names = new Set<string>()
+      const ids = new Set<string>()
+      for (const preset of cleaned) {
+        const folded = preset.name.toLowerCase()
         if (names.has(folded)) {
-          return problem(422, 'Unprocessable Content', `two presets are named '${name}'`)
+          return problem(422, 'Unprocessable Content', `two presets are named '${preset.name}'`)
         }
         names.add(folded)
-        if (preset.id !== undefined && preset.id !== null) {
-          if (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID) {
-            return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
-          }
+        if (preset.id) {
           if (ids.has(preset.id)) {
             return problem(422, 'Unprocessable Content', `two presets have the id '${preset.id}'`)
           }
           ids.add(preset.id)
         }
+      }
+      for (const preset of cleaned) {
         const refused = valueRefusal(slug, preset.params ?? {})
         if (refused) return refused
-        cleaned.push({ ...preset, name })
       }
       const keys = templatePresetKeys(cleaned)
       const shipped: ParamPreset[] = cleaned.map((preset, index) => ({

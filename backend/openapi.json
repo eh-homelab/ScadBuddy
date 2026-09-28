@@ -7212,7 +7212,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,128}$",
+              "pattern": "^[a-z0-9-]{1,109}$",
               "title": "Preset Id",
               "type": "string"
             }
@@ -7258,7 +7258,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,128}$",
+              "pattern": "^[a-z0-9-]{1,109}$",
               "title": "Preset Id",
               "type": "string"
             }
@@ -7323,7 +7323,7 @@
             "name": "preset_id",
             "required": true,
             "schema": {
-              "pattern": "^[a-z0-9-]{1,128}$",
+              "pattern": "^[a-z0-9-]{1,109}$",
               "title": "Preset Id",
               "type": "string"
             }

@@ -33,12 +33,15 @@ from scadbuddy.library.presets import (
     PresetNotFoundError,
     TooManyPresetsError,
 )
+from scadbuddy.library.slugs import MAX_SLUG_LENGTH
 from scadbuddy.render.schema import ParamValue
 
 router = APIRouter(tags=["presets"])
 
 #: A saved preset's 32 hex digits, or ``template-`` plus a template preset's key.
-PresetIdPath = Annotated[str, Path(pattern=r"^[a-z0-9-]{1,128}$")]
+PresetIdPath = Annotated[
+    str, Path(pattern=rf"^[a-z0-9-]{{1,{len(TEMPLATE_ID_PREFIX) + MAX_SLUG_LENGTH}}}$")
+]
 
 
 async def _require_valid(
