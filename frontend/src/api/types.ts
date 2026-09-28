@@ -165,6 +165,12 @@ export type ScopeRef = Schemas['ScopeRef']
 /** A decision about a finding at a scope; `DecisionCreate` records an ignore or a suppression. */
 export type AnalyzerDecision = Schemas['Decision']
 export type DecisionCreate = Schemas['DecisionCreate']
+/** A fix a finding offers: a diff against the print's base, line by line. */
+export type AnalyzerFix = Schemas['Fix']
+export type SettingChange = Schemas['SettingChange']
+export type FixRequest = Schemas['FixRequest']
+export type FixPreview = Schemas['FixPreview']
+export type FixApply = Schemas['FixApply']
 
 export type SendRequest = Schemas['SendRequest']
 export type SendResult = Schemas['SendResult']

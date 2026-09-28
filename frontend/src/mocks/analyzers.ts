@@ -3,6 +3,7 @@ import type {
   AnalysisRequest,
   AnalyzerDecision,
   AnalyzerDiagnostic,
+  AnalyzerFix,
   AnalyzerSource,
   Output,
   ScopeRef,
@@ -210,6 +211,84 @@ export function resolveDecision(
   )[0]
 }
 
+/**
+ * A test double, not a bundled rule: every bundled fix targets something still on the AI
+ * spec's §3.2 list, so none can be applied (#461). #461's own tests apply a verified
+ * `print_options` fix the same way.
+ */
+export const verifiedFixDiagnostic: AnalyzerDiagnostic = {
+  id: 'SB9901',
+  key: 'SB9901',
+  title: 'A rule with a verified fix',
+  severity: 'warning',
+  category: 'profile',
+  message: 'Timelapse is off for a print worth watching.',
+  location: { kind: 'choices', setting: 'timelapse', edges: [], edges_truncated: false },
+  evidence: [],
+  sources: [ANALYZER_CRASH],
+  fixes: [
+    {
+      id: 'timelapse-on',
+      title: 'Record a timelapse',
+      description: 'Turn on the queue item\'s timelapse.',
+      changes: [
+        {
+          target: 'print_options',
+          setting: 'timelapse',
+          base: false,
+          base_known: true,
+          proposed: true,
+          sources: [ANALYZER_CRASH],
+          verified: true,
+          to_verify: null,
+          outward: true,
+        },
+      ],
+    },
+  ],
+  slots: [],
+  status: 'open',
+}
+
+/** What an accepted decision is compared against on later runs (`model.diff_digest`). */
+export function fixDigest(fix: AnalyzerFix): string {
+  return digest(
+    JSON.stringify({
+      fix: fix.id,
+      changes: fix.changes.map((row) => [row.target, row.setting, row.base, row.proposed, row.slot_id]),
+    }),
+    64,
+  )
+}
+
+/**
+ * What a preview is confirmed against (`model.fingerprint`): the diagnostic, the fix and
+ * its diff, the scope, the output, and the base the request resolves to.
+ */
+export function fixFingerprint(
+  outputId: string,
+  diagnosticKey: string,
+  fix: AnalyzerFix,
+  scope: ScopeRef,
+  request: AnalysisRequest,
+): string {
+  return digest(
+    JSON.stringify({
+      diagnostic: diagnosticKey,
+      digest: fixDigest(fix),
+      scope: [scope.kind, scope.key],
+      subject: outputId,
+      base: [
+        request.printer_id ?? null,
+        request.choices ?? null,
+        request.plate_id,
+        request.filament_plan?.slots ?? [],
+      ],
+    }),
+    64,
+  )
+}
+
 /** Each diagnostic with the status its decision gives it (`runner.apply_decisions`). */
 function decide(
   diagnostics: AnalyzerDiagnostic[],
@@ -218,7 +297,17 @@ function decide(
 ): AnalyzerDiagnostic[] {
   return diagnostics.map((diagnostic) => {
     const decision = resolveDecision(diagnostic, decisions, scopes)
-    if (!decision || decision.kind === 'accept') return diagnostic
+    if (!decision) return diagnostic
+    if (decision.kind === 'accept') {
+      const fix = diagnostic.fixes?.find((row) => row.id === decision.fix_id)
+      // An accepted diff that has since changed is stale, and the finding open again.
+      const holds = fix !== undefined && fixDigest(fix) === decision.diff_digest
+      return {
+        ...diagnostic,
+        status: holds ? 'accepted' : 'open',
+        decision: { decision, stale: !holds },
+      }
+    }
     return {
       ...diagnostic,
       status: decision.kind === 'suppress' ? 'suppressed' : 'ignored',
@@ -267,7 +356,16 @@ export function analysisReport(
       suggestions,
     },
     diagnostics: sorted,
-    accepted_changes: [],
+    accepted_changes: sorted.flatMap((row) => {
+      const applied = row.status === 'accepted' ? row.decision?.decision : undefined
+      return (applied?.changes ?? []).map((change) => ({
+        diagnostic_id: row.id,
+        diagnostic_key: row.key,
+        fix_id: applied?.fix_id ?? '',
+        scope: applied?.scope ?? { kind: 'print' as const, key: output.id },
+        change,
+      }))
+    }),
     skipped: [],
     inputs: (['output', 'geometry', 'plate', 'printer', 'choices', 'filaments', 'inventory'] as const).map(
       (name) => ({ name, available: name !== 'choices' || request.choices != null }),

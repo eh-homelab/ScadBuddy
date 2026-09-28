@@ -3,6 +3,9 @@ import type {
   AnalysisRun,
   AnalyzerDecision,
   DecisionCreate,
+  FixApply,
+  FixPreview,
+  FixRequest,
   Asset,
   AssetUsage,
   AttachResult,
@@ -593,6 +596,26 @@ export const api = {
    */
   createDecision: (body: DecisionCreate) =>
     request<AnalyzerDecision>('/analyzers/decisions', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — a fix's whole diff, where each line lands, whether it can be applied yet, and
+   * the fingerprint an apply confirms against. Changes nothing (`post_preview`).
+   */
+  previewFix: (body: FixRequest) =>
+    request<FixPreview>('/analyzers/fixes/preview', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  /**
+   * #284 — record a previewed fix as accepted at its scope (`post_apply`). A 409
+   * `analyzer-fix-stale` means the diff, scope, print or base moved since the preview.
+   */
+  applyFix: (body: FixApply) =>
+    request<AnalyzerDecision>('/analyzers/fixes/apply', {
       method: 'POST',
       body: JSON.stringify(body),
     }),

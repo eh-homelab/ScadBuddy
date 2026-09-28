@@ -52,7 +52,7 @@ test.describe('print dialog', () => {
     await expect(dialog.getByTestId('queued-items')).toContainText('Queue #')
   })
 
-  test('lists the checks with their sources, suppresses one, and still prints', async ({ page }) => {
+  test('lists the checks, previews a fix, suppresses one, and still prints', async ({ page }) => {
     const dialog = await openDialog(page)
     const checks = dialog.getByTestId('print-checks')
     await expect(checks.getByTestId('checks-headline')).toHaveText('2 suggestions')
@@ -64,6 +64,14 @@ test.describe('print dialog', () => {
       name: 'Bambu Studio PrintConfig.cpp: support_threshold_angle',
     })
     await expect(source).toHaveAttribute('target', '_blank')
+
+    // Its fix previews as a diff; every bundled fix still waits on a §3.2 item, so no Apply.
+    await overhang.getByRole('button', { name: 'Preview fix: Turn on supports' }).click()
+    const fix = overhang.getByTestId('fix-preview-enable-support')
+    await expect(fix.getByTestId('change-enable_support')).toContainText('Derived process preset')
+    await expect(fix.getByTestId('fix-blockers')).toContainText('/local-presets/')
+    await expect(fix.getByRole('button', { name: 'Apply' })).toBeDisabled()
+    await fix.getByRole('button', { name: 'Close' }).click()
 
     // Suppressed at a scope, with the reason a suppression requires.
     const edges = checks.getByTestId('diagnostic-SB1002:part-2')
