@@ -163,6 +163,13 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
     follows both with the header). Claude Code renames tool-name characters outside
     `[A-Za-z0-9_-]` to `_` (`harnessToolName`); only such names take a tier, and
     colliding tools are hidden. Unlisted plugin tools are `outward`.
+  - Plugin packages (#297; skills, agents, hooks from git or a marketplace entry) live
+    in `ai_plugin_packages` (`src/plugins/packages/`, routes
+    `src/routes/pluginPackages.ts`). Postgres holds the pin (commit + content hash);
+    `<state dir>/plugins/` is only a cache, re-hashed before every load and
+    re-fetched from the pin. Install stores the pin unapproved; approving needs the
+    exact commit and hash. `vet.ts` adds rules on top of `harness/plugins.ts`. Tests
+    use local git repos (`test/support/gitRepo.ts`).
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

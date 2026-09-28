@@ -200,10 +200,11 @@ FROM node:24-bookworm-slim AS agent
 
 # tini for the same reason as the backend image: the Agent SDK spawns the
 # Claude Code binary as a child process per query, and node as PID 1 does not
-# reap orphans.
+# reap orphans. git (and ca-certificates for its https) fetches plugin
+# packages at their pinned commit (#297, agent/src/plugins/packages/git.ts).
 # hadolint ignore=DL3008
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends tini \
+    && apt-get install -y --no-install-recommends tini git ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Numeric uid 10001, the same as the backend image, so one pod
