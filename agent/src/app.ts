@@ -3,6 +3,7 @@ import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
+import type { PluginForwarder } from './plugins/forwarder.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
@@ -28,7 +29,9 @@ export type AppDeps = {
   /** The plugin registry (#297); undefined when there is no database. */
   plugins?: PluginRepo | undefined
   /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
-  testPlugin?: (plugin: RemotePlugin) => Promise<PluginTest>
+  testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
+  /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
+  pluginForwarder?: PluginForwarder
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
@@ -158,7 +161,19 @@ export function createApp(deps: AppDeps): Hono {
     kek: deps.kek,
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
-    testPlugin: deps.testPlugin ?? ((plugin) => testPlugin(plugin)),
+    testPlugin:
+      deps.testPlugin ??
+      ((plugin, address) =>
+        deps.pluginForwarder
+          ? testPlugin(plugin, address, deps.pluginForwarder)
+          : Promise.resolve({
+              ok: false,
+              detail: 'the plugin forwarder is not running',
+              duration_ms: 0,
+              server: null,
+              tools: [],
+              truncated: false,
+            })),
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
   })
 

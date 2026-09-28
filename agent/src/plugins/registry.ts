@@ -11,10 +11,21 @@ import { type Envelope, type Kek, last4, openSecret, rewrap, SealError, sealSecr
 //
 // WHAT A PLUGIN IS HERE. A remote MCP server: a Streamable HTTP URL plus an
 // optional auth header. The harness registers it as an Agent SDK
-// `McpHttpServerConfig` (`{ type: 'http', url, headers }`, sdk.d.ts 0.3.283)
-// under the plugin's name, so its tools reach the model as
-// `mcp__<name>__<tool>` ("MCP tools follow the naming pattern
-// mcp__{server_name}__{tool_name}", https://code.claude.com/docs/en/agent-sdk/mcp).
+// `McpHttpServerConfig` (`{ type: 'http', url }`, sdk.d.ts 0.3.283) under the
+// plugin's name, so its tools reach the model as `mcp__<name>__<tool>` ("MCP
+// tools follow the naming pattern mcp__{server_name}__{tool_name}",
+// https://code.claude.com/docs/en/agent-sdk/mcp). The URL Claude Code gets is
+// NOT the plugin's: it is a loopback forwarder in this process
+// (forwarder.ts), which connects to the checked address, refuses redirects
+// and OAuth discovery, and adds the header itself, so Claude Code never holds
+// the secret.
+//
+// TOOL NAMES. Claude Code rewrites every character outside [A-Za-z0-9_-] in
+// a tool name to `_` (`harnessToolName`; spec §3.1), so `files.list` and
+// `files_list` would share one name. `tool_tiers` keys must therefore already
+// be in that alphabet (a tool named otherwise stays `outward`), and the
+// forwarder hides colliding tools and refuses a call whose raw name differs
+// from the tiered one.
 // Plugin PACKAGES (skills, subagents, hooks from a git URL at a pinned commit,
 // issue #297 "Installing a plugin") are not in this entry: fetching them means
 // files on the data volume, which the rule for new state (Postgres only) does
@@ -50,7 +61,9 @@ export const PLUGIN_NAME_RE = /^[a-z][a-z0-9-]{0,30}[a-z0-9]$/
 /**
  * Names a plugin may not take: the in-process ScadBuddy server (#251's
  * `mcp__scadbuddy__*`) and the headless browser plugin (#349), whose tools have
- * tiers of their own, plus the vendor names.
+ * tiers of their own, plus the vendor names, plus the server names Claude Code
+ * 2.1.283 treats specially and drops or never offers tools from (`workspace`,
+ * `computer-use`, `claude-in-chrome`, `hearthbot`, `ide`).
  */
 export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
   'scadbuddy',
@@ -58,10 +71,29 @@ export const RESERVED_PLUGIN_NAMES: ReadonlySet<string> = new Set([
   'claude',
   'anthropic',
   'plugin',
+  'workspace',
+  'computer-use',
+  'claude-in-chrome',
+  'hearthbot',
+  'ide',
 ])
 
-/** MCP tool names as ScadBuddy accepts them in a tier map or the disabled list. */
-export const TOOL_NAME_RE = /^[A-Za-z0-9_.-]{1,128}$/
+/**
+ * A tool name as Claude Code puts it in `mcp__<server>__<tool>`: every
+ * character outside [A-Za-z0-9_-] becomes `_` (CLI 2.1.283; spec §3.1).
+ */
+export function harnessToolName(tool: string): string {
+  return tool.replace(/[^a-zA-Z0-9_-]/g, '_')
+}
+
+/**
+ * `tool_tiers` keys: names Claude Code does not rewrite, so the tier the
+ * permission seam sees (by harness name) is the tier of exactly that tool.
+ */
+export const TIERED_TOOL_NAME_RE = /^[A-Za-z0-9_-]{1,128}$/
+/** `disabled_tools` entries: any MCP tool name up to 128 characters, no control characters. */
+// eslint-disable-next-line no-control-regex
+const DISABLED_TOOL_NAME_RE = /^[^\u0000-\u001f\u007f]{1,128}$/
 export const MAX_TOOL_ENTRIES = 256
 
 /** An HTTP token (RFC 9110 §5.6.2) of at most 64 characters. */
@@ -78,7 +110,26 @@ const RESERVED_HEADERS: ReadonlySet<string> = new Set([
   'mcp-session-id',
   'mcp-protocol-version',
   'last-event-id',
+  'proxy-authorization',
+  'te',
+  'upgrade',
+  'expect',
+  'keep-alive',
+  'trailer',
+  'user-agent',
+  'origin',
+  'accept-encoding',
 ])
+
+/**
+ * What to redact for a header value: the value, and the token after an
+ * auth-scheme prefix (`Bearer`, `Basic`, `Token`), which a server or a log
+ * line may echo on its own.
+ */
+export function headerSecretVariants(value: string): string[] {
+  const scheme = /^(?:bearer|basic|token)\s+(\S.*)$/i.exec(value)
+  return scheme?.[1] ? [value, scheme[1]] : [value]
+}
 
 export const DEFAULT_AUTH_HEADER = 'Authorization'
 
@@ -196,22 +247,20 @@ export function normalisePluginUrl(raw: string): string {
 /**
  * Spec §8.4 and the egress rule for a URL a secret is sent to: the host must
  * not be (or resolve to) link-local or cloud metadata, and plain http is
- * allowed only when every address the host resolves to is loopback.
+ * allowed only when every address the host resolves to is loopback. Resolves
+ * to the checked addresses; the forwarder connects to the first of them and
+ * does not resolve the name again.
  */
-export async function assertEndpointAllowed(url: string, resolve: Resolver = systemResolver): Promise<void> {
-  await assertHostAllowed(url, resolve, 'url', 'an MCP endpoint')
+export async function assertEndpointAllowed(url: string, resolve: Resolver = systemResolver): Promise<string[]> {
+  const addresses = await assertHostAllowed(url, resolve, 'url', 'an MCP endpoint')
   const parsed = new URL(url)
-  if (parsed.protocol === 'https:') return
-  const host = parsed.hostname.startsWith('[') ? parsed.hostname.slice(1, -1) : parsed.hostname
-  let addresses: string[]
-  try {
-    addresses = isLoopbackPeer(host) ? [host] : await resolve(host)
-  } catch {
-    throw new EgressError(`url host ${host} cannot be resolved from the agent service`)
+  if (parsed.protocol === 'https:') return addresses
+  if (!addresses.every((a) => isLoopbackPeer(a))) {
+    throw new EgressError(
+      `url must be https: plain http is allowed only to loopback, and ${parsed.hostname} is not (spec §8.4)`,
+    )
   }
-  if (addresses.length === 0 || !addresses.every((a) => isLoopbackPeer(a))) {
-    throw new EgressError(`url must be https: plain http is allowed only to loopback, and ${host} is not (spec §8.4)`)
-  }
+  return addresses
 }
 
 export function validateHeaderName(name: string): string {
@@ -231,19 +280,19 @@ export function validateSecret(raw: string): string {
   return secret
 }
 
-function validateToolName(tool: string, field: string): string {
-  if (!TOOL_NAME_RE.test(tool)) {
-    throw new PluginError(`${field}: "${tool}" is not a tool name (1–128 of A-Z a-z 0-9 _ . -)`, 400)
-  }
-  return tool
-}
-
 export function validateToolTiers(tiers: Record<string, string>): Record<string, RiskTier> {
   const entries = Object.entries(tiers)
   if (entries.length > MAX_TOOL_ENTRIES) throw new PluginError(`tool_tiers has more than ${MAX_TOOL_ENTRIES} entries`, 400)
   const out: Record<string, RiskTier> = {}
   for (const [tool, tier] of entries) {
-    validateToolName(tool, 'tool_tiers')
+    if (!TIERED_TOOL_NAME_RE.test(tool)) {
+      throw new PluginError(
+        `tool_tiers: "${tool}" cannot be given a tier: only tools named with A-Z a-z 0-9 _ - (1–128) can, ` +
+          'because Claude Code renames any other character to "_" and two tools could then share the tier; ' +
+          'such a tool stays outward (or disable it)',
+        400,
+      )
+    }
     if (!(RISK_TIERS as readonly string[]).includes(tier)) {
       throw new PluginError(`tool_tiers.${tool} must be one of ${RISK_TIERS.join(', ')}`, 400)
     }
@@ -256,7 +305,12 @@ export function validateDisabledTools(tools: readonly string[]): string[] {
   if (tools.length > MAX_TOOL_ENTRIES) {
     throw new PluginError(`disabled_tools has more than ${MAX_TOOL_ENTRIES} entries`, 400)
   }
-  return [...new Set(tools.map((t) => validateToolName(t, 'disabled_tools')))].sort()
+  for (const tool of tools) {
+    if (!DISABLED_TOOL_NAME_RE.test(tool)) {
+      throw new PluginError(`disabled_tools: "${tool}" is not a tool name (1–128 characters, no control characters)`, 400)
+    }
+  }
+  return [...new Set(tools)].sort()
 }
 
 /**
@@ -362,13 +416,16 @@ export function openPlugin(row: Row, kek: Kek | undefined): RemotePlugin {
   return plugin
 }
 
-export type LoadedPlugins = { plugins: RemotePlugin[]; problems: string[] }
+/** A plugin whose endpoint passed the check, with the address that passed it. */
+export type CheckedPlugin = { plugin: RemotePlugin; address: string }
+export type LoadedPlugins = { plugins: CheckedPlugin[]; problems: string[] }
 
 /**
  * The enabled plugins for one harness run: opened, and each endpoint checked
  * again (egress + https, `assertEndpointAllowed`) since its name may resolve
- * differently now than at save. A plugin that fails either is left out and
- * named in `problems`; the run goes ahead without it.
+ * differently now than at save. The address checked is the one the forwarder
+ * connects to. A plugin that fails either is left out and named in
+ * `problems`; the run goes ahead without it.
  */
 export async function loadEnabledPlugins(
   store: Pick<PluginStore, 'enabled'>,
@@ -376,11 +433,12 @@ export async function loadEnabledPlugins(
   resolve: Resolver = systemResolver,
 ): Promise<LoadedPlugins> {
   const { plugins, problems } = await store.enabled(kek)
-  const allowed: RemotePlugin[] = []
+  const allowed: CheckedPlugin[] = []
   for (const plugin of plugins) {
     try {
-      await assertEndpointAllowed(plugin.url, resolve)
-      allowed.push(plugin)
+      const [address] = await assertEndpointAllowed(plugin.url, resolve)
+      if (address === undefined) throw new EgressError(`url host of ${plugin.name} resolves to no address`)
+      allowed.push({ plugin, address })
     } catch (err) {
       if (!(err instanceof EgressError)) throw err
       problems.push(`plugin ${plugin.name} was not loaded: ${err.message}`)
@@ -412,6 +470,12 @@ export class PluginStore implements PluginRepo {
     const url = normalisePluginUrl(input.url)
     const tiers = validateToolTiers(input.tool_tiers ?? {})
     const disabled = validateDisabledTools(input.disabled_tools ?? [])
+    if (input.enabled) {
+      throw new PluginError(
+        'a plugin is registered disabled: run its connection test, review its tools, then enable it (issue #297)',
+        400,
+      )
+    }
     let sealed: Sealed = null
     if (input.secret !== undefined) {
       const header = validateHeaderName(input.auth_header ?? DEFAULT_AUTH_HEADER)
@@ -422,7 +486,7 @@ export class PluginStore implements PluginRepo {
     const rows = await this.sql<Row[]>`
       INSERT INTO ai_plugins (name, kind, url, enabled, auth_header, secret_sealed, dek_sealed, kek_id, last4,
                               tool_tiers, disabled_tools)
-      VALUES (${name}, 'remote_mcp', ${url}, ${input.enabled ?? false}, ${sealed?.header ?? null},
+      VALUES (${name}, 'remote_mcp', ${url}, false, ${sealed?.header ?? null},
               ${sealed?.envelope.secretSealed ?? null}, ${sealed?.envelope.dekSealed ?? null},
               ${sealed?.envelope.kekId ?? null}, ${sealed?.last4 ?? null},
               ${this.sql.json(tiers)}, ${disabled})

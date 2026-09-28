@@ -3,24 +3,29 @@ import { mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { query, type SDKMessage, type SDKResultMessage, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import type { Credential } from '../src/credentials.js'
 import { bundledCliPath } from '../src/harness/cliVersion.js'
 import type { ToolDecision } from '../src/harness/permissions.js'
 import { buildHarnessOptions, type HarnessRun, runHarness } from '../src/harness/run.js'
 import { ensureStateDirs } from '../src/harness/stateDirs.js'
+import { forwardForRun, PluginForwarder, type PluginsForRun } from '../src/plugins/forwarder.js'
 import type { RemotePlugin } from '../src/plugins/registry.js'
 import { testPlugin } from '../src/plugins/testConnection.js'
 import { type FakeAnthropic, type RecordedRequest, type Reply, startFakeAnthropic } from './support/fakeAnthropic.js'
 import { type FakeMcp, startFakeMcp } from './support/fakeMcp.js'
 
 // #297 end to end: the real SDK and its bundled Claude Code binary, a local
-// fake Anthropic endpoint (test/support/fakeAnthropic.ts) and a local
-// Streamable HTTP MCP server built on @modelcontextprotocol/sdk
-// (test/support/fakeMcp.ts). Nothing leaves the machine.
+// fake Anthropic endpoint (test/support/fakeAnthropic.ts), the loopback
+// plugin forwarder (src/plugins/forwarder.ts), and local Streamable HTTP MCP
+// servers built on @modelcontextprotocol/sdk (test/support/fakeMcp.ts).
+// Nothing leaves the machine.
 
 const GATEWAY_TOKEN = 'gw-plugin-e2e-token-0000111122223333'
 const PLUGIN_TOKEN = 'hs-plugin-e2e-token-4444555566667777'
+// Tools whose names Claude Code rewrites: a dotted one, and a pair that
+// collide on one harness name (files.list and files_list → files_list).
+const EXTRA_TOOLS = ['files.delete', 'files.list', 'files_list']
 
 let cliMissing: string | undefined
 try {
@@ -29,77 +34,123 @@ try {
   cliMissing = (err as Error).message
 }
 
-describe('plugin connection test (tools/list over Streamable HTTP)', () => {
+let forwarder: PluginForwarder
+beforeAll(async () => {
+  forwarder = await PluginForwarder.start()
+})
+afterAll(async () => {
+  await forwarder.close()
+})
+
+const plugin = (url: string, extra: Partial<RemotePlugin> = {}): RemotePlugin => ({
+  // A hyphenated name, as the registry allows: the SDK keeps it in the tool names.
+  name: 'my-memory',
+  url,
+  header: { name: 'Authorization', value: `Bearer ${PLUGIN_TOKEN}` },
+  toolTiers: { recall: 'read', files_list: 'read' },
+  disabledTools: ['forget', 'files.delete'],
+  ...extra,
+})
+
+/** A second server that must never be reached (a redirect or OAuth target). */
+async function trap(): Promise<FakeMcp> {
+  return startFakeMcp({ path: '/never' })
+}
+
+describe('plugin connection test, through the forwarder', () => {
   let mcp: FakeMcp
+  let other: FakeMcp
   beforeEach(async () => {
-    mcp = await startFakeMcp()
+    other = await trap()
   })
   afterEach(async () => {
     await mcp.close()
+    await other.close()
   })
 
-  it('lists the tools with their effective tiers and annotation suggestions, sending the header', async () => {
-    const result = await testPlugin(
-      {
-        name: 'my-memory',
-        url: mcp.url,
-        header: { name: 'Authorization', value: `Bearer ${PLUGIN_TOKEN}` },
-        toolTiers: { recall: 'read' },
-        disabledTools: ['forget'],
-      },
-      { timeoutMs: 5000 },
-    )
+  it('lists every tool with its harness name, tier and collisions, sending the header', async () => {
+    mcp = await startFakeMcp({ extraTools: EXTRA_TOOLS })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
     expect(result.ok).toBe(true)
     expect(result.server).toEqual({ name: 'fake-memory', version: '0.0.1' })
-    expect(result.tools.map((t) => [t.name, t.harness_name, t.tier, t.tier_source, t.suggested_tier, t.disabled])).toEqual([
+    expect(
+      result.tools.map((t) => [t.name, t.harness_name, t.tier, t.tier_source, t.suggested_tier, t.disabled]),
+    ).toEqual([
+      ['files.delete', 'mcp__my-memory__files_delete', 'outward', 'renamed', null, true],
+      ['files.list', 'mcp__my-memory__files_list', 'outward', 'collision', null, true],
+      ['files_list', 'mcp__my-memory__files_list', 'outward', 'collision', null, true],
       ['recall', 'mcp__my-memory__recall', 'read', 'explicit', 'read', false],
       ['retain', 'mcp__my-memory__retain', 'outward', 'default', null, false],
       ['forget', 'mcp__my-memory__forget', 'outward', 'default', null, true],
     ])
-    // No tool was called: the test only lists.
+    expect(result.tools.find((t) => t.name === 'files.list')?.collides_with).toEqual(['files_list'])
     expect(mcp.calls).toEqual([])
     const posts = mcp.requests.filter((r) => r.method === 'POST')
-    expect(posts.length).toBeGreaterThanOrEqual(2) // initialize (+ initialized) + tools/list
+    expect(posts.length).toBeGreaterThanOrEqual(2)
     for (const r of posts) expect(r.headers.authorization).toBe(`Bearer ${PLUGIN_TOKEN}`)
     expect(JSON.stringify(result)).not.toContain(PLUGIN_TOKEN)
+    expect(forwarder.size).toBe(0) // released
   })
 
-  it('fails with a clear reason, never echoing the secret, when the endpoint refuses', async () => {
-    const result = await testPlugin(
-      {
-        name: 'my-memory',
-        url: mcp.url.replace('/bank-1/', '/nope/'),
-        header: { name: 'Authorization', value: `Bearer ${PLUGIN_TOKEN}` },
-        toolTiers: {},
-        disabledTools: [],
-      },
-      { timeoutMs: 5000 },
-    )
+  it('connects to the checked address, not to whatever the name resolves to', async () => {
+    mcp = await startFakeMcp()
+    const port = new URL(mcp.url).port
+    // .invalid never resolves (RFC 6761): only the pinned address can reach it.
+    const url = `http://plugin.invalid:${port}/mcp/bank-1/`
+    const result = await testPlugin(plugin(url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(true)
+    expect(mcp.requests[0]?.headers.host).toBe(`plugin.invalid:${port}`)
+  })
+
+  it('fails with the status, never echoing the secret, when the endpoint refuses', async () => {
+    mcp = await startFakeMcp()
+    const result = await testPlugin(plugin(mcp.url.replace('/bank-1/', '/nope/')), '127.0.0.1', forwarder, {
+      timeoutMs: 5000,
+    })
     expect(result.ok).toBe(false)
     expect(result.detail).toMatch(/404/)
     expect(JSON.stringify(result)).not.toContain(PLUGIN_TOKEN)
   })
 
   it('times out', async () => {
-    const result = await testPlugin(
-      { name: 'slow', url: 'http://127.0.0.1:9/mcp', toolTiers: {}, disabledTools: [] },
-      { timeoutMs: 300, fetch: () => new Promise(() => {}) },
-    )
+    mcp = await startFakeMcp()
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, {
+      timeoutMs: 300,
+      fetch: () => new Promise(() => {}),
+    })
     expect(result).toMatchObject({ ok: false, detail: expect.stringMatching(/timed out/) as unknown })
   })
 
-  it('does not follow a redirect (the egress check applies to the URL it was given)', async () => {
-    const result = await testPlugin(
-      { name: 'redirect', url: mcp.url, toolTiers: {}, disabledTools: [] },
-      {
-        timeoutMs: 2000,
-        fetch: (url, init) => {
-          expect(init?.redirect).toBe('error')
-          return fetch(url, init)
-        },
+  it('does not follow a redirect: a 307 to another origin fails, and that origin is never contacted', async () => {
+    mcp = await startFakeMcp({
+      intercept: (_req, res) => {
+        res.writeHead(307, { location: `${other.url.replace('/never', '')}/mcp/bank-1/` }).end()
+        return true
       },
-    )
-    expect(result.ok).toBe(true)
+    })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/redirect/)
+    expect(mcp.requests.length).toBeGreaterThan(0)
+    expect(other.requests).toEqual([])
+  })
+
+  it('does not start OAuth discovery: a 401 with resource_metadata fails, and the metadata URL is never fetched', async () => {
+    mcp = await startFakeMcp({
+      intercept: (_req, res) => {
+        res
+          .writeHead(401, {
+            'www-authenticate': `Bearer resource_metadata="${other.url.replace('/never', '')}/.well-known/oauth-protected-resource"`,
+          })
+          .end()
+        return true
+      },
+    })
+    const result = await testPlugin(plugin(mcp.url), '127.0.0.1', forwarder, { timeoutMs: 5000 })
+    expect(result.ok).toBe(false)
+    expect(result.detail).toMatch(/401/)
+    expect(other.requests).toEqual([])
+    expect(JSON.stringify(result)).not.toContain(PLUGIN_TOKEN)
   })
 })
 
@@ -108,29 +159,31 @@ describe.skipIf(cliMissing !== undefined)(
   () => {
     let fake: FakeAnthropic
     let mcp: FakeMcp
+    let other: FakeMcp
     let script: (request: RecordedRequest) => Reply
     let stateDir: string
+    let forwarded: PluginsForRun | undefined
 
     beforeEach(async () => {
       stateDir = await mkdtemp(path.join(os.tmpdir(), 'plugins-e2e-'))
       await ensureStateDirs({ stateDir })
       fake = await startFakeAnthropic((r) => script(r))
-      mcp = await startFakeMcp()
+      other = await trap()
+      mcp = await startFakeMcp({ extraTools: EXTRA_TOOLS })
     })
     afterEach(async () => {
+      forwarded?.release()
+      forwarded = undefined
       await fake.close()
       await mcp.close()
+      await other.close()
     })
 
     const gateway = (): Credential => ({ kind: 'gateway', baseUrl: fake.url, secret: GATEWAY_TOKEN })
-    const plugin = (): RemotePlugin => ({
-      // A hyphenated name, as the registry allows: the SDK keeps it in the tool names.
-      name: 'my-memory',
-      url: mcp.url,
-      header: { name: 'Authorization', value: `Bearer ${PLUGIN_TOKEN}` },
-      toolTiers: { recall: 'read' },
-      disabledTools: ['forget'],
-    })
+    const forward = (p: RemotePlugin) => {
+      forwarded = forwardForRun({ plugins: [{ plugin: p, address: '127.0.0.1' }], problems: [] }, forwarder)
+      return forwarded.plugins
+    }
     const lastContent = (r: RecordedRequest) => JSON.stringify(r.body?.messages?.at(-1)?.content ?? '')
     const offered = () =>
       [...new Set(fake.messageCalls().flatMap((c) => (c.body?.tools ?? []).map((t) => t.name)))].sort()
@@ -147,8 +200,12 @@ describe.skipIf(cliMissing !== undefined)(
       if (!result) throw new Error(`no result message; stderr: ${stderr.join('')}`)
       return { messages, result, stderr }
     }
+    const initOf = (messages: SDKMessage[]) => {
+      const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
+      return init && 'mcp_servers' in init ? init.mcp_servers : undefined
+    }
 
-    it('offers the plugin tools namespaced, minus the disabled one, and runs a read-tier tool', async () => {
+    it('offers the plugin tools namespaced, minus disabled and colliding ones, and runs a read-tier tool', async () => {
       script = (r) =>
         lastContent(r).includes('tool_result')
           ? { text: 'Found it.' }
@@ -159,25 +216,20 @@ describe.skipIf(cliMissing !== undefined)(
         credential: gateway(),
         prompt: 'What do you remember about PETG?',
         model: 'claude-sonnet-4-5',
-        remotePlugins: [plugin()],
+        remotePlugins: forward(plugin(mcp.url)),
         onDecision: (name, d) => decisions.push([name, d]),
       })
       expect(result).toMatchObject({ subtype: 'success', result: 'Found it.' })
+      // forget and files.delete are disabled; files.list/files_list collide, so both are hidden.
       expect(offered()).toEqual(['mcp__my-memory__recall', 'mcp__my-memory__retain'])
       expect(decisions).toEqual([['mcp__my-memory__recall', { decision: 'allow', tier: 'read' }]])
       expect(mcp.calls).toEqual(['recall:PETG settings'])
-      // The tool result reached the model.
       expect(lastContent(fake.messageCalls().at(-1)!)).toContain('remembered: PETG settings')
-      // The ${VAR} header reference was expanded by Claude Code: the MCP
-      // server got the real value on every request.
+      // The forwarder added the header on every request to the plugin.
       const posts = mcp.requests.filter((r) => r.method === 'POST')
       expect(posts.length).toBeGreaterThan(0)
       for (const r of posts) expect(r.headers.authorization).toBe(`Bearer ${PLUGIN_TOKEN}`)
-      // The init message reports the server as connected.
-      const init = messages.find((m) => m.type === 'system' && m.subtype === 'init')
-      expect(init && 'mcp_servers' in init ? init.mcp_servers : undefined).toEqual([
-        { name: 'my-memory', status: 'connected', source: 'dynamic' },
-      ])
+      expect(initOf(messages)).toEqual([{ name: 'my-memory', status: 'connected', source: 'dynamic' }])
       expect(JSON.stringify(messages)).not.toContain(PLUGIN_TOKEN)
       expect(stderr.join('\n')).not.toContain(PLUGIN_TOKEN)
     })
@@ -193,7 +245,7 @@ describe.skipIf(cliMissing !== undefined)(
         credential: gateway(),
         prompt: 'Remember that I like PETG',
         model: 'claude-sonnet-4-5',
-        remotePlugins: [plugin()],
+        remotePlugins: forward(plugin(mcp.url)),
         onDecision: (name, d) => decisions.push([name, d]),
       })
       expect(result.subtype).toBe('success')
@@ -205,7 +257,50 @@ describe.skipIf(cliMissing !== undefined)(
       expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/needs a human approval in the ScadBuddy UI/)
     })
 
-    it('never puts the header value on the Claude Code command line', async () => {
+    it('cannot run a colliding tool through its read-tier harness name', async () => {
+      // files_list is tiered read, but files.list shares its harness name, so both are hidden.
+      script = (r) =>
+        lastContent(r).includes('tool_result')
+          ? { text: 'No such tool.' }
+          : { toolUse: { name: 'mcp__my-memory__files_list', input: { text: 'x' } } }
+      const { result } = await collect({
+        paths: { stateDir },
+        credential: gateway(),
+        prompt: 'List files',
+        model: 'claude-sonnet-4-5',
+        remotePlugins: forward(plugin(mcp.url)),
+      })
+      expect(result.subtype).toBe('success')
+      expect(mcp.calls).toEqual([])
+      expect(lastContent(fake.messageCalls().at(-1)!)).toMatch(/"is_error":true/)
+    })
+
+    it('a plugin endpoint that redirects is not connected, and the redirect target is never contacted', async () => {
+      const redirecting = await startFakeMcp({
+        intercept: (_req, res) => {
+          res.writeHead(307, { location: `${other.url.replace('/never', '')}/mcp/bank-1/` }).end()
+          return true
+        },
+      })
+      try {
+        script = () => ({ text: 'ok' })
+        const { messages } = await collect({
+          paths: { stateDir },
+          credential: gateway(),
+          prompt: 'hi',
+          model: 'claude-sonnet-4-5',
+          maxTurns: 1,
+          remotePlugins: forward(plugin(redirecting.url)),
+        })
+        expect(initOf(messages)?.find((s) => s.name === 'my-memory')?.status).not.toBe('connected')
+        expect(redirecting.requests.length).toBeGreaterThan(0)
+        expect(other.requests).toEqual([])
+      } finally {
+        await redirecting.close()
+      }
+    })
+
+    it('never puts the plugin endpoint or its header on the Claude Code command line', async () => {
       script = () => ({ text: 'ok' })
       const options = buildHarnessOptions({
         paths: { stateDir },
@@ -213,7 +308,7 @@ describe.skipIf(cliMissing !== undefined)(
         prompt: 'hi',
         model: 'claude-sonnet-4-5',
         maxTurns: 1,
-        remotePlugins: [plugin()],
+        remotePlugins: forward(plugin(mcp.url)),
       })
       let argv: string[] = []
       options.spawnClaudeCodeProcess = (spawnOptions) => {
@@ -228,14 +323,14 @@ describe.skipIf(cliMissing !== undefined)(
       const messages: SDKMessage[] = []
       for await (const m of query({ prompt: 'hi', options })) messages.push(m)
       expect(messages.some((m) => m.type === 'result')).toBe(true)
-      const config = argv[argv.indexOf('--mcp-config') + 1] ?? ''
-      expect(config).toContain('"my-memory"')
-      expect(config).toContain('${SCADBUDDY_PLUGIN_0_HEADER}')
-      expect(argv.join(' ')).not.toContain(PLUGIN_TOKEN)
-      // ...and the server still received it.
-      for (const r of mcp.requests.filter((q) => q.method === 'POST')) {
-        expect(r.headers.authorization).toBe(`Bearer ${PLUGIN_TOKEN}`)
+      const config = JSON.parse(argv[argv.indexOf('--mcp-config') + 1] ?? '{}') as {
+        mcpServers: Record<string, { url: string; headers?: unknown }>
       }
+      expect(config.mcpServers['my-memory']?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\/[A-Za-z0-9_-]{24}$/)
+      expect(config.mcpServers['my-memory']?.headers).toBeUndefined()
+      expect(argv.join(' ')).not.toContain(PLUGIN_TOKEN)
+      expect(argv.join(' ')).not.toContain(mcp.url)
+      expect(Object.values(options.env ?? {}).join(' ')).not.toContain(PLUGIN_TOKEN)
     })
   },
 )

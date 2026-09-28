@@ -10,6 +10,7 @@ import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
+import { PluginForwarder } from './plugins/forwarder.js'
 import { PluginStore } from './plugins/registry.js'
 import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
@@ -79,6 +80,9 @@ void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
 const plugins = database ? new PluginStore(database.sql) : undefined
+// Plugin traffic (connection tests now; harness runs once a SessionManager is
+// built here, #471) goes through this loopback forwarder (plugins/forwarder.ts).
+const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
@@ -88,6 +92,7 @@ const app = createApp({
   kek,
   credentials,
   plugins,
+  pluginForwarder,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -115,8 +120,10 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     void shutdown({
-      closeServer: () =>
-        new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve()))),
+      closeServer: async () => {
+        await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
+        await pluginForwarder.close()
+      },
       closeDatabase: database ? () => database.close() : undefined,
       timeoutMs: 10_000,
     }).then((result) => {

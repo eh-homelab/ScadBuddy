@@ -1,9 +1,11 @@
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import { randomBytes } from 'node:crypto'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp } from '../src/app.js'
 import type { Database } from '../src/db.js'
 import type { HarnessRun } from '../src/harness/run.js'
 import { originPolicy } from '../src/http/origins.js'
+import { forwardForRun, PluginForwarder } from '../src/plugins/forwarder.js'
 import { loadEnabledPlugins, PluginError, PluginStore } from '../src/plugins/registry.js'
 import type { PluginTest } from '../src/plugins/testConnection.js'
 import type { PluginView } from '../src/routes/plugins.js'
@@ -140,14 +142,24 @@ describe.skipIf(!TEST_DATABASE_URL)(
       })
 
       it('loads only enabled plugins whose endpoint passes the egress check now', async () => {
-        await store.create({ name: 'good', url: 'https://good.example/mcp', enabled: true }, kek)
-        await store.create({ name: 'moved', url: 'https://moved.example/mcp', enabled: true }, kek)
-        await store.create({ name: 'off', url: 'https://off.example/mcp' }, kek)
+        for (const name of ['good', 'moved', 'off']) {
+          await store.create({ name, url: `https://${name}.example/mcp` }, kek)
+        }
+        await store.update('good', { enabled: true }, kek)
+        await store.update('moved', { enabled: true }, kek)
         const loaded = await loadEnabledPlugins(store, kek, (host) =>
           Promise.resolve(host === 'moved.example' ? ['169.254.169.254'] : ['203.0.113.10']),
         )
-        expect(loaded.plugins.map((p) => p.name)).toEqual(['good'])
+        // With the address the check passed, for the forwarder to connect to.
+        expect(loaded.plugins.map((p) => [p.plugin.name, p.address])).toEqual([['good', '203.0.113.10']])
         expect(loaded.problems).toEqual([expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/)])
+      })
+
+      it('registers plugins disabled: enabled: true is refused at create', async () => {
+        await expect(
+          store.create({ name: 'mem', url: 'https://hs.example/mcp', enabled: true }, kek),
+        ).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/review its tools, then enable/) as unknown })
+        expect(await store.list()).toEqual([])
       })
     })
 
@@ -216,6 +228,7 @@ describe.skipIf(!TEST_DATABASE_URL)(
         // The test got the opened plugin (with its header), the route did not return it.
         expect(testPlugin).toHaveBeenCalledWith(
           expect.objectContaining({ name: 'hindsight', header: { name: 'Authorization', value: `Bearer ${TOKEN}` } }),
+          '203.0.113.10',
         )
 
         for (const body of bodies) expect(body).not.toContain(TOKEN)
@@ -288,29 +301,65 @@ describe.skipIf(!TEST_DATABASE_URL)(
     })
 
     describe('the session manager', () => {
-      it('loads the enabled plugins into each turn and redacts their header values from the event log', async () => {
+      let forwarder: PluginForwarder
+      beforeEach(async () => {
+        forwarder = await PluginForwarder.start()
+      })
+      afterEach(async () => {
+        await forwarder.close()
+      })
+
+      it('loads the enabled plugins into each turn through the forwarder, reports the unavailable ones, and redacts secrets', async () => {
         await store.create(
-          { name: 'hindsight', url: 'https://hs.example/mcp/', enabled: true, secret: `Bearer ${TOKEN}`, tool_tiers: { recall: 'read' } },
+          { name: 'hindsight', url: 'https://hs.example/mcp/', secret: `Bearer ${TOKEN}`, tool_tiers: { recall: 'read' } },
           kek,
         )
+        await store.update('hindsight', { enabled: true }, kek)
+        await store.create({ name: 'moved', url: 'https://moved.example/mcp/' }, kek)
+        await store.update('moved', { enabled: true }, kek)
         await store.create({ name: 'off', url: 'https://off.example/mcp/' }, kek)
-        const { runner, runs } = scriptedRunner(() => ({ reply: `the token is Bearer ${TOKEN}` }))
+        // The "model" echoes the BARE token, without its Bearer prefix.
+        const scripted = scriptedRunner(() => ({ reply: `the token is ${TOKEN}` }))
+        const runs: HarnessRun[] = []
+        const runner = (run: HarnessRun): AsyncIterable<SDKMessage> =>
+          (async function* () {
+            runs.push(run)
+            // Claude Code's init: the hindsight server failed to connect.
+            yield {
+              type: 'system',
+              subtype: 'init',
+              mcp_servers: [{ name: 'hindsight', status: 'failed' }],
+            } as unknown as SDKMessage
+            yield* scripted.runner(run)
+          })()
+        const resolve = (host: string) => Promise.resolve(host === 'moved.example' ? ['169.254.169.254'] : ['203.0.113.10'])
         const m = manager({
           sql: db.sql,
           paths: await tempPaths(),
           run: runner,
-          remotePlugins: () => loadEnabledPlugins(store, kek, PUBLIC),
+          remotePlugins: async () => forwardForRun(await loadEnabledPlugins(store, kek, resolve), forwarder),
         })
         const { session, turn } = await m.start(agentA, { origin: 'mcp', prompt: 'hi' })
         await turn!.done
-        const run: HarnessRun | undefined = runs[0]
-        expect(run?.remotePlugins?.map((p) => [p.name, p.header?.value, p.toolTiers])).toEqual([
-          ['hindsight', `Bearer ${TOKEN}`, { recall: 'read' }],
+        const run = runs[0]
+        expect(run?.remotePlugins?.map((p) => [p.name, p.toolTiers])).toEqual([['hindsight', { recall: 'read' }]])
+        // Claude Code gets the forwarder's loopback URL, never the endpoint or the secret.
+        expect(run?.remotePlugins?.[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/p\//)
+        expect(JSON.stringify(run?.remotePlugins)).not.toContain(TOKEN)
+        // Released when the turn ended.
+        expect(forwarder.size).toBe(0)
+
+        const logged = (
+          await db.sql<{ event: string }[]>`
+            SELECT event FROM ai_session_events WHERE session_id = ${session.id} ORDER BY seq`
+        ).map((e) => JSON.parse(e.event) as { type: string; code?: string; message?: string })
+        const unavailable = logged.filter((e) => e.type === 'error' && e.code === 'plugin_unavailable')
+        expect(unavailable.map((e) => e.message)).toEqual([
+          expect.stringMatching(/plugin moved was not loaded: .*169\.254\.169\.254/),
+          expect.stringMatching(/plugin hindsight is not available in this turn: its MCP server is failed/),
         ])
-        const logged = await db.sql<{ event: string }[]>`
-          SELECT event FROM ai_session_events WHERE session_id = ${session.id}`
-        expect(logged.length).toBeGreaterThan(0)
-        expect(logged.map((e) => e.event).join('\n')).not.toContain(TOKEN)
+        expect(JSON.stringify(logged)).toContain('[redacted]')
+        expect(JSON.stringify(logged)).not.toContain(TOKEN)
       })
     })
   },

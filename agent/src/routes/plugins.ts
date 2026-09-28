@@ -40,7 +40,8 @@ export type PluginRouteDeps = {
   remoteAddress: RemoteAddress
   origins: OriginPolicy
   resolveHost?: Resolver
-  testPlugin: (plugin: RemotePlugin) => Promise<PluginTest>
+  /** Runs the connection test against the checked `address` (testConnection.ts). */
+  testPlugin: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
 }
 
 export type PluginView = {
@@ -216,13 +217,16 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
         throw err
       }
       if (!plugin) return c.json({ detail: `no plugin named "${name}"` }, 404)
+      let address: string | undefined
       try {
         // Again at test time: the name may resolve differently than at save.
-        await assertEndpointAllowed(plugin.url, resolveHost)
+        // The forwarder connects to exactly the address checked here.
+        ;[address] = await assertEndpointAllowed(plugin.url, resolveHost)
       } catch (err) {
         return refusal(c, err)
       }
-      return c.json(await deps.testPlugin(plugin))
+      if (address === undefined) return c.json({ detail: 'url host resolves to no address' }, 400)
+      return c.json(await deps.testPlugin(plugin, address))
     } finally {
       testing.delete(name)
     }

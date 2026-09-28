@@ -13,7 +13,8 @@ import { buildQueryOptions, type HarnessPaths } from './options.js'
 import { type DecisionListener, makeCanUseTool, makePreToolUseHook, type TierResolver } from './permissions.js'
 import { assertPluginAllowed } from './plugins.js'
 import { type LineRedactor, lineRedactor } from './redactLines.js'
-import { pluginTierResolver, type RemotePlugin, toolPrefix } from '../plugins/registry.js'
+import type { HarnessPlugin } from '../plugins/forwarder.js'
+import { harnessToolName, pluginTierResolver, toolPrefix } from '../plugins/registry.js'
 
 // The harness loop (issue #255): one `query()` of the Claude Agent SDK per turn,
 // built on buildQueryOptions() so every query keeps `tools: []`,
@@ -44,7 +45,8 @@ import { pluginTierResolver, type RemotePlugin, toolPrefix } from '../plugins/re
 //     paths (#297, #299), each vetted by plugins.ts: a plugin that would start
 //     a process of its own (command hook, stdio MCP server, LSP server,
 //     monitor) is refused, since that process would inherit the credential env;
-//   - registered remote MCP plugins (#297, `remotePlugins`), as Streamable
+//   - registered remote MCP plugins (#297, `remotePlugins`, via the loopback
+//     forwarder in src/plugins/forwarder.ts), as Streamable
 //     HTTP servers with their own tier maps (remotePluginOptions below);
 //   - Claude Code's stderr, buffered to whole lines and redacted of the
 //     credential (redactLines.ts), so a secret split across chunks is caught.
@@ -76,13 +78,14 @@ export type HarnessRun = {
    */
   pluginPaths?: string[]
   /**
-   * Registered remote MCP plugins (#297, src/plugins/registry.ts), each loaded
-   * as an SDK `{ type: 'http' }` server named after the plugin. Their tiers
-   * come from the plugin's own `tool_tiers` (unlisted: outward), ahead of
-   * `tierOf`; their disabled tools go in `disallowedTools`. See
-   * `remotePluginOptions` for how the header value is kept off the command line.
+   * Registered remote MCP plugins (#297), each already registered with the
+   * loopback forwarder (src/plugins/forwarder.ts `forwardForRun`), so `url` is
+   * the forwarder's and carries no secret. Each is loaded as an SDK
+   * `{ type: 'http' }` server named after the plugin. Their tiers come from the
+   * plugin's own `tool_tiers` (unlisted: outward), ahead of `tierOf`; their
+   * disabled tools go in `disallowedTools`.
    */
-  remotePlugins?: RemotePlugin[]
+  remotePlugins?: HarnessPlugin[]
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
   onDecision?: DecisionListener
@@ -120,62 +123,46 @@ export function credentialEnv(credential: Credential): Record<string, string> {
   }
 }
 
-/** Environment variable carrying the header value of the `index`-th remote plugin. */
-export function pluginHeaderEnv(index: number): string {
-  return `SCADBUDDY_PLUGIN_${index}_HEADER`
-}
-
 export class PluginConfigError extends Error {
   override name = 'PluginConfigError'
 }
 
 /**
- * The SDK options for the remote plugins: `mcpServers` entries, the
- * environment carrying their header values, and `disallowedTools`.
+ * The SDK options for the remote plugins: `mcpServers` entries and
+ * `disallowedTools`.
  *
- * - `{ type: 'http', url, headers }` is the SDK's `McpHttpServerConfig`
- *   (sdk.d.ts 0.3.283), the Streamable HTTP transport (spec D5); `'sse'` is the
- *   legacy transport D5 rejects and is never produced.
- * - HEADER VALUES STAY OFF THE COMMAND LINE. The SDK hands every non-SDK MCP
- *   server to Claude Code as `--mcp-config <json>` on its argv (read in
- *   sdk.mjs 0.3.283: `j.push("--mcp-config", ...({mcpServers: D}))`), where
- *   `/proc/<pid>/cmdline` shows it. So the header is written as
- *   `${SCADBUDDY_PLUGIN_<i>_HEADER}` and the value goes in the query's `env`,
- *   next to the Claude credential; Claude Code expands the reference when it
- *   connects. MEASURED in test/plugins.e2e.test.ts: the fake MCP server
- *   receives the value, and the argv the SDK builds does not contain it.
- *   Values come from the env, so a stored value is never expanded again, and
- *   registry URLs refuse `$` (registry.ts), so nothing the operator types can
- *   reference the credential variables.
+ * - `{ type: 'http', url }` is the SDK's `McpHttpServerConfig` (sdk.d.ts
+ *   0.3.283), the Streamable HTTP transport (spec D5); `'sse'` is the legacy
+ *   transport D5 rejects and is never produced. The URL is the loopback
+ *   forwarder's, and no header is configured: the forwarder adds the plugin's
+ *   own. The SDK passes this config on Claude Code's argv (`--mcp-config`,
+ *   sdk.mjs 0.3.283), where the forwarder token is all there is to see.
  * - `alwaysLoad: true`: "all tools from this server are always included in
  *   the prompt and never deferred behind tool search ... this also blocks
  *   startup until the server is connected (capped at the standard 5s connect
  *   timeout)" (sdk.d.ts). Without it MCP startup is non-blocking and the first
  *   turn may not see the plugin's tools.
  * - disabled tools: `disallowedTools` "will be removed from the model's
- *   context and cannot be used" (sdk.d.ts), measured in the e2e test.
+ *   context and cannot be used" (sdk.d.ts), by the name Claude Code gives the
+ *   tool (`harnessToolName`); the forwarder also hides them from tools/list.
  */
 export function remotePluginOptions(
-  plugins: readonly RemotePlugin[],
+  plugins: readonly HarnessPlugin[],
   taken: ReadonlySet<string>,
-): { mcpServers: Record<string, McpHttpServerConfig>; env: Record<string, string>; disallowedTools: string[] } {
+): { mcpServers: Record<string, McpHttpServerConfig>; disallowedTools: string[] } {
   const mcpServers: Record<string, McpHttpServerConfig> = {}
-  const env: Record<string, string> = {}
   const disallowedTools: string[] = []
-  plugins.forEach((plugin, index) => {
+  for (const plugin of plugins) {
     if (taken.has(plugin.name) || Object.hasOwn(mcpServers, plugin.name)) {
       throw new PluginConfigError(`MCP server name "${plugin.name}" is used twice`)
     }
-    const server: McpHttpServerConfig = { type: 'http', url: plugin.url, alwaysLoad: true }
-    if (plugin.header) {
-      const variable = pluginHeaderEnv(index)
-      env[variable] = plugin.header.value
-      server.headers = { [plugin.header.name]: `\${${variable}}` }
+    mcpServers[plugin.name] = { type: 'http', url: plugin.url, alwaysLoad: true }
+    for (const tool of plugin.disabledTools) {
+      const name = `${toolPrefix(plugin.name)}${harnessToolName(tool)}`
+      if (!disallowedTools.includes(name)) disallowedTools.push(name)
     }
-    mcpServers[plugin.name] = server
-    for (const tool of plugin.disabledTools) disallowedTools.push(`${toolPrefix(plugin.name)}${tool}`)
-  })
-  return { mcpServers, env, disallowedTools }
+  }
+  return { mcpServers, disallowedTools }
 }
 
 /** The tier resolver a run uses: its plugins' tiers first, then `run.tierOf`. */
@@ -208,7 +195,6 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
     ...base,
     env: {
       ...base.env,
-      ...remote.env,
       ...credentialEnv(run.credential),
       CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
     },
@@ -239,7 +225,7 @@ function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor
   let stderr: LineRedactor | undefined
   if (run.stderr) {
     // Line-buffered: a secret split across two chunks is still one line here.
-    const redactor = lineRedactor([run.credential.secret, ...Object.values(remote.env)], run.stderr)
+    const redactor = lineRedactor([run.credential.secret], run.stderr)
     stderr = redactor
     options.stderr = (data) => redactor.write(data)
   }

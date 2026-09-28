@@ -1,4 +1,4 @@
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http'
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js'
@@ -17,13 +17,27 @@ import { z } from 'zod'
 
 export type FakeMcp = {
   url: string
-  requests: { method: string; headers: IncomingHttpHeaders }[]
+  requests: { method: string; path: string; headers: IncomingHttpHeaders }[]
   calls: string[]
   close(): Promise<void>
 }
 
-function buildServer(calls: string[]): McpServer {
+export type FakeMcpOptions = {
+  path?: string
+  /** More tools, each echoing `<name>:<text>`; for the naming tests (dots, collisions). */
+  extraTools?: string[]
+  /** Answer a request yourself (redirects, 401s); return true when handled. */
+  intercept?: (req: IncomingMessage, res: ServerResponse) => boolean
+}
+
+function buildServer(calls: string[], extraTools: readonly string[]): McpServer {
   const server = new McpServer({ name: 'fake-memory', version: '0.0.1' })
+  for (const name of extraTools) {
+    server.registerTool(name, { description: `Extra tool ${name}`, inputSchema: { text: z.string() } }, ({ text }) => {
+      calls.push(`${name}:${text}`)
+      return { content: [{ type: 'text', text: `${name} ran` }] }
+    })
+  }
   server.registerTool(
     'recall',
     {
@@ -51,11 +65,13 @@ function buildServer(calls: string[]): McpServer {
   return server
 }
 
-export async function startFakeMcp(path = '/mcp/bank-1/'): Promise<FakeMcp> {
+export async function startFakeMcp(options: FakeMcpOptions = {}): Promise<FakeMcp> {
+  const path = options.path ?? '/mcp/bank-1/'
   const requests: FakeMcp['requests'] = []
   const calls: string[] = []
   const http: Server = createServer((req, res) => {
-    requests.push({ method: req.method ?? 'GET', headers: req.headers })
+    requests.push({ method: req.method ?? 'GET', path: req.url ?? '', headers: req.headers })
+    if (options.intercept?.(req, res)) return
     if ((req.url ?? '').split('?')[0] !== path) {
       res.writeHead(404).end()
       return
@@ -65,7 +81,7 @@ export async function startFakeMcp(path = '/mcp/bank-1/'): Promise<FakeMcp> {
       res.writeHead(405, { allow: 'POST' }).end()
       return
     }
-    const server = buildServer(calls)
+    const server = buildServer(calls, options.extraTools ?? [])
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
