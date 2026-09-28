@@ -148,7 +148,8 @@ describe.skipIf(skip !== undefined)(`sessions against the real SDK${skip ? ` (sk
       'assistant.text.done',
       'session.status',
     ])
-  })
+    // Three Claude Code runs; past vitest's 5 s default on a loaded machine.
+  }, 60_000)
 
   it('interrupts a running turn through the abort signal', async () => {
     script = () => ({ hang: true })

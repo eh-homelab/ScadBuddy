@@ -9,6 +9,8 @@ import { api, ApiError } from '../api/client'
 import type { ConnectionTest, Settings, SettingsUpdate, SidebarLink } from '../api/types'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { McpOidcSettings } from '../components/McpOidcSettings'
+import { PluginPackagesPanel } from '../components/settings/PluginPackages'
+import { RemotePluginsPanel } from '../components/settings/RemotePlugins'
 import { McpTokensSection } from '../components/McpTokensSection'
 import { Button } from '../components/ui/Button'
 import { Dialog } from '../components/ui/Dialog'
@@ -967,6 +969,17 @@ export function SettingsPage() {
                 <p className="text-[13px]">MCP sign-in (OIDC)</p>
                 {/* Saved on its own: the agent service owns it, not the backend's settings. */}
                 <McpOidcSettings />
+              </div>
+            )}
+            {/* Each action is its own request, applied at once. */}
+            {ai.available && (
+              <div>
+                <p className="text-[13px]">Assistant plugins</p>
+                <p className="mt-0.5 text-[12px] text-muted">
+                  What the assistant can load besides ScadBuddy&rsquo;s own tools. Each change applies at once.
+                </p>
+                <PluginPackagesPanel />
+                <RemotePluginsPanel />
               </div>
             )}
           </Section>

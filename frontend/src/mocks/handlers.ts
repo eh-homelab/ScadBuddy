@@ -56,6 +56,7 @@ import {
 } from '../lib/modelFolder'
 import { resolveOptions } from '../lib/printOptions'
 import { keychainGlb } from './glb'
+import { aiPluginHandlers, resetAiPluginMocks } from './aiPlugins'
 import { choicesView } from './choices'
 import * as fixtures from './fixtures'
 
@@ -200,6 +201,7 @@ function runJob(jobId: string): void {
 
 /** Reset every mutable fixture. Call between tests. */
 export function resetMockState(): void {
+  resetAiPluginMocks()
   resetMcpOidcMock()
   state.models = fixtures.models.map((m) => ({ ...m }))
   state.schemas = { ...fixtures.schemas }
@@ -1059,6 +1061,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's plugin routes (#297), under /api/v1/ai.
+  ...aiPluginHandlers,
   // The agent service's routes (#251); the rest of this list is the backend.
   ...mcpTokenHandlers,
   ...mcpOidcHandlers,

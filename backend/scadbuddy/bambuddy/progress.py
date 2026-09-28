@@ -22,50 +22,28 @@ by which stage produced it, so it stays right when Bambuddy rewords a message.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+import time
 from collections import OrderedDict
 from typing import Literal
 
+import psycopg
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
+from scadbuddy.bambuddy.linking import link_by_hash, link_item, link_run
 from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, SlicedCopy
+from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.stages import Stage, stage_of
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, SlicedCopy
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
 
+logger = logging.getLogger(__name__)
+
 QUEUE_PATH = "/queue"
-
-#: Normalised across both routes. ``unknown`` is a real state: Bambuddy's status
-#: vocabularies differ per object and a new value must render as "still going" rather
-#: than silently as "done", which would stop the polling on a print that is still live.
-Stage = Literal["running", "queued", "done", "failed", "cancelled", "unknown"]
-
-#: Bambuddy's own words for a finished state, per object. Anything outside these is
-#: treated as still in flight.
-_DONE = {"completed", "complete", "done", "finished", "success", "succeeded", "printed"}
-_FAILED = {"failed", "error", "errored"}
-_CANCELLED = {"cancelled", "canceled", "aborted"}
-_QUEUED = {"queued", "pending", "waiting", "scheduled"}
-
-
-def stage_of(status: str | None) -> Stage:
-    """Map one of Bambuddy's status strings onto the shared vocabulary."""
-    if not status:
-        return "unknown"
-    value = status.strip().lower()
-    if value in _DONE:
-        return "done"
-    if value in _FAILED:
-        return "failed"
-    if value in _CANCELLED:
-        return "cancelled"
-    if value in _QUEUED:
-        return "queued"
-    if value in {"running", "printing", "in_progress", "slicing", "dispatching"}:
-        return "running"
-    return "unknown"
 
 
 class CopyProgress(BaseModel):
@@ -252,8 +230,106 @@ def from_queue(
     )
 
 
+#: How long after an output's archive scan by hash (#306) a later progress read skips
+#: it. Kept in memory: after a restart the next read scans once more, which is harmless.
+HASH_SCAN_INTERVAL = 600.0
+_last_hash_scan: dict[str, float] = {}
+
+#: What recording a link can fail with. Linking is a side effect of the progress read:
+#: none of these may fail the read, nor another plate's read beside it (#522 review).
+_LINK_ERRORS = (ApiError, psycopg.Error, DatabaseRequiredError)
+
+
+def _claim_hash_scan(output_id: str, now: float) -> bool:
+    """Claim an output's hash scan; False when one ran within HASH_SCAN_INTERVAL.
+
+    Entries past the interval are dropped here, so the map holds only recent scans.
+    """
+    last = _last_hash_scan.get(output_id)
+    if last is not None and now - last < HASH_SCAN_INTERVAL:
+        return False
+    for stale in [key for key, at in _last_hash_scan.items() if now - at >= HASH_SCAN_INTERVAL]:
+        del _last_hash_scan[stale]
+    _last_hash_scan[output_id] = now
+    return True
+
+
+class _Linker:
+    """Records the archives a progress read comes across (#306): the one a queue item
+    reports, or, when an item is gone, those found by the sliced file's hash.
+
+    Best effort: a failure is logged and the read goes on as if nothing were linked.
+    """
+
+    def __init__(
+        self,
+        client: BambuddyClient,
+        meta: OutputMeta,
+        uploads: BambuddyUploadStore,
+        links: PrintLinkStore,
+    ) -> None:
+        self.client = client
+        self.meta = meta
+        self.uploads = uploads
+        self.links = links
+        self._searched = False
+
+    async def item(self, item: QueueItem, plate_id: int | None) -> None:
+        try:
+            await link_item(self.links, self.meta.id, item, plate_id=plate_id)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a queue item's archive",
+                extra={"output_id": self.meta.id, "queue_item_id": item.id},
+            )
+
+    async def gone(self, queue_item_id: int) -> None:
+        try:
+            await self._gone(queue_item_id)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a gone queue item's archives",
+                extra={"output_id": self.meta.id, "queue_item_id": queue_item_id},
+            )
+
+    async def _gone(self, queue_item_id: int) -> None:
+        if self._searched:
+            return
+        # An item linked before it went needs nothing; another plate's gone item still
+        # may, so this item's own link must not spend the read's one scan (#522 review).
+        known = await self.links.for_output(self.meta.id)
+        if any(link.queue_item_id == queue_item_id for link in known) or self._searched:
+            return
+        # Once per read, however many plates' items are gone: one scan covers them all.
+        # Plates' tasks run concurrently, but nothing awaits between the re-check above
+        # and this assignment, so only one of them gets past it.
+        self._searched = True
+        # And at most once per output every HASH_SCAN_INTERVAL: a settled print is read
+        # again whenever its dialog opens, and each scan pages Bambuddy's archive list.
+        if not _claim_hash_scan(self.meta.id, time.monotonic()):
+            return
+        await link_by_hash(self.client, self.uploads, self.links, self.meta)
+
+    async def run(self, run: PipelineRun) -> None:
+        try:
+            # A gone entry takes the same once-per-read, throttled scan by hash as a
+            # gone queue item does on the slice-and-queue route (#522 review).
+            await link_run(self.client, self.links, self.meta.id, run, gone=self.gone)
+        except _LINK_ERRORS:
+            logger.exception(
+                "could not link a pipeline run's archives",
+                extra={"output_id": self.meta.id, "pipeline_run_id": run.id},
+            )
+
+
 async def _queued_progress(
-    client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+    client: BambuddyClient,
+    slice_job_id: int | None,
+    queue_item_id: int | None,
+    url: str,
+    *,
+    linker: _Linker | None = None,
+    plate_id: int | None = None,
 ) -> PrintProgress:
     """One slice job and the queue item it became, read off Bambuddy."""
     slice_job = None
@@ -266,9 +342,11 @@ async def _queued_progress(
         except ApiError as error:
             if error.status != 404:
                 raise
-            # Bambuddy drops a queue entry once it has been dispatched and archived;
-            # that is not a failure, and reporting one would contradict the print
-            # the user can see running.
+            # Bambuddy keeps a queue item after its print; it is gone when someone
+            # deleted it, or deleted its archive. That is not a failure of the print,
+            # and reporting one would contradict what the user can see in Bambuddy.
+            if linker is not None:
+                await linker.gone(queue_item_id)
             return PrintProgress(
                 route="slice_queue",
                 stage="done",
@@ -278,6 +356,8 @@ async def _queued_progress(
                 copies_completed=1,
                 bambuddy_url=url,
             )
+    if item is not None and linker is not None:
+        await linker.item(item, plate_id)
     return from_queue(item, slice_job=slice_job, slice_job_id=slice_job_id, bambuddy_url=url)
 
 
@@ -342,7 +422,11 @@ def from_plates(
 
 
 async def progress_for(
-    client: BambuddyClient, meta: OutputMeta, *, uploads: BambuddyUploadStore | None = None
+    client: BambuddyClient,
+    meta: OutputMeta,
+    *,
+    uploads: BambuddyUploadStore | None = None,
+    links: PrintLinkStore | None = None,
 ) -> PrintProgress | None:
     """Read the progress of whatever this output last printed, or ``None``.
 
@@ -356,6 +440,9 @@ async def progress_for(
     With ``uploads``, a pipeline run's sliced file is recorded against its source copy
     once the run reports one (#316). The run's 202 carries none — the slice happens in
     Bambuddy's background task — so this read is the first place it can be seen.
+
+    With ``uploads`` and ``links``, the archives the print produced are linked to the
+    output as they appear (#306).
     """
     route = meta.print_route
     if route is None:
@@ -365,6 +452,9 @@ async def progress_for(
         if route is None and meta.queue_item_id is not None:
             route = "slice_queue"
     url = client.config.web_url(QUEUE_PATH)
+    linker = (
+        _Linker(client, meta, uploads, links) if uploads is not None and links is not None else None
+    )
 
     if route == "pipeline":
         if meta.pipeline_run_id is None:
@@ -383,6 +473,8 @@ async def progress_for(
                     preset_key=str(run.pipeline_id) if run.pipeline_id is not None else None,
                 ),
             )
+        if linker is not None:
+            await linker.run(run)
         return from_run(run, bambuddy_url=url)
 
     if route == "slice_queue":
@@ -393,7 +485,14 @@ async def progress_for(
                 async with asyncio.TaskGroup() as group:
                     tasks = [
                         group.create_task(
-                            _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
+                            _queued_progress(
+                                client,
+                                plate.slice_job_id,
+                                plate.queue_item_id,
+                                url,
+                                linker=linker,
+                                plate_id=plate.plate_id,
+                            )
                         )
                         for plate in meta.plates
                     ]
@@ -415,7 +514,9 @@ async def progress_for(
                 queue_item_id=meta.queue_item_id,
                 bambuddy_url=url,
             )
-        return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url)
+        return await _queued_progress(
+            client, meta.slice_job_id, meta.queue_item_id, url, linker=linker
+        )
 
     return None
 

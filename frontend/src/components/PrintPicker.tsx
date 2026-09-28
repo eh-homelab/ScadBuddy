@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
-import { api, ApiError } from '../api/client'
+import { api, ApiError, mayHaveRun } from '../api/client'
 import type {
   ChoicesView,
   FilamentOptions,
@@ -16,6 +16,7 @@ import type {
   SlotChoice,
 } from '../api/types'
 import { openExternal } from '../lib/embed'
+import { useAsync } from '../lib/useAsync'
 import { seedPlan } from '../lib/filaments'
 import { resolveOptions } from '../lib/printOptions'
 import { usePrintProgress } from '../lib/usePrintProgress'
@@ -113,6 +114,20 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   /** Only a 422 — these choices cannot resolve — keeps Print disabled until one changes. */
   const [refused, setRefused] = useState(false)
   const [result, setResult] = useState<PrintRunResult | null>(null)
+  /**
+   * #470 — a run whose answer never arrived (a proxy's timeout, a dropped connection):
+   * the backend may have queued it anyway, so the dialog says so instead of offering
+   * Print again. Closing the dialog is the way back to it.
+   */
+  const [unanswered, setUnanswered] = useState<string | null>(null)
+  // Only for the queue link while a run is unanswered (a result carries its own), so it
+  // is read then, not on every open; a failed read offers to try again.
+  const settings = useAsync(
+    async () => (open && unanswered !== null ? await api.getSettings() : null),
+    [open, unanswered !== null],
+  )
+  // As typed in Settings: a trailing slash would make `…//queue` below.
+  const bambuddyUrl = settings.data?.bambuddy_url?.replace(/\/+$/, '') || null
 
   const outputId = output?.id
   /**
@@ -308,12 +323,19 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
+  /** Which `run()` may still update the dialog: bumped by each run. */
+  const runAttempt = useRef(0)
+
   function close() {
+    // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
+    // reopen with Print enabled and send the print a second time (#539 review).
+    if (running) return
     setProjectId(null)
     setOptions({})
     setRunError(null)
     setRefused(false)
     setResult(null)
+    setUnanswered(null)
     setAskedPrinter(null)
     setNozzles(DEFAULT_NOZZLES)
     setTier('standard')
@@ -388,6 +410,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
 
   async function run() {
     if (!outputId || !choices || bedType === null) return
+    const attempt = ++runAttempt.current
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -409,16 +432,22 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         options,
       }
       const ran = await api.runPrint(outputId, body)
+      if (attempt !== runAttempt.current) return
       setResult(ran)
       onRan(ran)
       rememberChoices()
       rememberBedType()
     } catch (cause) {
+      if (attempt !== runAttempt.current) return
+      if (mayHaveRun(cause)) {
+        setUnanswered((cause as ApiError).detail)
+        return
+      }
       setRunError(cause instanceof ApiError ? cause.detail : 'The print could not be started.')
-      // Anything else (Bambuddy down, a timeout) is worth retrying as it stands.
+      // Anything else (a refusal, nothing upstream took it) is worth retrying as it stands.
       setRefused(cause instanceof ApiError && cause.status === 422)
     } finally {
-      setRunning(false)
+      if (attempt === runAttempt.current) setRunning(false)
     }
   }
 
@@ -429,7 +458,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
       open={open}
       title="Print"
       description={
-        result
+        result || unanswered !== null
           ? undefined
           : 'Choose the spools, nozzles, quality and plate. ScadBuddy picks the Bambu presets, then Bambuddy slices and queues it.'
       }
@@ -441,6 +470,19 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
             <Button variant="primary" onClick={() => openExternal(result.bambuddy_url)}>
               Open in queue
             </Button>
+          </>
+        ) : unanswered !== null ? (
+          <>
+            <Button onClick={close}>Close</Button>
+            {bambuddyUrl ? (
+              <Button variant="primary" onClick={() => openExternal(`${bambuddyUrl}/queue`)}>
+                {"Open Bambuddy's queue"}
+              </Button>
+            ) : (
+              settings.error && (
+                <Button onClick={settings.reload}>{"Find Bambuddy's queue"}</Button>
+              )
+            )}
           </>
         ) : (
           <>
@@ -489,6 +531,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
           <WarningList warnings={result.warnings ?? []} testId="run-warnings" />
           <PrintProgressPanel progress={progress} polling={polling} />
         </div>
+      ) : unanswered !== null ? (
+        <p role="alert" className="text-[13px] text-warn" data-testid="run-unanswered">
+          {unanswered}{' '}
+          {
+            "The print may still have been queued. Check Bambuddy's queue before printing again, or it may print twice."
+          }
+        </p>
       ) : (
         <>
           {loading && !choices && (
