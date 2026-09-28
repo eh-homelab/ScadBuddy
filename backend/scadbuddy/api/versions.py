@@ -18,6 +18,7 @@ from scadbuddy.api.deps import (
     CommitPath,
     ConfigDep,
     EventsDep,
+    FetcherDep,
     HistoryDep,
     PathsDep,
     SlugPath,
@@ -187,12 +188,13 @@ async def get_version_schema(
     history: HistoryDep,
     paths: PathsDep,
     config: ConfigDep,
+    fetcher: FetcherDep,
 ) -> CustomizerSchema:
     require_model_exists(catalogue, slug)
     require_history(history)
     resolved = await _require_revision_async(history, commit)
     try:
-        source = await resolve_source(slug, resolved, paths=paths, history=history)
+        source = await resolve_source(slug, resolved, paths=paths, history=history, fetcher=fetcher)
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} does not exist at {commit}") from None
     except GitError as error:

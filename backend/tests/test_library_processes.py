@@ -4,6 +4,7 @@ host without git still runs them (#248)."""
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import threading
@@ -89,6 +90,22 @@ def test_a_killed_git_that_is_not_reaped_in_time_is_reaped_later(
     assert process.reaped.wait(timeout=5)
 
 
+def test_a_killed_git_handed_to_the_reaper_is_logged_by_pid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """So a git stuck in the kernel is visible, not just quietly waited on (#399)."""
+    monkeypatch.setattr("scadbuddy.library.libraries.os.killpg", lambda pid, sig: None)
+    process = Unreapable()
+    process.pid = 4242
+
+    with caplog.at_level(logging.WARNING, logger="scadbuddy.library.libraries"):
+        LibraryStore._kill(process)  # type: ignore[arg-type]
+
+    [record] = [r for r in caplog.records if "reaper" in r.getMessage()]
+    assert "pid 4242" in record.getMessage()
+    assert record.__dict__["pid"] == 4242
+
+
 def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
     paths: DataPaths, tmp_path: Path
 ) -> None:
@@ -147,3 +164,52 @@ def test_sweep_staging_leaves_a_clone_another_replica_may_be_writing(
 
     assert store.sweep_staging() == [dead.name]
     assert live.is_dir()
+
+
+def _checkout(paths: DataPaths, name: str, commit: str, *, old: bool = True) -> Path:
+    checkout = paths.libraries / name / commit
+    (checkout / name).mkdir(parents=True)
+    if old:
+        _age(checkout)
+    return checkout
+
+
+def test_sweep_checkouts_removes_only_what_keep_refuses(paths: DataPaths) -> None:
+    kept = _checkout(paths, "BOSL2", "a" * 40)
+    unpinned = _checkout(paths, "BOSL2", "b" * 40)
+    other = _checkout(paths, "MCAD", "c" * 40)
+    store = LibraryStore(paths, catalogue=())
+
+    removed = store.sweep_checkouts(lambda name, commit: commit == "a" * 40)
+
+    assert removed == [f"BOSL2@{'b' * 40}", f"MCAD@{'c' * 40}"]
+    assert kept.is_dir()
+    assert not unpinned.exists()
+    assert not other.exists()
+    assert not (paths.libraries / "MCAD").exists()
+
+
+def test_sweep_checkouts_leaves_one_another_replica_may_not_have_recorded_yet(
+    paths: DataPaths,
+) -> None:
+    """A clone moved into place moments ago on another replica sharing /data is not
+    in any model.json until its pin is recorded: the same age guard as staging."""
+    fresh = _checkout(paths, "BOSL2", "a" * 40, old=False)
+    store = LibraryStore(paths, catalogue=())
+
+    assert store.sweep_checkouts(lambda name, commit: False) == []
+    assert fresh.is_dir()
+
+
+def test_sweep_checkouts_keeps_one_it_cannot_decide_about(
+    paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    checkout = _checkout(paths, "BOSL2", "a" * 40)
+    store = LibraryStore(paths, catalogue=())
+
+    def keep(name: str, commit: str) -> bool:
+        raise OSError("EIO")
+
+    assert store.sweep_checkouts(keep) == []
+    assert checkout.is_dir()
+    assert "could not sweep a library checkout" in caplog.text

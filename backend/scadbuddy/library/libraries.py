@@ -53,7 +53,7 @@ import subprocess
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -191,6 +191,15 @@ def _require_name(name: str) -> None:
 
 class LibraryNotInstalledError(LookupError):
     """A model declares a library that has no pin, or whose checkout is gone."""
+
+
+class LibraryCheckoutMissingError(LibraryNotInstalledError):
+    """A declared pin whose checkout is not on the volume: one that the pin itself
+    says how to fetch again (:class:`CheckoutFetcher`)."""
+
+    def __init__(self, message: str, pin: ModelLibrary) -> None:
+        super().__init__(message)
+        self.pin = pin
 
 
 class LibraryDeclarationError(RuntimeError):
@@ -334,24 +343,30 @@ def search_path(
     A declared library with no pin, or whose checkout is not on the volume, is an
     error rather than a silent omission: OpenSCAD only WARNs on a missing ``use``,
     so leaving it off would render a model with half its geometry missing. A bare
-    name is looked up in ``legacy``, the lockfile of its time.
+    name is looked up in ``legacy``, the lockfile of its time. A missing checkout is
+    :class:`LibraryCheckoutMissingError`, which :class:`CheckoutFetcher` answers by
+    cloning it again.
     """
     directories: list[Path] = []
     for entry in declared:
         if isinstance(entry, str):
             name = entry
-            pin = legacy.pin(name) if legacy is not None else None
-            if pin is None:
+            found = legacy.pin(name) if legacy is not None else None
+            if found is None:
                 raise LibraryNotInstalledError(
                     f"{name!r} is declared but has no pin; pin it to this model again"
                 )
+            # Unvalidated: a lockfile key is not held to NAME_PATTERN, and a fetch of
+            # one that is not a usable name is refused by the store.
+            pin = ModelLibrary.model_construct(name=name, **found.model_dump())
         else:
             name, pin = entry.name, entry
         directory = paths.libraries / name / pin.commit
         if not (directory / name).is_dir():
-            raise LibraryNotInstalledError(
+            raise LibraryCheckoutMissingError(
                 f"{name!r} is pinned to {pin.commit[:7]}, which is not on this volume; "
-                f"pin it to this model again at {pin.ref!r}"
+                f"pin it to this model again at {pin.ref!r}",
+                pin,
             )
         directories.append(directory)
     return tuple(directories)
@@ -739,6 +754,35 @@ class LibraryStore:
             library.rmdir()  # only when it emptied
         return commits
 
+    def sweep_checkouts(self, keep: Callable[[str, str], bool]) -> list[str]:
+        """Remove every checkout ``keep(name, commit)`` is false for. Returns
+        ``name@commit`` for each one removed.
+
+        Runs at boot, under the :class:`CheckoutGate` alone. Another replica sharing
+        ``/data`` may have just cloned a checkout it has not recorded in a model yet,
+        so -- as :meth:`sweep_staging` -- only a checkout older than the clone
+        timeout plus ``STAGING_MAX_AGE_MARGIN`` goes. One that cannot be read or
+        removed, or that ``keep`` cannot answer for, is logged and kept.
+        """
+        cutoff = time.time() - self.timeout - STAGING_MAX_AGE_MARGIN
+        removed: list[str] = []
+        for name, commit in self.installed():
+            try:
+                if (self.paths.libraries / name / commit).stat().st_mtime > cutoff:
+                    continue
+                if keep(name, commit):
+                    continue
+                self.remove(name, commit)
+            except LibraryCheckoutNotFoundError:
+                continue  # gone already
+            except OSError:
+                logger.exception(
+                    "could not sweep a library checkout", extra={"library": name, "commit": commit}
+                )
+                continue
+            removed.append(f"{name}@{commit}")
+        return removed
+
     def resolve(self, name: str, *, url: str | None = None, ref: str | None = None) -> ModelLibrary:
         """Clone ``name`` at ``ref`` and return the pin: the commit that resolved to.
 
@@ -746,6 +790,29 @@ class LibraryStore:
         from another repository -- a fork is still ``use <BOSL2/...>`` -- but only
         the catalogue's own URL skips the vetting, and another one needs a ``ref``.
         """
+        url, ref, pinned = self._prepare(name, url, ref)
+        commit = self._clone(name, url, ref, pinned)
+        return ModelLibrary(name=name, url=url, ref=ref, commit=commit)
+
+    def fetch(self, pin: ModelLibrary) -> None:
+        """Clone ``pin`` again, at the commit it records, into its checkout: one
+        that was pinned and has since gone from the volume (#169).
+
+        The same checks as :meth:`resolve` -- the URL vetted unless it is the
+        catalogue's, the transport allowed, the size capped -- so a ``model.json``
+        brought from elsewhere cannot fetch what a pin could not. The ref is cloned
+        first (cheap, and a tag still names the commit); if it has moved on, the
+        commit itself is fetched, which the upstream must allow (GitHub does).
+        """
+        url, ref, pinned = self._prepare(pin.name, pin.url, pin.ref)
+        self._clone(pin.name, url, ref, pinned, commit=pin.commit)
+
+    def _prepare(
+        self, name: str, url: str | None, ref: str | None
+    ) -> tuple[str, str, tuple[str, ...]]:
+        """Check what :meth:`resolve` was asked for, and fill in the catalogue's
+        defaults. Returns the URL and ref to clone, and the git config that holds
+        the clone to the vetted addresses."""
         if not re.fullmatch(NAME_PATTERN, name):
             raise LibraryError(f"{name!r} is not a usable library name")
         # A URL is recorded in the pin, logged and quoted back in errors, so one that
@@ -773,9 +840,7 @@ class LibraryStore:
             raise LibraryError(f"{url!r} is not a {' or '.join(self.protocols)} URL")
         # The catalogue's own URLs are trusted as they are; anything a client named
         # is vetted on every clone.
-        pinned = () if trusted else self._vet(url)
-        commit = self._clone(name, url, ref, pinned)
-        return ModelLibrary(name=name, url=url, ref=ref, commit=commit)
+        return url, ref, (() if trusted else self._vet(url))
 
     def _vet(self, url: str) -> tuple[str, ...]:
         """Refuse ``url`` unless its host resolves only to public addresses, and
@@ -811,10 +876,19 @@ class LibraryStore:
         # An address literal: there is no second lookup to pin.
         return ()
 
-    def _clone(self, name: str, url: str, ref: str, pinned: Sequence[str] = ()) -> str:
+    def _clone(
+        self,
+        name: str,
+        url: str,
+        ref: str,
+        pinned: Sequence[str] = (),
+        *,
+        commit: str | None = None,
+    ) -> str:
         """Clone into a staging directory beside the checkouts, then move it into
         place under the commit it resolved to. Nothing half-cloned is ever at a
-        path a render could read."""
+        path a render could read. With ``commit``, the checkout is at that commit
+        whatever ``ref`` names now."""
         self.paths.libraries.mkdir(parents=True, exist_ok=True)
         staging = self.paths.libraries / f"{STAGING_PREFIX}{uuid.uuid4().hex}"
         try:
@@ -836,12 +910,17 @@ class LibraryStore:
                 raise LibraryFetchError(f"could not clone {ref!r} from {url}: {error}") from error
             except LibraryTooLargeError as error:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {error}") from None
+            head = self._git("-C", str(staging / name), "rev-parse", "HEAD")
+            if commit is not None and head != commit:
+                self._check_out(staging, name, url, commit, pinned)
+                head = self._git("-C", str(staging / name), "rev-parse", "HEAD")
+                if head != commit:
+                    raise LibraryFetchError(f"{url} did not give {commit[:7]}")
             # The last poll can land before the clone's final writes.
             size = _tree_size(staging, self.max_bytes)
             if size > self.max_bytes:
                 raise LibraryTooLargeError(f"{url} at {ref!r} {self._over(size)}")
-            commit = self._git("-C", str(staging / name), "rev-parse", "HEAD")
-            destination = self.paths.libraries / name / commit
+            destination = self.paths.libraries / name / head
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
                 os.replace(staging, destination)
@@ -850,9 +929,36 @@ class LibraryStore:
                 # concurrent one; either copy is the same tree.
                 if not (destination / name).is_dir():
                     raise
-            return commit
+            return head
         finally:
             shutil.rmtree(staging, ignore_errors=True)
+
+    def _check_out(
+        self, staging: Path, name: str, url: str, commit: str, pinned: Sequence[str]
+    ) -> None:
+        """Fetch ``commit`` into the shallow clone at ``staging`` and check it out:
+        the ref it was pinned at has moved on since."""
+        clone = str(staging / name)
+        try:
+            # The clone's own config does not carry `pinned`; the fetch is held to
+            # the vetted addresses the same way.
+            self._git(
+                *pinned,
+                "-C",
+                clone,
+                "fetch",
+                "--quiet",
+                "--depth",
+                "1",
+                "origin",
+                commit,
+                watch=staging,
+            )
+            self._git("-C", clone, "checkout", "--quiet", "--detach", commit)
+        except LibraryFetchError as error:
+            raise LibraryFetchError(f"could not fetch {commit[:7]} from {url}: {error}") from error
+        except LibraryTooLargeError as error:
+            raise LibraryTooLargeError(f"{url} at {commit[:7]} {error}") from None
 
     def _git(self, *args: str, watch: Path | None = None) -> str:
         """Run git; with ``watch``, also kill it once that directory grows past
@@ -931,4 +1037,68 @@ class LibraryStore:
         try:
             process.communicate(timeout=KILL_WAIT)
         except subprocess.TimeoutExpired:
+            logger.warning(
+                "killed git (pid %d) was not reaped within %gs; a reaper thread waits for it",
+                process.pid,
+                KILL_WAIT,
+                extra={"pid": process.pid},
+            )
             threading.Thread(target=process.wait, name="git-reaper", daemon=True).start()
+
+
+@dataclass
+class CheckoutFetcher:
+    """Clones a pinned checkout that has gone from the volume back into place
+    (#169), rather than failing the render or create that found it missing.
+
+    Through the same path a pin takes: the store's checks and size cap, one of the
+    ``installs`` permits, and the :class:`CheckoutGate` as a pin holds it, so no
+    removal runs while it fetches.
+    """
+
+    store: LibraryStore
+    installs: asyncio.Semaphore
+    checkouts: CheckoutGate
+
+    async def search_path(self, resolve: Callable[[], tuple[Path, ...]]) -> tuple[Path, ...]:
+        """``resolve()`` -- one of the ``*search_path`` functions, off the loop --
+        fetching each missing checkout it names and trying again. A checkout that
+        cannot be fetched is :class:`LibraryNotInstalledError`, saying why."""
+        fetched: set[tuple[str, str]] = set()
+        while True:
+            try:
+                return await asyncio.to_thread(resolve)
+            except LibraryCheckoutMissingError as missing:
+                pin = missing.pin
+                if (pin.name, pin.commit) in fetched:
+                    raise  # fetched, and gone again: a removal won the race
+                fetched.add((pin.name, pin.commit))
+                await self.fetch(pin)
+
+    async def fetch(self, pin: ModelLibrary) -> None:
+        try:
+            async with self.checkouts.pinning(), self.installs:
+                await asyncio.to_thread(self.store.fetch, pin)
+        except LibraryError as error:
+            logger.warning(
+                "could not fetch a missing library checkout again",
+                extra={"library": pin.name, "commit": pin.commit, "reason": str(error)},
+            )
+            raise LibraryNotInstalledError(
+                f"{pin.name!r} is pinned to {pin.commit[:7]}, which is not on this volume, "
+                f"and fetching it again failed ({error}); pin it to this model again"
+            ) from None
+        logger.info(
+            "fetched a missing library checkout again",
+            extra={"library": pin.name, "commit": pin.commit},
+        )
+
+
+async def resolve_search_path(
+    fetcher: CheckoutFetcher | None, resolve: Callable[[], tuple[Path, ...]]
+) -> tuple[Path, ...]:
+    """``resolve()`` off the loop, re-fetching missing checkouts when there is a
+    ``fetcher`` to do it."""
+    if fetcher is None:
+        return await asyncio.to_thread(resolve)
+    return await fetcher.search_path(resolve)

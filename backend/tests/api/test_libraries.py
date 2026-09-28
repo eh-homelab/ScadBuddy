@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import shutil
 import subprocess
 import threading
 import time
 from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -31,7 +33,7 @@ from scadbuddy.api.deps import (
     get_libraries,
 )
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.history import GIT, ModelHistory, git_env
+from scadbuddy.library.history import GIT, GitError, ModelHistory, git_env
 from scadbuddy.library.libraries import (
     LOCKFILE_NAME,
     STAGING_PREFIX,
@@ -40,6 +42,7 @@ from scadbuddy.library.libraries import (
     LibraryStore,
     ModelLibrary,
 )
+from scadbuddy.main import sweep_library_checkouts
 from tests.conftest import make_library_upstream
 from tests.test_library_processes import _age
 
@@ -451,21 +454,126 @@ def test_the_editor_check_sees_the_models_libraries(
     assert log.read_text(encoding="utf-8").splitlines() == [expected, expected]
 
 
-def test_a_pinned_library_whose_checkout_is_gone_is_a_409(
+def _unreachable(url: str) -> None:
+    """Take the upstream away, so fetching a missing checkout again fails."""
+    bare = Path(url.removeprefix("file://"))
+    bare.rename(bare.with_name("moved.git"))
+
+
+def test_a_pinned_library_whose_checkout_is_gone_is_fetched_again(
     lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
 ) -> None:
+    """Re-cloned at the pinned commit from the pin's own URL (#169), rather than a
+    409 asking for the library to be pinned again."""
     _, commits = upstream
     create_model(lib_client)
     pin(lib_client, "BOSL2")
     checkout = paths.libraries / "BOSL2" / commits["v1"]
+    shutil.rmtree(checkout)
+
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
+    render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
+
+    assert schema.status_code == 200, schema.text
+    assert render.status_code == 202, render.text
+    assert (checkout / "BOSL2" / "std.scad").read_text(encoding="utf-8") == (
+        "module marker() cube(1);\n"
+    )
+    assert not [e for e in paths.libraries.iterdir() if e.name.startswith(STAGING_PREFIX)]
+
+
+def test_a_pinned_library_whose_checkout_is_gone_is_a_409_when_it_cannot_be_fetched(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    url, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
     checkout.rename(paths.root / "elsewhere")
+    _unreachable(url)
 
     schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
     render = lib_client.post(f"/api/v1/models/{SLUG}/render", json={"params": {}})
 
     assert schema.status_code == 409
     assert "BOSL2" in schema.json()["detail"]
+    assert "fetching it again failed" in schema.json()["detail"]
     assert render.status_code == 409
+    assert not checkout.exists()
+
+
+def test_a_missing_checkout_is_fetched_at_its_commit_when_the_ref_has_moved(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    """A branch pin: the branch is at v2 now, but the model is pinned to v1."""
+    url, commits = upstream
+    create_model(lib_client)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+    state.catalogue.pin_library(
+        SLUG, ModelLibrary(name="BOSL2", url=url, ref="main", commit=commits["v1"])
+    )
+
+    assert lib_client.get(f"/api/v1/models/{SLUG}/schema").status_code == 200
+
+    assert [commit for _, commit in state.libraries.installed()] == [commits["v1"]]
+    fetched = paths.libraries / "BOSL2" / commits["v1"] / "BOSL2" / "std.scad"
+    assert fetched.read_text(encoding="utf-8") == "module marker() cube(1);\n"
+
+
+def test_a_missing_checkout_is_held_to_the_size_cap_when_fetched_again(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    shutil.rmtree(paths.libraries / "BOSL2" / commits["v1"])
+    libraries_app.dependency_overrides[get_libraries]().max_bytes = 1
+
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/schema")
+
+    assert schema.status_code == 409
+    assert "a library may take" in schema.json()["detail"]
+    assert not (paths.libraries / "BOSL2" / commits["v1"]).exists()
+
+
+def test_an_old_revision_whose_checkout_is_gone_is_fetched_again(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    written_against = pin(lib_client, "BOSL2")["version"]
+    pin(lib_client, "BOSL2", ref="v2")
+    removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
+    assert removed.status_code == 204, removed.text
+
+    schema = lib_client.get(f"/api/v1/models/{SLUG}/versions/{written_against}/schema")
+
+    assert schema.status_code == 200, schema.text
+    assert (paths.libraries / "BOSL2" / commits["v1"] / "BOSL2").is_dir()
+
+
+def test_the_editor_check_and_save_fetch_a_checkout_that_is_gone(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    _, commits = upstream
+    create_model(lib_client)
+    pin(lib_client, "BOSL2")
+    checkout = paths.libraries / "BOSL2" / commits["v1"]
+    shutil.rmtree(checkout)
+
+    checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
+    assert checked.status_code == 200, checked.text
+    assert (checkout / "BOSL2").is_dir()
+    shutil.rmtree(checkout)
+    saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
+    assert saved.status_code == 200, saved.text
+    assert (checkout / "BOSL2").is_dir()
 
 
 def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
@@ -473,10 +581,11 @@ def test_the_editor_check_and_save_are_a_409_when_a_checkout_is_gone(
 ) -> None:
     """The check takes its source from the body, so it wires the library path up on
     its own rather than through `resolve_source` -- and must fail the same way."""
-    _, commits = upstream
+    url, commits = upstream
     create_model(lib_client)
     pin(lib_client, "BOSL2")
     (paths.libraries / "BOSL2" / commits["v1"]).rename(paths.root / "elsewhere")
+    _unreachable(url)
 
     checked = lib_client.post("/api/v1/models/check", json={"source": SOURCE, "slug": SLUG})
     saved = lib_client.put(f"/api/v1/models/{SLUG}/source", json={"source": SOURCE + "\n"})
@@ -626,14 +735,30 @@ def test_a_dropped_model_json_carries_its_pins_and_is_checked_with_them(
 def test_a_dropped_model_json_whose_checkout_is_not_here_is_a_409(
     lib_client: TestClient,
 ) -> None:
-    """The 409 every render of it would be, and nothing is created."""
+    """One that cannot be fetched -- here, a transport this store does not allow --
+    is the 409 every render of it would be, and nothing is created."""
     pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
 
     refused = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned]})
 
     assert refused.status_code == 409, refused.text
     assert "not on this volume" in refused.json()["detail"]
+    assert "is not a file URL" in refused.json()["detail"]
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_dropped_model_json_whose_checkout_is_not_here_fetches_it(
+    lib_client: TestClient, paths: DataPaths, upstream: tuple[str, dict[str, str]]
+) -> None:
+    """A model.json from another instance brings its pins; the checkouts follow."""
+    url, commits = upstream
+    pinned = {"name": "BOSL2", "url": url, "ref": "v2", "commit": commits["v2"]}
+
+    created = _upload_with_meta(lib_client, {"name": "Widget", "libraries": [pinned]})
+
+    assert created.status_code == 201, created.text
+    assert created.json()["libraries"] == [pinned]
+    assert (paths.libraries / "BOSL2" / commits["v2"] / "BOSL2").is_dir()
 
 
 def test_a_dropped_model_json_with_a_malformed_pin_is_a_422(lib_client: TestClient) -> None:
@@ -955,3 +1080,106 @@ def test_a_lease_elsewhere_does_not_block_a_removal(
     removed = lib_client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]})
 
     assert removed.status_code == 204, removed.text
+
+
+# ── sweeping checkouts nothing pins (#271) ────────────────────────────────────
+
+
+def _fake_checkout(paths: DataPaths, name: str, commit: str, *, old: bool = True) -> Path:
+    checkout = paths.libraries / name / commit
+    (checkout / name).mkdir(parents=True)
+    if old:
+        _age(checkout)
+    return checkout
+
+
+def test_the_sweep_keeps_every_checkout_any_revision_pins(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+    upstream: tuple[str, dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    _, commits = upstream
+    other_url, other = make_library_upstream(tmp_path / "other", {"x1": "cube(1);\n"})
+    create_model(lib_client)
+    create_model(lib_client, "gadget")
+    old_revision = pin(lib_client, "BOSL2")["version"]  # v1: only in the history after
+    pin(lib_client, "BOSL2", ref="v2")  # v2: pinned live
+    # MCAD: pinned only by a model that has since been deleted.
+    pin(lib_client, "MCAD", "gadget", url=other_url, ref="x1")
+    assert lib_client.delete("/api/v1/models/gadget").status_code == 204
+    for entry in lib_client.get("/api/v1/libraries/installed").json():
+        _age(paths.libraries / entry["name"] / entry["commit"])
+    unpinned = _fake_checkout(paths, "BOSL2", "c" * 40)
+    just_cloned = _fake_checkout(paths, "BOSL2", "d" * 40, old=False)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+
+    # A gate of its own: the app's is bound to the TestClient's loop.
+    removed = asyncio.run(sweep_library_checkouts(replace(state, checkouts=CheckoutGate())))
+
+    assert removed == [f"BOSL2@{'c' * 40}"]
+    assert not unpinned.exists()
+    assert just_cloned.is_dir()
+    assert sorted(commit for _, commit in state.libraries.installed()) == sorted(
+        [commits["v1"], commits["v2"], other["x1"], "d" * 40]
+    )
+    # Restoring the old revision needs nothing fetched: its checkout was kept.
+    restored = lib_client.post(f"/api/v1/models/{SLUG}/versions/{old_revision}/restore")
+    assert restored.status_code == 200, restored.text
+
+
+def test_the_sweep_keeps_a_checkout_a_live_edit_names(
+    lib_client: TestClient,
+    libraries_app: FastAPI,
+    paths: DataPaths,
+) -> None:
+    """Named by a bare name only, uncommitted: every checkout of it stays."""
+    create_model(lib_client)
+    meta = json.loads(paths.model_meta(SLUG).read_text(encoding="utf-8"))
+    paths.model_meta(SLUG).write_text(
+        json.dumps({**meta, "libraries": ["BOSL2"]}), encoding="utf-8"
+    )
+    kept = _fake_checkout(paths, "BOSL2", "c" * 40)
+    state: AppState = getattr(libraries_app.state, STATE_ATTR)
+
+    removed = asyncio.run(sweep_library_checkouts(replace(state, checkouts=CheckoutGate())))
+
+    assert removed == []
+    assert kept.is_dir()
+
+
+def test_boot_sweeps_checkouts_no_revision_pins(app: FastAPI, paths: DataPaths) -> None:
+    history: ModelHistory = getattr(app.state, STATE_ATTR).history
+    pinned = {"name": "BOSL2", "url": "https://x.invalid/b.git", "ref": "v1", "commit": "a" * 40}
+    paths.model_dir(SLUG).mkdir(parents=True)
+    paths.model_source(SLUG).write_text(SOURCE, encoding="utf-8")
+    paths.model_meta(SLUG).write_text(
+        json.dumps({"name": "Widget", "libraries": [pinned]}), encoding="utf-8"
+    )
+    history.ensure_repo()  # records it as the first revision
+    paths.model_meta(SLUG).write_text(json.dumps({"name": "Widget"}), encoding="utf-8")
+    assert history.commit("unpin", SLUG) is not None
+    in_history = _fake_checkout(paths, "BOSL2", "a" * 40)
+    unpinned = _fake_checkout(paths, "BOSL2", "b" * 40)
+
+    with TestClient(app):
+        pass
+
+    assert in_history.is_dir()
+    assert not unpinned.exists()
+
+
+def test_a_sweep_that_cannot_read_the_history_removes_nothing(
+    app: FastAPI, paths: DataPaths, caplog: pytest.LogCaptureFixture
+) -> None:
+    unpinned = _fake_checkout(paths, "BOSL2", "b" * 40)
+
+    with (
+        patch.object(ModelHistory, "object_ids_in", side_effect=GitError("git log failed")),
+        TestClient(app) as client,
+    ):
+        assert client.get("/healthz").status_code == 200
+
+    assert unpinned.is_dir()
+    assert "could not sweep library checkouts" in caplog.text
