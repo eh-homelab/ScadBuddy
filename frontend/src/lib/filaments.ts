@@ -58,7 +58,8 @@ type Hardware = Partial<Pick<FilamentOptions, 'nozzles' | 'track_switch'>>
 
 /**
  * The extruders — 0 right, 1 left, as `nozzles` is indexed — whose fitted nozzle is
- * `size` (#469). With none the run is refused; with one, so is a multi-color print.
+ * `size` (#469). With none the run is refused; with one of two reported, so is a
+ * multi-color print.
  */
 export function fittingSides(options: Hardware, size: string | undefined): (0 | 1)[] {
   const nozzles = options.nozzles ?? []

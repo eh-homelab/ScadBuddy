@@ -491,6 +491,23 @@ def plates_of(path: Path) -> list[PlateEntry]:
     return sorted(plates, key=lambda plate: plate.index)
 
 
+def plate_filaments(path: Path) -> dict[int, set[int]]:
+    """The filaments (1-based extruder numbers) each plate's parts are assigned in
+    ``model_settings.config``, by plate index (#469). A plate whose object names no
+    part extruder is left out: the caller can't tell what it uses."""
+    with zipfile.ZipFile(path) as archive:
+        config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+    used: dict[str, set[int]] = {}
+    for obj in config.iter("object"):
+        numbers = {_metadata(part).get("extruder", "") for part in obj.findall("part")}
+        used[obj.get("id", "")] = {int(number) for number in numbers if number.isdigit()}
+    return {
+        plate.index: used[plate.object_id]
+        for plate in plate_settings(config)
+        if plate.object_id is not None and used.get(plate.object_id)
+    }
+
+
 def write_bambu_3mf(
     parts: Sequence[ColourPart],
     out_path: Path,

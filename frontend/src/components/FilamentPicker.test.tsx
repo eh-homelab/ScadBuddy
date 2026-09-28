@@ -110,6 +110,27 @@ describe('FilamentPicker', () => {
     expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
   })
 
+  it('lets a single-nozzle printer print in several colors', () => {
+    open({ ...wired, nozzles: [{ nozzle_type: 'HS00', nozzle_diameter: '0.4' }] }, 1, '0.4')
+    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
+    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
+  })
+
+  it('does not refuse up front when one side of two is unreported', () => {
+    open(
+      {
+        ...wired,
+        nozzles: [
+          { nozzle_type: 'HS00', nozzle_diameter: '0.4' },
+          { nozzle_type: 'HH01', nozzle_diameter: '' },
+        ],
+      },
+      1,
+      '0.4',
+    )
+    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
+  })
+
   it('says nothing about sides when both nozzles fit', () => {
     open(bothAt02, 1, '0.2')
     expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()

@@ -24,7 +24,7 @@ from scadbuddy.bambuddy.extruders import (
     track_switch,
 )
 from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.models import PrinterStatus, SlotChoice, SpoolAssignment
+from scadbuddy.bambuddy.models import NozzleInfo, PrinterStatus, SlotChoice, SpoolAssignment
 from tests.bambuddy.conftest import recording
 
 
@@ -170,7 +170,7 @@ def test_the_recorded_printer_has_the_switch() -> None:
 
 def test_with_the_switch_a_left_resting_spool_prints_in_one_color_on_the_right() -> None:
     """User ruling: any AMS reaches either nozzle, so AMS 2 (inlet A) is not refused."""
-    result = plan_extruders([LEFT_02], fts_status(), size="0.2", filament_count=1)
+    result = plan_extruders([LEFT_02], fts_status(), size="0.2", used_slots={1})
     assert result.errors == []
     [warning] = result.warnings
     assert warning.kind == "side-unknown"
@@ -186,7 +186,7 @@ def test_with_the_switch_a_left_resting_spool_prints_in_one_color_on_the_right()
 def test_differing_nozzles_refuse_a_multi_color_print(size: str, only: str, other: str) -> None:
     """Queue item 108: the slicer spread two colors across both nozzles, and a pin in the
     3MF is ignored, so nothing but the refusal keeps that print off the printer."""
-    result = plan_extruders([RIGHT_02, LEFT_02], fts_status(), size=size, filament_count=2)
+    result = plan_extruders([RIGHT_02, LEFT_02], fts_status(), size=size, used_slots={1, 2})
     assert result.errors == [
         "This printer has a 0.2 mm nozzle on the right and 0.4 mm on the left. The slicer "
         f"spreads a multi-color print across both, and ScadBuddy can't keep it on the {only}, "
@@ -196,22 +196,22 @@ def test_differing_nozzles_refuse_a_multi_color_print(size: str, only: str, othe
 
 
 def test_a_second_color_with_no_spool_still_counts() -> None:
-    """The model's filament count decides, not how many slots have a spool: the slicer
-    maps every filament the 3MF declares."""
-    result = plan_extruders([RIGHT_02], fts_status(), size="0.2", filament_count=2)
+    """The filaments the plate uses decide, not how many slots have a spool: the slicer
+    maps every filament the plate's parts are assigned."""
+    result = plan_extruders([RIGHT_02], fts_status(), size="0.2", used_slots={1, 2})
     assert len(result.errors) == 1
 
 
 @pytest.mark.parametrize("status", [fts(**both_02()), mapped_status(**both_02())])
 def test_both_nozzles_matching_print_any_colors(status: PrinterStatus) -> None:
-    result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.2", filament_count=2)
+    result = plan_extruders([RIGHT_02, LEFT_02], status, size="0.2", used_slots={1, 2})
     assert result.errors == []
     assert result.warnings == []
 
 
 @pytest.mark.parametrize("status", [fts_status(), mapped_status()])
 def test_neither_side_fitted_with_the_size_is_refused(status: PrinterStatus) -> None:
-    result = plan_extruders([RIGHT_02], status, size="0.6", filament_count=1)
+    result = plan_extruders([RIGHT_02], status, size="0.6", used_slots={1})
     assert result.errors == [
         "Neither nozzle is 0.6 mm: the right has 0.2 mm and the left 0.4 mm. Choose 0.2 or "
         "0.4, or fit a 0.6 mm nozzle."
@@ -219,7 +219,7 @@ def test_neither_side_fitted_with_the_size_is_refused(status: PrinterStatus) -> 
 
 
 def test_unreported_nozzles_are_warned_about() -> None:
-    result = plan_extruders([RIGHT_02], None, size="0.2", filament_count=2)
+    result = plan_extruders([RIGHT_02], None, size="0.2", used_slots={1, 2})
     assert result.errors == []
     [warning] = result.warnings
     assert warning.kind == "side-unknown"
@@ -227,11 +227,62 @@ def test_unreported_nozzles_are_warned_about() -> None:
     assert "couldn't read which nozzles" in warning.message
 
 
+#: A single-nozzle printer (X1C, P1S, A1): Bambuddy reports an empty second entry.
+SINGLE = [
+    {"nozzle_type": "HS00", "nozzle_diameter": "0.4"},
+    {"nozzle_type": "", "nozzle_diameter": ""},
+]
+
+
+@pytest.mark.parametrize("nozzles", [SINGLE, SINGLE[:1]])
+def test_a_single_nozzle_printer_prints_many_colors_through_its_one_nozzle(
+    nozzles: list[dict[str, str]],
+) -> None:
+    """Review of #538: an X1C or P1S with an AMS has no left side to pause on."""
+    status = mapped_status(nozzles=nozzles, ams_extruder_map={"0": 0}, fila_switch=None)
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.4", used_slots={1, 2})
+    assert result == type(result)()
+
+
+@pytest.mark.parametrize("status", [fts_status(), mapped_status()])
+def test_a_two_nozzle_printer_with_one_side_unreported_is_warned_not_refused(
+    status: PrinterStatus,
+) -> None:
+    """Partial MQTT state: the left is there (its type, its AMS) but its size isn't."""
+    nozzles = [
+        {"nozzle_type": "HS00", "nozzle_diameter": "0.2"},
+        {"nozzle_type": "HH01", "nozzle_diameter": ""},
+    ]
+    status = status.model_copy(update={"nozzles": [NozzleInfo.model_validate(n) for n in nozzles]})
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
+    assert result.errors == []
+    [warning] = result.warnings
+    assert warning.kind == "side-unknown"
+    assert warning.message == (
+        "The right nozzle is 0.2 mm, but the printer didn't report the left one, so "
+        "nothing checks that the slicer's extruders match them."
+    )
+
+
+def test_an_unreported_left_on_a_printer_wired_to_it_is_warned_about() -> None:
+    """Nothing but ``ams_extruder_map`` says the left exists."""
+    status = mapped_status(nozzles=SINGLE, fila_switch=None)
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.4", used_slots={1, 2})
+    assert result.errors == []
+    assert [warning.kind for warning in result.warnings] == ["side-unknown"]
+
+
+def test_a_plate_using_one_filament_of_two_is_not_refused() -> None:
+    """Only the plate's filaments count: slot 2's spool isn't printed from."""
+    result = plan_extruders([RIGHT_02, LEFT_02], fts_status(), size="0.2", used_slots={1})
+    assert result.errors == []
+
+
 # --- without the switch, each AMS is wired to one side ----------------------------------
 
 
 def test_without_the_switch_a_spool_on_the_other_nozzle_is_refused_with_the_way_out() -> None:
-    result = plan_extruders([RIGHT_02, LEFT_02], mapped_status(), size="0.2", filament_count=2)
+    result = plan_extruders([RIGHT_02, LEFT_02], mapped_status(), size="0.2", used_slots={1, 2})
     assert result.errors == [
         "Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for "
         "0.2 mm. Pick a spool on the right, or choose 0.4."
@@ -240,15 +291,15 @@ def test_without_the_switch_a_spool_on_the_other_nozzle_is_refused_with_the_way_
 
 def test_without_the_switch_the_ht_and_external_holder_are_named() -> None:
     external, ht = SlotSide(1, 3, 255, 0, LEFT), SlotSide(1, 4, 128, 0, RIGHT)
-    [error] = plan_extruders([external], mapped_status(), size="0.2", filament_count=1).errors
+    [error] = plan_extruders([external], mapped_status(), size="0.2", used_slots={1}).errors
     assert error.startswith("Slot 1's spool (the external spool holder, left)")
-    [error] = plan_extruders([ht], mapped_status(), size="0.4", filament_count=1).errors
+    [error] = plan_extruders([ht], mapped_status(), size="0.4", used_slots={1}).errors
     assert error.startswith("Slot 1's spool (AMS HT, right)")
 
 
 def test_without_the_switch_a_spool_of_unknown_side_is_not_refused() -> None:
     status = mapped_status(**both_02())
-    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", filament_count=2)
+    result = plan_extruders([RIGHT_02, SHELF], status, size="0.2", used_slots={1, 2})
     assert result == type(result)()
-    result = plan_extruders([RIGHT_02, NO_SIDE], status, size="0.2", filament_count=2)
+    result = plan_extruders([RIGHT_02, NO_SIDE], status, size="0.2", used_slots={1, 2})
     assert result == type(result)()
