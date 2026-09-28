@@ -18,6 +18,7 @@ from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import LibraryFile
 from scadbuddy.bambuddy.send import Target, ensure_copy
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.glb import BoundingBox
@@ -132,3 +133,62 @@ async def test_two_outputs_filed_into_one_folder_at_once_get_different_names(
     await asyncio.gather(ensure(output("a")), ensure(output("b")))
 
     assert sorted(bambuddy.uploaded) == ["Demo (2).3mf", "Demo.3mf"]
+
+
+class ListingFails(SlowBambuddy):
+    async def library_files(self, folder_id: int) -> list[LibraryFile]:
+        raise ApiError(503, "Bambuddy is busy")
+
+
+async def test_a_folder_listing_that_fails_still_uploads_under_a_plain_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The listing only makes the name unique; it never fails the print (#540 review)."""
+    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = ListingFails()
+
+    copy = await ensure_copy(
+        cast(BambuddyClient, bambuddy),
+        cast(OutputStore, None),
+        cast(BambuddyUploadStore, MemoryUploads()),
+        output("e"),
+        StoredSettings(library_folder_id=2),
+        target=Target(DEFAULT_PLATE),
+        folder_id=FOLDER,
+        stem="Demo",
+    )
+
+    assert (copy.created, bambuddy.uploaded) == (True, ["Demo.3mf"])
+
+
+async def test_filing_after_a_print_in_the_models_own_colours_reuses_its_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A print whose spools were the model's colours records its copy under a coloured
+    key; a filing with no spools must reuse it, not upload a duplicate (#540 review)."""
+    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = SlowBambuddy()
+    uploads = MemoryUploads()
+    meta = output("f")
+
+    async def ensure(target: Target) -> send.EnsuredCopy:
+        return await ensure_copy(
+            cast(BambuddyClient, bambuddy),
+            cast(OutputStore, None),
+            cast(BambuddyUploadStore, uploads),
+            meta,
+            StoredSettings(library_folder_id=2),
+            target=target,
+            folder_id=FOLDER,
+            stem="Demo",
+        )
+
+    printed = await ensure(Target(DEFAULT_PLATE, "0.2", colours=("#ff0000",)))
+    filed = await ensure(Target(DEFAULT_PLATE, "0.2"))
+    other = await ensure(Target(DEFAULT_PLATE, "0.2", colours=("#00ff00",)))
+
+    assert (filed.created, filed.library_file_id) == (False, printed.library_file_id)
+    assert other.created
+    assert bambuddy.uploaded == ["Demo.3mf", "Demo (2).3mf"]

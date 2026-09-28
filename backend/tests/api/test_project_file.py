@@ -246,6 +246,52 @@ def test_naming_the_file_never_fails_the_print(
 
 
 @respx.mock
+def test_a_folder_listing_that_fails_never_fails_the_print(client: TestClient, model: str) -> None:
+    """The listing only makes the name unique: a 5xx there names the copy plainly and
+    the print goes ahead (#540 review)."""
+    configure(client)
+    output_id = named_output(client, model)
+    project_folder_routes().mock(return_value=httpx.Response(503, json={"detail": "busy"}))
+    uploaded = uploads(41)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    ran = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
+    )
+    assert ran.status_code == 200, ran.text
+    assert uploaded_name(uploaded) == "Demo — 12.3mf"
+
+
+@respx.mock
+def test_filing_after_a_print_in_the_models_colours_reuses_the_prints_copy(
+    client: TestClient, model: str, paths: DataPaths
+) -> None:
+    """The print's copy is recorded under its spools' colours; they are the model's own,
+    so Generate's filing (no spools) reuses it rather than uploading a second one."""
+    configure(client)
+    output_id = make_output(client, model)
+    in_spool_nines_colour(paths, model, output_id)
+    remember_h2c_at(client, "0.2")
+    project_folder_routes()
+    uploaded = uploads(41, 42)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    ran = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
+    )
+    assert ran.status_code == 200, ran.text
+    assert ran.json()["library_file_id"] == 41
+
+    filed = file_into_project(client, output_id).json()
+    assert (filed["library_file_id"], filed["created"]) == (41, False)
+    assert uploaded.call_count == 1
+
+
+@respx.mock
 def test_the_name_runs_no_openscad_when_no_schema_is_cached(
     client: TestClient, model: str, tmp_path: Path
 ) -> None:

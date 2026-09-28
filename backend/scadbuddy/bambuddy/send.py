@@ -313,8 +313,18 @@ async def project_filename(
     model, or it would have been reused — the new one is named after its model
     (``Name sign — Reagan (H2D).3mf``) so the two are told apart. Anything else that
     collides is numbered from 2.
+
+    A listing that fails (a timeout, a 5xx, a body that is not a list) leaves the name
+    unchecked rather than failing the print: naming is never worth the print.
     """
-    taken = {row.filename.casefold() for row in await client.library_files(folder_id)}
+    try:
+        taken = {row.filename.casefold() for row in await client.library_files(folder_id)}
+    except (ApiError, ValueError) as error:
+        logger.warning(
+            "could not list the project folder; naming the copy without checking it",
+            extra={"folder_id": folder_id, "error": str(error)},
+        )
+        return f"{stem}.3mf"
     candidates = [f"{stem}.3mf"]
     ours = any(copy.folder_id == folder_id for copy in await uploads.for_output(meta.id))
     if ours and target.plate.model:
@@ -477,21 +487,38 @@ async def _reusable(
     target: Target,
     folder: int | None,
 ) -> list[LibraryCopy]:
-    """The recorded copies in ``folder`` that serve ``target``, best first."""
+    """The recorded copies in ``folder`` that serve ``target``, best first.
+
+    Outside the inbox, when ``target`` is in the model's own colours, that also takes
+    the uncoloured copy and then one recoloured for spools that were the model's own
+    colours (a print whose spools matched the model), so a later filing with no spools
+    reuses it rather than uploading a duplicate.
+    """
     keys = [target.key]
-    own_colours = target.colours is None or [
-        normalise_colour(colour) for colour in target.colours
-    ] == [normalise_colour(colour) for colour in meta.colors]
-    if not is_inbox(folder, settings) and own_colours and target.uncoloured_key != target.key:
-        keys.append(target.uncoloured_key)
-    return sorted(
-        (
-            copy
-            for copy in await uploads.for_output(meta.id)
-            if copy.folder_id == folder and copy.target_key in keys
-        ),
-        key=lambda copy: keys.index(copy.target_key),
+    own = [normalise_colour(colour) for colour in meta.colors]
+    own_colours = (
+        target.colours is None or [normalise_colour(colour) for colour in target.colours] == own
     )
+    recoloured = f"{target.uncoloured_key}{_RECOLORED}"
+    extended = not is_inbox(folder, settings) and own_colours
+    if extended and target.uncoloured_key != target.key:
+        keys.append(target.uncoloured_key)
+
+    def rank(copy: LibraryCopy) -> int | None:
+        if copy.target_key in keys:
+            return keys.index(copy.target_key)
+        if extended and copy.target_key.startswith(recoloured):
+            suffix = copy.target_key.removeprefix(recoloured).split(",")
+            if [normalise_colour(colour) for colour in suffix] == own:
+                return len(keys)
+        return None
+
+    ranked = [
+        (order, copy)
+        for copy in await uploads.for_output(meta.id)
+        if copy.folder_id == folder and (order := rank(copy)) is not None
+    ]
+    return [copy for _, copy in sorted(ranked, key=lambda pair: pair[0])]
 
 
 async def _still_there(
