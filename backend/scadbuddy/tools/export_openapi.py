@@ -1,4 +1,8 @@
-"""Write ``backend/openapi.json``; the frontend generates its client from it."""
+"""Write ``backend/openapi.json``; the frontend and agent generate their clients from it.
+
+The file is not committed (#492). ``pnpm gen:api`` in either package runs this first,
+and the Dockerfile's ``api-spec`` stage runs it for the image builds.
+"""
 
 from __future__ import annotations
 
