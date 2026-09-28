@@ -27,9 +27,14 @@ import { type AuditActor, type AuditLog, type AuditOutcome, safeDetail } from '.
 
 type Open = { name: string; tier: RiskTier; input: Record<string, unknown>; startedAt: Date }
 
+/** The longest a row waits for its call's gate to record a verdict. */
+export const GATE_SETTLE_MS = 5000
+
 export class TurnAuditor {
   private readonly open = new Map<string, Open>()
   private readonly verdicts = new Map<string, ApprovalVerdict>()
+  /** Gates entered and not yet settled, by tool_use id. */
+  private readonly gating = new Map<string, Promise<void>>()
   private readonly audit: AuditLog
   private readonly context: {
     sessionId: string
@@ -55,6 +60,10 @@ export class TurnAuditor {
    */
   gate(gate: ApprovalGate, approvalFor?: (toolUseId: string) => Promise<string | undefined>): ApprovalGate {
     return async (request) => {
+      // Registered before anything awaits: a row for this call waits for the
+      // verdict (`write`), so it never races the gate (see `settled`).
+      let settle!: () => void
+      this.gating.set(request.toolUseId, new Promise<void>((resolve) => (settle = resolve)))
       try {
         const verdict = await gate(request)
         this.verdicts.set(request.toolUseId, verdict)
@@ -67,8 +76,27 @@ export class TurnAuditor {
           ...(approvalId ? { approvalId } : {}),
         })
         throw err
+      } finally {
+        settle()
       }
     }
+  }
+
+  /**
+   * Waits until the gate for this call (if one was entered) has recorded its
+   * verdict. Without this, an interrupt made the row racy: the abort ends the
+   * turn's message loop, whose `finish()` writes the parked call's row, while
+   * the gate's `catch` is still awaiting `approvalFor`'s database lookup, so
+   * the row was sometimes written with no verdict: outcome `error` and no
+   * approval id instead of `refused` with one. Bounded, so a gate that never
+   * settles (it always does once the turn's signal aborts) cannot hold the
+   * turn's clean-up.
+   */
+  private async settled(toolUseId: string): Promise<void> {
+    const pending = this.gating.get(toolUseId)
+    if (!pending) return
+    await Promise.race([pending, new Promise<void>((resolve) => setTimeout(resolve, GATE_SETTLE_MS).unref())])
+    this.gating.delete(toolUseId)
   }
 
   /** Feed every event the turn maps, unscrubbed (the hash is of the full input). */
@@ -97,6 +125,7 @@ export class TurnAuditor {
   }
 
   private async write(toolUseId: string, call: Open, ok: boolean, summary: string): Promise<void> {
+    await this.settled(toolUseId)
     const verdict = this.verdicts.get(toolUseId)
     this.verdicts.delete(toolUseId)
     let outcome: AuditOutcome
