@@ -43,7 +43,7 @@ def test_persisting_a_job_writes_the_documented_layout(
     assert body["has_thumbnail"] is False
     # Reserved for the Bambuddy epic.
     assert body["library_files"] == []
-    assert body["pipeline_run_id"] is None
+    assert "pipeline_run_id" not in body
     assert body["queue_item_id"] is None
 
     directory = paths.output_dir(model, body["id"])

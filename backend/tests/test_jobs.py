@@ -12,6 +12,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
+import psycopg
 import pytest
 import pytest_asyncio
 import trimesh
@@ -43,7 +44,7 @@ from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.schema import CustomizerSchema, Parameter, ParamValue
 from scadbuddy.render.solids import STAGED_ASSET_PREFIX, SolidRender
 from scadbuddy.render.split import ColourPart
-from tests.conftest import write_openscad_3mf
+from tests.conftest import PgPool, write_openscad_3mf
 
 CONFIG = Config(data_dir=Path("/unused"), render_concurrency=2, job_ttl=3600.0)
 
@@ -530,13 +531,54 @@ def _file_schema() -> CustomizerSchema:
     )
 
 
+async def test_staging_looks_the_upload_up_off_the_event_loop(
+    paths: DataPaths, pg_pool: PgPool, pg_conninfo: str
+) -> None:
+    """Marking an upload used is a database round trip (#591) that waits on a row the
+    sweep has locked; the render must wait in a thread, not stall the whole loop."""
+    model_dir = paths.model_dir("demo")
+    model_dir.mkdir(parents=True)
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
+    held = psycopg.connect(pg_conninfo)  # a transaction: the sweep's re-check, row locked
+    held.execute("SELECT 1 FROM assets WHERE id = %s FOR UPDATE", (asset.id,))
+    release = threading.Timer(1.0, held.commit)
+    release.start()
+
+    async def stage() -> dict[str, ParamValue]:
+        async with jobs.staged_assets(
+            _file_schema(), {"overlay": asset.id}, model_dir, store
+        ) as params:
+            return params
+
+    try:
+        staging = asyncio.create_task(stage())
+        loop = asyncio.get_running_loop()
+        gaps: list[float] = []
+        last = loop.time()
+        while not staging.done():
+            await asyncio.sleep(0.05)
+            gaps.append(loop.time() - last)
+            last = loop.time()
+        params = await staging
+    finally:
+        release.join()
+        held.close()
+    assert isinstance(params["overlay"], str)
+    assert params["overlay"].startswith(STAGED_ASSET_PREFIX)
+    # The row lock was held for a second; the loop never stopped for it.
+    assert sum(gaps) >= 0.9
+    assert max(gaps) < 0.5, f"the event loop stalled for {max(gaps):.2f}s"
+
+
 async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
-    paths: DataPaths,
+    paths: DataPaths, pg_pool: PgPool
 ) -> None:
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
     seen: dict[str, tuple[str, bytes]] = {}
 
     def staged(label: str, params: object) -> None:
@@ -577,11 +619,9 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         mock.patch.object(jobs, "cached_schema", cached_schema),
         mock.patch.object(jobs, "render_solids", render_solids),
     ):
-        result, _ = await jobs.render_job(
-            job, config=CONFIG, paths=paths, assets=AssetStore(paths.assets)
-        )
+        result, _ = await jobs.render_job(job, config=CONFIG, paths=paths, assets=store)
 
-    stored = AssetStore(paths.assets).blob_path(asset).read_bytes()
+    stored = store.blob_path(asset).read_bytes()
     assert seen["main"] == seen["solids"]
     assert seen["main"][1] == stored
     # Gone once the render is: the model directory is the versioned one.
@@ -591,11 +631,12 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
     assert result.warnings == []
 
 
-async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None:
+async def test_staging_is_undone_when_the_render_fails(paths: DataPaths, pg_pool: PgPool) -> None:
     model_dir = paths.model_dir("demo")
     model_dir.mkdir(parents=True)
     paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
-    asset = AssetStore(paths.assets).put(OVERLAY_SVG, "heart.svg")
+    store = AssetStore(paths.assets, pg_pool)
+    asset = store.put(OVERLAY_SVG, "heart.svg")
 
     async def render(*args: object, **kwargs: object) -> object:
         raise OpenSCADError("openscad exited with 1", [])
@@ -612,7 +653,7 @@ async def test_staging_is_undone_when_the_render_fails(paths: DataPaths) -> None
             _job("f", params={"overlay": asset.id}),
             config=CONFIG,
             paths=paths,
-            assets=AssetStore(paths.assets),
+            assets=store,
         )
 
     assert [p.name for p in model_dir.iterdir()] == ["model.scad"]
