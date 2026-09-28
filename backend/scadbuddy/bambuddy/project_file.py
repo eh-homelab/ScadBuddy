@@ -28,9 +28,10 @@ from scadbuddy.render.schema import ParamValue
 
 #: How many changed params the file name spells out before it stops.
 SUMMARY_PARAMS = 3
-#: A generous cap well inside the 255 bytes a FAT32 name may take, leaving room for
-#: `` (H2D)`` or `` (12)`` and the extension.
-STEM_MAX_CHARS = 120
+#: A generous cap well inside the 255 UTF-16 code units a FAT32/exFAT name may take
+#: (a character outside the BMP, such as an emoji, takes two), leaving room for
+#: `` (H2D)`` or `` (12)`` and the extension. Counted in those units, not characters.
+STEM_MAX_UTF16_UNITS = 120
 #: What Bambuddy refuses in a print file name (``utils/filename.py``: the printer's SD
 #: card is FAT32/exFAT), plus control characters.
 _UNSAFE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
@@ -58,6 +59,17 @@ class ProjectFile(BaseModel):
 
 def _clean(text: str) -> str:
     return " ".join(_UNSAFE.sub("-", text).split())
+
+
+def _within_utf16_units(text: str, limit: int) -> str:
+    """The longest prefix of ``text`` that is at most ``limit`` UTF-16 code units, never
+    ending halfway through a surrogate pair."""
+    units = 0
+    for index, char in enumerate(text):
+        units += 2 if ord(char) > 0xFFFF else 1
+        if units > limit:
+            return text[:index]
+    return text
 
 
 def _value_text(name: str, value: ParamValue) -> str:
@@ -92,7 +104,7 @@ def project_stem(
     stem = _clean(template) or "ScadBuddy"
     if summary.strip():
         stem = f"{stem} — {_clean(summary)}"
-    return stem[:STEM_MAX_CHARS].rstrip(" .") or "ScadBuddy"
+    return _within_utf16_units(stem, STEM_MAX_UTF16_UNITS).rstrip(" .") or "ScadBuddy"
 
 
 async def generate_target(

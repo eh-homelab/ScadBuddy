@@ -18,7 +18,7 @@ import respx
 from fastapi.testclient import TestClient
 
 from scadbuddy.api import outputs as outputs_api
-from scadbuddy.bambuddy.project_file import project_stem
+from scadbuddy.bambuddy.project_file import STEM_MAX_UTF16_UNITS, project_stem
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.outputs import META_NAME
 from scadbuddy.render.schema import ParamValue
@@ -355,6 +355,21 @@ def test_the_stem_spells_out_what_changed_and_nothing_a_print_file_name_refuses(
     assert project_stem("Sign", {"name": 'A/B: "C"?'}, defaults) == "Sign — A-B- -C--"
     assert project_stem("Sign", {}, defaults, name="Elan") == "Sign — Elan"
     assert project_stem("Sign", {}, defaults) == "Sign"
+
+
+def test_the_stem_is_capped_in_utf16_code_units_as_fat32_and_exfat_count_a_name() -> None:
+    """A name on the printer's SD card is at most 255 UTF-16 code units; an emoji takes
+    two. The stem keeps to its budget in those units, never splitting a pair, so the
+    `` (H2D)`` or `` (12)`` suffix and ``.3mf`` still fit."""
+    ascii_stem = project_stem("x" * 300, {}, {})
+    assert len(ascii_stem) == STEM_MAX_UTF16_UNITS
+
+    emoji_stem = project_stem("\N{SMILING FACE WITH SMILING EYES}" * 300, {}, {})
+    assert len(emoji_stem.encode("utf-16-le")) // 2 == STEM_MAX_UTF16_UNITS
+    assert emoji_stem == "\N{SMILING FACE WITH SMILING EYES}" * (STEM_MAX_UTF16_UNITS // 2)
+
+    odd = project_stem("a" + "\N{SMILING FACE WITH SMILING EYES}" * 300, {}, {})
+    assert len(odd.encode("utf-16-le")) // 2 == STEM_MAX_UTF16_UNITS - 1
 
 
 @respx.mock
