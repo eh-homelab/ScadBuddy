@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
@@ -95,11 +96,14 @@ def _detail(store: OutputStore, meta: OutputMeta, library_files: list[LibraryCop
     )
 
 
-def _details(
+async def _details(
     store: OutputStore, uploads: BambuddyUploadStore, metas: list[OutputMeta]
 ) -> list[OutputDetail]:
-    copies = uploads.for_outputs(meta.id for meta in metas)
-    return [_detail(store, meta, copies[meta.id]) for meta in metas]
+    copies = await uploads.for_outputs(meta.id for meta in metas)
+    # The thumbnail check and params read are file IO: off the event loop.
+    return await asyncio.to_thread(
+        lambda: [_detail(store, meta, copies[meta.id]) for meta in metas]
+    )
 
 
 def require_output(store: OutputStore, output_id: str) -> OutputMeta:
@@ -141,19 +145,23 @@ def create_output(
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
-def list_outputs(
+async def list_outputs(
     slug: SlugPath, catalogue: CatalogueDep, outputs: OutputsDep, uploads: UploadsDep
 ) -> list[OutputDetail]:
     """Details, not summaries: the history page shows each output's parameter diff, and
     a summary list would make it fetch every row again one at a time."""
-    require_model(catalogue, slug)
-    return _details(outputs, uploads, outputs.list_for(slug))
+    await asyncio.to_thread(require_model, catalogue, slug)
+    metas = await asyncio.to_thread(outputs.list_for, slug)
+    return await _details(outputs, uploads, metas)
 
 
 @router.get("/outputs/{output_id}", response_model=OutputDetail, summary="Output detail")
-def get_output(output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep) -> OutputDetail:
-    meta = require_output(outputs, output_id)
-    return _detail(outputs, meta, uploads.for_output(meta.id))
+async def get_output(
+    output_id: OutputIdPath, outputs: OutputsDep, uploads: UploadsDep
+) -> OutputDetail:
+    meta = await asyncio.to_thread(require_output, outputs, output_id)
+    [detail] = await _details(outputs, uploads, [meta])
+    return detail
 
 
 @router.get(
@@ -222,13 +230,13 @@ async def delete_output(
     fails stops here, before the record goes — it is the only pointer to the file.
     """
     meta = require_output(outputs, output_id)
-    if delete_inbox_copies and uploads.for_output(meta.id):
+    if delete_inbox_copies and await uploads.for_output(meta.id):
         settings = store.load()
         async with client_for(settings) as client:
             await remove_inbox_copies(client, uploads, meta, settings)
     outputs.delete(output_id)
     # After the files: a failed delete keeps the output, and so must keep its records.
-    uploads.delete_output(output_id)
+    await uploads.delete_outputs([output_id])
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

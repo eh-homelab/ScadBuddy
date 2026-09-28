@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -32,13 +33,16 @@ from scadbuddy.api.deps import (
     HistoryDep,
     InstallsDep,
     LibrariesDep,
+    OutputsDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
@@ -69,6 +73,7 @@ from scadbuddy.library.libraries import (
     parse_declaration,
     search_path,
 )
+from scadbuddy.library.outputs import OutputStore
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -95,7 +100,7 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import RenderQueue, resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -851,15 +856,37 @@ def duplicate_model(
         "they report their upstream as `gone`."
     ),
 )
-def delete_model(
+async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
     queue: QueueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
     events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    # Its outputs went with it; so do their Bambuddy upload records (#455). Bambuddy's
+    # own files are left alone, as a single output's delete leaves them unless asked.
+    # Best effort, like the rest of the cleanup after a delete: the model is gone.
+    if output_ids:
+        try:
+            await uploads.delete_outputs(output_ids)
+        except (DatabaseRequiredError, psycopg.Error):
+            logger.exception(
+                "could not forget a deleted model's upload records", extra={"slug": slug}
+            )
+    emit(events, ModelEvent(kind="model.deleted", slug=slug))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _delete_model(
+    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+) -> list[str]:
+    """The blocking part of :func:`delete_model`; returns the ids of the outputs it
+    removed, read before their directories go."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -878,13 +905,13 @@ def delete_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
+    output_ids = outputs.ids_for(slug)
     try:
         catalogue.delete(slug)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.deleted", slug=slug))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return output_ids
 
 
 @router.get(

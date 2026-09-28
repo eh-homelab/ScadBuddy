@@ -696,7 +696,7 @@ async def run_for_output(
         )
         if run.sliced_library_file_id is not None:
             # Usually null on the 202; the progress read records it once it appears.
-            uploads.record_sliced(
+            await uploads.record_sliced(
                 meta.id,
                 library_file_id,
                 SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
@@ -733,7 +733,7 @@ async def run_for_output(
                 project_id=project_id,
                 options=print_options,
             )
-            sent = _record_queued(
+            sent = await _record_queued(
                 store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
             )
             outcomes.append(outcome)
@@ -825,7 +825,7 @@ async def run_for_output(
             project_id=project_id,
             options=print_options,
         )
-        sent = _record_queued(
+        sent = await _record_queued(
             store, uploads, meta, library_file_id, plate_id, outcome, project_id, sent
         )
         outcomes.append(outcome)
@@ -878,7 +878,7 @@ async def _pipeline_or_conflict(client: BambuddyClient, pipeline_id: int) -> Pip
     return pipeline
 
 
-def _record_queued(
+async def _record_queued(
     store: OutputStore,
     uploads: BambuddyUploadStore,
     meta: OutputMeta,
@@ -895,7 +895,7 @@ def _record_queued(
     carries every plate of this print, since the single ids hold only the last. The
     plate's sliced file is recorded against the copy it was sliced from (#316).
     """
-    uploads.record_sliced(
+    await uploads.record_sliced(
         meta.id,
         library_file_id,
         SlicedCopy(id=outcome.sliced_library_file_id, preset_key=outcome.preset_key),

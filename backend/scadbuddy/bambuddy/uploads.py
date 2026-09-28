@@ -11,6 +11,7 @@ fallback, and every call raises `DatabaseRequiredError`.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Iterable
 
 from psycopg import Connection
@@ -67,6 +68,10 @@ class BambuddyUploadStore:
 
     The pool is the render queue's (`PostgresJobStore.pool`), opened and migrated at
     startup; this store opens nothing of its own.
+
+    Every public method is a coroutine that runs its query in a worker thread, as the
+    render queue does with its store: psycopg's calls here are blocking, and the
+    progress poll alone would otherwise hold the event loop for a round trip each time.
     """
 
     def __init__(self, pool: ConnectionPool[Connection[DictRow]] | None) -> None:
@@ -77,13 +82,45 @@ class BambuddyUploadStore:
             raise DatabaseRequiredError
         return self._pool
 
-    def for_output(self, output_id: str) -> list[LibraryCopy]:
+    async def for_output(self, output_id: str) -> list[LibraryCopy]:
         """The output's copies in upload order, each with its slices."""
-        return self.for_outputs([output_id])[output_id]
+        return (await self.for_outputs([output_id]))[output_id]
 
-    def for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[LibraryCopy]]:
+    async def for_outputs(self, output_ids: Iterable[str]) -> dict[str, list[LibraryCopy]]:
         """:meth:`for_output` for several outputs in two queries, not two per output."""
-        ids = list(dict.fromkeys(output_ids))
+        return await asyncio.to_thread(self._for_outputs, list(dict.fromkeys(output_ids)))
+
+    async def record(self, output_id: str, copy: LibraryCopy) -> None:
+        """Record an upload, replacing the folder and target of one with the same id."""
+        await asyncio.to_thread(self._record, output_id, copy)
+
+    async def forget(self, output_id: str, library_file_id: int) -> None:
+        """Drop one copy, and its slices, once the file has actually gone.
+
+        Call this *after* the delete has come back — committed or 404 — never before
+        it. Clearing first looks safer and is not: a delete that fails for any other
+        reason (a 500, a timeout) leaves the file in Bambuddy with nothing pointing at
+        it, so nothing would ever delete it. A copy whose delete failed stays recorded
+        and is tried again the next time it is superseded.
+        """
+        await asyncio.to_thread(self._forget, output_id, library_file_id)
+
+    async def record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> None:
+        """Record a slice against the copy it was sliced from.
+
+        A no-op when the slice is already recorded, which is what lets the progress
+        poll call this on every read, or when the copy is no longer recorded
+        (superseded and deleted since): a slice has nowhere to belong then.
+        """
+        await asyncio.to_thread(self._record_sliced, output_id, library_file_id, sliced)
+
+    async def delete_outputs(self, output_ids: Iterable[str]) -> None:
+        """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
+        await asyncio.to_thread(self._delete_outputs, list(output_ids))
+
+    # The blocking bodies, run in a worker thread by the coroutines above.
+
+    def _for_outputs(self, ids: list[str]) -> dict[str, list[LibraryCopy]]:
         found: dict[str, list[LibraryCopy]] = {output_id: [] for output_id in ids}
         with self._require().connection() as conn:
             copies = conn.execute(
@@ -114,8 +151,7 @@ class BambuddyUploadStore:
             )
         return found
 
-    def record(self, output_id: str, copy: LibraryCopy) -> None:
-        """Record an upload, replacing the folder and target of one with the same id."""
+    def _record(self, output_id: str, copy: LibraryCopy) -> None:
         with self._require().connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_uploads"
@@ -125,28 +161,14 @@ class BambuddyUploadStore:
                 (output_id, copy.id, copy.folder_id, copy.target_key),
             )
 
-    def forget(self, output_id: str, library_file_id: int) -> None:
-        """Drop one copy, and its slices, once the file has actually gone.
-
-        Call this *after* the delete has come back — committed or 404 — never before
-        it. Clearing first looks safer and is not: a delete that fails for any other
-        reason (a 500, a timeout) leaves the file in Bambuddy with nothing pointing at
-        it, so nothing would ever delete it. A copy whose delete failed stays recorded
-        and is tried again the next time it is superseded.
-        """
+    def _forget(self, output_id: str, library_file_id: int) -> None:
         with self._require().connection() as conn:
             conn.execute(
                 "DELETE FROM output_bambuddy_uploads WHERE output_id = %s AND library_file_id = %s",
                 (output_id, library_file_id),
             )
 
-    def record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> None:
-        """Record a slice against the copy it was sliced from.
-
-        A no-op when the slice is already recorded, which is what lets the progress
-        poll call this on every read, or when the copy is no longer recorded
-        (superseded and deleted since): a slice has nowhere to belong then.
-        """
+    def _record_sliced(self, output_id: str, library_file_id: int, sliced: SlicedCopy) -> None:
         with self._require().connection() as conn:
             conn.execute(
                 "INSERT INTO output_bambuddy_slices"
@@ -163,7 +185,6 @@ class BambuddyUploadStore:
                 },
             )
 
-    def delete_output(self, output_id: str) -> None:
-        """Forget every copy and slice of a deleted output. Bambuddy is not touched."""
+    def _delete_outputs(self, ids: list[str]) -> None:
         with self._require().connection() as conn:
-            conn.execute("DELETE FROM output_bambuddy_uploads WHERE output_id = %s", (output_id,))
+            conn.execute("DELETE FROM output_bambuddy_uploads WHERE output_id = ANY(%s)", (ids,))

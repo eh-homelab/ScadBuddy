@@ -63,61 +63,63 @@ def test_the_tables_are_created_on_a_fresh_database_and_reopening_changes_nothin
 
 
 @pytest.mark.requires_postgres
-def test_uploads_list_in_upload_order_per_output(uploads: BambuddyUploadStore) -> None:
-    uploads.record(OUTPUT, copy(11, folder_id=9))
-    uploads.record(OUTPUT, copy(12, folder_id=None, target_key="A1"))
-    uploads.record(OTHER, copy(13))
+async def test_uploads_list_in_upload_order_per_output(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11, folder_id=9))
+    await uploads.record(OUTPUT, copy(12, folder_id=None, target_key="A1"))
+    await uploads.record(OTHER, copy(13))
 
-    assert uploads.for_output(OUTPUT) == [copy(11, folder_id=9), copy(12, None, "A1")]
-    assert uploads.for_output(OTHER) == [copy(13)]
-    assert uploads.for_output("c" * 32) == []
-
-
-@pytest.mark.requires_postgres
-def test_recording_the_same_file_again_replaces_it(uploads: BambuddyUploadStore) -> None:
-    uploads.record(OUTPUT, copy(11, folder_id=2))
-    uploads.record(OUTPUT, copy(11, folder_id=9, target_key="A1"))
-
-    assert uploads.for_output(OUTPUT) == [copy(11, folder_id=9, target_key="A1")]
+    assert await uploads.for_output(OUTPUT) == [copy(11, folder_id=9), copy(12, None, "A1")]
+    assert await uploads.for_output(OTHER) == [copy(13)]
+    assert await uploads.for_output("c" * 32) == []
 
 
 @pytest.mark.requires_postgres
-def test_slices_belong_to_their_source_and_record_once(uploads: BambuddyUploadStore) -> None:
-    uploads.record(OUTPUT, copy(11))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21, preset_key="1"))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21, preset_key="1"))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=22))
+async def test_recording_the_same_file_again_replaces_it(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11, folder_id=2))
+    await uploads.record(OUTPUT, copy(11, folder_id=9, target_key="A1"))
 
-    [only] = uploads.for_output(OUTPUT)
+    assert await uploads.for_output(OUTPUT) == [copy(11, folder_id=9, target_key="A1")]
+
+
+@pytest.mark.requires_postgres
+async def test_slices_belong_to_their_source_and_record_once(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21, preset_key="1"))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21, preset_key="1"))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=22))
+
+    [only] = await uploads.for_output(OUTPUT)
     assert only.sliced == [SlicedCopy(id=21, preset_key="1"), SlicedCopy(id=22)]
 
 
 @pytest.mark.requires_postgres
-def test_a_slice_of_a_file_no_longer_recorded_is_dropped(uploads: BambuddyUploadStore) -> None:
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
+async def test_a_slice_of_a_file_no_longer_recorded_is_dropped(
+    uploads: BambuddyUploadStore,
+) -> None:
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
 
-    assert uploads.for_output(OUTPUT) == []
-
-
-@pytest.mark.requires_postgres
-def test_forgetting_a_file_forgets_its_slices(uploads: BambuddyUploadStore) -> None:
-    uploads.record(OUTPUT, copy(11))
-    uploads.record(OUTPUT, copy(12))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
-
-    uploads.forget(OUTPUT, 11)
-    uploads.record(OUTPUT, copy(11))
-
-    assert uploads.for_output(OUTPUT) == [copy(12), copy(11)]
+    assert await uploads.for_output(OUTPUT) == []
 
 
 @pytest.mark.requires_postgres
-def test_for_outputs_answers_every_output_in_one_read(uploads: BambuddyUploadStore) -> None:
-    uploads.record(OUTPUT, copy(11))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
-    uploads.record(OTHER, copy(12))
+async def test_forgetting_a_file_forgets_its_slices(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record(OUTPUT, copy(12))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
 
-    listed = uploads.for_outputs([OUTPUT, OTHER, "c" * 32])
+    await uploads.forget(OUTPUT, 11)
+    await uploads.record(OUTPUT, copy(11))
+
+    assert await uploads.for_output(OUTPUT) == [copy(12), copy(11)]
+
+
+@pytest.mark.requires_postgres
+async def test_for_outputs_answers_every_output_in_one_read(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
+    await uploads.record(OTHER, copy(12))
+
+    listed = await uploads.for_outputs([OUTPUT, OTHER, "c" * 32])
 
     assert listed == {
         OUTPUT: [copy(11).model_copy(update={"sliced": [SlicedCopy(id=21)]})],
@@ -127,25 +129,40 @@ def test_for_outputs_answers_every_output_in_one_read(uploads: BambuddyUploadSto
 
 
 @pytest.mark.requires_postgres
-def test_deleting_an_output_deletes_only_its_rows(
+async def test_deleting_an_output_deletes_only_its_rows(
     uploads: BambuddyUploadStore, pg_conninfo: str
 ) -> None:
-    uploads.record(OUTPUT, copy(11))
-    uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
-    uploads.record(OTHER, copy(12))
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record_sliced(OUTPUT, 11, SlicedCopy(id=21))
+    await uploads.record(OTHER, copy(12))
 
-    uploads.delete_output(OUTPUT)
+    await uploads.delete_outputs([OUTPUT])
 
-    assert uploads.for_output(OUTPUT) == []
-    assert uploads.for_output(OTHER) == [copy(12)]
+    assert await uploads.for_output(OUTPUT) == []
+    assert await uploads.for_output(OTHER) == [copy(12)]
     with psycopg.connect(pg_conninfo) as conn:
         row = conn.execute("SELECT count(*) FROM output_bambuddy_slices").fetchone()
     assert row is not None and row[0] == 0
 
 
-def test_without_a_database_every_use_says_so() -> None:
+async def test_without_a_database_every_use_says_so() -> None:
     uploads = BambuddyUploadStore(None)
     with pytest.raises(DatabaseRequiredError, match="SCADBUDDY_DATABASE_URL"):
-        uploads.for_output(OUTPUT)
+        await uploads.for_output(OUTPUT)
     with pytest.raises(DatabaseRequiredError):
-        uploads.record(OUTPUT, copy(11))
+        await uploads.record(OUTPUT, copy(11))
+
+
+@pytest.mark.requires_postgres
+async def test_delete_outputs_takes_several_at_once(uploads: BambuddyUploadStore) -> None:
+    await uploads.record(OUTPUT, copy(11))
+    await uploads.record(OTHER, copy(12))
+    await uploads.record("c" * 32, copy(13))
+
+    await uploads.delete_outputs([OUTPUT, OTHER])
+
+    assert await uploads.for_outputs([OUTPUT, OTHER, "c" * 32]) == {
+        OUTPUT: [],
+        OTHER: [],
+        "c" * 32: [copy(13)],
+    }

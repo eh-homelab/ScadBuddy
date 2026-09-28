@@ -7,6 +7,7 @@ in is the upload's ``folder_id`` query parameter, so that is what these read.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -347,7 +348,7 @@ def test_deleting_an_output_can_take_its_inbox_copies_and_never_a_projects(
     assert [call.request.url.path for call in delete.calls] == ["/api/v1/library/files/41"]
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
     # The project's copy stays in Bambuddy; the record of it goes with the output.
-    assert upload_store(client).for_output(output_id) == []
+    assert asyncio.run(upload_store(client).for_output(output_id)) == []
 
 
 @respx.mock
@@ -380,3 +381,24 @@ def test_an_inbox_copy_that_cannot_be_deleted_keeps_the_output(
 
     assert response.status_code >= 500
     assert client.get(f"/api/v1/outputs/{output_id}").status_code == 200
+
+
+@respx.mock
+def test_deleting_a_model_forgets_its_outputs_upload_records(
+    client: TestClient, model: str
+) -> None:
+    """The model's outputs go with it, and so do their records (#455). Bambuddy's files
+    are left alone, as they are when one output is deleted without asking."""
+    output_id = set_up(client, model)
+    other = make_output(client, model)
+    uploads(41, 42)
+    delete = deletes()
+    run(client, output_id, pipeline_id=1)
+    run(client, other, pipeline_id=1)
+    store = upload_store(client)
+    assert asyncio.run(store.for_outputs([output_id, other])) != {output_id: [], other: []}
+
+    assert client.delete(f"/api/v1/models/{model}").status_code == 204
+
+    assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
+    assert not delete.called

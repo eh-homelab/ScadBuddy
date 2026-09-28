@@ -375,7 +375,7 @@ async def progress_for(
             and run.sliced_library_file_id is not None
             and run.source_library_file_id is not None
         ):
-            uploads.record_sliced(
+            await uploads.record_sliced(
                 meta.id,
                 run.source_library_file_id,
                 SlicedCopy(

@@ -270,9 +270,11 @@ async def upload_output(
     folder = folder_id if folder_id is not None else settings.library_folder_id
 
     uploaded = await client.upload_library_file(download_filename(meta), payload, folder_id=folder)
-    uploads.record(meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key))
+    await uploads.record(
+        meta.id, LibraryCopy(id=uploaded.id, folder_id=folder, target_key=target.key)
+    )
     if is_inbox(folder, settings):
-        for copy in uploads.for_output(meta.id):
+        for copy in await uploads.for_output(meta.id):
             if copy.id == uploaded.id or copy.folder_id != folder:
                 continue
             await _delete_copy(client, uploads, meta, copy.id, strict=False)
@@ -305,7 +307,7 @@ async def _delete_copy(
             )
             return
         logger.info("the library copy was already gone", extra={"library_file_id": library_file_id})
-    uploads.forget(meta.id, library_file_id)
+    await uploads.forget(meta.id, library_file_id)
 
 
 async def _ensure_copy(
@@ -321,7 +323,7 @@ async def _ensure_copy(
     """:func:`ensure_uploaded`, plus the file name Bambuddy holds the copy under."""
     target = target if target is not None else await target_for(client, settings, meta.slug)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-    for copy in uploads.for_output(meta.id):
+    for copy in await uploads.for_output(meta.id):
         if copy.folder_id != folder or copy.target_key != target.key:
             continue
         # Someone may have deleted it in Bambuddy since. Reusing a dead id would fail
@@ -336,7 +338,7 @@ async def _ensure_copy(
                 "a recorded library copy was deleted in Bambuddy; uploading it again",
                 extra={"library_file_id": copy.id},
             )
-            uploads.forget(meta.id, copy.id)
+            await uploads.forget(meta.id, copy.id)
             continue
         return copy.id, found.filename
     return await upload_output(
@@ -391,7 +393,7 @@ async def delete_inbox_copies(
 
     Slices are left alone: a queued print may still reference one.
     """
-    for copy in uploads.for_output(meta.id):
+    for copy in await uploads.for_output(meta.id):
         if is_inbox(copy.folder_id, settings):
             await _delete_copy(client, uploads, meta, copy.id, strict=True)
 
@@ -586,7 +588,7 @@ async def _queue_send(
         )
         store.record_send(meta.id, pipeline_run_id=run.id, print_route="pipeline")
         if run.sliced_library_file_id is not None:
-            uploads.record_sliced(
+            await uploads.record_sliced(
                 meta.id,
                 library_file_id,
                 SlicedCopy(id=run.sliced_library_file_id, preset_key=str(pipeline_id)),
@@ -638,7 +640,7 @@ async def _queue_send(
             f"Bambuddy slice job {accepted.job_id} completed without a sliced file",
         )
 
-    uploads.record_sliced(
+    await uploads.record_sliced(
         meta.id, library_file_id, SlicedCopy(id=sliced, preset_key=slice_request.preset_key)
     )
     item = await client.enqueue(

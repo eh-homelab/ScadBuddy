@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import uuid
@@ -156,6 +157,18 @@ class OutputStore:
             for path in directory.glob(f"*/{META_NAME}")
         ]
         return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
+
+    def ids_for(self, slug: str) -> list[str]:
+        """The id of every output directory of ``slug``, readable record or not."""
+        try:
+            entries = list((self.paths.outputs / slug).iterdir())
+        except OSError:
+            return []
+        return [
+            entry.name
+            for entry in entries
+            if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
+        ]
 
     def create(
         self, job: Job, *, name: str | None = None, public_url: str | None = None
