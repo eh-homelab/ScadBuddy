@@ -338,7 +338,7 @@ export class SettingsStore {
       actor: context?.actor ?? SYSTEM_ACTOR,
       clientIp: context?.clientIp,
       outcome: failure === undefined ? 'ok' : 'error',
-      detail: `${key} = ${JSON.stringify(value) ?? 'undefined'}${failure === undefined ? '' : ` (failed: ${(failure as Error).message})`}`,
+      detail: `${key} = ${JSON.stringify(value) ?? 'undefined'}${failure === undefined ? '' : ` (failed: ${failure instanceof Error ? failure.message : String(failure)})`}`,
       startedAt,
       finishedAt: new Date(),
     })

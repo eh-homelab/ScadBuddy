@@ -90,6 +90,8 @@ export const approvalTools: Tool[] = [
         })
       }
       // Approved and now used up: whatever happens next, this approval never runs again.
+      // The report also names the tool, so runToolWithOutcome's untrusted-data
+      // envelope (and its error attribution) says the content is that tool's, not confirm_action's.
       ctx.report?.({ approvalId: claim.action.id, ran: { tool: tool.name, input } })
       return tool.execute(input, ctx)
     },

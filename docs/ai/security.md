@@ -686,7 +686,10 @@ its decider as the principal.
 
 - **Append-only.** Triggers refuse `UPDATE`, `TRUNCATE` and any `DELETE` except the
   retention sweep's, which sets `scadbuddy.audit_prune` for its own transaction only
-  (`set_config(…, true)`). This stops the service's own code, not a database superuser.
+  (`set_config(…, true)`). This guards against a stray statement in the service's own
+  code; it is not tamper-evidence, since any role can set that setting for its
+  transaction, the service's role holds `DELETE` for the sweep, and a superuser can
+  drop the trigger.
 - **Retention.** `audit_retention_days` in `ai_settings` (default 90, 1–3650), pruned
   hourly by `main.ts`. Changing it is itself a `settings` row.
 - **Reading it.** `GET /api/v1/ai/audit` (`routes/audit.ts`) behind `uiReadProblem`,

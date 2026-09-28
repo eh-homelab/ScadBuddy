@@ -53,9 +53,11 @@ CREATE INDEX ai_audit_action ON ai_audit (action, at DESC);
 
 -- Append-only, enforced in the database: rows are never updated, and are
 -- deleted only by the retention sweep (src/audit/log.ts prune), which sets
--- `scadbuddy.audit_prune` for its own transaction. This stops the service's
--- own code (or a stray statement) from rewriting history; it is no defence
--- against a database superuser, who can drop the trigger.
+-- `scadbuddy.audit_prune` for its own transaction. This guards against a
+-- stray UPDATE, DELETE or TRUNCATE in the service's own code. It is not
+-- tamper-evidence: `scadbuddy.audit_prune` is an ordinary setting any role
+-- can set for its transaction, the service's role holds DELETE for the
+-- sweep, and a superuser can drop the trigger.
 CREATE FUNCTION ai_audit_append_only() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
   IF TG_OP = 'DELETE' AND current_setting('scadbuddy.audit_prune', true) = 'on' THEN

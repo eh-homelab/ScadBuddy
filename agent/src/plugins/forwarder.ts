@@ -257,9 +257,17 @@ export function rewriteSseEvent(block: string, ids: Rewrites, route: Pick<Route,
   } catch {
     return ids.calls.size > 0 ? undefined : block
   }
-  const rewritten = rewriteMessages(parsed, ids, route)
-  if (rewritten === parsed) return block
-  return [...lines.filter((l) => !l.startsWith('data:')), `data: ${JSON.stringify(rewritten)}`].join('\n')
+  // Guarded like the JSON-body path: a shape the rewrite cannot handle is
+  // withheld while a call is in flight, never thrown into the stream's handler.
+  let data_: string
+  try {
+    const rewritten = rewriteMessages(parsed, ids, route)
+    if (rewritten === parsed) return block
+    data_ = JSON.stringify(rewritten)
+  } catch {
+    return ids.calls.size > 0 ? undefined : block
+  }
+  return [...lines.filter((l) => !l.startsWith('data:')), `data: ${data_}`].join('\n')
 }
 
 /** The JSON-RPC error a call gets when its reply was withheld. */

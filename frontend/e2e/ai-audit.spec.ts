@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test'
 
 test.describe('AI activity in Settings (#258)', () => {
-  // The mocked build serves the agent's audit log from msw (src/mocks/audit.ts);
+  // The mocked build serves the agent's audit log from msw (src/mocks/features/audit.ts);
   // against a real stack the section needs a running agent service.
   test.skip(!!process.env.E2E_BASE_URL, 'mock-agent-backed')
 

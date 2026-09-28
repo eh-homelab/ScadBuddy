@@ -145,8 +145,13 @@ export type AuditSettings = {
   set(key: string, value: unknown, context?: AuditContext): Promise<void>
 }
 
+/** At most `max` UTF-16 units, cut between code points: a surrogate pair at the boundary goes whole, never as a lone half. */
 export function cap(text: string, max: number): string {
-  return text.length > max ? `${text.slice(0, max - 1)}…` : text
+  if (text.length <= max) return text
+  let kept = text.slice(0, max - 1)
+  const last = kept.charCodeAt(kept.length - 1)
+  if (last >= 0xd800 && last <= 0xdbff) kept = kept.slice(0, -1)
+  return `${kept}…`
 }
 
 /** A retention value from Settings, clamped; the default when unset or not a number. */

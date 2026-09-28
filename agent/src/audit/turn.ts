@@ -44,12 +44,16 @@ export class TurnAuditor {
     secrets: () => readonly string[]
   }
 
+  private readonly settleMs: number
+
   constructor(
     audit: AuditLog,
     context: { sessionId: string; turnId: string; actor: AuditActor; tierOf: TierResolver; secrets: () => readonly string[] },
+    options: { settleMs?: number } = {},
   ) {
     this.audit = audit
     this.context = context
+    this.settleMs = options.settleMs ?? GATE_SETTLE_MS
   }
 
   /**
@@ -95,7 +99,7 @@ export class TurnAuditor {
   private async settled(toolUseId: string): Promise<void> {
     const pending = this.gating.get(toolUseId)
     if (!pending) return
-    await Promise.race([pending, new Promise<void>((resolve) => setTimeout(resolve, GATE_SETTLE_MS).unref())])
+    await Promise.race([pending, new Promise<void>((resolve) => setTimeout(resolve, this.settleMs).unref())])
     this.gating.delete(toolUseId)
   }
 
@@ -117,11 +121,15 @@ export class TurnAuditor {
     await this.write(e.id, call, e.ok, unwrapUntrusted(e.summary))
   }
 
-  /** Calls with no result when the turn ended; `why` is the turn's reason. */
+  /**
+   * Calls with no result when the turn ended; `why` is the turn's reason.
+   * Their rows are written at once, not one after another, so several calls
+   * still on the gate hold the turn's clean-up for one settle wait, not one each.
+   */
   async finish(why: string): Promise<void> {
     const left = [...this.open.entries()]
     this.open.clear()
-    for (const [id, call] of left) await this.write(id, call, false, `no result: ${why}`)
+    await Promise.all(left.map(([id, call]) => this.write(id, call, false, `no result: ${why}`)))
   }
 
   private async write(toolUseId: string, call: Open, ok: boolean, summary: string): Promise<void> {

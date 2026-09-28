@@ -14,7 +14,8 @@ import {
 } from '../src/safety/untrusted.js'
 import { SdkEventMapper } from '../src/sessions/sdkEvents.js'
 import { tierOf } from '../src/tools/index.js'
-import { PendingActionStore } from '../src/tools/pending.js'
+import { approvalTools } from '../src/tools/approvals.js'
+import { type OutwardActions, PendingActionStore } from '../src/tools/pending.js'
 import { ok } from '../src/tools/call.js'
 import { defineTool, runToolWithOutcome, text, ToolError } from '../src/tools/registry.js'
 import { z } from 'zod'
@@ -160,6 +161,51 @@ describe('runTool marks handler output, not its own messages', () => {
 
     const own = await runToolWithOutcome(stub(() => Promise.reject(new ToolError('give a photo or a plate'))), {}, ctx())
     expect((own.result.content[0] as { text: string }).text).toBe('give a photo or a plate')
+  })
+
+  it('names the tool confirm_action ran, and its source, in the envelope and in a failure, not confirm_action', async () => {
+    const stub = (name: string, handler: () => Promise<ReturnType<typeof text>>) =>
+      defineTool({
+        name,
+        description: 'stub',
+        input: z.object({ copies: z.number().default(1) }),
+        risk: 'outward',
+        routes: [],
+        source: 'the printer',
+        summarize: () => 'print it',
+        handler,
+      })
+    const printer = stub('print_stub', async () => text(INJECTED))
+    const broken = stub('print_broken', () => Promise.reject(new Error(INJECTED)))
+    const tools = [printer, broken]
+    const confirm = approvalTools.find((t) => t.name === 'confirm_action')!
+    /** An approval store whose one action is approved for whichever tool `tool` names. */
+    const approvedFor = (tool: string): OutwardActions => {
+      const action = { id: 'a1', tool, summary: 'print it', expiresAt: new Date(Date.now() + 60_000) }
+      return {
+        prepare: async () => action,
+        list: async () => [action],
+        find: async () => action,
+        claim: async () => ({ status: 'approved', action }),
+      }
+    }
+    const confirmCtx = (tool: string) => ({
+      ...ctx(),
+      pending: approvedFor(tool),
+      lookup: (name: string) => tools.find((t) => t.name === name),
+    })
+
+    const run = await runToolWithOutcome(confirm, { pending_action_id: 'a1', arguments: {} }, confirmCtx('print_stub'))
+    expect(run).toMatchObject({ outcome: 'ok', approvalId: 'a1', ran: { tool: 'print_stub', input: { copies: 1 } } })
+    expect(JSON.parse((run.result.content[0] as { text: string }).text)).toEqual({
+      [UNTRUSTED_KEY]: { tool: 'print_stub', source: 'the printer', content: INJECTED },
+    })
+
+    const failed = await runToolWithOutcome(confirm, { pending_action_id: 'a1', arguments: {} }, confirmCtx('print_broken'))
+    expect(failed).toMatchObject({ outcome: 'error', approvalId: 'a1', ran: { tool: 'print_broken' } })
+    const message = (failed.result.content[0] as { text: string }).text
+    expect(message.startsWith('print_broken failed: ')).toBe(true)
+    expect(JSON.parse(message.slice('print_broken failed: '.length))[UNTRUSTED_KEY]).toMatchObject({ tool: 'print_broken', content: INJECTED })
   })
 
   it('an outward call is only prepared, whatever its arguments say about approval', async () => {

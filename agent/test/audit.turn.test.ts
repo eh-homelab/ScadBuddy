@@ -65,6 +65,34 @@ describe('TurnAuditor', () => {
     ])
   })
 
+  it('writes the rows of every call still on the gate when the turn ends at once: one settle wait, not one per call', async () => {
+    const { log, entries } = stubLog()
+    const turn = new TurnAuditor(
+      log,
+      {
+        sessionId: 's',
+        turnId: 't',
+        actor: { kind: 'browser', id: 'browser', label: 'You' },
+        tierOf: () => 'outward',
+        secrets: () => [],
+      },
+      { settleMs: 200 },
+    )
+    // A gate that never records a verdict, so each row waits the full settle time.
+    const gate = turn.gate(() => new Promise(() => {}))
+    const ids = ['t1', 't2', 't3', 't4']
+    for (const id of ids) {
+      await turn.observe(call(id))
+      void gate({ toolName: 'mcp__scadbuddy__print_output', input: {}, toolUseId: id, tier: 'outward', signal: new AbortController().signal })
+    }
+    const started = Date.now()
+    await turn.finish('the turn was interrupted')
+    // One after another would be 4 × 200 ms.
+    expect(Date.now() - started).toBeLessThan(500)
+    expect(entries.map((e) => e.toolUseId).sort()).toEqual(ids)
+    expect(entries.every((e) => e.outcome === 'error' && e.detail === 'no result: the turn was interrupted')).toBe(true)
+  })
+
   it('a call that never met the gate (read or write tier) is written at once', async () => {
     const { log, entries } = stubLog()
     const turn = new TurnAuditor(log, {

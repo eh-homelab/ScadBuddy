@@ -103,6 +103,22 @@ describe('plugin tool results through the forwarder', () => {
     expect(rewriteSseEvent(': ping', rewrites(), route)).toBe(': ping')
   })
 
+  it('withholds an SSE event the rewrite itself cannot handle while a call is in flight, rather than throwing', () => {
+    // A route whose collision set fails: the tools/list rewrite consults it.
+    const hostile = {
+      plugin: route.plugin,
+      collided: {
+        has: () => {
+          throw new Error('boom')
+        },
+        add: () => {},
+      } as unknown as Set<string>,
+    }
+    const list = `data: ${JSON.stringify({ jsonrpc: '2.0', id: 1, result: { tools: [{ name: 'recall' }] } })}`
+    expect(rewriteSseEvent(list, { lists: new Set<unknown>([1]), calls: new Map<unknown, string>([[7, 'files.get']]) }, hostile)).toBeUndefined()
+    expect(rewriteSseEvent(list, { lists: new Set<unknown>([1]), calls: new Map<unknown, string>() }, hostile)).toBe(list)
+  })
+
   it('reads a block by the SSE rules: a line ends at CRLF, CR or LF', () => {
     const block = `event: message\rdata: ${JSON.stringify({ jsonrpc: '2.0', id: 7, result: { content: [{ type: 'text', text: 'hi' }] } })}\r\n`
     const out = rewriteSseEvent(block, rewrites(), route)!

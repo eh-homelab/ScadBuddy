@@ -2,7 +2,10 @@ import { randomBytes } from 'node:crypto'
 import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp } from '../src/app.js'
 import { auditedTokenStore, REFUSAL_WINDOW_MS, RefusalCoalescer, UI_ACTOR, UNVERIFIED_ACTOR } from '../src/audit/writes.js'
+import type { Sql } from 'postgres'
+import { cap } from '../src/audit/log.js'
 import type { TokenStore } from '../src/auth/tokens.js'
+import { SettingsStore } from '../src/credentials.js'
 import { originPolicy } from '../src/http/origins.js'
 import { kekFromBase64 } from '../src/secrets.js'
 import { MemoryAudit } from './support/memoryAudit.js'
@@ -216,6 +219,34 @@ describe('MCP token writes', () => {
     expect(audit.entries.map((e) => [e.kind, e.action, e.outcome, e.clientIp])).toEqual([
       ['token', 'mint', 'error', '10.0.0.7'],
       ['token', 'revoke', 'error', '10.0.0.7'],
+    ])
+  })
+})
+
+describe('cap', () => {
+  it('cuts between code points, so no lone surrogate reaches a row', () => {
+    expect(cap('abc', 3)).toBe('abc')
+    expect(cap('abcd', 3)).toBe('ab…')
+    // 'ab😀x' is five UTF-16 units; a cut after three would keep half the emoji.
+    expect(cap('ab😀x', 4)).toBe('ab…')
+    expect(cap('a😀', 3)).toBe('a😀')
+    expect(cap('a😀bc', 4)).toBe('a😀…')
+  })
+})
+
+describe('SettingsStore', () => {
+  it('audits a failed write whose rejection is not an Error, and rethrows it as it was', async () => {
+    const audit = new MemoryAudit()
+    const sql = Object.assign(() => Promise.reject('connection reset'), { json: (value: unknown) => value }) as unknown as Sql
+    const settings = new SettingsStore(sql, audit)
+    await expect(settings.set('model', 'claude-sonnet-4-5')).rejects.toBe('connection reset')
+    expect(audit.entries).toEqual([
+      expect.objectContaining({
+        kind: 'settings',
+        action: 'model',
+        outcome: 'error',
+        detail: 'model = "claude-sonnet-4-5" (failed: connection reset)',
+      }),
     ])
   })
 })

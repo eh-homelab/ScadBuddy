@@ -231,7 +231,7 @@ function failed(message: string): ToolRun {
  * An error whose `reason` ScadBuddy did not write: the model gets `summary`
  * bare and `reason` in the untrusted-data envelope; the audit row keeps both.
  */
-function failedWith(tool: Tool, summary: string, reason: string, source: string): ToolRun {
+function failedWith(tool: Pick<Tool, 'name'>, summary: string, reason: string, source: string): ToolRun {
   return {
     result: errorResult(`${summary}: ${wrapUntrustedText(tool.name, source, reason)}`),
     outcome: 'error',
@@ -257,12 +257,21 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   // whether the run then answered or threw: an approval it consumed is on the
   // row either way.
   let reported: RunReport = {}
-  const run = await runJudgedByResult(tool, args, {
-    ...ctx,
-    report: (r) => {
-      reported = r
+  // The envelope names the tool whose content it is: the one the handler
+  // reports it ran (confirm_action runs the approved tool), else the tool called.
+  const executed = (): Pick<Tool, 'name' | 'source'> =>
+    (reported.ran && ctx.lookup?.(reported.ran.tool)) || tool
+  const run = await runJudgedByResult(
+    tool,
+    args,
+    {
+      ...ctx,
+      report: (r) => {
+        reported = r
+      },
     },
-  })
+    executed,
+  )
   return {
     ...run,
     ...(reported.outcome ? { outcome: reported.outcome } : {}),
@@ -272,7 +281,12 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
   }
 }
 
-async function runJudgedByResult(tool: Tool, args: unknown, ctx: ToolContext): Promise<ToolRun> {
+async function runJudgedByResult(
+  tool: Tool,
+  args: unknown,
+  ctx: ToolContext,
+  executed: () => Pick<Tool, 'name' | 'source'>,
+): Promise<ToolRun> {
   if (!hasTier(ctx.principal, tool.risk)) {
     return refused(
       `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
@@ -298,19 +312,22 @@ async function runJudgedByResult(tool: Tool, args: unknown, ctx: ToolContext): P
         detail: `waiting for approval (pending action ${action.id}); nothing was sent`,
       }
     }
-    const result = markUntrusted(await tool.execute(args, ctx), tool.name, tool.source)
+    const raw = await tool.execute(args, ctx)
+    const by = executed()
+    const result = markUntrusted(raw, by.name, by.source)
     return result.isError
       ? { result, outcome: 'error', detail: 'the tool returned an error result' }
       : { result, outcome: 'ok' }
   } catch (err) {
     if (err instanceof z.ZodError) return failed(`invalid arguments: ${z.prettifyError(err)}`)
+    const by = executed()
     if (err instanceof ToolError && err.untrusted !== undefined) {
-      return failedWith(tool, err.summary, err.untrusted, ERROR_DETAIL_SOURCE)
+      return failedWith(by, err.summary, err.untrusted, ERROR_DETAIL_SOURCE)
     }
     if (err instanceof ToolError || err instanceof PendingStoreFullError) return failed(err.message)
     if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
     // An unexpected error's message can quote anything (a response body, a path).
-    return failedWith(tool, `${tool.name} failed`, err instanceof Error ? err.message : String(err), UNEXPECTED_ERROR_SOURCE)
+    return failedWith(by, `${by.name} failed`, err instanceof Error ? err.message : String(err), UNEXPECTED_ERROR_SOURCE)
   }
 }
 
