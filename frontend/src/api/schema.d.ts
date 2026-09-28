@@ -788,7 +788,16 @@ export interface paths {
         get: operations["get_output_api_v1_outputs__output_id__get"];
         put?: never;
         post?: never;
-        /** Delete an output */
+        /**
+         * Delete an output
+         * @description Delete the output, and with ``delete_inbox_copies`` its copies in Bambuddy's
+         *     inbox folder (#316).
+         *
+         *     Copies in a project's folder are never deleted: they are that project's record of
+         *     what it printed, listed in ``library_files`` so the UI can say they stay. Nor are
+         *     sliced files, which a queued print may still reference. A Bambuddy delete that
+         *     fails stops here, before the record goes — it is the only pointer to the file.
+         */
         delete: operations["delete_output_api_v1_outputs__output_id__delete"];
         options?: never;
         head?: never;
@@ -916,8 +925,8 @@ export interface paths {
          *     slice and queue it.
          *
          *     The file is read from the PVC and pushed by the server, so the API key never
-         *     reaches the browser. A re-send replaces the file Bambuddy already holds rather
-         *     than adding a second copy.
+         *     reaches the browser. A re-send reuses the copy already in the inbox while it was
+         *     laid out for the same printer, and replaces it otherwise (#316).
          */
         post: operations["send_output_to_bambuddy_api_v1_outputs__output_id__send_post"];
         delete?: never;
@@ -1093,8 +1102,8 @@ export interface paths {
          * @description Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
          *
          *     Bambuddy judges a *library file*, so there is no eligibility answer before an
-         *     upload. The upload happens once per output: an output is immutable, so a recorded
-         *     ``library_file_id`` still describes this 3MF.
+         *     upload. The upload happens once per folder and target: an output is immutable, so a
+         *     recorded copy still describes this 3MF (#316).
          *
          *     Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
          *     ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
@@ -2096,6 +2105,31 @@ export interface components {
             /** Warnings */
             warnings?: string[] | null;
         };
+        /**
+         * LibraryCopy
+         * @description One copy of the output's 3MF in Bambuddy's library (#316).
+         *
+         *     Keyed by (``folder_id``, ``target_key``). The folder is what files it under a
+         *     project, and the target is what it was laid out for, so a copy is reusable only
+         *     where both still hold. A copy in a project's folder is the user's record of what
+         *     that project printed and is never moved or deleted by ScadBuddy; only a copy in
+         *     the inbox (Settings' ``library_folder_id``) is ever replaced.
+         */
+        LibraryCopy: {
+            /** Folder Id */
+            folder_id: number | null;
+            /**
+             * Folder Known
+             * @default true
+             */
+            folder_known: boolean;
+            /** Id */
+            id: number;
+            /** Sliced */
+            sliced?: components["schemas"]["SlicedCopy"][];
+            /** Target Key */
+            target_key: string;
+        };
         /** LibraryPinRequest */
         LibraryPinRequest: {
             /**
@@ -2372,10 +2406,8 @@ export interface components {
             id: string;
             /** Job Id */
             job_id: string;
-            /** Library File Id */
-            library_file_id?: number | null;
-            /** Library File Plate */
-            library_file_plate?: string | null;
+            /** Library Files */
+            library_files?: components["schemas"]["LibraryCopy"][];
             /** Model Version */
             model_version?: string | null;
             /** Name */
@@ -3459,6 +3491,19 @@ export interface components {
             open_in_new_tab: boolean;
             /** Url */
             url: string;
+        };
+        /**
+         * SlicedCopy
+         * @description A sliced 3MF Bambuddy wrote beside one of this output's library copies (#316).
+         *
+         *     Bambuddy puts a slice in its source's folder, so it belongs to that copy's entry:
+         *     a slice made for project A is in A's folder, next to the file it was sliced from.
+         */
+        SlicedCopy: {
+            /** Id */
+            id: number;
+            /** Preset Key */
+            preset_key?: string | null;
         };
         /**
          * SlotChoice
@@ -5411,7 +5456,9 @@ export interface operations {
     };
     delete_output_api_v1_outputs__output_id__delete: {
         parameters: {
-            query?: never;
+            query?: {
+                delete_inbox_copies?: boolean;
+            };
             header?: never;
             path: {
                 output_id: string;

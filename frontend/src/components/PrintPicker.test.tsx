@@ -16,7 +16,7 @@ function open(onRan: (result: PrintRunResult) => void = vi.fn()) {
     <PrintPicker
       open
       slug="name-keychain"
-      output={{ ...output, library_file_id: undefined, pipeline_run_id: undefined }}
+      output={{ ...output, library_files: [], pipeline_run_id: undefined }}
       onClose={vi.fn()}
       onRan={onRan}
     />,
@@ -368,8 +368,8 @@ describe('PrintPicker', () => {
       }),
     )
 
-    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
-    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
+    const first = { ...output, id: 'a'.repeat(32), library_files: [] }
+    const second = { ...output, id: 'b'.repeat(32), library_files: [] }
     const { rerender } = renderPage(
       <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
     )
@@ -1004,8 +1004,8 @@ describe('PrintPicker · Plate', () => {
   })
 
   it("drops the previous output's plates while the next output's load", async () => {
-    const first = { ...output, id: 'a'.repeat(32), library_file_id: undefined }
-    const second = { ...output, id: 'b'.repeat(32), library_file_id: undefined }
+    const first = { ...output, id: 'a'.repeat(32), library_files: [] }
+    const second = { ...output, id: 'b'.repeat(32), library_files: [] }
     server.use(
       http.get('/api/v1/outputs/:id/plates', async ({ params }) => {
         if (params.id === second.id) await delay('infinite')
