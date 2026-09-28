@@ -8,7 +8,8 @@ from typing import Annotated
 from fastapi import APIRouter, Query
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import FontsDep
+from scadbuddy.api.deps import EventsDep, FontsDep
+from scadbuddy.core.events import FontInstalled, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.fonts import FontFamily, FontNotFoundError, InstalledFamily
 from scadbuddy.library.googlefonts import CatalogueSource, FontVariant, GoogleFontsError
@@ -108,10 +109,12 @@ async def get_catalogue(
     response_model=InstalledFamily,
     summary="Install a family onto the data volume",
 )
-async def install_font(body: InstallRequest, fonts: FontsDep) -> InstalledFamily:
+async def install_font(body: InstallRequest, fonts: FontsDep, events: EventsDep) -> InstalledFamily:
     try:
-        return await fonts.install(body.family, force=body.force)
+        installed = await fonts.install(body.family, force=body.force)
     except FontNotFoundError as exc:
         raise ApiError(404, f"{body.family!r} is not in the Google Fonts catalogue") from exc
     except GoogleFontsError as exc:
         raise ApiError(502, f"{body.family!r} could not be downloaded: {exc}") from exc
+    emit(events, FontInstalled(family=installed.family))
+    return installed

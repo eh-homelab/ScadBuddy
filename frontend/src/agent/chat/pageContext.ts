@@ -47,18 +47,27 @@ export function suggestedPrompts(pathname: string): string[] {
   return ROUTES.find((r) => matchPath({ path: r.pattern, end: true }, pathname))?.prompts ?? []
 }
 
+/** The part of the browser bridge's snapshot that rides along with each turn. */
+export interface BridgeView {
+  tools: string[]
+  dialogs: string[]
+  page: Record<string, unknown>
+}
+
 /**
  * What the agent is told about the page with each turn (#256 "page context").
  *
- * Seam for the browser bridge (#254, in PR #339): once it lands, the bridge's page
- * snapshot (live handlers, selected model, focused control) should be merged in here
- * rather than the panel talking to the bridge directly. Until then the route is all
- * the panel knows.
+ * With the browser bridge (#254) it also carries the bridge's view of the page: the
+ * live tools, the open dialogs and what each mounted page reports about itself. The
+ * full snapshot (every interactive element) stays behind the `snapshot` tool rather
+ * than riding on every message.
  */
-export function pageContext(pathname: string): PageContext {
+export function pageContext(pathname: string, view?: BridgeView): PageContext {
   const match =
     matchPath({ path: '/m/:slug/*', end: false }, pathname) ??
     matchPath({ path: '/m/:slug', end: true }, pathname)
   const slug = match?.params.slug
-  return slug ? { route: pathname, modelSlug: slug } : { route: pathname }
+  const context: PageContext = slug ? { route: pathname, modelSlug: slug } : { route: pathname }
+  if (!view) return context
+  return { ...context, tools: view.tools, dialogs: view.dialogs, page: view.page }
 }

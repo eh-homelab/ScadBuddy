@@ -581,7 +581,13 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   heartbeats every third of `SCADBUDDY_RENDER_LEASE_TIMEOUT` (60 s), and a job whose
   heartbeat lapses is requeued, up to `SCADBUDDY_RENDER_MAX_ATTEMPTS` (2). Accepted
   jobs survive a restart. Migrations are append-only and applied at startup under
-  an advisory lock. Without a database URL the store is JSON files under `jobs/`
+  an advisory lock. A new or requeued job sends `NOTIFY scadbuddy_render_queue` in
+  the transaction that queues it; each process keeps one `LISTEN` connection
+  (reconnected with capped, jittered back-off) that wakes its idle workers, so a job
+  queued on one replica starts at once on an idle other. While it is connected,
+  idle workers poll only every `SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL` (30 s),
+  to catch a notification missed around a reconnect; while it is down, every
+  `SCADBUDDY_RENDER_POLL_INTERVAL` (1 s). Without a database URL the store is JSON files under `jobs/`
   with the wait list in the process, and a restart fails unfinished jobs.
   A retry renders into its own `attempt-N/` under the job's work directory, since a
   lapsed lease does not prove the first worker died; only the attempt that still
@@ -614,7 +620,9 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   (the scrape), `work` (claiming), `reap`, `heartbeat`. The app never falls back to
   files on a database error: an unreachable database at startup fails the start.
   The file store's read is in-process with no I/O, so without a database URL
-  `store_up` is always 1.
+  `store_up` is always 1. The wake-up listener (Postgres):
+  `scadbuddy_render_queue_listener_connected` (always 0 with the file store) and
+  `scadbuddy_render_queue_listener_reconnects_total`.
 - Hard timeout `SCADBUDDY_RENDER_TIMEOUT` (default 120 s); OpenSCAD is killed
   and the job fails with the log tail.
 - `-D` values are constructed from the schema, never from raw user strings:

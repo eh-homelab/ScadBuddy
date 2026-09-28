@@ -13,7 +13,13 @@ from typing import Annotated
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
 
-from scadbuddy.api.deps import OutputIdPath, OutputsDep, SettingsStoreDep, SlugPath
+from scadbuddy.api.deps import (
+    OutputIdPath,
+    OutputsDep,
+    PrintProgressDep,
+    SettingsStoreDep,
+    SlugPath,
+)
 from scadbuddy.api.outputs import require_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
@@ -233,6 +239,7 @@ async def post_run(
     body: PrintRunRequest,
     outputs: OutputsDep,
     store: SettingsStoreDep,
+    observer: PrintProgressDep,
 ) -> PrintRunResult:
     """``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
     ``force``.
@@ -249,7 +256,9 @@ async def post_run(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await run_for_output(client, outputs, meta, settings, body)
+        result = await run_for_output(client, outputs, meta, settings, body)
+    observer.started(meta)
+    return result
 
 
 @router.get(
@@ -302,6 +311,7 @@ async def get_progress(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     store: SettingsStoreDep,
+    observer: PrintProgressDep,
 ) -> PrintProgress | None:
     """Follow whichever of Bambuddy's two routes this output last took (#89).
 
@@ -316,7 +326,9 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        return await progress_for(client, meta)
+        progress = await progress_for(client, meta)
+    observer.observe(meta, progress)
+    return progress
 
 
 @router.get("/projects", response_model=ProjectChoices, summary="Bambuddy's projects")

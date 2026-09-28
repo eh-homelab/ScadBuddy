@@ -1,5 +1,8 @@
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router'
+import { AgentToolError } from '../agent/types'
+import { touch } from '../agent/highlight'
+import { useAgentHandlers } from '../agent/useAgentHandlers'
 import { api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
@@ -19,6 +22,32 @@ export function CataloguePage() {
   const [uploadOpen, setUploadOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const navigate = useNavigate()
+
+  // #254 — the catalogue's browser tools. There is no search box on this page, so
+  // `search` filters the list the page already holds rather than typing anywhere.
+  useAgentHandlers(
+    'catalogue',
+    {
+      search: ({ query }) => {
+        if (!data) throw new AgentToolError('timeout', error ? `The catalogue did not load: ${error.message}` : 'The catalogue is still loading.')
+        return data.filter((model) => matches(model, query)).map(summarise)
+      },
+      open_model: async ({ slug }) => {
+        const model = data?.find((entry) => entry.slug === slug)
+        if (!model) {
+          throw new AgentToolError('invalid_args', `No model "${slug}" in the catalogue; search lists the slugs.`)
+        }
+        touch(
+          [...document.querySelectorAll('[data-model-card]')].find(
+            (card) => card.getAttribute('data-model-card') === slug,
+          ),
+        )
+        await navigate(modelPath(slug))
+        return { route: modelPath(slug) }
+      },
+    },
+    () => ({ loading, error: error?.message, models: data?.length }),
+  )
 
   function added(model: ModelSummary) {
     setData([model, ...(data ?? []).filter((m) => m.slug !== model.slug)])
@@ -99,7 +128,9 @@ export function CataloguePage() {
 function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?: string }) {
   const origin = safeHttpUrl(model.origin_url)
   return (
-    <li className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
+    <li
+      data-model-card={model.slug}
+      className="group rounded-[6px] border border-line bg-surface transition-colors hover:border-line-strong">
       <Link to={modelPath(model.slug)} className="block p-3 focus-visible:rounded-[6px]">
         <ModelThumbnail
           src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
@@ -161,6 +192,24 @@ function ModelCard({ model, upstreamName }: { model: ModelSummary; upstreamName?
       </div>
     </li>
   )
+}
+
+function matches(model: ModelSummary, query: string): boolean {
+  const wanted = query.trim().toLowerCase()
+  if (!wanted) return true
+  return [model.slug, model.name, model.description ?? '', ...(model.tags ?? [])].some((text) =>
+    text.toLowerCase().includes(wanted),
+  )
+}
+
+function summarise(model: ModelSummary) {
+  return {
+    slug: model.slug,
+    name: model.name,
+    description: model.description ?? null,
+    tags: model.tags ?? [],
+    origin: model.origin,
+  }
 }
 
 function hostOf(url: string): string {

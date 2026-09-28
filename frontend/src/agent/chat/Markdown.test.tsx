@@ -40,6 +40,15 @@ describe('page context', () => {
     expect(pageContext('/settings')).toEqual({ route: '/settings' })
   })
 
+  it("carries the browser bridge's view of the page when given one (#254)", () => {
+    const view = { tools: ['get_params', 'set_param'], dialogs: [], page: { customize: { slug: 'name-keychain' } } }
+    expect(pageContext('/m/name-keychain', view)).toEqual({
+      route: '/m/name-keychain',
+      modelSlug: 'name-keychain',
+      ...view,
+    })
+  })
+
   it('suggests prompts per page', () => {
     expect(suggestedPrompts('/m/x')).toContain('Explain these settings')
     expect(suggestedPrompts('/m/x/source')).toContain('Why does this fail to render?')

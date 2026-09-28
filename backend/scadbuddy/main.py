@@ -144,6 +144,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         await state.queue.aclose()
+        await state.events.aclose()
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

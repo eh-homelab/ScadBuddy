@@ -18,8 +18,13 @@ DEFAULT_RENDER_QUEUE_MAX = 0
 # default) never expires one -- every submit is accepted and, in time, rendered.
 DEFAULT_RENDER_QUEUE_TIMEOUT = 0.0
 # How often an idle worker looks for work it was not woken for: jobs another replica
-# submitted, or ones a reaped lease put back.
+# submitted, or ones a reaped lease put back. With Postgres this is the poll only
+# while the LISTEN connection is down; it is also a failed claim's back-off.
 DEFAULT_RENDER_POLL_INTERVAL = 1.0
+# Postgres only: while the LISTEN connection is up, a NOTIFY wakes the workers for
+# every job any replica queues, and the poll only has to catch a notification lost
+# around a reconnect -- so it can be long.
+DEFAULT_RENDER_FALLBACK_POLL_INTERVAL = 30.0
 # A running job whose worker has not heartbeated for this long is presumed lost and
 # requeued (Postgres only; heartbeats go every third of it).
 DEFAULT_RENDER_LEASE_TIMEOUT = 60.0
@@ -58,6 +63,7 @@ class Config:
     render_queue_max: int = DEFAULT_RENDER_QUEUE_MAX
     render_queue_timeout: float = DEFAULT_RENDER_QUEUE_TIMEOUT
     render_poll_interval: float = DEFAULT_RENDER_POLL_INTERVAL
+    render_fallback_poll_interval: float = DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
     render_lease_timeout: float = DEFAULT_RENDER_LEASE_TIMEOUT
     render_max_attempts: int = DEFAULT_RENDER_MAX_ATTEMPTS
     render_queue_depth_slo: int = DEFAULT_RENDER_QUEUE_DEPTH_SLO
@@ -96,6 +102,7 @@ class Config:
                 raise ValueError(f"{name} must be at least 0, not {value}")
         for name, value in (
             ("SCADBUDDY_RENDER_POLL_INTERVAL", self.render_poll_interval),
+            ("SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL", self.render_fallback_poll_interval),
             ("SCADBUDDY_RENDER_LEASE_TIMEOUT", self.render_lease_timeout),
         ):
             if value <= 0:
@@ -130,6 +137,10 @@ def load_config(env: Mapping[str, str] | None = None) -> Config:
         ),
         render_poll_interval=float(
             source.get("SCADBUDDY_RENDER_POLL_INTERVAL") or DEFAULT_RENDER_POLL_INTERVAL
+        ),
+        render_fallback_poll_interval=float(
+            source.get("SCADBUDDY_RENDER_FALLBACK_POLL_INTERVAL")
+            or DEFAULT_RENDER_FALLBACK_POLL_INTERVAL
         ),
         render_lease_timeout=float(
             source.get("SCADBUDDY_RENDER_LEASE_TIMEOUT") or DEFAULT_RENDER_LEASE_TIMEOUT
