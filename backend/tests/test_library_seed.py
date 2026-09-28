@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ from scadbuddy.library.library_seed import (
     verify_seed,
 )
 from scadbuddy.main import create_app
+from tests.test_library_processes import _age
 
 COMMIT = "f47030c41d88d0676bca73be1c6b7ba58564f9dd"
 OTHER = "bd0a7ba3f042bfbced5ca1894b236cea08904e26"
@@ -310,6 +312,35 @@ def test_boot_seeds_the_volume_from_the_image(seed: Path, tmp_path: Path) -> Non
         pass
 
     assert (tmp_path / "data" / "libraries" / "BOSL2" / COMMIT / "BOSL2" / "std.scad").is_file()
+
+
+@pytest.mark.requires_git
+def test_the_boot_checkout_sweep_keeps_the_seed_nothing_pins(seed: Path, tmp_path: Path) -> None:
+    """Otherwise every later boot would delete it and the next copy it back."""
+    models = tmp_path / "models"
+    models.mkdir()
+    settings = Settings(
+        openscad="definitely-not-installed",
+        data_dir=tmp_path / "data",
+        seed_models_dir=models,
+        seed_libraries_dir=seed,
+        frontend_dir=Path("/nonexistent"),
+    )
+    libraries = tmp_path / "data" / "libraries"
+    with TestClient(create_app(settings)):
+        pass
+    seeded = libraries / "BOSL2" / COMMIT
+    unpinned = libraries / "BOSL2" / OTHER
+    (unpinned / "BOSL2").mkdir(parents=True)
+    _age(seeded)
+    _age(unpinned)
+
+    with TestClient(create_app(settings)):
+        pass
+
+    assert (seeded / "BOSL2" / "std.scad").is_file()
+    assert os.stat(seeded).st_mtime < time.time() - 60  # kept, not copied back
+    assert not unpinned.exists()
 
 
 def test_the_container_seed_is_used_when_it_exists(

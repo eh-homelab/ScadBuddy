@@ -39,7 +39,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
-from scadbuddy.library.library_seed import seed_libraries
+from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
@@ -125,10 +125,14 @@ def _sweep_checkouts(state: AppState) -> list[str]:
     lock = read_lock(state.paths)
     if lock is not None:
         named |= {pin.commit for pin in lock.pins.values()}
+    # The image's seed (#169) is kept pinned or not: the boot would copy it back.
+    seed_dir = state.settings.resolve_seed_libraries_dir()
+    seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
 
     def keep(name: str, commit: str) -> bool:
         return (
             commit in named
+            or (name, commit) in seeded
             or bool(state.checkouts.leased(state.paths.libraries / name / commit))
             # The live pins as a removal counts them: uncommitted edits, and a bare
             # name or an unreadable model.json keeps every checkout of the library.
