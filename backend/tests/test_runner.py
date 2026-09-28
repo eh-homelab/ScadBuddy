@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import os
 import shutil
 from dataclasses import replace
 from pathlib import Path
@@ -138,6 +140,19 @@ async def test_render_timeout_kills_openscad_and_keeps_the_log(tmp_path: Path) -
         await render_3mf(scad, CustomizerSchema(), {}, tmp_path / "out.3mf", config=config)
     assert isinstance(caught.value, OpenSCADError)
     assert caught.value.returncode is None
+
+
+async def test_a_timed_out_openscad_takes_its_children_with_it(tmp_path: Path) -> None:
+    fake = tmp_path / "openscad"
+    fake.write_text("#!/bin/sh\nsleep 30 &\necho $! > child.pid\nwait\n", encoding="utf-8")
+    fake.chmod(0o755)
+    config = Config(data_dir=tmp_path, openscad=str(fake), render_timeout=0.3)
+    with pytest.raises(RenderTimeoutError):
+        await run_openscad([], cwd=tmp_path, config=config)
+    child = int((tmp_path / "child.pid").read_text())
+    await asyncio.sleep(0.1)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child, 0)
 
 
 ECHO_FONTCONFIG = """#!/bin/sh
