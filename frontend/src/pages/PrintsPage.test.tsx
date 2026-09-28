@@ -271,6 +271,40 @@ describe('PrintsPage (#310): the global print history', () => {
   })
 })
 
+describe('waiting for Bambuddy, with more pages to load (#310)', () => {
+  const luna: Output = {
+    ...(outputs[0] as Output),
+    id: '1'.repeat(32),
+    name: 'Luna',
+    // A day after print 37 in any time zone: its time carries none, so it reads as local.
+    created_at: '2026-09-29T12:00:00Z',
+    queue_item_id: 4500,
+  }
+
+  function firstPage(items: PrintPage['items']) {
+    server.use(
+      http.get('/api/v1/prints', () => HttpResponse.json({ items, next_cursor: '1' } satisfies PrintPage)),
+      http.get('/api/v1/models/:slug/outputs', () => HttpResponse.json([luna, ...outputs])),
+    )
+  }
+
+  it('judges by the oldest print that has a time, past a deleted one without', async () => {
+    firstPage([summaryOf(37), summaryOf(38)])
+    render('/m/name-keychain/prints')
+    const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(waiting).toHaveTextContent('Luna')
+    // Reagan was sent before the oldest print loaded: its print may be on a later page.
+    expect(waiting).not.toHaveTextContent('Reagan')
+  })
+
+  it('still shows them when no loaded print has a time', async () => {
+    firstPage([summaryOf(38)])
+    render('/m/name-keychain/prints')
+    const waiting = await screen.findByRole('list', { name: 'Waiting for Bambuddy' })
+    expect(waiting).toHaveTextContent('Luna')
+  })
+})
+
 describe('the print route in the app (#310, until #311)', () => {
   it('a row click lands on the print, not back on the catalogue', async () => {
     const { user } = renderPage(

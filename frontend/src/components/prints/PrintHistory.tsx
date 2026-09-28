@@ -100,6 +100,18 @@ function usePrintPages(filters: PrintFilters) {
   }
 }
 
+/**
+ * When the oldest loaded print that has a time started (or finished). A print with
+ * none, such as an archive deleted in Bambuddy, is passed over; with none at all, null.
+ */
+function oldestTime(prints: PrintSummary[]): number | null {
+  for (const print of [...prints].reverse()) {
+    const time = Date.parse(print.started_at ?? print.completed_at ?? '')
+    if (!Number.isNaN(time)) return time
+  }
+  return null
+}
+
 /** An output that went to Bambuddy's queue, by either route (#89). */
 function wasSent(output: Output): boolean {
   return Boolean(output.queue_item_id || output.pipeline_run_id || (output.plates ?? []).length > 0)
@@ -281,18 +293,15 @@ function MorePrints({ more, onLoadMore }: { more: Pages['more']; onLoadMore: () 
  * #310 — an output sent to Bambuddy that no print is linked to yet (plan §2.4: it is not
  * a print, so the list does not carry it). While older pages are still unloaded, only
  * outputs newer than the oldest print shown are judged: an older one's print may be on
- * a page not loaded yet.
+ * a page not loaded yet. With no time to judge by, every one is shown.
  */
 function Waiting({ slug, prints, complete }: { slug: string; prints: PrintSummary[]; complete: boolean }) {
   const outputs = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
   const linked = new Set(prints.map((print) => print.output_id))
-  const oldest = prints.at(-1)
-  const since = complete ? null : Date.parse(oldest?.started_at ?? oldest?.completed_at ?? '')
+  const since = complete ? null : oldestTime(prints)
   const waiting = (outputs.data ?? []).filter(
     (output) =>
-      wasSent(output) &&
-      !linked.has(output.id) &&
-      (since === null || (!Number.isNaN(since) && Date.parse(output.created_at) >= since)),
+      wasSent(output) && !linked.has(output.id) && (since === null || Date.parse(output.created_at) >= since),
   )
   if (waiting.length === 0) return null
   return (
