@@ -131,7 +131,7 @@ export const TOOLS = {
   render: tool({
     description:
       'Wait for the preview render of the current values to settle and report it: status, ' +
-      'bounding box, colours, warnings and, on failure, the OpenSCAD log.',
+      'bounding box, colours, warnings, the notes the template echoed and, on failure, the OpenSCAD log.',
     risk: 'read',
     scope: 'customize',
     input: z
