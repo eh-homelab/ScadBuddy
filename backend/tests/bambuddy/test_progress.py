@@ -410,7 +410,11 @@ async def test_when_several_plates_fail_the_earliest_plates_error_is_raised(
     released = asyncio.Event()
 
     async def read(
-        client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+        client: BambuddyClient,
+        slice_job_id: int | None,
+        queue_item_id: int | None,
+        url: str,
+        **_: object,
     ) -> PrintProgress:
         if queue_item_id == 52:
             released.set()

@@ -1,6 +1,6 @@
 """Find the Bambuddy archives an output's prints produced, and record them (#306).
 
-Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1–L3 and L8–L10):
+Verified on the live Bambuddy 1.2.5.6 (print-history plan §1, L1-L3 and L8-L10):
 
 - The scheduler sets ``queue_item.archive_id`` when it dispatches a library-file item,
   and the item outlives its print. So the queue items ScadBuddy created are read for it

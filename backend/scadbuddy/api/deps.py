@@ -11,8 +11,8 @@ from fastapi import Depends, Path, status
 from starlette.requests import HTTPConnection
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
-from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.print_links import PrintLinkStore
+from scadbuddy.bambuddy.progress import ProgressObserver
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import (

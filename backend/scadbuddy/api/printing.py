@@ -16,10 +16,10 @@ from pydantic import BaseModel, Field
 from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
+    PrintLinksDep,
     PrintProgressDep,
     SettingsStoreDep,
     SlugPath,
-    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.outputs import require_output
@@ -230,7 +230,9 @@ async def get_progress(
     """
     meta = require_output(outputs, output_id)
     async with client_for(store.load()) as client:
-        progress = await progress_for(client, meta, uploads=uploads, links=links)
+        progress = await progress_for(
+            client, meta, uploads=uploads, links=links if links.available else None
+        )
     observer.observe(meta, progress)
     return progress
 
@@ -295,5 +297,9 @@ async def post_attach_project(
     )
     async with client_for(settings) as client:
         return await attach_results(
-            client, project_id, queue_item_ids=ids, output_id=meta.id, links=links
+            client,
+            project_id,
+            queue_item_ids=ids,
+            output_id=meta.id,
+            links=links if links.available else None,
         )

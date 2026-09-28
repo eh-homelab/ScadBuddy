@@ -317,7 +317,7 @@ def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
 
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
+    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1", "file_hash": None}]]
 
 
 # --- deleting an output --------------------------------------------------------------

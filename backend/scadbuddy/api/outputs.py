@@ -15,11 +15,11 @@ from scadbuddy.api.deps import (
     EventsDep,
     OutputIdPath,
     OutputsDep,
+    PrintLinksDep,
     PrintProgressDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
-    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job

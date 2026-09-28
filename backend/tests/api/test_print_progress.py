@@ -78,6 +78,11 @@ def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, mod
             },
         )
     )
+    # Each dispatched entry is read once, for the archive it became (#306).
+    for entry in (71, 72):
+        respx.get(f"{API}/queue/{entry}").mock(
+            return_value=httpx.Response(200, json={"id": entry, "status": "completed"})
+        )
     body = client.get(f"/api/v1/print/outputs/{output_id}/progress").json()
     assert body["route"] == "pipeline"
     assert body["settled"] is True

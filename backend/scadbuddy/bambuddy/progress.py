@@ -415,9 +415,7 @@ async def progress_for(
             route = "slice_queue"
     url = client.config.web_url(QUEUE_PATH)
     linker = (
-        _Linker(client, meta, uploads, links)
-        if uploads is not None and links is not None
-        else None
+        _Linker(client, meta, uploads, links) if uploads is not None and links is not None else None
     )
 
     if route == "pipeline":

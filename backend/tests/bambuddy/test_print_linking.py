@@ -2,7 +2,7 @@
 including when its queue item is gone by the first poll.
 
 The shapes follow what the spike saw on the live Bambuddy 1.2.5.6 (print-history plan
-§1, L8–L10): a dispatched item carries ``archive_id``; an archive's ``content_hash``
+§1, L8-L10): a dispatched item carries ``archive_id``; an archive's ``content_hash``
 equals its sliced file's ``file_hash``; one sliced file printed three times has three
 archives with that one hash.
 """

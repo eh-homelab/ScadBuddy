@@ -165,9 +165,7 @@ async def get_plate_thumbnail(
     )
 
 
-@router.api_route(
-    "/files/sliced", methods=READ_METHODS, summary="The sliced file that was printed"
-)
+@router.api_route("/files/sliced", methods=READ_METHODS, summary="The sliced file that was printed")
 async def get_sliced_file(
     archive_id: ArchiveIdPath, request: Request, store: SettingsStoreDep
 ) -> Response:

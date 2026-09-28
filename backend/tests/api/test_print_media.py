@@ -33,6 +33,7 @@ def _linked(client: TestClient) -> None:
         print_links(client).record("a" * 32, PrintLink(archive_id=LINKED, matched_by="queue_item"))
     )
 
+
 VIDEO_HEADERS = {
     "Content-Type": "video/mp4",
     "Accept-Ranges": "bytes",
@@ -251,4 +252,3 @@ def test_bambuddys_address_never_reaches_the_browser(client: TestClient) -> None
     assert response.headers["content-disposition"].endswith('"name-keychain.gcode.3mf"')
     assert "bambuddy.test" not in str(response.headers)
     assert "s3cret" not in str(response.headers)
-

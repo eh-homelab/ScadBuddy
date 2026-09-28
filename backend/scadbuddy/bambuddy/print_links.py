@@ -51,6 +51,11 @@ class PrintLinkStore:
     def __init__(self, pool: ConnectionPool[Connection[DictRow]] | None) -> None:
         self._pool = pool
 
+    @property
+    def available(self) -> bool:
+        """Whether there is a database to record links in; without one they are skipped."""
+        return self._pool is not None
+
     def _require(self) -> ConnectionPool[Connection[DictRow]]:
         if self._pool is None:
             raise DatabaseRequiredError

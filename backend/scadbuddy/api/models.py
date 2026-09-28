@@ -39,9 +39,9 @@ from scadbuddy.api.deps import (
     OutputsDep,
     PathsDep,
     PresetsDep,
+    PrintLinksDep,
     QueueDep,
     SlugPath,
-    PrintLinksDep,
     UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
