@@ -2,7 +2,7 @@ import { constants } from 'node:fs'
 import { access, mkdir, readdir, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { claudeConfigDir, scratchDir, type HarnessPaths } from './options.js'
+import { claudeConfigDir, pluginCacheDir, scratchDir, type HarnessPaths } from './options.js'
 
 // The deployment mounts an emptyDir (Kubernetes) or tmpfs (the CI smoke test)
 // over the state directory so the root filesystem can stay read-only
@@ -104,7 +104,9 @@ export async function ensureSessionDir(paths: HarnessPaths, sessionId: string): 
 }
 
 export async function ensureStateDirs(paths: HarnessPaths): Promise<string[]> {
-  const dirs = [claudeConfigDir(paths), scratchDir(paths)]
+  // The plugin package cache (#297) is checked with the others, so an
+  // unwritable one stops the pod here rather than failing the first install.
+  const dirs = [claudeConfigDir(paths), scratchDir(paths), pluginCacheDir(paths)]
   for (const dir of dirs) {
     try {
       await mkdir(dir, { recursive: true })
