@@ -550,20 +550,12 @@ async def gather_plate_options(
     """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
 
     The spools, assignments and printer are the same for every plate, so they are read
-    once, before the plates and in sequence — spools, then assignments, then the
-    printer, then inventory-remain — exactly as the single-plate path has always read
-    them. A shared-read failure therefore always wins over any plate-specific failure,
-    matching that path's historical behavior. Only each plate's own slots are read per
-    plate (#480), concurrently with each other; a failed plate read raises the first
-    failing plate's error, in ``plate_ids`` order, as reading them in turn would."""
+    once (#480); only each plate's slots are read per plate, concurrently. The reads
+    keep the single-plate order, spools, assignments, the plates, then the printer and
+    its inventory-remain, so the same failure surfaces either way: a plate's error beats
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
     spools = await client.spools()
     assignments = await client.spool_assignments()
-
-    printer = None
-    slot_materials: list[SlotMaterial] = []
-    if printer_id is not None:
-        printer = await client.printer(printer_id)
-        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
     answers = await asyncio.gather(
         *(
@@ -577,6 +569,13 @@ async def gather_plate_options(
         if isinstance(answer, BaseException):
             raise answer
         per_plate.append(answer)
+
+    printer = None
+    slot_materials: list[SlotMaterial] = []
+    if printer_id is not None:
+        printer = await client.printer(printer_id)
+        slot_materials = (await client.inventory_remain(printer_id)).slot_materials
+
     return [
         build_options(
             library_file_id=library_file_id,

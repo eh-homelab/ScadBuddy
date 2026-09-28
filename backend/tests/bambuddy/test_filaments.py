@@ -432,11 +432,10 @@ async def test_an_early_spools_failure_raises_and_never_reaches_the_plates(
 
 
 @respx.mock
-async def test_a_printer_failure_raises_and_never_reaches_the_plates(
+async def test_a_printer_failure_is_raised_after_the_plates_are_read(
     bambuddy: BambuddyClient,
 ) -> None:
-    """A printer-side failure is a shared-read failure too, and is raised before any
-    plate is read, matching the single-plate path's historical order."""
+    """The printer is read after the plates, as the single-plate path always has."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
@@ -457,18 +456,16 @@ async def test_a_printer_failure_raises_and_never_reaches_the_plates(
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
     assert "printer-boom" in excinfo.value.detail
 
-    assert not requirements.called
+    assert requirements.call_count == 3
     assert not remain.called
 
 
 @respx.mock
-async def test_a_printer_failure_beats_a_plate_failure(
+async def test_a_plate_failure_beats_a_printer_failure(
     bambuddy: BambuddyClient,
 ) -> None:
-    """Pins finding #1 on #525 directly: a printer failure and a plate-specific
-    failure happening together must surface the printer's error, because the shared
-    reads run first and in sequence — never the plate's, no matter how the plate read
-    and the printer read would otherwise race."""
+    """With both failing, the plate's error surfaces, as it does on the single-plate
+    path, which reads the plate before the printer (#525 review)."""
     respx.get(f"{API}/inventory/spools").mock(
         return_value=httpx.Response(200, json=recording("inventory-spools.json"))
     )
@@ -478,20 +475,16 @@ async def test_a_printer_failure_beats_a_plate_failure(
     requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
         return_value=httpx.Response(500, json={"detail": "plate-boom"})
     )
-    respx.get(f"{API}/printers/1").mock(
+    printer = respx.get(f"{API}/printers/1").mock(
         return_value=httpx.Response(500, json={"detail": "printer-boom"})
-    )
-    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
-        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
     )
 
     with pytest.raises(ApiError) as excinfo:
         await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1])
-    assert "printer-boom" in excinfo.value.detail
-    assert "plate-boom" not in excinfo.value.detail
+    assert "plate-boom" in excinfo.value.detail
 
-    assert not requirements.called
-    assert not remain.called
+    assert requirements.called
+    assert not printer.called
 
 
 @respx.mock
