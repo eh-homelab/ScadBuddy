@@ -38,6 +38,14 @@ export function scratchDir(paths: HarnessPaths): string {
   return path.join(paths.stateDir, 'work')
 }
 
+/**
+ * The plugin package cache (#297, src/plugins/packages/install.ts): a cache
+ * only, rebuilt from the pins in Postgres, so an emptyDir will do.
+ */
+export function pluginCacheDir(paths: HarnessPaths): string {
+  return path.join(paths.stateDir, 'plugins')
+}
+
 export function buildQueryOptions(paths: HarnessPaths): Options {
   const env: Record<string, string> = {
     CLAUDE_CONFIG_DIR: claudeConfigDir(paths),
@@ -54,5 +62,6 @@ export function buildQueryOptions(paths: HarnessPaths): Options {
     mcpServers: {},
     cwd: scratchDir(paths),
     env,
+    settings: { disableSkillShellExecution: true },
   }
 }

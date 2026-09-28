@@ -3,22 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
+from datetime import UTC, datetime
 
 import httpx
+import psycopg
 import pytest
 import respx
 
 from scadbuddy.bambuddy import progress as progress_module
 from scadbuddy.bambuddy.client import BambuddyClient
 from scadbuddy.bambuddy.models import QueueItem, SliceJob
+from scadbuddy.bambuddy.print_links import PrintLink, PrintLinkStore
 from scadbuddy.bambuddy.progress import (
     QUEUED_THEN_FAILED_FIX,
     SLICE_FIX,
     PrintProgress,
     from_queue,
     progress_for,
-    stage_of,
 )
+from scadbuddy.bambuddy.stages import stage_of
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy, SlicedCopy
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.glb import BoundingBox
@@ -323,7 +328,11 @@ async def test_when_several_plates_fail_the_earliest_plates_error_is_raised(
     released = asyncio.Event()
 
     async def read(
-        client: BambuddyClient, slice_job_id: int | None, queue_item_id: int | None, url: str
+        client: BambuddyClient,
+        slice_job_id: int | None,
+        queue_item_id: int | None,
+        url: str,
+        **_: object,
     ) -> PrintProgress:
         if queue_item_id == 52:
             released.set()
@@ -404,3 +413,117 @@ async def test_a_failed_plate_beside_an_unsettled_one_keeps_polling(
     assert progress.error_message == "AMS slot empty"
     assert progress.copies_failed == 1
     assert progress.copies_in_progress == 1
+
+
+# --- linking archives is best effort (#306, #522 review) --------------------
+
+
+class FakeLinks(PrintLinkStore):
+    """Links in memory; ``fail`` makes every write raise what a lost database would."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        super().__init__(None)
+        self.fail = fail
+        self.recorded: list[PrintLink] = []
+
+    async def record(self, output_id: str, link: PrintLink) -> None:
+        if self.fail:
+            raise psycopg.OperationalError("the database went away")
+        self.recorded.append(link)
+
+    async def for_output(self, output_id: str) -> list[PrintLink]:
+        return list(self.recorded)
+
+    async def linked_queue_items(self, output_id: str) -> set[int]:
+        return {link.queue_item_id for link in self.recorded if link.queue_item_id is not None}
+
+
+class FakeUploads(BambuddyUploadStore):
+    """One library copy whose slice's hash is already known."""
+
+    def __init__(self) -> None:
+        super().__init__(None)
+
+    async def for_output(self, output_id: str) -> list[LibraryCopy]:
+        return [
+            LibraryCopy(
+                id=11, folder_id=2, target_key="H2C", sliced=[SlicedCopy(id=80, file_hash="ab")]
+            )
+        ]
+
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        sent = datetime(2026, 9, 27, tzinfo=UTC)
+        return sent, sent
+
+
+@pytest.fixture
+def no_recent_scans() -> Iterator[None]:
+    progress_module._last_hash_scan.clear()
+    yield
+    progress_module._last_hash_scan.clear()
+
+
+@respx.mock
+async def test_a_link_that_cannot_be_recorded_does_not_fail_any_plates_read(
+    bambuddy: BambuddyClient,
+) -> None:
+    sliced()
+    respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json={"id": 51, "status": "printing", "archive_id": 7})
+    )
+    respx.get(f"{API}/queue/52").mock(
+        return_value=httpx.Response(200, json={"id": 52, "status": "completed", "archive_id": 8})
+    )
+    progress = await progress_for(
+        bambuddy, plates_meta(), uploads=FakeUploads(), links=FakeLinks(fail=True)
+    )
+    assert progress is not None
+    assert [(c.plate_id, c.stage) for c in progress.copies_detail] == [
+        (1, "running"),
+        (2, "done"),
+    ]
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
+async def test_a_failing_archive_scan_still_reads_the_gone_item_as_finished(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    scan = respx.get(f"{API}/archives/").mock(
+        return_value=httpx.Response(503, json={"detail": "busy"})
+    )
+    progress = await progress_for(
+        bambuddy,
+        meta(queue_item_id=51, print_route="slice_queue"),
+        uploads=FakeUploads(),
+        links=FakeLinks(),
+    )
+    assert scan.called
+    assert progress is not None
+    assert (progress.stage, progress.settled) == ("done", True)
+
+
+@respx.mock
+@pytest.mark.usefixtures("no_recent_scans")
+async def test_without_a_database_a_gone_item_still_reads_as_finished(
+    bambuddy: BambuddyClient,
+) -> None:
+    respx.get(f"{API}/queue/51").mock(return_value=httpx.Response(404, json={"detail": "gone"}))
+    progress = await progress_for(
+        bambuddy,
+        meta(queue_item_id=51, print_route="slice_queue"),
+        uploads=BambuddyUploadStore(None),
+        links=PrintLinkStore(None),
+    )
+    assert progress is not None
+    assert progress.stage == "done"
+
+
+@pytest.mark.usefixtures("no_recent_scans")
+def test_scans_older_than_the_interval_are_forgotten() -> None:
+    interval = progress_module.HASH_SCAN_INTERVAL
+    assert progress_module._claim_hash_scan("a", 0.0)
+    assert not progress_module._claim_hash_scan("a", interval / 2)
+    assert progress_module._claim_hash_scan("b", interval + 1)
+    assert set(progress_module._last_hash_scan) == {"b"}

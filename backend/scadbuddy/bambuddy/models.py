@@ -406,6 +406,9 @@ class LibraryFile(BambuddyModel):
     file_size: int | None = None
     thumbnail_path: str | None = None
     duplicate_of: int | None = None
+    #: SHA-256 of the file (``FileResponse.file_hash``). For a sliced file it equals the
+    #: ``content_hash`` of the archive of each print of it (#306).
+    file_hash: str | None = None
     #: The only free-text field a library file has, and one a person may have typed
     #: into — read before writing, never replaced wholesale.
     notes: str | None = None
