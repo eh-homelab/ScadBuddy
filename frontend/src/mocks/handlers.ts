@@ -499,6 +499,9 @@ function refuseBuiltin(slug: string) {
 /** `library/presets.py`'s limits: the longest name, and the most presets a template keeps. */
 export const MAX_PRESET_NAME = 80
 export const MAX_PRESETS = 200
+/** `library/slugs.py`'s `SLUG_PATTERN` and `MAX_SLUG_LENGTH`: what a template preset's `id` may be. */
+export const PRESET_ID_PATTERN = /^[a-z0-9][a-z0-9-]*$/
+export const MAX_PRESET_ID = 100
 
 /**
  * `template_preset_keys` in `library/presets.py`: a preset's explicit id, else its name
@@ -1021,8 +1024,8 @@ export const handlers = [
       const ids = new Set<string>()
       const cleaned: typeof defined = []
       for (const preset of defined) {
-        const name = preset.name.trim().replace(/\s+/g, ' ')
-        if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
+        // The raw length first, as pydantic checks `max_length` before `_clean_name`
+        // collapses the whitespace.
         if (preset.name.length > MAX_PRESET_NAME) {
           return problem(
             422,
@@ -1030,13 +1033,15 @@ export const handlers = [
             `a preset name is at most ${MAX_PRESET_NAME} characters`,
           )
         }
+        const name = preset.name.trim().replace(/\s+/g, ' ')
+        if (!name) return problem(422, 'Unprocessable Content', 'a preset needs a name')
         const folded = name.toLowerCase()
         if (names.has(folded)) {
           return problem(422, 'Unprocessable Content', `two presets are named '${name}'`)
         }
         names.add(folded)
         if (preset.id !== undefined && preset.id !== null) {
-          if (!/^[a-z0-9][a-z0-9-]*$/.test(preset.id) || preset.id.length > 100) {
+          if (!PRESET_ID_PATTERN.test(preset.id) || preset.id.length > MAX_PRESET_ID) {
             return problem(422, 'Unprocessable Content', `'${preset.id}' is not a preset id`)
           }
           if (ids.has(preset.id)) {

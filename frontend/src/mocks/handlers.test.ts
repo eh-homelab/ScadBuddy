@@ -3,7 +3,13 @@ import { ApiError, api } from '../api/client'
 import type { ModelPatch, ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, keychainSource, versionIds } from './fixtures'
-import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
+import {
+  MAX_PRESET_ID,
+  MAX_PRESET_NAME,
+  MAX_PRESETS,
+  resetMockState,
+  setMockPresets,
+} from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -685,8 +691,13 @@ describe('mock API: a template of mine defines its presets in its metadata (#326
     ])
     await refused(Array.from({ length: MAX_PRESETS + 1 }, (_, n) => ({ name: `Preset ${n}` })))
     await refused([{ id: 'Not A Slug', name: 'X' }])
+    await refused([{ id: 'a'.repeat(MAX_PRESET_ID + 1), name: 'X' }])
     await refused([{ name: '   ' }])
     await refused([{ name: 'x'.repeat(MAX_PRESET_NAME + 1) }])
+    // Over-long before blank, as the server checks them: 81 spaces is a length problem.
+    await expect(
+      api.updateModel('name-keychain', { presets: [{ name: ' '.repeat(MAX_PRESET_NAME + 1) }] }),
+    ).rejects.toMatchObject({ detail: expect.stringContaining('at most') })
     // Nothing was written by any of them.
     const presets = await api.listPresets('name-keychain')
     expect(presets.filter((p) => p.origin === 'template').map((p) => p.id)).toEqual([
