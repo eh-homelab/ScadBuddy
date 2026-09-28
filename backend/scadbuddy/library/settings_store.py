@@ -10,6 +10,10 @@ Three tables, all in ``migrations/20260928T0840Z_settings.sql``:
 - ``model_print_choices``: what the print dialog last chose, one row per model.
 - ``printer_bed_types``: the plate last printed on, one row per printer.
 
+A fourth, ``library_print_choices`` (``migrations/20260928T1522Z_library_print_choices.sql``,
+#313), is the same shape as ``model_print_choices`` but keyed by Bambuddy's own library
+file id, for a library file that has no ScadBuddy slug.
+
 The print dialog writes a model's choices and its printer's plate back to back on
 every print, and FastAPI runs each on its own threadpool thread; each write is one
 statement on its own row, so neither can drop the other's change.
@@ -24,7 +28,7 @@ from psycopg import Connection
 from psycopg.rows import DictRow, dict_row
 from psycopg.types.json import Jsonb
 from psycopg_pool import ConnectionPool
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from scadbuddy.bambuddy.models import NozzleChoice, SlotChoice, Tier
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
@@ -270,6 +274,38 @@ class SettingsStore:
                     (printer_id, bed_type),
                 )
         return self._written("printer_bed_type")
+
+    def library_choices(self, file_id: int) -> ModelPrintChoices:
+        """What the dialog last chose for one Bambuddy library file (#313); nothing
+        remembered is the empty choice. A row this version cannot read is nothing
+        remembered too, rather than a dialog that will not open."""
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT choices FROM library_print_choices WHERE file_id = %s", (file_id,)
+            ).fetchone()
+        if row is None:
+            return ModelPrintChoices()
+        try:
+            return ModelPrintChoices.model_validate(row["choices"])
+        except ValidationError:
+            logger.warning("unreadable library print choices", extra={"file_id": file_id})
+            return ModelPrintChoices()
+
+    def set_library_choices(self, file_id: int, choices: ModelPrintChoices) -> ModelPrintChoices:
+        """Remember one library file's choices; an empty ``choices`` forgets them."""
+        with self._pool.connection() as conn:
+            if choices == ModelPrintChoices():
+                conn.execute("DELETE FROM library_print_choices WHERE file_id = %s", (file_id,))
+            else:
+                conn.execute(
+                    "INSERT INTO library_print_choices (file_id, choices) VALUES (%s, %s)"
+                    " ON CONFLICT (file_id) DO UPDATE"
+                    " SET choices = EXCLUDED.choices, updated_at = now()",
+                    (file_id, Jsonb(choices.model_dump(mode="json"))),
+                )
+        # The dialog's remembered choices, as for a model: no new section is needed.
+        emit(self.events, SettingsChanged(section="model_choices"))
+        return self.library_choices(file_id)
 
     def remember_project(self, project_id: int | None) -> StoredSettings:
         """Remember the project the last send went to, so the picker opens on it."""
