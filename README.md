@@ -97,7 +97,8 @@ and `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER` to `render`.
 on shutdown.
 Drain renders, and stop the worker Deployment, before flipping
 `SCADBUDDY_TEMPORAL_ADDRESS` either way: a restart across the flip fails the renders
-in flight (a pending one carries over).
+in flight, while a pending one carries over (a Temporal boot adopts the legacy
+queue's pending renders; a legacy boot adopts Temporal's).
 
 - **Image:** `ghcr.io/eh-homelab/scadbuddy` is a **public** GHCR package (no pull
   secret needed), built for `linux/amd64` and `linux/arm64`. It has these tags:
