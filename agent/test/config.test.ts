@@ -7,21 +7,41 @@ describe('loadConfig', () => {
       databaseUrl: undefined,
       backendUrl: DEFAULT_BACKEND_URL,
       secretKeyFile: undefined,
+      previousSecretKeyFile: undefined,
+      publicUrl: undefined,
+      trustedProxies: undefined,
     })
   })
 
-  it('reads the three variables it owns', () => {
+  it('reads the variables it owns', () => {
     expect(
       loadConfig({
         SCADBUDDY_DATABASE_URL: 'postgresql://u:p@db:5432/scadbuddy',
         SCADBUDDY_BACKEND_URL: 'http://localhost:9000/',
         SCADBUDDY_SECRET_KEY_FILE: '/run/secrets/kek',
+        SCADBUDDY_SECRET_KEY_PREVIOUS_FILE: '/run/secrets/kek-old',
+        SCADBUDDY_PUBLIC_URL: 'https://scadbuddy.example',
+        SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.42.0.0/16, fd00::/8',
       }),
     ).toEqual({
       databaseUrl: 'postgresql://u:p@db:5432/scadbuddy',
       backendUrl: 'http://localhost:9000',
       secretKeyFile: '/run/secrets/kek',
+      previousSecretKeyFile: '/run/secrets/kek-old',
+      publicUrl: 'https://scadbuddy.example',
+      trustedProxies: '10.42.0.0/16, fd00::/8',
     })
+  })
+
+  it.each([
+    [{ SCADBUDDY_PUBLIC_URL: 'scadbuddy.example' }, /SCADBUDDY_PUBLIC_URL must be an http\(s\) URL/],
+    [{ SCADBUDDY_PUBLIC_URL: 'ftp://scadbuddy.example' }, /SCADBUDDY_PUBLIC_URL/],
+    [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/33' }, /"10\.0\.0\.0\/33" is not an IP address or CIDR range/],
+    [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: 'ingress-nginx' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
+    [{ SCADBUDDY_AGENT_TRUSTED_PROXIES: '10.0.0.0/8/1' }, /SCADBUDDY_AGENT_TRUSTED_PROXIES/],
+  ])('refuses a malformed %j', (env, message) => {
+    expect(() => loadConfig(env)).toThrow(ConfigError)
+    expect(() => loadConfig(env)).toThrow(message)
   })
 
   it('treats blank values as unset', () => {
