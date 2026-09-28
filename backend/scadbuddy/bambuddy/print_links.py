@@ -171,10 +171,14 @@ class PrintLinkStore:
     ) -> list[LinkedPrint]:
         with self._require().connection() as conn:
             rows = conn.execute(
-                f"{_LINKED}"
+                # Each archive's owner is chosen over all its rows first, as `_linked`
+                # does, and only then kept or dropped by output: filtering first would
+                # hand an archive to whichever filtered output saw it (#609 review).
+                f"SELECT * FROM ({_LINKED}"
                 " WHERE (%(before)s::bigint IS NULL OR archive_id < %(before)s)"
-                " AND (%(outputs)s::text[] IS NULL OR output_id = ANY(%(outputs)s))"
-                " ORDER BY archive_id DESC, first_seen, output_id LIMIT %(limit)s",
+                " ORDER BY archive_id DESC, first_seen, output_id) AS owners"
+                " WHERE (%(outputs)s::text[] IS NULL OR output_id = ANY(%(outputs)s))"
+                " ORDER BY archive_id DESC LIMIT %(limit)s",
                 {
                     "before": before,
                     "outputs": list(output_ids) if output_ids is not None else None,
