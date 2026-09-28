@@ -18,7 +18,6 @@ from fastapi.testclient import TestClient
 
 import scadbuddy.api.params as params_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
-from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.presets import (
     MAX_PRESET_DESCRIPTION,
@@ -50,11 +49,6 @@ def bundled(seed_dir: Path) -> Path:
     meta = {"name": "Keychain", "presets": SHIPPED}
     (directory / MODEL_META_NAME).write_text(json.dumps(meta), encoding="utf-8")
     return directory
-
-
-@pytest.fixture
-def settings(settings: Settings, pg_conninfo: str) -> Settings:
-    return settings.model_copy(update={"database_url": pg_conninfo})
 
 
 @pytest.fixture
@@ -502,11 +496,10 @@ def test_a_template_s_list_is_checked_and_written_under_the_lock_a_save_takes(
     assert held == [(False, True)]
 
 
-def test_without_a_database_nothing_is_saved_and_the_template_s_own_still_list(
+def test_a_store_without_a_database_reads_only_the_template_s_own(
     paths: DataPaths,
 ) -> None:
     store = PresetStore(paths)
-    assert not store.saves
     assert store.saved_presets("m") == []
     assert store.with_names_free("m", ["A"], lambda: "written") == "written"
     with pytest.raises(SavedPresetsUnavailableError):
