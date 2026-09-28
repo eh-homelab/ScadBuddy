@@ -1,15 +1,19 @@
-import { ApiError } from '../../api/client'
+import { useState } from 'react'
+import { api, ApiError } from '../../api/client'
 import type {
   AnalysisRequest,
   AnalyzerDiagnostic,
   AnalyzerSeverity,
   AnalyzerSource,
+  ScopeRef,
 } from '../../api/types'
 import { SEVERITY_LABEL, describeLocation, partition, scopeLabel } from '../../lib/analyzers'
 import { NEW_TAB } from '../../lib/embed'
 import { safeHttpUrl } from '../../lib/safeUrl'
 import { useAnalysis } from '../../lib/useAnalysis'
+import { Button } from '../ui/Button'
 import { Spinner } from '../ui/Spinner'
+import { SuppressForm } from './SuppressForm'
 
 const TONE: Record<AnalyzerSeverity, string> = {
   error: 'border-warn/50 bg-warn/10 text-warn',
@@ -47,7 +51,15 @@ function SourceList({ sources }: { sources: AnalyzerSource[] }) {
   )
 }
 
-function DiagnosticItem({ diagnostic }: { diagnostic: AnalyzerDiagnostic }) {
+interface ItemProps {
+  diagnostic: AnalyzerDiagnostic
+  /** Where a decision can be stored; empty when no decision can be (no store). */
+  scopes: ScopeRef[]
+  onChanged: () => void
+}
+
+function DiagnosticItem({ diagnostic, scopes, onChanged }: ItemProps) {
+  const [suppressing, setSuppressing] = useState(false)
   return (
     <li
       data-testid={`diagnostic-${diagnostic.key}`}
@@ -68,7 +80,63 @@ function DiagnosticItem({ diagnostic }: { diagnostic: AnalyzerDiagnostic }) {
       )}
       {diagnostic.why && <p className="mt-0.5 text-[12px] text-faint">{diagnostic.why}</p>}
       <SourceList sources={diagnostic.sources} />
+      {scopes.length > 0 && !suppressing && (
+        <div className="mt-1.5 flex flex-wrap gap-2">
+          <Button size="sm" variant="ghost" onClick={() => setSuppressing(true)}>
+            Suppress…
+          </Button>
+        </div>
+      )}
+      {suppressing && (
+        <SuppressForm
+          diagnostic={diagnostic}
+          scopes={scopes}
+          onCancel={() => setSuppressing(false)}
+          onDone={() => {
+            setSuppressing(false)
+            onChanged()
+          }}
+        />
+      )}
     </li>
+  )
+}
+
+/** Removes the decision that set a finding aside, so it is open again. */
+function RemoveDecision({ diagnostic, onChanged }: { diagnostic: AnalyzerDiagnostic; onChanged: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [refusal, setRefusal] = useState<string | null>(null)
+  const applied = diagnostic.decision?.decision
+  if (!applied || applied.kind === 'accept') return null
+  const verb = applied.kind === 'suppress' ? 'suppression' : 'ignore'
+  return (
+    <>
+      {' '}
+      <button
+        type="button"
+        disabled={busy}
+        aria-label={`Remove the ${verb} of ${diagnostic.id}`}
+        onClick={() => {
+          setBusy(true)
+          setRefusal(null)
+          api
+            .deleteDecision(applied.id)
+            .then(onChanged)
+            .catch((cause: unknown) => {
+              setRefusal(cause instanceof ApiError ? cause.detail : 'It was not removed.')
+              setBusy(false)
+            })
+        }}
+        className="underline underline-offset-2 hover:text-ink disabled:opacity-45"
+      >
+        Remove
+      </button>
+      {refusal && (
+        <span role="alert" className="ml-1 text-warn">
+          {refusal}
+        </span>
+      )}
+    </>
   )
 }
 
@@ -97,6 +165,8 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
   const { report, error, checking, reload } = useAnalysis(outputId, request)
   const { shown, setAside } = partition(report?.diagnostics ?? [])
   const skipped = report?.skipped ?? []
+  /** Decisions are stored in Postgres; without it the run says why (`decisions_reason`). */
+  const decidable = report?.decisions_available ?? false
 
   return (
     <section
@@ -134,7 +204,12 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
           </p>
           <ul className="mt-2 space-y-2">
             {shown.map((diagnostic) => (
-              <DiagnosticItem key={diagnostic.key} diagnostic={diagnostic} />
+              <DiagnosticItem
+                key={diagnostic.key}
+                diagnostic={diagnostic}
+                scopes={decidable ? (report?.scopes ?? []) : []}
+                onChanged={reload}
+              />
             ))}
           </ul>
         </>
@@ -170,6 +245,7 @@ export function AnalyzerPanel({ outputId, request, allPlates = false }: Props) {
               <li key={diagnostic.key}>
                 <code className="sb-num">{diagnostic.id}</code> {diagnostic.title} —{' '}
                 {setAsideReason(diagnostic)}
+                {decidable && <RemoveDecision diagnostic={diagnostic} onChanged={reload} />}
               </li>
             ))}
           </ul>

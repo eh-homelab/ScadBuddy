@@ -1,6 +1,8 @@
 import { HttpResponse, delay, http } from 'msw'
 import type {
   AnalysisRun,
+  AnalyzerDecision,
+  DecisionCreate,
   Asset,
   AssetUsage,
   AttachResult,
@@ -126,6 +128,19 @@ const state = {
    * it and a later read has it (`landPreviews`).
    */
   pendingPreviews: new Set<string>(),
+  /** #284 — the `analyzer_decisions` table: ignores and suppressions at a scope. */
+  analyzerDecisions: [] as AnalyzerDecision[],
+}
+
+/** #284 — `analyzer.decision` on the `analyzers` topic, ids only (`core/events.py`). */
+function announceDecision(decision: AnalyzerDecision, action: 'recorded' | 'removed'): void {
+  emitRealtime('analyzer.decision', ['analyzers'], {
+    decision_id: decision.id,
+    diagnostic_id: decision.diagnostic_id,
+    scope: decision.scope.kind,
+    scope_key: decision.scope.key,
+    action,
+  })
 }
 
 /** Milliseconds a mock render spends pending, then running. */
@@ -221,6 +236,7 @@ export function resetMockState(): void {
   state.sidebarLinkId = 0
   state.seq = 0
   state.pendingPreviews.clear()
+  state.analyzerDecisions = []
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -2249,7 +2265,59 @@ export const handlers = [
     const body = (await request.json()) as AnalysisRun
     const output = state.outputs.find((o) => o.id === body.target.output_id)
     if (!output) return problem(404, 'Output not found')
-    return HttpResponse.json(analysisReport(output, body.request ?? { plate_id: 1 }))
+    return HttpResponse.json(
+      analysisReport(output, body.request ?? { plate_id: 1 }, undefined, state.analyzerDecisions),
+    )
+  }),
+
+  /**
+   * Ignore or suppress at a scope (`post_decision`): a suppression without a reason is
+   * refused as the backend's validator refuses it, and a decision about the same rule
+   * and instance at the same scope is replaced, each announced on `analyzers`.
+   */
+  http.post(`${base}/analyzers/decisions`, async ({ request }) => {
+    const body = (await request.json()) as DecisionCreate
+    if (body.kind === 'suppress' && !body.reason?.trim()) {
+      return problem(
+        422,
+        'Unprocessable Content',
+        'Value error, a suppression needs a reason, as #pragma warning disable does',
+      )
+    }
+    const instance = body.instance ?? null
+    const replaced = state.analyzerDecisions.filter(
+      (row) =>
+        row.diagnostic_id === body.diagnostic_id &&
+        (row.instance ?? null) === instance &&
+        row.scope.kind === body.scope.kind &&
+        row.scope.key === body.scope.key,
+    )
+    state.seq += 1
+    const decision: AnalyzerDecision = {
+      id: state.seq.toString(16).padStart(32, '0'),
+      diagnostic_id: body.diagnostic_id,
+      instance,
+      kind: body.kind,
+      scope: body.scope,
+      reason: body.reason?.trim() ?? null,
+      enforced: body.enforced ?? false,
+      created_at: new Date().toISOString(),
+    }
+    state.analyzerDecisions = [
+      ...state.analyzerDecisions.filter((row) => !replaced.includes(row)),
+      decision,
+    ]
+    for (const row of replaced) announceDecision(row, 'removed')
+    announceDecision(decision, 'recorded')
+    return HttpResponse.json(decision, { status: 201 })
+  }),
+
+  http.delete(`${base}/analyzers/decisions/:id`, ({ params }) => {
+    const gone = state.analyzerDecisions.find((row) => row.id === params['id'])
+    if (!gone) return problem(404, 'Not Found', `no decision with id '${String(params['id'])}'`)
+    state.analyzerDecisions = state.analyzerDecisions.filter((row) => row !== gone)
+    announceDecision(gone, 'removed')
+    return new HttpResponse(null, { status: 204 })
   }),
 
   // --- #79 projects -----------------------------------------------------------------

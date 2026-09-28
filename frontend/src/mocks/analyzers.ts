@@ -1,6 +1,7 @@
 import type {
   AnalysisReport,
   AnalysisRequest,
+  AnalyzerDecision,
   AnalyzerDiagnostic,
   AnalyzerSource,
   Output,
@@ -175,14 +176,66 @@ export function analysisScopes(output: Output, request: AnalysisRequest): ScopeR
 }
 
 const SEVERITY_ORDER = { error: 0, warning: 1, info: 2, hidden: 3 } as const
+const SCOPE_ORDER: ScopeRef['kind'][] = [
+  'global',
+  'material',
+  'printer',
+  'template',
+  'template_version',
+  'configuration',
+  'print',
+]
 
-/** The report for `output`: `diagnostics` sorted and counted as `build_report` does. */
+/**
+ * The decision that decides `diagnostic` (`decisions.resolve`): an enforced one at the
+ * broadest scope, else the narrowest, one about this instance beating one about every
+ * instance at the same scope.
+ */
+export function resolveDecision(
+  diagnostic: AnalyzerDiagnostic,
+  decisions: AnalyzerDecision[],
+  scopes: ScopeRef[],
+): AnalyzerDecision | undefined {
+  const rank = (decision: AnalyzerDecision) => SCOPE_ORDER.indexOf(decision.scope.kind)
+  const applicable = decisions.filter(
+    (decision) =>
+      decision.diagnostic_id === diagnostic.id &&
+      (decision.instance == null || decision.instance === diagnostic.key) &&
+      scopes.some((scope) => scope.kind === decision.scope.kind && scope.key === decision.scope.key),
+  )
+  const enforced = applicable.filter((decision) => decision.enforced)
+  if (enforced.length > 0) return enforced.sort((a, b) => rank(a) - rank(b))[0]
+  return applicable.sort(
+    (a, b) => rank(b) - rank(a) || Number(b.instance != null) - Number(a.instance != null),
+  )[0]
+}
+
+/** Each diagnostic with the status its decision gives it (`runner.apply_decisions`). */
+function decide(
+  diagnostics: AnalyzerDiagnostic[],
+  decisions: AnalyzerDecision[],
+  scopes: ScopeRef[],
+): AnalyzerDiagnostic[] {
+  return diagnostics.map((diagnostic) => {
+    const decision = resolveDecision(diagnostic, decisions, scopes)
+    if (!decision || decision.kind === 'accept') return diagnostic
+    return {
+      ...diagnostic,
+      status: decision.kind === 'suppress' ? 'suppressed' : 'ignored',
+      decision: { decision, stale: false },
+    }
+  })
+}
+
+/** The report for `output`: `diagnostics` decided, sorted and counted as `build_report` does. */
 export function analysisReport(
   output: Output,
   request: AnalysisRequest,
   diagnostics: AnalyzerDiagnostic[] = [overhangDiagnostic, openEdgesDiagnostic],
+  decisions: AnalyzerDecision[] = [],
 ): AnalysisReport {
-  const sorted = [...diagnostics].sort(
+  const scopes = analysisScopes(output, request)
+  const sorted = decide(diagnostics, decisions, scopes).sort(
     (left, right) =>
       SEVERITY_ORDER[left.severity] - SEVERITY_ORDER[right.severity] ||
       left.key.localeCompare(right.key),
@@ -219,7 +272,7 @@ export function analysisReport(
     inputs: (['output', 'geometry', 'plate', 'printer', 'choices', 'filaments', 'inventory'] as const).map(
       (name) => ({ name, available: name !== 'choices' || request.choices != null }),
     ),
-    scopes: analysisScopes(output, request),
+    scopes,
     decisions_available: true,
     decisions_reason: null,
     base: {
