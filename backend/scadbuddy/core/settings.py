@@ -164,6 +164,17 @@ class Settings(BaseSettings):
     revision: str = "unknown"
     version: str = "dev"
 
+    @field_validator("revision")
+    @classmethod
+    def _revision_fits_a_visibility_query(cls, value: str) -> str:
+        # It is the worker's build id, which the drain puts inside a quoted visibility
+        # query (workflows/client.py `drained`).
+        if '"' in value or any(c.isspace() for c in value):
+            raise ValueError(
+                f"SCADBUDDY_REVISION must not contain a double quote or whitespace: {value!r}"
+            )
+        return value
+
     def to_config(self) -> Config:
         return Config(
             openscad=self.openscad,

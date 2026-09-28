@@ -7,7 +7,7 @@ import asyncio
 import contextlib
 import logging
 import signal
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Generator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 
@@ -153,7 +153,7 @@ async def _poll(
 
 class _HealthServer(uvicorn.Server):
     @contextlib.contextmanager
-    def capture_signals(self) -> Iterator[None]:
+    def capture_signals(self) -> Generator[None, None, None]:
         # `main` owns SIGTERM/SIGINT: they set `stop`, which stops this server too.
         yield
 
