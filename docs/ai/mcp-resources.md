@@ -149,6 +149,18 @@ all (`createApp()`, [`agent/src/app.ts`](../../agent/src/app.ts)).
   missed events, or a log it cannot read, makes it log
   `event bus: resyncing followers: …` and send every subscription an update plus one
   `list_changed`, so clients re-read.
+- **The replay rests on short event transactions.** The listener's place in the log
+  trails the newest `seq` by one 30 s check, because a `seq` is handed out at INSERT
+  but becomes visible only at COMMIT. That is safe only while no transaction that
+  writes to `events` stays open longer than 30 s. One that did could commit an event
+  behind the place, and if the listener were reconnecting at the time, that event would
+  be lost for good; the duplicate filter stops repeats, not skips. The backend keeps
+  well inside this: each event is one short INSERT + `pg_notify` transaction
+  ([`pg_events.py`](../../backend/scadbuddy/core/pg_events.py), "Publishing"). As a
+  guard, a replayed event whose `logged_at` (its transaction's start) is more than 30 s
+  older than the place shows the bound was broken; the listener then logs
+  `event bus: resyncing followers: a replayed event's transaction was open more than …`
+  and resyncs every subscriber (the ASSUMPTION and GUARD comments in `pgListener.ts`).
 - **Schemas.** The listener reads `events` through the connection's `search_path`, so
   the agent and the backend must share a schema; channels are per database, so two
   deployments sharing a database would hear each other (the same caveat the backend's

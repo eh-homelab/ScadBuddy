@@ -29,6 +29,23 @@ import { type BusEvent, decodeEvent, type EventListener, type EventSource, Follo
 // the lag costs a few duplicate deliveries after a reconnect, which the seen
 // set and the ids-only events make harmless.
 //
+// ASSUMPTION: no transaction that inserts into `events` stays open longer
+// than `checkIntervalMs` (30 s). `seq` is handed out at INSERT but becomes
+// visible at COMMIT, so a transaction open longer than that could commit a
+// row BELOW the adopted place. If the listening connection were down when
+// that row's NOTIFY went out, the replay (`seq > place`) would never read it
+// and the event would be lost for good. The seen set cannot catch this: it
+// stops repeats, not skips. The backend keeps well inside the bound: every
+// event is one short INSERT + pg_notify transaction
+// (backend/scadbuddy/core/pg_events.py, "Publishing"), and the render queue's
+// in-transaction events commit with a single job update.
+//
+// GUARD: a replayed row whose `logged_at` (its transaction's start, the
+// column's `DEFAULT now()`) is more than `checkIntervalMs` before the time
+// the adopted place was read came from a transaction open longer than the
+// bound. The assumption has been broken, and some other event may have been
+// skipped this way, so followers are told to resync after the replay.
+//
 // Why not postgres.js `sql.listen()`: it re-listens after a drop once, and a
 // failed attempt is swallowed (postgres@3.4.9 src/index.js `listen`,
 // `onclose`), after which nothing is heard until a restart. Here one pool of
@@ -50,7 +67,7 @@ export type PgListenerOptions = {
   log?: (message: string) => void
 }
 
-type Row = { seq: string; event_id: string; payload: unknown }
+type Row = { seq: string; event_id: string; payload: unknown; logged_at: Date; read_at: Date }
 
 export class PgEventListener implements EventSource {
   readonly #sql: Sql
@@ -69,8 +86,12 @@ export class PgEventListener implements EventSource {
   #everListened = false
   /** The last `events.seq` known to be delivered; undefined while the log is unreadable. */
   #position: bigint | undefined
+  /** The database clock when `#position` was read, for the guard above. */
+  #positionAt: Date | undefined
   /** max(seq) as the previous check read it; becomes `#position` on the next. */
-  #candidate: bigint | undefined
+  #candidate: { seq: bigint; at: Date } | undefined
+  /** Replays that found a transaction open longer than `checkIntervalMs` (tests, metrics). */
+  longTransactions = 0
   /** How many events came from the replay log rather than NOTIFY (tests, metrics). */
   replayed = 0
   /** How many resyncs were sent (tests, metrics). */
@@ -151,7 +172,7 @@ export class PgEventListener implements EventSource {
         await this.#sql.unsafe(`LISTEN "${PG_CHANNEL}"`)
         this.#listening = true
         if (this.#everListened) await this.#replayGap()
-        else this.#position = await this.#maxSeq()
+        else this.#adopt(await this.#maxSeq())
         this.#everListened = true
         return
       } catch (err) {
@@ -176,17 +197,23 @@ export class PgEventListener implements EventSource {
     if (!this.#listening || this.#closed) return
     const max = await this.#maxSeq()
     if (max === undefined) return
-    if (this.#candidate !== undefined && (this.#position === undefined || this.#candidate > this.#position)) {
-      this.#position = this.#candidate
+    if (this.#candidate !== undefined && (this.#position === undefined || this.#candidate.seq > this.#position)) {
+      this.#adopt(this.#candidate)
     }
     this.#candidate = max
   }
 
-  /** max(seq) of the log, or undefined when it cannot be read. */
-  async #maxSeq(): Promise<bigint | undefined> {
+  #adopt(place: { seq: bigint; at: Date } | undefined): void {
+    this.#position = place?.seq
+    this.#positionAt = place?.at
+  }
+
+  /** max(seq) of the log and the database clock, or undefined when the log cannot be read. */
+  async #maxSeq(): Promise<{ seq: bigint; at: Date } | undefined> {
     try {
-      const [row] = await this.#sql<{ seq: string }[]>`SELECT coalesce(max(seq), 0)::text AS seq FROM events`
-      return BigInt(row?.seq ?? '0')
+      const [row] = await this.#sql<{ seq: string; at: Date }[]>`
+        SELECT coalesce(max(seq), 0)::text AS seq, now() AS at FROM events`
+      return { seq: BigInt(row?.seq ?? '0'), at: row?.at ?? new Date() }
     } catch {
       return undefined
     }
@@ -195,27 +222,30 @@ export class PgEventListener implements EventSource {
   async #replayGap(): Promise<void> {
     const from = this.#position
     if (from === undefined) {
-      this.#position = await this.#maxSeq()
+      this.#adopt(await this.#maxSeq())
       this.#resync('the event log could not be read before the drop')
       return
     }
     let rows: Row[]
     try {
       rows = await this.#sql<Row[]>`
-        SELECT seq::text AS seq, event_id, payload FROM events
+        SELECT seq::text AS seq, event_id, payload, logged_at, now() AS read_at FROM events
         WHERE seq > ${from.toString()}::bigint
         ORDER BY seq DESC LIMIT ${this.#replayLimit + 1}`
     } catch (err) {
-      this.#position = undefined
+      this.#adopt(undefined)
       this.#resync(`the event log could not be read (${(err as Error).message})`)
       return
     }
     if (rows.length > this.#replayLimit) {
-      this.#position = BigInt(rows[0]!.seq)
+      this.#adopt({ seq: BigInt(rows[0]!.seq), at: rows[0]!.read_at })
       this.#resync(`more than ${this.#replayLimit} events were missed`)
       return
     }
+    const placeAt = this.#positionAt
+    let longTransaction = false
     for (const row of rows.reverse()) {
+      if (placeAt !== undefined && row.logged_at.getTime() < placeAt.getTime() - this.#checkMs) longTransaction = true
       const seq = BigInt(row.seq)
       if (!this.#seen.has(row.event_id)) {
         const event = decodeEvent(row.payload)
@@ -224,9 +254,16 @@ export class PgEventListener implements EventSource {
           this.#deliver(event)
         }
       }
-      if (seq > (this.#position ?? 0n)) this.#position = seq
+      if (seq > (this.#position ?? 0n)) this.#adopt({ seq, at: row.read_at })
     }
     this.#candidate = undefined
+    if (longTransaction) {
+      this.longTransactions += 1
+      this.#resync(
+        `a replayed event's transaction was open more than ${this.#checkMs} ms, so an event may have been ` +
+          'skipped (see the ASSUMPTION in agent/src/events/pgListener.ts)',
+      )
+    }
   }
 
   #resync(reason: string): void {

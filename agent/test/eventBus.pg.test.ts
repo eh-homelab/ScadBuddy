@@ -17,8 +17,9 @@ import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './s
 // row in `events` and pg_notify in one transaction), and the client receives
 // `notifications/resources/updated`.
 //
-// The `events` table is the backend's (backend/scadbuddy/render/pg_store.py
-// migration 4), created here verbatim in a throwaway schema. NOTIFY channels
+// The `events` table is the backend's
+// (backend/scadbuddy/migrations/20260928T0630Z_events.sql), created here in a
+// throwaway schema. NOTIFY channels
 // are per database, not per schema, so every test's listener hears every
 // other test's events: assertions look only at this test's own event ids.
 
@@ -39,10 +40,16 @@ function event(fields: { kind: string } & Record<string, string>): BusEvent {
 }
 
 /** What the backend's PgNotifyEventBus does: log row and NOTIFY in one transaction. */
-async function publish(db: Database, e: BusEvent, { notify = true } = {}): Promise<void> {
+async function publish(
+  db: Database,
+  e: BusEvent,
+  { notify = true, loggedAt }: { notify?: boolean; loggedAt?: Date } = {},
+): Promise<void> {
   const payload = JSON.stringify(e)
   await db.sql.begin(async (tx) => {
-    await tx`INSERT INTO events (event_id, kind, at, payload) VALUES (${e.id}, ${e.kind}, ${e.at!}, ${payload}::jsonb)`
+    await tx`
+      INSERT INTO events (event_id, kind, at, payload, logged_at)
+      VALUES (${e.id}, ${e.kind}, ${e.at!}, ${payload}::jsonb, coalesce(${loggedAt ?? null}::timestamptz, now()))`
     if (notify) await tx`SELECT pg_notify('scadbuddy_events', ${payload})`
   })
 }
@@ -133,11 +140,26 @@ describe.skipIf(!TEST_DATABASE_URL)(
       expect(ids.indexOf(missed[0]!.id)).toBeLessThan(ids.indexOf(missed[1]!.id))
       expect(ids.filter((id) => id === before.id)).toHaveLength(1)
       expect(listener.replayed).toBeGreaterThanOrEqual(2)
+      // Short transactions: the long-transaction guard stays quiet.
+      expect(listener.longTransactions).toBe(0)
 
       // And it listens again.
       const later = event({ kind: 'settings.changed', section: 'connection' })
       await publish(db, later)
       await until(() => heard.some((h) => h.id === later.id), 'an event after reconnecting')
+    })
+
+    it('resyncs after replaying a row whose transaction was open longer than the check interval', async () => {
+      const { listener, heard, resyncs, logs } = await listen()
+      // logged_at is the transaction's start (DEFAULT now()): an hour before the
+      // listener read its place, far beyond the 60 s check interval here.
+      const late = event({ kind: 'job.done', job_id: 'slow', slug: 'k' })
+      await publish(db, late, { notify: false, loggedAt: new Date(Date.now() - 3_600_000) })
+      await listener.dropConnectionForTest()
+      await until(() => resyncs() === 1, 'the resync')
+      expect(heard.some((h) => h.id === late.id)).toBe(true)
+      expect(listener.longTransactions).toBe(1)
+      expect(logs.some((l) => l.includes('may have been skipped'))).toBe(true)
     })
 
     it('resyncs followers instead when the gap is larger than the replay limit', async () => {
