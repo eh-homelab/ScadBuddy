@@ -1517,6 +1517,20 @@
             ],
             "title": "Model Version"
           },
+          "notes": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Notes"
+          },
           "params": {
             "additionalProperties": {
               "anyOf": [

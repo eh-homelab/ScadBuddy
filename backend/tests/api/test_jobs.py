@@ -20,6 +20,7 @@ def test_render_is_accepted_and_the_job_completes(client: TestClient, model: str
     assert job["params"] == {"width": 12}
     assert job["colors"] == ["#FF0000"]
     assert job["warnings"] == ["a warning"]
+    assert job["notes"] == ["a note"]
     assert job["bbox_mm"]["size"] == [10.0, 10.0, 5.0]
     assert job["parts"][0]["extruder"] == 1
     assert job["log_tail"] == ["rendered fine"]

@@ -425,7 +425,7 @@ async def test_the_3mf_the_preview_and_the_result_number_extruders_alike(
                 ("Color 2", "#0047BB00", trimesh.creation.box(extents=(10, 10, 1))),
             ],
         )
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), notes=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return schema
@@ -463,7 +463,7 @@ async def test_a_built_ins_3mf_is_titled_by_its_bare_slug(paths: DataPaths) -> N
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), notes=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _colour_schema(("base_color", "#0047BB"))
@@ -526,7 +526,7 @@ async def test_an_uploaded_file_is_staged_beside_the_model_for_every_render(
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=())
+        return mock.Mock(log_tail=[], missing_files=(), notes=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -586,7 +586,7 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         out = args[3]
         assert isinstance(out, Path)
         write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
-        return mock.Mock(log_tail=[], missing_files=("pic.svg",))
+        return mock.Mock(log_tail=[], missing_files=("pic.svg",), notes=())
 
     async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
         return _file_schema()
@@ -602,3 +602,29 @@ async def test_a_file_openscad_could_not_open_is_a_job_warning(paths: DataPaths)
         result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
 
     assert result.warnings == ["OpenSCAD could not open pic.svg; the model rendered without it"]
+
+
+async def test_the_notes_a_template_echoed_are_on_the_result(paths: DataPaths) -> None:
+    paths.model_dir("demo").mkdir(parents=True)
+    paths.model_source("demo").write_text("// stand-in\n", encoding="utf-8")
+
+    async def render(*args: object, **kwargs: object) -> object:
+        out = args[3]
+        assert isinstance(out, Path)
+        write_openscad_3mf(out, [("Color 1", "#0047BB00", trimesh.creation.box())])
+        return mock.Mock(log_tail=[], missing_files=(), notes=("letter_size reduced",))
+
+    async def cached_schema(*args: object, **kwargs: object) -> CustomizerSchema:
+        return _file_schema()
+
+    async def render_solids(*args: object, **kwargs: object) -> SolidRender:
+        return SolidRender()
+
+    with (
+        mock.patch.object(jobs, "render_3mf", render),
+        mock.patch.object(jobs, "cached_schema", cached_schema),
+        mock.patch.object(jobs, "render_solids", render_solids),
+    ):
+        result, _ = await jobs.render_job(_job("m"), config=CONFIG, paths=paths)
+
+    assert result.notes == ["letter_size reduced"]

@@ -20,6 +20,7 @@ from scadbuddy.render.runner import (
     quote_string,
     render_3mf,
     run_openscad,
+    template_note,
 )
 from scadbuddy.render.schema import CustomizerSchema, Option, Parameter, build_schema
 from tests.conftest import FIXTURES, load_fixture_param, load_fixture_source
@@ -326,3 +327,65 @@ def test_the_templates_own_values_pass() -> None:
 def test_build_defines_refuses_a_path_so_the_route_422s() -> None:
     with pytest.raises(ValueError, match="looks like a file path"):
         build_defines(_schema(TEXT_PARAMETER), {"label": "/proc/self/environ"})
+
+
+def test_template_note_reads_note_and_warning_echoes() -> None:
+    assert template_note('ECHO: "NOTE: letter_size reduced from 25 to 10.9 mm"') == (
+        "letter_size reduced from 25 to 10.9 mm"
+    )
+    # wifi-qr-plaque and flexi-fabric echo `WARNING:`; both prefixes reach the user.
+    assert template_note('ECHO: "WARNING: plaque too thin for magnet pockets"') == (
+        "plaque too thin for magnet pockets"
+    )
+    # OpenSCAD prints the string raw: an embedded quote is not escaped.
+    assert template_note('ECHO: "NOTE: overlay_file "x.svg" ignored"') == (
+        'overlay_file "x.svg" ignored'
+    )
+
+
+def test_template_note_ignores_everything_else() -> None:
+    assert template_note('ECHO: "QRROW;3;0101"') is None
+    assert template_note('ECHO: "NOTE:", 5') is None
+    assert template_note("ECHO: COASTERS = [3, 2]") is None
+    assert template_note('ECHO: "NOTE: "') is None
+    # OpenSCAD's own warnings are about the template, not the parameters.
+    assert template_note("WARNING: Ignoring unknown variable 'x'") is None
+    assert template_note('ECHO: "note: lower case is a debug echo"') is None
+
+
+NOTES_OPENSCAD = """#!/bin/sh
+echo 'ECHO: "NOTE: letter_size reduced from 25 to 10.9 mm"'
+i=0
+while [ $i -lt 80 ]; do echo "ECHO: \"QRROW;$i\""; i=$((i+1)); done
+echo 'ECHO: "WARNING: modules are 0.59 mm"'
+echo 'ECHO: "NOTE: letter_size reduced from 25 to 10.9 mm"'
+"""
+
+
+async def test_a_run_reports_every_note_the_template_echoed(tmp_path: Path) -> None:
+    """Exit 0, the first note long gone from the log tail, and a repeat reported once."""
+    binary = tmp_path / "notes-openscad"
+    binary.write_text(NOTES_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    config = Config(openscad=str(binary), data_dir=tmp_path / "data")
+
+    output = await run_openscad([], cwd=tmp_path, config=config)
+
+    assert output.notes == ("letter_size reduced from 25 to 10.9 mm", "modules are 0.59 mm")
+    assert not any("letter_size" in line for line in output.log_tail[:-1])
+
+
+@pytest.mark.requires_openscad
+async def test_a_real_render_reports_the_notes_it_echoed(tmp_path: Path) -> None:
+    scad = tmp_path / "notes.scad"
+    scad.write_text(
+        'echo(str("NOTE: overlay_file \\"", "x.svg", "\\" ignored"));\n'
+        'echo("WARNING: plaque too thin");\n'
+        'echo("NOTE:", 5);\n'
+        "cube(1);\n",
+        encoding="utf-8",
+    )
+    output = await run_openscad(
+        ["-o", str(tmp_path / "out.stl"), scad.name], cwd=tmp_path, config=load_config()
+    )
+    assert output.notes == ('overlay_file "x.svg" ignored', "plaque too thin")

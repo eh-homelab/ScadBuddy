@@ -112,6 +112,13 @@ from, returns diagnostics with line numbers and saves nothing
 parse-checks too, unless `force` is set (main spec §8). A source that fails the
 check is one the customizer cannot open, so fix it rather than forcing it.
 
+When the template changes what the user asked for (caps a size, shrinks text to
+fit the plate), say so with a single-string echo starting `NOTE: `, e.g.
+`echo(str("NOTE: letter_size reduced from ", a, " to ", b, " mm"));`. ScadBuddy
+shows those under the preview of a successful render; `WARNING: ` is accepted
+too. Anything else you echo, including `echo("NOTE:", x)` with more than one
+argument, stays in the render log (main spec §6.1, "Template notes").
+
 ## 5. Colour: every solid in a `color()`, one colour parameter per extruder
 
 ScadBuddy renders with `--backend=Manifold -o out.3mf`. That writes one object
