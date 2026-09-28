@@ -930,3 +930,90 @@ async def test_a_failed_start_releases_the_store(paths: DataPaths) -> None:
 
     assert closed == [True]
     queue.close_thumbnails()
+
+
+# ── the background lane (default-render previews) ─────────────────────────────
+
+
+async def test_background_work_runs_behind_every_waiting_render(
+    make_queue: QueueFactory,
+) -> None:
+    """A preview never starts ahead of a render someone asked for -- including one
+    submitted after the preview was queued, and (Postgres) one any replica took."""
+    gate = Gate()
+    queue = await make_queue(gate)
+    #: Which renders had started when the preview ran.
+    ran_after: list[list[str]] = []
+
+    async def background() -> bytes:
+        ran_after.append(list(gate.started))
+        return b"png"
+
+    first = await _occupy_the_worker(queue, gate)
+    preview = asyncio.create_task(queue.run_background(background))
+    await asyncio.sleep(0.05)
+    second = await queue.submit("demo", {"n": 1})  # submitted after, rendered before
+    gate.release.set()
+
+    assert await preview == b"png"
+    await queue.join()
+    assert ran_after == [[first.id, second.id]]
+
+
+async def test_background_work_is_never_a_job(make_queue: QueueFactory) -> None:
+    """Held in the process, never in the store: nothing to list, nothing a model's
+    delete waits on, and a failure raises to its caller with the worker alive."""
+    gate = Gate()
+    gate.release.set()
+    queue = await make_queue(gate)
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def held() -> None:
+        started.set()
+        await release.wait()
+
+    running = asyncio.create_task(queue.run_background(held))
+    await asyncio.wait_for(started.wait(), 5)
+    assert queue.store.list_jobs() == []
+    assert not queue.store.has_unfinished("demo")
+    assert queue.store.counts().pending == queue.store.counts().running == 0
+    release.set()
+    await running
+
+    async def broken() -> None:
+        raise RuntimeError("no geometry")
+
+    with pytest.raises(RuntimeError, match="no geometry"):
+        await queue.run_background(broken)
+    job = await queue.submit("demo", {"n": 1})
+    await queue.join()
+    assert queue.store.read(job.id).state == "done"
+
+
+async def test_background_work_is_not_admitted_or_counted(make_queue: QueueFactory) -> None:
+    """Admission (`render_queue_max`) and the queue metrics see renders only: a
+    waiting preview takes no place and moves no gauge or counter."""
+    gate = Gate()
+    queue = await make_queue(gate, replace(CONFIG, render_queue_max=1))
+    await _occupy_the_worker(queue, gate)
+
+    async def background() -> None:
+        return None
+
+    preview = asyncio.create_task(queue.run_background(background))
+    await _until(lambda: len(queue._background) == 1)
+
+    # The one place is the next render's, not the waiting preview's.
+    waiting = await queue.submit("demo", {"n": 1})
+    with pytest.raises(QueueFullError):
+        await queue.submit("demo", {"n": 2})
+    queue.refresh_metrics()
+    assert _sample(queue.metrics, "scadbuddy_render_queue_depth") == 1
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_submitted_total") == 2
+
+    gate.release.set()
+    await preview
+    await queue.join()
+    assert queue.store.read(waiting.id).state == "done"
+    assert _sample(queue.metrics, "scadbuddy_render_jobs_submitted_total") == 2

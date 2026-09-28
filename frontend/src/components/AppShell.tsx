@@ -19,6 +19,7 @@ import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { LiveUpdatesIndicator } from './LiveUpdatesIndicator'
 import { useLoadDisplayUnit } from '../lib/units'
+import { leaveFullscreen } from '../lib/useFullscreen'
 
 // Split out: the panel, its protocol schemas (zod) and its renderer download only
 // when someone opens it, and never when AI is off.
@@ -60,7 +61,23 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
     setOpen(false)
     toggleButton.current?.focus()
   }, [])
-  const toggle = useCallback(() => (open ? closePanel() : openPanel()), [open, closePanel, openPanel])
+  // Full screen hides the panel along with the rest of the page, so there the toggle
+  // means "show me the assistant": it leaves full screen and opens the panel, rather
+  // than opening (or closing) it out of sight.
+  const toggle = useCallback(() => {
+    if (leaveFullscreen()) {
+      openPanel()
+      // The browser's own full screen ends a moment later, and until it has, nothing
+      // outside it can take the focus: give it to the panel again once it has.
+      if (document.fullscreenElement) {
+        document.addEventListener('fullscreenchange', openPanel, { once: true })
+      }
+    } else if (open) {
+      closePanel()
+    } else {
+      openPanel()
+    }
+  }, [open, closePanel, openPanel])
 
   useEffect(() => {
     if (!ai.available) return

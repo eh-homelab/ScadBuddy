@@ -38,6 +38,8 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.library.previews import sweep_work_dirs
+from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
 API_PREFIX = "/api/v1"
 
@@ -161,6 +163,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # A default render the process died in left its scratch directory, which the
+    # orphan sweep never reads: no slug names it. Only one older than any render may
+    # run goes, since another replica may be rendering into it. Whether or not
+    # previews are on: one may be left from when they were.
+    try:
+        await asyncio.to_thread(
+            sweep_work_dirs, state.paths, state.config.render_timeout * PREVIEW_TIMEOUT_FACTOR
+        )
+    except OSError:
+        logger.exception("could not sweep preview scratch directories")
     # Pins from before they moved into each model (#93): once, then the shared
     # lockfile is gone. It logs what it cannot record, so it never stops the boot.
     try:
@@ -184,25 +196,43 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
-    # After the queue has opened its store: the jobs in it are references too.
+    # Everything from here holds the queue's resources (the Postgres pool, its
+    # workers), so it runs inside the `try` whose `finally` releases them: a
+    # failure while starting up closes the queue as a shutdown does, rather than
+    # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
-    if state.config.asset_sweep_interval > 0:
-        await _sweep_assets_logged(state)
-        sweeper = asyncio.create_task(_asset_sweeper(state))
-    logger.info(
-        "scadbuddy started",
-        extra={
-            # The deploy provenance stamped into the image (what /healthz
-            # reports), not the package version, which is not bumped per deploy.
-            "version": state.settings.version,
-            "revision": state.settings.revision,
-            "data_dir": str(state.paths.root),
-            "openscad_version": state.openscad_version,
-        },
-    )
     try:
+        # After the queue has opened its store: the jobs in it are references too.
+        if state.config.asset_sweep_interval > 0:
+            await _sweep_assets_logged(state)
+            sweeper = asyncio.create_task(_asset_sweeper(state))
+        if state.settings.preview_renders:
+            state.previews.start()
+            # Every model without a thumbnail gets its default render, one at a time
+            # and behind any render someone asks for; one already made from the
+            # current source is left alone, so after the first boot this renders
+            # nothing. Best effort, like the migration above: a listing that fails
+            # costs the backfill, never the boot.
+            try:
+                records = await asyncio.to_thread(state.catalogue.list_models)
+            except (OSError, ValueError, GitError):
+                logger.exception("could not list the models to render their previews")
+            else:
+                state.previews.request_all(record.slug for record in records)
+        logger.info(
+            "scadbuddy started",
+            extra={
+                # The deploy provenance stamped into the image (what /healthz
+                # reports), not the package version, which is not bumped per deploy.
+                "version": state.settings.version,
+                "revision": state.settings.revision,
+                "data_dir": str(state.paths.root),
+                "openscad_version": state.openscad_version,
+            },
+        )
         yield
     finally:
+        await state.previews.aclose()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
