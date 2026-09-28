@@ -125,11 +125,7 @@ async def generate_target(
         choices = settings.model_print_choices.get(meta.slug)
         printer_id = (choices.printer_id if choices else None) or settings.printer_id
         nozzle = choices.nozzles[0].size if choices and choices.nozzles else None
-    if printer_id is not None and nozzle is not None:
-        return await target_for(
-            client, settings, meta.slug, printer_id=printer_id, nozzle_diameter=nozzle
-        )
-    return await target_for(client, settings, meta.slug)
+    return await target_for(client, settings, printer_id=printer_id, nozzle_diameter=nozzle)
 
 
 async def file_into_project(

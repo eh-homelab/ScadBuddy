@@ -16,6 +16,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.api.deps import STATE_ATTR, AppState, get_libraries
+from scadbuddy.api.library_pins import MAX_CREATE_LIBRARIES
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.libraries import LibraryStore
 from tests.api import test_libraries as shared
@@ -97,6 +98,48 @@ def test_a_create_naming_a_library_outside_the_catalogue_clones_nothing(
     assert refused.json()["libraries"] == ["NopeSCAD"]
     resolve.assert_not_called()
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+@pytest.mark.parametrize("multipart", [False, True], ids=["json", "multipart"])
+def test_a_create_naming_more_libraries_than_the_cap_clones_nothing(
+    lib_client: TestClient, libraries_app: FastAPI, multipart: bool
+) -> None:
+    """#444: one create holds the checkout gate across all its clones, so it may
+    name only so many; the refusal comes before any clone."""
+    names = ["BOSL2", *(f"Lib{index}" for index in range(MAX_CREATE_LIBRARIES))]
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        if multipart:
+            refused = lib_client.post(
+                "/api/v1/models",
+                files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+                data={"libraries": [*names, "BOSL2"]},
+            )
+        else:
+            refused = lib_client.post(
+                "/api/v1/models",
+                json={"name": "Widget", "source": SOURCE, "libraries": [*names, "BOSL2"]},
+            )
+
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["libraries"] == names
+    resolve.assert_not_called()
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+def test_a_create_naming_as_many_libraries_as_the_cap_is_not_refused_for_it(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    unknown = [f"Lib{index}" for index in range(MAX_CREATE_LIBRARIES - 1)]
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post(
+            "/api/v1/models",
+            json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", *unknown]},
+        )
+
+    # Past the cap, to the catalogue check.
+    assert refused.status_code == 422, refused.text
+    assert refused.json()["libraries"] == unknown
+    resolve.assert_not_called()
 
 
 def test_a_create_naming_something_that_is_not_a_library_name_is_a_422(

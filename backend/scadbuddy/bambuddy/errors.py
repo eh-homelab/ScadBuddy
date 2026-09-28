@@ -19,7 +19,7 @@ from scadbuddy.core.problems import ApiError
 #: Problem ``type`` URIs. The frontend branches on these, so they are contract.
 SCOPE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-scope"
 NOT_FOUND_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-found"
-ELIGIBILITY_PROBLEM = "https://scadbuddy.dev/problems/pipeline-ineligible"
+CONFLICT_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-conflict"
 REJECTED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-rejected"
 UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-unavailable"
 NOT_CONFIGURED_PROBLEM = "https://scadbuddy.dev/problems/bambuddy-not-configured"
@@ -31,11 +31,7 @@ class Scope(StrEnum):
 
     The authoritative list is ``APIKeyCreate``'s ``can_*`` flags in Bambuddy's
     ``openapi.json`` — ``can_read_status``, ``can_manage_library``, ``can_queue``,
-    ``can_manage_projects`` are the four ScadBuddy needs. Which flag guards
-    ``/slicer-pipelines/`` could **not** be verified: the homelab instance runs with
-    authentication disabled, so every call succeeds whatever the key says. Those
-    methods declare ``MANAGE_QUEUE`` because running a pipeline queues prints; if a
-    key with that scope still 403s there, this is the line to correct.
+    ``can_manage_projects`` are the four ScadBuddy needs.
     """
 
     READ_STATUS = "Read Status"
@@ -101,12 +97,12 @@ def map_response(response: httpx.Response, *, scope: Scope, what: str) -> ApiErr
             bambuddy_status=code,
         )
     if code == status.HTTP_409_CONFLICT:
-        # The pipeline-eligibility report lives in the body; pass it through verbatim
-        # so the UI can list the blocking issues rather than paraphrase them.
+        # Bambuddy's own reason lives in the body; pass it through verbatim rather than
+        # paraphrase it.
         return ApiError(
             status.HTTP_409_CONFLICT,
             f"Bambuddy reported a conflict when asked to {what}{suffix}",
-            type_=ELIGIBILITY_PROBLEM,
+            type_=CONFLICT_PROBLEM,
             bambuddy_status=code,
             bambuddy_body=upstream_body(response),
         )

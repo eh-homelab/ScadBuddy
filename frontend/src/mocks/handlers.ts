@@ -105,7 +105,7 @@ const state = {
   /** #83 — the plate last printed on each printer, the store's `printer_bed_types`. */
   printerBedTypes: {} as Record<string, string>,
   projects: [...fixtures.projectViews] as ProjectView[],
-  /** #79 — per-model projects. No global fallback, unlike the pipeline default. */
+  /** #79 — per-model projects. No global fallback. */
   lastProjectId: null as number | null,
   fonts: [...fixtures.fonts] as FontFamily[],
   /** #90 — one git history per model, newest first. */
@@ -163,6 +163,15 @@ function runJob(jobId: string): void {
         job.error = 'openscad exited with 1'
         job.log_tail = fixtures.OPENSCAD_LOG_TAIL
         announce('job.failed')
+        return
+      }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
         return
       }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
@@ -2086,35 +2095,20 @@ export const handlers = [
     return new HttpResponse(null, { status: 204 })
   }),
 
-  http.post(`${base}/outputs/:id/send`, async ({ params, request }) => {
+  http.post(`${base}/outputs/:id/send`, async ({ params }) => {
     const id = String(params['id'])
-    const body = (await request.json()) as { mode: 'library' | 'queue'; copies?: number }
     const output = state.outputs.find((o) => o.id === id)
     if (!output) return problem(404, 'Output not found')
     if (!state.settings.has_api_key) {
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
+    // #312: the send bar only uploads; nothing is queued, so no queue or run id is set.
     const libraryFileId = copyIn(output, null)
-    const queued = body.mode === 'queue'
-    const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
-    const queueItemId = queued && !pipelineRunId ? nextNumber() : null
-    state.outputs = state.outputs.map((o) =>
-      o.id === id
-        ? {
-            ...o,
-            pipeline_run_id: pipelineRunId,
-            queue_item_id: queueItemId,
-          }
-        : o,
-    )
     const result: SendResult = {
-      mode: body.mode,
       library_file_id: libraryFileId,
       filename: `${output.slug}-${output.name ?? output.id}.3mf`,
-      pipeline_run_id: pipelineRunId,
-      queue_item_id: queueItemId,
-      bambuddy_url: `${state.settings.bambuddy_url}${queued ? '/queue' : '/library'}`,
+      bambuddy_url: `${state.settings.bambuddy_url}/library`,
       edit_url: state.settings.public_url
         ? `${state.settings.public_url.replace(/\/$/, '')}${editPath(id)}`
         : null,
@@ -2230,7 +2224,7 @@ export const handlers = [
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)
@@ -2361,12 +2355,6 @@ export const handlers = [
   http.get(`${base}/print/outputs/:id/progress`, ({ params }) => {
     const output = state.outputs.find((o) => o.id === params['id'])
     if (!output) return problem(404, 'Output not found')
-    if (output.pipeline_run_id) {
-      return HttpResponse.json({
-        ...fixtures.pipelineProgress,
-        pipeline_run_id: output.pipeline_run_id,
-      } satisfies PrintProgress)
-    }
     if (output.queue_item_id) {
       return HttpResponse.json({
         ...fixtures.queuedSliceProgress,
@@ -2497,7 +2485,6 @@ export const handlers = [
       bambuddy_api_key?: string
       public_url?: string | null
       library_folder_id?: number | null
-      pipeline_id?: number | null
       printer_id?: number | null
       display_unit?: Settings['display_unit'] | null
     }

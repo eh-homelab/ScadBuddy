@@ -19,8 +19,6 @@ from scadbuddy.api.deps import (
     OutputIdPath,
     OutputsDep,
     PrintLinksDep,
-    PrintProgressDep,
-    PrintWatcherDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
@@ -417,7 +415,7 @@ async def put_output_thumbnail(
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
-    summary="Send the 3MF to Bambuddy",
+    summary="Upload the 3MF to the Bambuddy library",
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
@@ -425,25 +423,22 @@ async def send_output_to_bambuddy(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
-    observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
 ) -> SendResult:
-    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-    slice and queue it.
+    """Upload ``model.3mf`` to the configured library folder, laid out for the printer
+    set in Settings, and note the "Edit in ScadBuddy" link on it.
+
+    Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+    ``mode`` accepts only ``"library"``.
 
     The file is read from the PVC and pushed by the server, so the API key never
     reaches the browser. A re-send reuses the copy already in the inbox while it was
     laid out for the same printer, and replaces it otherwise (#316).
     """
+    del body  # validated for its ``mode`` alone
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, uploads, meta, settings, body)
-    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
-    if result.pipeline_run_id is not None or result.queue_item_id is not None:
-        observer.started(meta)
-        await watcher.started(meta.id)
-    return result
+        return await send_output(client, outputs, uploads, meta, settings)
 
 
 def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
