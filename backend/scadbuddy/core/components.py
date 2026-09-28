@@ -16,7 +16,7 @@ import importlib.util
 import pkgutil
 from collections.abc import AsyncIterator, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
@@ -65,6 +65,10 @@ class Key[T]:
     components under one name are refused rather than one shadowing the other."""
 
     name: str
+    #: Never set: it makes ``T`` invariant (a parameter in no field is inferred
+    #: covariant), so ``override(Key[int], "text")`` fails type checking rather than
+    #: solving ``T`` as ``object``.
+    _variance: Callable[[T], T] | None = field(default=None, init=False, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

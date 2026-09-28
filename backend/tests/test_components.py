@@ -5,6 +5,7 @@ import sys
 import textwrap
 from collections.abc import AsyncIterator, Iterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Annotated, cast
@@ -28,6 +29,7 @@ from scadbuddy.core.components import (
 )
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.libraries import CheckoutGate
 from scadbuddy.main import create_app
 
 #: A stand-in: these tests only check that `build` is handed the core it was given.
@@ -129,6 +131,13 @@ def test_override_replaces_the_value_without_building() -> None:
     assert registry.get(NUMBER) == 5
     registry.override(NUMBER, 6)
     assert registry.get(NUMBER) == 6
+
+
+def test_override_is_typed_by_the_key() -> None:
+    registry = Components(CORE, [])
+    # mypy must refuse this: an unused ignore fails the strict run (warn_unused_ignores),
+    # so a `Key` whose parameter went covariant again would be caught here.
+    registry.override(NUMBER, "not an int")  # type: ignore[misc]
 
 
 async def test_running_enters_in_build_order_and_exits_in_reverse() -> None:
@@ -277,6 +286,33 @@ def test_discovery_finds_each_feature_packages_component_in_name_order(
 def test_every_discovered_key_is_unique() -> None:
     names = [component.key.name for component in discover_components(scadbuddy)]
     assert len(names) == len(set(names))
+
+
+def test_a_replaced_state_keeps_its_components(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in list(os.environ):
+        if name.startswith("SCADBUDDY_"):
+            monkeypatch.delenv(name)
+    probe: Key[str] = Key("probe")
+    component = Component(probe, build=lambda core, components: "probe")
+    monkeypatch.setattr(deps, "discover_components", lambda: [component])
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    state = deps.build_state(
+        Settings(
+            openscad=str(tmp_path / "no-openscad"),
+            data_dir=tmp_path / "data",
+            seed_models_dir=seed,
+            frontend_dir=Path("/nonexistent"),
+            # build_state connects to nothing; the lifespan opens the pools.
+            database_url="postgresql://unused@127.0.0.1:1/unused",
+            preview_renders=False,
+        )
+    )
+    copy = replace(state, checkouts=CheckoutGate())
+    assert copy.components is state.components
+    assert copy.components.get(probe) == "probe"
 
 
 def test_the_lifespan_enters_a_discovered_components_run(

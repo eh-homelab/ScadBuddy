@@ -82,9 +82,6 @@ class AppState:
     #: Uploads for `// file` parameters, with their caps (#296).
     assets: AssetStore
     queue: RenderQueue
-    #: Every feature service that is a component (`core/components.py`), built over
-    #: this state by `build_state`: a new service goes there, not in a field here.
-    components: Components = field(init=False)
     #: Default-render previews: the thumbnail of a model with none and no output.
     #: None when they are off (SCADBUDDY_PREVIEW_RENDERS) or there is no database.
     previews: PreviewScheduler | None
@@ -132,6 +129,21 @@ class AppState:
     #: One permit per open realtime socket (``SCADBUDDY_REALTIME_SOCKETS``, #266).
     realtime_sockets: asyncio.Semaphore = field(default_factory=lambda: asyncio.Semaphore(1))
     openscad_version: str | None = field(default=None)
+    #: Read through :attr:`components`. An ``__init__`` field, so ``dataclasses.replace``
+    #: carries the built registry over to the copy rather than dropping it.
+    _components: Components | None = field(default=None, kw_only=True, repr=False)
+
+    @property
+    def components(self) -> Components:
+        """Every feature service that is a component (`core/components.py`), built over
+        this state by `build_state`: a new service goes there, not in a field here."""
+        if self._components is None:
+            raise RuntimeError("the components are not built yet: use build_state")
+        return self._components
+
+    @components.setter
+    def components(self, value: Components) -> None:
+        self._components = value
 
 
 def announce_commits(events: EventBus, catalogue: Catalogue) -> Callable[[str, list[str]], None]:
