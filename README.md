@@ -62,7 +62,7 @@ docker run -d --name scadbuddy -p 8080:8080 -v scadbuddy-data:/data \
 ```
 
 **A PostgreSQL database is required** (#401): without `SCADBUDDY_DATABASE_URL`
-the backend refuses to start and says so. Settings and the render queue live
+the backend refuses to start and says so. Settings and the render jobs live
 there; the schema is created and migrated at startup, so an empty database is
 enough.
 
@@ -175,30 +175,26 @@ on shutdown.
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.
-- **Render queue.** By default every render request is accepted;
-  `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
-  first. A preview replaced before it started is dropped, and identical waiting
-  requests share one job. A finished render is kept under its template
-  (`models/<slug>/.renders/<key>/`, beside the source like its media) and a
-  later request for the same parameters at the same revision is answered from it
-  without running OpenSCAD; an entry with a file missing is rendered again, and
-  entries unused for `SCADBUDDY_JOB_TTL` are removed with the jobs. Installing a
-  font or moving a library pin does not change the key, so a render kept before
-  that is served until it expires or the template is edited.
+- **Render queue.** By default every render request is accepted and runs on
+  Temporal: the API records the job in `render_jobs` and starts its workflow, and
+  the render worker renders `SCADBUDDY_RENDER_CONCURRENCY` at once. A preview
+  replaced before it started is cancelled, and identical waiting requests share
+  one job. An identical OpenSCAD run (same template, revision, file and
+  parameters) is rendered once and its piece kept in the blob store
+  (`/data/blobs/`), so a later job that needs it reuses it; a piece no job
+  references is removed after `SCADBUDDY_JOB_TTL`.
   - `SCADBUDDY_RENDER_QUEUE_MAX` (0 = no limit): set, a request that would be a new
     job while that many already wait gets 503 with `Retry-After`. A request that
     supersedes a waiting preview, or matches one, is never refused.
-  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the queue is in Postgres, so
-    accepted renders survive a restart. Several replicas can share one queue only
-    if they also share `/data` (a ReadWriteMany volume): a job's files are written
-    there by whichever replica renders it. On a ReadWriteOnce PVC run one replica,
-    as the design does. `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the queue
-    and the settings each hold one). The schema is created and migrated at
-    startup.
+  - `SCADBUDDY_DATABASE_URL` (libpq URL, required): the jobs are rows in Postgres
+    (`render_jobs`), so accepted renders survive a restart; a pending row whose
+    workflow never started is started by the API's reconciler.
+    `SCADBUDDY_DATABASE_POOL_SIZE` (10, per pool: the jobs and the settings each
+    hold one). The schema is created and migrated at startup.
   - The **event bus** (spec §7) is in the same Postgres database (the backend
     will not start without `SCADBUDDY_DATABASE_URL`, #467): each change is appended to an `events` table and sent with
     `NOTIFY scadbuddy_events` in one transaction, and every replica's subscribers
-    hear it once over the same `LISTEN` connection the job store uses. After
+    hear it once over the process's one `LISTEN` connection. After
     that connection drops and comes back, subscribers get a `bus.resync` event.
     The table keeps events for `Last-Event-ID` replay:
     `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` (86400) and
@@ -211,14 +207,14 @@ on shutdown.
   - `SCADBUDDY_RENDER_QUEUE_DEPTH_SLO` (16) and `SCADBUDDY_RENDER_LATENCY_SLO`
     (60 s): targets, not limits. They are exported with the metrics for alerts.
 - `GET /healthz` reports the OpenSCAD version, whether the data directory is
-  writable, and the build revision. On the Temporal path it also has a `temporal`
-  object (`address`, `namespace`, `task_queue`, `worker_inprocess`); on the legacy
-  queue that key is absent.
+  writable, the build revision, and a `temporal` object (`address`, `namespace`,
+  `task_queue`, `worker_inprocess`).
 - `GET /metrics` serves Prometheus metrics: render queue depth and oldest wait
   (read from the store in Postgres, so across replicas), wait time and latency
   (`scadbuddy_render_job_latency_seconds`, by outcome), per-stage render time, whether
-  the queue's store can be read (`scadbuddy_render_store_up`), the
-  SLO targets, the upload store's files and bytes against its caps
+  the jobs table can be read (`scadbuddy_render_store_up`), whether the process's
+  `LISTEN` connection is up (`scadbuddy_render_queue_listener_connected`,
+  `scadbuddy_render_queue_listener_reconnects_total`), the SLO targets, the upload store's files and bytes against its caps
   (`scadbuddy_assets_*`), and HTTP requests by route. It is unauthenticated, like the rest of
   the app.
 
@@ -311,8 +307,8 @@ Probe that port: the image's `HEALTHCHECK` is the API's 8080.
   the same volume. A ReadWriteOnce volume is fine as long as both pods run on the
   same node (pod affinity); a `ReadWriteOncePod` volume is not, because only one pod
   may mount it. A piece no job references any more is removed by the API's periodic
-  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention a
-  render has on the legacy queue.
+  upload sweep once it has gone `SCADBUDDY_JOB_TTL` untouched, the same retention as
+  the jobs.
 - **Environment:** `SCADBUDDY_DATABASE_URL` (the same database: the worker writes
   the `render_jobs` rows and their `job.*` events), `SCADBUDDY_TEMPORAL_ADDRESS`,
   `SCADBUDDY_TEMPORAL_NAMESPACE`, `SCADBUDDY_TEMPORAL_TASK_QUEUE_RENDER`,

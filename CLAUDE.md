@@ -44,6 +44,16 @@ Renders run on Temporal, and `SCADBUDDY_TEMPORAL_ADDRESS` is required (#546), li
 `SCADBUDDY_DATABASE_URL`; `python -m scadbuddy.worker` is the worker (or
 `SCADBUDDY_TEMPORAL_WORKER_INPROCESS=true` for a one-process dev run). A `Settings` for
 an app whose renders never run uses `tests.conftest.UNUSED_TEMPORAL_ADDRESS`.
+`tests/api` renders on Temporal too, and skips without one: one dev server per session
+(`tests/api/conftest.py::temporal_address`), and each test's app runs its own in-process
+worker on a task queue of its own (the api `settings` fixture), because every test has
+its own data directory and schema. The render is the real pipeline behind the fake
+openscad (`FAKE_3MF`, `FAKE_STDERR` in `fake-env.json`; `width=999` fails). Every
+test's queue registers with one worker-deployment version, so the dev server raises
+`matching.maxTaskQueuesInDeploymentVersion` past Temporal's default of 100 (past it,
+renders never start); a server named by `SCADBUDDY_TEST_TEMPORAL_ADDRESS` needs the same.
+The fixture terminates the workflows a test leaves open, since an abandoned piece
+would be joined by the next test that renders it.
 Backend schema changes are new files in `backend/scadbuddy/migrations/`
 (`<yyyymmdd>T<hhmm>Z_<slug>.sql`, UTC; never edit a merged one); the settings tables are
 `20260928T0840Z_settings.sql`. The only place a real `openscad` exists is the image:
