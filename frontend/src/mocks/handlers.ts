@@ -46,6 +46,7 @@ import type {
   UpstreamStatus,
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
+import { realtimeHandler } from './realtime'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -636,6 +637,8 @@ function refusal(check: SourceCheck) {
 }
 
 export const handlers = [
+  realtimeHandler,
+
   http.get(`${base}/models`, () => HttpResponse.json(state.models.map(view))),
 
   http.post(`${base}/models`, async ({ request }) => {
