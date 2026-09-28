@@ -279,9 +279,9 @@ class Catalogue:
         self.history = history
         #: Where the fallback thumbnail is read from; None turns the fallback off.
         self.outputs = outputs
-        self.duplicate_staging_max_age = duplicate_staging_max_age
         #: Where the default-render preview is read from; None turns it off.
         self.previews = previews
+        self.duplicate_staging_max_age = duplicate_staging_max_age
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -876,10 +876,12 @@ class Catalogue:
                 raise
             if not started:
                 self._replace_source(slug, source)
+                written = True
             logger.exception("could not record a revision", extra={"revision_message": message})
-        # As `_commit_change`: the source is written whether or not its revision was
-        # recorded, and it is what a preview is rendered from.
-        self.notify_change(slug)
+        finally:
+            # Like `_commit_change`: the preview scheduler hears of a source that was written.
+            if written:
+                self.notify_change(slug)
 
     def _replace_source(self, slug: str, source: str) -> None:
         """Swap in ``model.scad`` atomically and drop the schema derived from the old one."""
