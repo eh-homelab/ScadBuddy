@@ -27,6 +27,7 @@ from scadbuddy.bambuddy.filaments import (
     check,
     every_plate,
     gather_options,
+    normalise_colour,
     queue_filaments,
 )
 from scadbuddy.bambuddy.hardware import (
@@ -37,7 +38,13 @@ from scadbuddy.bambuddy.hardware import (
 )
 from scadbuddy.bambuddy.options import PrintOptions
 from scadbuddy.bambuddy.projects import folder_for
-from scadbuddy.bambuddy.resolver import PRINTER_MODEL, PrintChoices, Resolved, resolve
+from scadbuddy.bambuddy.resolver import (
+    PRINTER_MODEL,
+    PrintChoices,
+    Resolved,
+    choice_errors,
+    resolve,
+)
 from scadbuddy.bambuddy.send import (
     ensure_uploaded,
     request_scope,
@@ -177,6 +184,21 @@ async def filament_options_for_output(
     return options
 
 
+async def _spool_colours(
+    client: BambuddyClient, meta: OutputMeta, plan: FilamentPlan
+) -> list[str] | None:
+    """One colour per filament of the output: the chosen spool's, or the model's own
+    for a slot with no spool (#476). ``None`` when no spool is chosen at all, which
+    leaves the file in the model's colours."""
+    if not plan.slots:
+        return None
+    rgba = {spool.id: normalise_colour(spool.rgba) for spool in await client.spools()}
+    return [
+        rgba.get(plan.spool_for(index + 1) or 0) or colour
+        for index, colour in enumerate(meta.colors)
+    ]
+
+
 async def run_for_output(
     client: BambuddyClient,
     store: OutputStore,
@@ -190,8 +212,10 @@ async def run_for_output(
     decides AMS tray and extruder placement at dispatch — no ``ams_mapping`` is sent
     (spec §6).
 
-    Every plate is resolved before any is sliced, so a resolver error is a 422 with
-    nothing on Bambuddy's queue, however many plates the print has.
+    What the choices alone decide (nozzle sizes, printer and process preset) is
+    refused before the 3MF is uploaded. Every plate is then resolved before any is
+    sliced, so a slot error is a 422 with nothing on Bambuddy's queue, however many
+    plates the print has.
     """
     plate_ids = (
         [plate.index for plate in plates_of(store.directory(meta.id) / MODEL_NAME)]
@@ -213,6 +237,17 @@ async def run_for_output(
         )
     await _require_resolvable_printer(client, printer_id)
     choices = request.choices
+    # Read once for every plate: the catalogue is ~4000 presets on the live instance.
+    # Read before the upload, so that what the choices alone refuse — mixed nozzle
+    # sizes, no printer or process preset — is a 422 that leaves nothing in Bambuddy's
+    # library. Slot errors need the plate's slots, which only a library file answers,
+    # so those are still found after the upload, by `resolve` below.
+    catalogue = await _catalogue(client)
+    refused = choice_errors(choices, catalogue)
+    if refused:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
+        )
     # Placed for the chosen printer's plate, stating the chosen nozzle (#105, #126).
     target = await target_for(
         client,
@@ -220,6 +255,7 @@ async def run_for_output(
         meta.slug,
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
+        colours=await _spool_colours(client, meta, request.filament_plan),
     )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because
@@ -237,9 +273,7 @@ async def run_for_output(
     ).model_copy(update={"project_id": None})
     copies = print_options.quantity or 1
 
-    # Read once for every plate: the catalogue is ~4000 presets on the live instance,
-    # and the plan's spools are the same on every plate.
-    catalogue = await _catalogue(client)
+    # Read once for every plate: the plan's spools are the same on every plate.
     spool_presets = {
         spool_id: await client.spool_filament_presets(spool_id)
         for spool_id in sorted({slot.spool_id for slot in request.filament_plan.slots})

@@ -222,6 +222,17 @@ export const models: ModelSummary[] = [
     has_readme: false,
     origin: 'builtin',
   },
+  // #276 — an accented name and a tag with a space and `&`, for the catalogue filters.
+  {
+    slug: 'creme-coaster',
+    name: 'Crème Coaster',
+    description: 'A drinks coaster with a raised rim.',
+    tags: ['kitchen', 'Tea & Coffee'],
+    updated_at: '2026-09-18T12:00:00Z',
+    has_thumbnail: false,
+    has_readme: false,
+    origin: 'mine',
+  },
 ]
 
 /**
@@ -770,6 +781,11 @@ export const TEMPLATE_NOTES = [
 export const WARNED_NAME = 'nopic'
 
 export const JOB_WARNINGS = ['OpenSCAD could not open pic.svg; the model rendered without it']
+
+/** #408 — a name the mock fails the way a template drawing only a missing picture does. */
+export const PICTURELESS_NAME = 'nosvg'
+
+export const FAILED_JOB_WARNINGS = ['OpenSCAD could not open pic.svg']
 
 export const OPENSCAD_LOG_TAIL = [
   'Compiling design (CSG Tree generation)...',

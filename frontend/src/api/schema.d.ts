@@ -1238,6 +1238,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/prints/{archive_id}/files/sliced": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sliced file that was printed */
+        get: operations["get_sliced_file_api_v1_prints__archive_id__files_sliced_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/files/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The slicer project 3MF, when there is one */
+        get: operations["get_source_file_api_v1_prints__archive_id__files_source_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/photos/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A photo of the print */
+        get: operations["get_photo_api_v1_prints__archive_id__photos__filename__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/plates/{index}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One plate's image from the slicer */
+        get: operations["get_plate_thumbnail_api_v1_prints__archive_id__plates__index__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The print's thumbnail */
+        get: operations["get_thumbnail_api_v1_prints__archive_id__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/timelapse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The print's timelapse video (Range supported) */
+        get: operations["get_timelapse_api_v1_prints__archive_id__timelapse_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings": {
         parameters: {
             query?: never;
@@ -5824,6 +5926,290 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ProjectView"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sliced_file_api_v1_prints__archive_id__files_sliced_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_source_file_api_v1_prints__archive_id__files_source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_photo_api_v1_prints__archive_id__photos__filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_thumbnail_api_v1_prints__archive_id__plates__index__thumbnail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_thumbnail_api_v1_prints__archive_id__thumbnail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_timelapse_api_v1_prints__archive_id__timelapse_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {

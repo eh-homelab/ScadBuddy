@@ -167,7 +167,7 @@ export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props)
             className="absolute inset-y-0 right-0 z-30 w-full max-w-[400px] border-l border-line bg-surface shadow-2xl md:static md:w-[380px] md:max-w-none md:shrink-0 md:shadow-none"
           >
             <Suspense fallback={<p className="p-3 text-[12.5px] text-muted">Loading the assistant…</p>}>
-              <AssistantPanel onClose={closePanel} focusKey={focusKey} factory={assistantTransport} />
+              <AssistantPanel onClose={closePanel} focusKey={focusKey} factory={assistantTransport} embedded={embedded} />
             </Suspense>
           </aside>
         )}

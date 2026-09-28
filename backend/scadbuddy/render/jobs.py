@@ -91,6 +91,8 @@ UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
 MISSING_FILE_WARNING = "OpenSCAD could not open {name}; the model rendered without it"
+#: The same fact on a render that failed, where "rendered without it" is untrue.
+MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
 #: The most plates a template may ask for with `echo(plates = N)`. Each plate is a
 #: render plus a solid render per colour of its own, so this bounds a job's cost.
 MAX_PLATES = 16
@@ -112,6 +114,18 @@ def unreadable_colour_warnings(
                 "it gets no extruder"
             )
     return warnings
+
+
+def failed_render_warnings(
+    missing_files: Sequence[str], schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> list[str]:
+    """The warnings a failed render can still give (#408): a file it could not open
+    is often why it failed -- a template that draws only the picture then renders
+    nothing -- and an unreadable colour is a fact about the parameters either way."""
+    return [
+        *(MISSING_FILE_FAILED_WARNING.format(name=name) for name in missing_files),
+        *unreadable_colour_warnings(schema, params),
+    ]
 
 
 def extruder_order(
@@ -620,9 +634,13 @@ async def render_job(
 
         with staged_assets(schema, job.params, scad.parent, assets) as params:
             with stage("render"):
-                output = await render_3mf(
-                    scad, schema, params, work / RAW_RENDER_NAME, config=config
-                )
+                try:
+                    output = await render_3mf(
+                        scad, schema, params, work / RAW_RENDER_NAME, config=config
+                    )
+                except OpenSCADError as error:
+                    error.warnings = failed_render_warnings(error.missing_files, schema, job.params)
+                    raise
             with stage("split"):
                 preview_parts = extruder_order(
                     split_by_material(work / RAW_RENDER_NAME), schema, params
@@ -633,6 +651,8 @@ async def render_job(
                         output.log_tail,
                         diagnostics=output.diagnostics,
                         diagnostics_dropped=output.diagnostics_dropped,
+                        missing_files=output.missing_files,
+                        warnings=failed_render_warnings(output.missing_files, schema, job.params),
                     )
                 preview_path = work / PREVIEW_NAME
                 box = write_glb(preview_parts, preview_path)
@@ -1108,6 +1128,7 @@ class RenderQueue:
             job.log_tail = error.log_tail
             job.diagnostics = error.diagnostics
             job.diagnostics_dropped = error.diagnostics_dropped
+            job.warnings = error.warnings
         except Exception as error:  # the job carries the failure, the worker lives on
             outcome = "failed"
             job.state = "failed"
@@ -1119,6 +1140,7 @@ class RenderQueue:
             job.log_tail = log_tail
             job.diagnostics = result.diagnostics
             job.diagnostics_dropped = result.diagnostics_dropped
+            job.warnings = result.warnings
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

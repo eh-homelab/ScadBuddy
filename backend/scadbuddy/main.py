@@ -23,6 +23,7 @@ from scadbuddy.api import (
     plates,
     presets,
     printing,
+    prints,
     realtime,
     settings,
     upstream,
@@ -39,6 +40,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
+from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 
@@ -59,6 +61,7 @@ def _api_router() -> APIRouter:
     router.include_router(assets.router)
     router.include_router(outputs.router)
     router.include_router(printing.router)
+    router.include_router(prints.router)
     router.include_router(settings.router)
     router.include_router(fonts.router)
     router.include_router(plates.router)
@@ -124,10 +127,14 @@ def _sweep_checkouts(state: AppState) -> list[str]:
     lock = read_lock(state.paths)
     if lock is not None:
         named |= {pin.commit for pin in lock.pins.values()}
+    # The image's seed (#169) is kept pinned or not: the boot would copy it back.
+    seed_dir = state.settings.resolve_seed_libraries_dir()
+    seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
 
     def keep(name: str, commit: str) -> bool:
         return (
             commit in named
+            or (name, commit) in seeded
             or bool(state.checkouts.leased(state.paths.libraries / name / commit))
             # The live pins as a removal counts them: uncommitted edits, and a bare
             # name or an unreadable model.json keeps every checkout of the library.
@@ -234,6 +241,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.libraries.sweep_staging)
     except OSError:
         logger.exception("could not sweep library staging clones")
+    # The curated libraries baked into the image (#169), so a fresh volume renders
+    # a BOSL2 model offline. Before the queue starts: the first render finds them.
+    seed_libraries_dir = state.settings.resolve_seed_libraries_dir()
+    if seed_libraries_dir is not None:
+        try:
+            await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
+        except OSError:
+            logger.exception("could not seed library checkouts from the image")
     # After the migration, so every pin is where the sweep reads it. It logs and
     # keeps what it cannot remove; one that cannot read the history removes nothing.
     try:

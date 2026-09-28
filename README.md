@@ -73,7 +73,10 @@ for the project picker).
   expose it to the internet.
 - **State** lives in `/data` (`SCADBUDDY_DATA_DIR`): models (a git repository),
   outputs, saved presets (`presets/`, outside the git repository), settings,
-  downloaded fonts and caches. Back up the volume.
+  downloaded fonts and caches. Back up the volume. The image carries BOSL2 at the
+  catalogue's ref and copies it into `/data/libraries` at start when it is not
+  there, so a fresh install renders BOSL2 models without network access (licence:
+  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)).
 - **Environment** (all optional): `SCADBUDDY_BAMBUDDY_URL`,
   `SCADBUDDY_BAMBUDDY_API_KEY` and `SCADBUDDY_PUBLIC_URL` set the starting values
   for Settings; `SCADBUDDY_GOOGLE_FONTS_API_KEY`; `SCADBUDDY_RENDER_TIMEOUT`
