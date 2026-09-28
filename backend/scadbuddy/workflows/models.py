@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.render.diagnostics import Diagnostic
 from scadbuddy.render.job_models import JobResult, StepInfo
@@ -26,7 +26,16 @@ class PieceRequest(BaseModel):
     revision: str | None
     file: str = "model.scad"
     params: dict[str, ParamValue] = Field(default_factory=dict)
+    #: Stored, so the Temporal payload carries it; checked against the other four
+    #: fields, because it names the child workflow that dedups the piece.
     piece_key: str
+
+    @model_validator(mode="after")
+    def _key_matches(self) -> Self:
+        expected = piece_key(self.slug, self.revision, self.file, self.params)
+        if self.piece_key != expected:
+            raise ValueError(f"piece_key {self.piece_key} does not match its request")
+        return self
 
 
 class PrepareResult(BaseModel):
@@ -61,6 +70,8 @@ class Failure(BaseModel):
 class Projection(BaseModel):
     job_id: str
     slug: str
+    #: No "pending": the workflow projects only once it runs; the API inserts the
+    #: row as pending, and None leaves the row's state as it is.
     state: Literal["running", "done", "failed", "cancelled"] | None = None
     steps: list[StepInfo] | None = None
     result: JobResult | None = None
