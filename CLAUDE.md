@@ -131,8 +131,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   variable the backend reads; the one origin allowed to write) and
   `SCADBUDDY_AGENT_TRUSTED_PROXIES` (CIDRs whose `X-Forwarded-*` are believed). No AI
   env vars; AI settings live in the database.
-  `src/app.ts` is the Hono server (`/healthz`, plus `src/routes/credentials.ts` for
-  `/api/v1/ai/credentials`). Every route that must know "is this the UI's origin"
+  `src/app.ts` is the Hono server (`/healthz` and `/mcp`). Every other route group is a
+  `src/routes/<name>.ts` that exports `route` (`routes/module.ts`) and is found without
+  an edit to `app.ts`. A dependency only that group needs is declared in its own file,
+  by augmenting `AppDeps` (#508). Every route that must know "is this the UI's origin"
   (credential writes and `/mcp` now; the agent's own sockets under `/api/v1/ai/*` later) uses the one allowlist in
   `src/http/origins.ts`, never an `Origin == Host` comparison (DNS rebinding makes
   those equal). `src/harness/options.ts` builds every query's SDK options
