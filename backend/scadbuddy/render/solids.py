@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import logging
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -13,6 +15,8 @@ from scadbuddy.render.colours import CSS_COLOURS
 from scadbuddy.render.runner import OpenSCADError, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.split import split_by_material
+
+logger = logging.getLogger(__name__)
 
 #: The wrapper has to live beside the model so its ``include <>`` resolves, which
 #: puts a transient .scad inside the directory `provenance.source_version` hashes —
@@ -69,6 +73,16 @@ def _vector_literal(values: Sequence[str]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
+def _solid_mesh(path: Path) -> trimesh.Trimesh | None:
+    """The wrapper render's geometry as one mesh, or None when it drew nothing."""
+    meshes = [part.mesh for part in split_by_material(path)]
+    if not meshes:
+        return None
+    if len(meshes) == 1:
+        return meshes[0]
+    return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+
+
 async def render_solids(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -78,13 +92,31 @@ async def render_solids(
     *,
     config: Config,
 ) -> SolidRender:
-    result = SolidRender()
+    """One closed solid per colour, rendered ``config.solid_slots()`` at a time (#282).
+
+    The result is in ``colours`` order whatever order the renders finish in. An
+    OpenSCAD failure is a colour's fallback, never the job's (spec §6.3). Anything
+    else -- or this coroutine being cancelled -- cancels every sibling, which kills
+    its `openscad` (`run_openscad`), and the wrapper is removed only once they have
+    all stopped -- except a mesh parse already running in its worker thread, which a
+    cancel abandons rather than stops (it is bounded work). Each render's
+    `SCADBUDDY_RENDER_TIMEOUT` starts when its process does, so a colour waiting for a
+    slot is not charged for the wait.
+    """
+    slots = asyncio.Semaphore(config.solid_slots())
     wrapper = scad_path.parent / f"{WRAPPER_PREFIX}{secrets.token_hex(8)}.scad"
-    wrapper.write_text(wrapper_source(scad_path.name), encoding="utf-8")
-    try:
-        for index, colour in enumerate(colours, start=1):
-            out_path = work_dir / f"solid_{index}.3mf"
-            targets = _vector_literal(targets_for(colour))
+    stopping = False
+
+    async def solid(index: int, colour: str) -> trimesh.Trimesh | str:
+        """The colour's solid, or the warning that says why it has none."""
+        nonlocal stopping
+        out_path = work_dir / f"solid_{index}.3mf"
+        targets = _vector_literal(targets_for(colour))
+        async with slots:
+            # A failing sibling frees its slot before the group's cancellation
+            # reaches the colour waiting on it: do not start an openscad to kill it.
+            if stopping:
+                raise asyncio.CancelledError
             try:
                 await render_3mf(
                     wrapper,
@@ -94,19 +126,45 @@ async def render_solids(
                     config=config,
                     extra_defines=["-D", f"_sb_targets={targets}"],
                 )
-                parts = split_by_material(out_path)
+                # Parsing and joining the mesh is CPU work: off the loop, which every
+                # other job's drain, the queue and /healthz share -- and several colours
+                # can now finish their `openscad` at nearly the same moment.
+                mesh = await asyncio.to_thread(_solid_mesh, out_path)
             except OpenSCADError as error:
-                result.warnings.append(f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}")
-                continue
-            if not parts:
-                result.warnings.append(f"{colour}: the solid render was empty; {SPLIT_FALLBACK}")
-                continue
-            meshes = [part.mesh for part in parts]
-            result.meshes[colour] = (
-                meshes[0]
-                if len(meshes) == 1
-                else cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+                return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
+            except BaseException:
+                stopping = True
+                raise
+        if mesh is None:
+            return f"{colour}: the solid render was empty; {SPLIT_FALLBACK}"
+        return mesh
+
+    wrapper.write_text(wrapper_source(scad_path.name), encoding="utf-8")
+    try:
+        async with asyncio.TaskGroup() as group:
+            tasks = [
+                group.create_task(solid(index, colour))
+                for index, colour in enumerate(colours, start=1)
+            ]
+    except BaseExceptionGroup as group_error:
+        # The job's error is the colour's own, not "unhandled errors in a TaskGroup".
+        # Two colours can fail before the cancellation lands; the job can carry only
+        # one error, so the others are logged rather than lost.
+        first, *others = group_error.exceptions
+        for other in others:
+            logger.error(
+                "another colour's solid render failed too",
+                exc_info=(type(other), other, other.__traceback__),
             )
+        raise first from None
     finally:
         wrapper.unlink(missing_ok=True)
+
+    result = SolidRender()
+    for colour, task in zip(colours, tasks, strict=True):
+        outcome = task.result()
+        if isinstance(outcome, str):
+            result.warnings.append(outcome)
+        else:
+            result.meshes[colour] = outcome
     return result
