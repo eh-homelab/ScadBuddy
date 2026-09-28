@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Sql } from 'postgres'
 
 // Schema for the `ai_*` tables the agent service owns (design spec §9:
@@ -14,7 +15,9 @@ import type { Sql } from 'postgres'
 // RULES FOR ADDING ONE
 //   - Append a new entry at the end. Never edit, reorder or remove an entry that
 //     has merged: a database records versions by POSITION (1-based), so a changed
-//     entry is silently skipped wherever the old one already ran.
+//     entry would be skipped wherever the old one already ran. `migrate` records
+//     each entry's SHA-256 and refuses to start when an applied entry's SQL has
+//     changed, so an edit fails loudly instead (even whitespace counts).
 //   - One story, one entry, named in its comment. Prefix every table `ai_`.
 //   - Plain SQL, no parameters (it runs through the simple query protocol, so
 //     several statements per entry are fine).
@@ -62,9 +65,56 @@ export const MIGRATIONS: readonly Migration[] = [
   },
 ]
 
-/** Applies the migrations this database has not seen; returns their versions. */
-export async function migrate(sql: Sql, migrations: readonly Migration[] = MIGRATIONS): Promise<number[]> {
+/** SHA-256 (hex) of an entry's SQL, exactly as written; recorded in `ai_migrations.checksum`. */
+export function migrationChecksum(migration: Migration): string {
+  return createHash('sha256').update(migration.sql, 'utf8').digest('hex')
+}
+
+/**
+ * An applied entry's SQL no longer matches what was recorded: someone edited a
+ * merged migration. Permanent, so main.ts stops the process on it rather than
+ * retrying.
+ */
+export class MigrationChecksumError extends Error {
+  override name = 'MigrationChecksumError'
+}
+
+export type MigrateOptions = {
+  /**
+   * Postgres `lock_timeout` while migrating. Bounds the wait for the advisory
+   * lock (another pod migrating, or one stuck holding it) and for table locks;
+   * a timeout fails this attempt, and `ready()` (db.ts) tries again on its
+   * next call.
+   */
+  lockTimeoutMs?: number
+  /** Postgres `statement_timeout` for each statement of the migration. */
+  statementTimeoutMs?: number
+}
+
+export const DEFAULT_LOCK_TIMEOUT_MS = 10_000
+export const DEFAULT_STATEMENT_TIMEOUT_MS = 60_000
+
+/**
+ * Applies the migrations this database has not seen; returns their versions.
+ *
+ * Every entry's SHA-256 is recorded, and an applied entry whose SQL has since
+ * changed throws MigrationChecksumError (the RULES above, enforced). Rows
+ * applied before the checksum column existed (#354) have none; they are
+ * adopted with the checksum of the SQL as it is now, which was the SQL #354
+ * merged since the rules forbid editing it, and are checked from then on.
+ */
+export async function migrate(
+  sql: Sql,
+  migrations: readonly Migration[] = MIGRATIONS,
+  options: MigrateOptions = {},
+): Promise<number[]> {
+  const lockTimeout = Math.max(1, Math.round(options.lockTimeoutMs ?? DEFAULT_LOCK_TIMEOUT_MS))
+  const statementTimeout = Math.max(1, Math.round(options.statementTimeoutMs ?? DEFAULT_STATEMENT_TIMEOUT_MS))
   return sql.begin(async (tx) => {
+    // SET LOCAL: scoped to this transaction, so the pooled connection goes back
+    // without them. Values are integers built here, not input.
+    await tx.unsafe(`SET LOCAL lock_timeout = ${lockTimeout}`)
+    await tx.unsafe(`SET LOCAL statement_timeout = ${statementTimeout}`)
     await tx`SELECT pg_advisory_xact_lock(${MIGRATION_LOCK.toString()}::bigint)`
     await tx`
       CREATE TABLE IF NOT EXISTS ai_migrations (
@@ -72,14 +122,28 @@ export async function migrate(sql: Sql, migrations: readonly Migration[] = MIGRA
         story      text NOT NULL,
         applied_at timestamptz NOT NULL DEFAULT now()
       )`
-    const rows = await tx<{ version: number }[]>`SELECT version FROM ai_migrations`
-    const done = new Set(rows.map((row) => row.version))
+    await tx`ALTER TABLE ai_migrations ADD COLUMN IF NOT EXISTS checksum text`
+    const rows = await tx<{ version: number; checksum: string | null }[]>`SELECT version, checksum FROM ai_migrations`
+    const recorded = new Map(rows.map((row) => [row.version, row.checksum]))
     const applied: number[] = []
     for (const [index, migration] of migrations.entries()) {
       const version = index + 1
-      if (done.has(version)) continue
+      const checksum = migrationChecksum(migration)
+      if (recorded.has(version)) {
+        const was = recorded.get(version)
+        if (was === null || was === undefined) {
+          await tx`UPDATE ai_migrations SET checksum = ${checksum} WHERE version = ${version}`
+        } else if (was !== checksum) {
+          throw new MigrationChecksumError(
+            `ai migration ${version} (${migration.story}) was applied with different SQL ` +
+              `(recorded sha256 ${was.slice(0, 12)}…, now ${checksum.slice(0, 12)}…). Merged entries in ` +
+              'agent/src/db/migrations.ts must never be edited: restore it and append a new entry instead.',
+          )
+        }
+        continue
+      }
       await tx.unsafe(migration.sql)
-      await tx`INSERT INTO ai_migrations (version, story) VALUES (${version}, ${migration.story})`
+      await tx`INSERT INTO ai_migrations (version, story, checksum) VALUES (${version}, ${migration.story}, ${checksum})`
       applied.push(version)
     }
     return applied

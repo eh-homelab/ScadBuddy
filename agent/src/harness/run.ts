@@ -9,6 +9,8 @@ import {
 import type { Credential } from '../credentials.js'
 import { buildQueryOptions, type HarnessPaths } from './options.js'
 import { type DecisionListener, makeCanUseTool, makePreToolUseHook, type TierResolver } from './permissions.js'
+import { assertPluginAllowed } from './plugins.js'
+import { type LineRedactor, lineRedactor } from './redactLines.js'
 
 // The harness loop (issue #255): one `query()` of the Claude Agent SDK per turn,
 // built on buildQueryOptions() so every query keeps `tools: []`,
@@ -36,7 +38,11 @@ import { type DecisionListener, makeCanUseTool, makePreToolUseHook, type TierRes
 //   - the permission seam (permissions.ts) as both `canUseTool` and a
 //     `PreToolUse` hook;
 //   - in-process MCP servers (#251's registry plugs in here) and local plugin
-//     paths (#297, #299).
+//     paths (#297, #299), each vetted by plugins.ts: a plugin that would start
+//     a process of its own (command hook, stdio MCP server, LSP server,
+//     monitor) is refused, since that process would inherit the credential env;
+//   - Claude Code's stderr, buffered to whole lines and redacted of the
+//     credential (redactLines.ts), so a secret split across chunks is caught.
 
 /** Placeholders until Settings stores per-session caps in `ai_settings` (#256). */
 export const DEFAULT_MAX_TURNS = 25
@@ -58,7 +64,11 @@ export type HarnessRun = {
    * not accepted here (spec D5, D9).
    */
   mcpServers?: Record<string, McpSdkServerConfigWithInstance>
-  /** Local plugin directories (the SDK accepts `type: "local"` only). */
+  /**
+   * Local plugin directories (the SDK accepts `type: "local"` only). Each is
+   * vetted first (plugins.ts): one that would start a process of its own, which
+   * would inherit the credential env, throws PluginRefusedError.
+   */
   pluginPaths?: string[]
   /** Maps each tool to its risk tier; tools it does not know are `outward`. */
   tierOf?: TierResolver
@@ -67,7 +77,7 @@ export type HarnessRun = {
   systemPromptAppend?: string
   /** Session id to resume (#300). */
   resume?: string
-  /** Claude Code's stderr, already redacted of the credential. */
+  /** Claude Code's stderr, whole lines, already redacted of the credential. */
   stderr?: (line: string) => void
 }
 
@@ -92,9 +102,12 @@ function linkedController(signal: AbortSignal | undefined): AbortController {
 
 /** The full SDK options for one run. Pure apart from the AbortController; tests read it. */
 export function buildHarnessOptions(run: HarnessRun): Options {
+  return buildHarness(run).options
+}
+
+function buildHarness(run: HarnessRun): { options: Options; stderr: LineRedactor | undefined } {
   const base = buildQueryOptions(run.paths)
   const tierOf = run.tierOf ?? (() => undefined)
-  const secret = run.credential.secret
   const options: Options = {
     ...base,
     env: {
@@ -113,19 +126,59 @@ export function buildHarnessOptions(run: HarnessRun): Options {
   if (run.model !== undefined) options.model = run.model
   if (run.resume !== undefined) options.resume = run.resume
   if (run.pluginPaths?.length) {
-    options.plugins = run.pluginPaths.map((p) => ({ type: 'local' as const, path: path.resolve(p) }))
+    options.plugins = run.pluginPaths.map((p) => {
+      assertPluginAllowed(p)
+      return { type: 'local' as const, path: path.resolve(p) }
+    })
   }
   if (run.systemPromptAppend !== undefined) {
     options.systemPrompt = { type: 'preset', preset: 'claude_code', append: run.systemPromptAppend }
   }
+  let stderr: LineRedactor | undefined
   if (run.stderr) {
-    const sink = run.stderr
-    options.stderr = (data) => sink(data.split(secret).join('[redacted]'))
+    // Line-buffered: a secret split across two chunks is still one line here.
+    const redactor = lineRedactor([run.credential.secret], run.stderr)
+    stderr = redactor
+    options.stderr = (data) => redactor.write(data)
   }
-  return options
+  return { options, stderr }
 }
 
-/** Starts one query. Iterate the returned Query for the SDK message stream. */
+/**
+ * Starts one query. Iterate the returned Query for the SDK message stream.
+ * When the stream ends (done, thrown, or returned early) the last partial
+ * stderr line is flushed, redacted.
+ */
 export function runHarness(run: HarnessRun): Query {
-  return query({ prompt: run.prompt, options: buildHarnessOptions(run) })
+  const { options, stderr } = buildHarness(run)
+  const q = query({ prompt: run.prompt, options })
+  if (!stderr) return q
+  const next = q.next.bind(q)
+  const ret = q.return.bind(q)
+  const thr = q.throw.bind(q)
+  q.next = async (...args) => {
+    try {
+      const result = await next(...args)
+      if (result.done) stderr.flush()
+      return result
+    } catch (err) {
+      stderr.flush()
+      throw err
+    }
+  }
+  q.return = async (value) => {
+    try {
+      return await ret(value)
+    } finally {
+      stderr.flush()
+    }
+  }
+  q.throw = async (err) => {
+    try {
+      return await thr(err)
+    } finally {
+      stderr.flush()
+    }
+  }
+  return q
 }
