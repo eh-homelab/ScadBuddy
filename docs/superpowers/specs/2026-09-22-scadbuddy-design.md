@@ -98,6 +98,12 @@ Measured 2026-09-22 against `docker.io/openscad/openscad:dev`
 > including non-whole initials such as `wall = 1.2`. That is the customizer's
 > default, not a declared step, so `build_schema` keeps `step` only for
 > sliders; the three `.param` fixtures were regenerated on the new build.
+>
+> **Re-verified 2026-09-28 against OpenSCAD 2026.09.28**
+> (`openscad/openscad:dev.2026-09-28@sha256:99250895…`, now pinned by tag and
+> digest in the Dockerfile). Everything below still holds with no change: all 35
+> `models/*/verify.sh` pass, and the backend suite in the `test` image passes
+> (1942 passed; the 65 skips are the Postgres-only tests).
 
 - `openscad -o model.param model.scad` writes the **customizer schema as JSON**:
   `{"parameters":[{name, type, initial, caption, group, min, max, step,
@@ -1076,8 +1082,9 @@ default `pipeline_id`.
 Flows (all server-side, so the browser never sees the API key):
 
 1. **Send to library** — `POST /api/v1/library/files?folder_id=…`
-   (multipart) with `model.3mf`; the returned `library_file_id` is stored in
-   `meta.json`.
+   (multipart) with `model.3mf`; the returned file id is recorded as one of the
+   output's library copies, one per folder and printer (print-flow spec §7), in
+   Postgres (`output_bambuddy_uploads`, #455).
 2. **Slice and queue** — if a pipeline is configured:
    `POST /api/v1/slicer-pipelines/{id}/run` with `source_library_file_id`,
    `copies`. Otherwise `POST /library/files/{id}/slice` with presets from

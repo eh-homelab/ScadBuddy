@@ -1,5 +1,7 @@
 import { useCallback, useRef, useState } from 'react'
 import { ApiError, api } from '../api/client'
+import { useLatest } from '../lib/useLatest'
+import { useSubscription } from '../lib/realtime'
 import type { ModelPatch, ModelSummary } from '../api/types'
 import {
   MAX_THUMBNAIL_SIZE,
@@ -57,6 +59,22 @@ const sameTags = (a: string[], b: string[]) =>
  * change the server accepts is its own revision in the model's history, so a save
  * sends only the parts that differ from what the form opened on.
  */
+/** Whether the fields this form edits are the same in both. */
+function sameDetails(a: Baseline, b: Baseline) {
+  return (
+    a.model.name === b.model.name &&
+    (a.model.description ?? '') === (b.model.description ?? '') &&
+    (a.model.tags ?? []).join('\n') === (b.model.tags ?? []).join('\n') &&
+    a.model.has_thumbnail === b.model.has_thumbnail &&
+    a.model.thumbnail_source === b.model.thumbnail_source &&
+    // Which output or default render it is. An uploaded image replaced by another
+    // shows no difference in the record (tracked as a follow-up to #442).
+    a.model.thumbnail_output_id === b.model.thumbnail_output_id &&
+    a.model.thumbnail_preview_id === b.model.thumbnail_preview_id &&
+    a.readme === b.readme
+  )
+}
+
 export function EditDetailsButton({ slug, onSaved }: Props) {
   const [open, setOpen] = useState(false)
   const [baseline, setBaseline] = useState<Baseline | null>(null)
@@ -70,8 +88,31 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  // #269 — the details changed elsewhere while this form is open: say so, and let the
+  // user load them; never overwrite what is being typed.
+  const [changedElsewhere, setChangedElsewhere] = useState(false)
+  // `model.updated` also follows pins, source saves and upstream changes, so it only
+  // counts when the details this form edits differ from the ones it opened with.
+  const opened = useLatest(baseline)
+  useSubscription(open && baseline ? `model:${slug}` : undefined, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'model.updated' || saving) return
+    void (async () => {
+      const model = await api.getModel(slug)
+      const text = model.has_readme ? ((await api.getReadme(slug)) ?? '') : ''
+      const was = opened.current
+      if (was && !sameDetails(was, { model, readme: text })) setChangedElsewhere(true)
+    })().catch(() => {
+      // The form keeps what it shows; the next change reads again.
+    })
+  })
+
+  /** Bumped by every show(), so a slower earlier load never lands over a later one. */
+  const loads = useRef(0)
+
   async function show() {
+    const mine = ++loads.current
     setOpen(true)
+    setChangedElsewhere(false)
     setBaseline(null)
     setLoadError(null)
     setError(null)
@@ -80,12 +121,14 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     try {
       const model = await api.getModel(slug)
       const text = model.has_readme ? ((await api.getReadme(slug)) ?? '') : ''
+      if (loads.current !== mine) return
       setBaseline({ model, readme: text })
       setName(model.name)
       setDescription(model.description ?? '')
       setTags((model.tags ?? []).join(', '))
       setReadme(text)
     } catch (caught) {
+      if (loads.current !== mine) return
       setLoadError(caught instanceof ApiError ? caught.detail : String(caught))
     }
   }
@@ -221,6 +264,17 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
           <p className="flex items-center gap-2 text-[13px] text-muted">
             <Spinner /> Loading details
           </p>
+        )}
+        {changedElsewhere && (
+          <div
+            role="status"
+            className="mb-3 flex items-center gap-3 rounded-[6px] border border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>These details were changed elsewhere since you opened them.</span>
+            <Button size="sm" onClick={() => void show()}>
+              Load the latest
+            </Button>
+          </div>
         )}
         {loadError && (
           <p role="alert" className="text-[13px] text-warn">
