@@ -88,11 +88,12 @@ export function ModelLibrariesButton({ slug, name, onSaved }: Props) {
       // The dialog keeps what it shows; the next change or reopen reads again.
     }
   }
-  const onChange = (signal: RealtimeSignal) => {
+  // `libraries` alone: a pin change emits `library.changed` there as well as on
+  // `model:<slug>` (backend `api/libraries.py`), and nothing else on that topic
+  // touches what this dialog shows.
+  useSubscription(open ? 'libraries' : undefined, (signal: RealtimeSignal) => {
     if (signal !== 'resync') void refreshOpen()
-  }
-  useSubscription(open ? 'libraries' : undefined, onChange)
-  useSubscription(open ? `model:${slug}` : undefined, onChange)
+  })
 
   function close() {
     if (running > 0) return

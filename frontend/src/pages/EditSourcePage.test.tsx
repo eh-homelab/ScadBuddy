@@ -269,4 +269,24 @@ describe('EditSourcePage, live (#269)', () => {
     expect(editor).toHaveValue(THEIRS)
     expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
   })
+
+  it('takes a change that lands before the first read answers, with no banner', async () => {
+    let answerFirst: (() => void) | undefined
+    vi.spyOn(api, 'getSource').mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          answerFirst = () => resolve(keychainSource)
+        }),
+    )
+    renderEdit()
+    await waitFor(() => expect(answerFirst).toBeDefined())
+    await api.replaceSource('name-keychain', THEIRS)
+    emitRealtime('source.changed', ['model:name-keychain'], { slug: 'name-keychain' })
+    const editor = await screen.findByLabelText('OpenSCAD source')
+    await waitFor(() => expect(editor).toHaveValue(THEIRS))
+    answerFirst?.()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(editor).toHaveValue(THEIRS)
+    expect(screen.queryByTestId('changed-elsewhere')).not.toBeInTheDocument()
+  })
 })

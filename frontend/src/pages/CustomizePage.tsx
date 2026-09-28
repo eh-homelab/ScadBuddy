@@ -120,15 +120,18 @@ export function CustomizePage() {
   // #269 — the source changed elsewhere (another tab, an agent). With no edits the
   // parameters follow it at once; with edits they are the user's, so the page asks.
   // An old revision (`version`) never changes, so it has nothing to follow.
-  const [sourceChanged, setSourceChanged] = useState(false)
+  // Held as the slug it is about, so it never follows the user to another model
+  // (Duplicate navigates here without remounting the page).
+  const [sourceChangedFor, setSourceChangedFor] = useState<string | null>(null)
+  const sourceChanged = sourceChangedFor === slug
   const dirty = edits.values !== null
   useSubscription(version === undefined ? `model:${slug}` : undefined, (signal) => {
     if (signal === 'resync' || signal.kind !== 'source.changed') return
-    if (dirty) setSourceChanged(true)
+    if (dirty) setSourceChangedFor(slug)
     else schemaState.refresh()
   })
   const reloadSchema = () => {
-    setSourceChanged(false)
+    setSourceChangedFor(null)
     setEdits({ of: seed, values: null })
     schemaState.refresh()
   }
@@ -509,7 +512,7 @@ export function CustomizePage() {
             <Button size="sm" onClick={reloadSchema}>
               Reload parameters
             </Button>
-            <Button size="sm" variant="ghost" onClick={() => setSourceChanged(false)}>
+            <Button size="sm" variant="ghost" onClick={() => setSourceChangedFor(null)}>
               Keep mine
             </Button>
           </div>

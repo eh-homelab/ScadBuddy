@@ -80,7 +80,11 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     }
   })
 
+  /** Bumped by every show(), so a slower earlier load never lands over a later one. */
+  const loads = useRef(0)
+
   async function show() {
+    const mine = ++loads.current
     setOpen(true)
     setChangedElsewhere(false)
     setBaseline(null)
@@ -91,12 +95,14 @@ export function EditDetailsButton({ slug, onSaved }: Props) {
     try {
       const model = await api.getModel(slug)
       const text = model.has_readme ? ((await api.getReadme(slug)) ?? '') : ''
+      if (loads.current !== mine) return
       setBaseline({ model, readme: text })
       setName(model.name)
       setDescription(model.description ?? '')
       setTags((model.tags ?? []).join(', '))
       setReadme(text)
     } catch (caught) {
+      if (loads.current !== mine) return
       setLoadError(caught instanceof ApiError ? caught.detail : String(caught))
     }
   }

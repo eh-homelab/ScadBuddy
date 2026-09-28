@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
@@ -46,11 +46,23 @@ export function EditSourcePage() {
   // follows it; an edited one is never overwritten: the page offers theirs, and a save
   // of mine goes through the usual stale-write conflict (#234).
   const [theirs, setTheirs] = useState<string | null>(null)
+  /** The buffer as it is when a read answers, not as it was when the signal came. */
+  const buffer = useRef({ source, loaded: loaded.data })
+  useEffect(() => {
+    buffer.current = { source, loaded: loaded.data }
+  })
+  const untouched = () => buffer.current.source === null || buffer.current.source === buffer.current.loaded
   useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
     if (signal === 'resync' || signal.kind !== 'source.changed') return
+    // Untouched, or not loaded yet: read it again through the loader, whose sequence
+    // guard drops a first read that was already in flight with the old text.
+    if (untouched()) {
+      loaded.refresh()
+      return
+    }
     void api.getSource(slug).then((latest) => {
-      if (latest === source) return
-      if (source === loaded.data) loaded.setData(latest)
+      if (latest === buffer.current.source) return
+      if (untouched()) loaded.setData(latest)
       else setTheirs(latest)
     })
   })

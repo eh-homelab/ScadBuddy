@@ -1005,6 +1005,22 @@ describe('CustomizePage, live (#269)', () => {
     expect(screen.queryByText(/source changed elsewhere/)).not.toBeInTheDocument()
   })
 
+  it('does not carry the banner to the copy Duplicate opens', async () => {
+    const { user } = render()
+    await firstRender()
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'Mine')
+    changeSourceElsewhere()
+    await screen.findByText(/source changed elsewhere/)
+
+    await user.click(screen.getByRole('button', { name: 'Duplicate' }))
+    const dialog = screen.getByRole('dialog', { name: /^Duplicate / })
+    await user.click(within(dialog).getByRole('button', { name: 'Duplicate' }))
+    await screen.findByTestId('duplicated-from')
+    expect(screen.queryByText(/source changed elsewhere/)).not.toBeInTheDocument()
+  })
+
   it('shows details edited elsewhere without a reload', async () => {
     render()
     await screen.findByRole('heading', { name: 'Name Keychain' })
