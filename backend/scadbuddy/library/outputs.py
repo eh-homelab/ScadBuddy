@@ -258,10 +258,17 @@ class OutputStore:
 
     def printed_since(self, cutoff: datetime) -> list[OutputMeta]:
         """Every output whose last print started at or after ``cutoff``. A record
-        that cannot be read is skipped: it cannot be followed either."""
+        that cannot be read is skipped: it cannot be followed either.
+
+        Only records written since ``cutoff`` are parsed: ``record_send`` rewrites
+        ``meta.json`` when it stamps ``printed_at``, so an older file cannot hold a
+        newer print. A rescan then stats the library and parses only recent prints."""
         found = []
+        since = cutoff.timestamp()
         for meta_path in self.paths.outputs.glob(f"*/*/{META_NAME}"):
             try:
+                if meta_path.stat().st_mtime < since:
+                    continue
                 meta = OutputMeta.model_validate_json(meta_path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue

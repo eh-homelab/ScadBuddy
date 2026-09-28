@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -259,6 +260,53 @@ def test_the_rescan_picks_up_a_print_nobody_follows(paths: DataPaths) -> None:
         return watching
 
     assert asyncio.run(scenario()) == {OUTPUT}
+
+
+class SlowRelease(LocalWatchLock):
+    """A release that takes long enough for a new print to arrive during it."""
+
+    def __init__(self) -> None:
+        self.releasing = asyncio.Event()
+        self.acquired = 0
+
+    async def acquire(self, output_id: str) -> bool:
+        self.acquired += 1
+        return True
+
+    async def release(self, output_id: str) -> None:
+        self.releasing.set()
+        await asyncio.sleep(0.05)
+
+
+def test_a_print_started_while_its_last_watch_ends_is_followed(paths: DataPaths) -> None:
+    async def scenario() -> tuple[SlowRelease, Script]:
+        write_output(paths)
+        read = Script(progress("done", settled=True), progress("running"))
+        lock = SlowRelease()
+        watcher, _ = watcher_for(paths, read, lock=lock, min_interval=0.01, max_interval=10)
+        watcher.watch(OUTPUT)
+        await lock.releasing.wait()
+        # The follower has settled and is releasing its lock: it reads no more.
+        watcher.watch(OUTPUT)
+        async with asyncio.timeout(5):
+            while read.reads < 2:
+                await asyncio.sleep(0.005)
+        await watcher.aclose()
+        return lock, read
+
+    lock, read = asyncio.run(scenario())
+    assert lock.acquired == 2
+    assert read.reads >= 2
+
+
+def test_printed_since_skips_records_not_written_since_the_cutoff(paths: DataPaths) -> None:
+    write_output(paths, "1" * 32)
+    write_output(paths, "2" * 32)
+    stale = paths.outputs / "demo" / ("2" * 32) / META_NAME
+    old = (NOW - timedelta(hours=30)).timestamp()
+    os.utime(stale, (old, old))
+    found = OutputStore(paths).printed_since(NOW - timedelta(hours=24))
+    assert [meta.id for meta in found] == ["1" * 32]
 
 
 class Refusing(LocalWatchLock):

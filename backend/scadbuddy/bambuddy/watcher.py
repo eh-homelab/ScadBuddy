@@ -183,6 +183,7 @@ class PrintWatcher:
         #: Set to cut a follower's wait short: a new print of an output already followed.
         self._pokes: dict[str, asyncio.Event] = {}
         self._rescanner: asyncio.Task[None] | None = None
+        self._closing = False
 
     @property
     def watching(self) -> frozenset[str]:
@@ -199,9 +200,15 @@ class PrintWatcher:
         task.add_done_callback(lambda _: self._forget(output_id, task))
 
     def _forget(self, output_id: str, task: asyncio.Task[None]) -> None:
-        if self._tasks.get(output_id) is task:
-            del self._tasks[output_id]
-            self._pokes.pop(output_id, None)
+        if self._tasks.get(output_id) is not task:
+            return
+        del self._tasks[output_id]
+        poke = self._pokes.pop(output_id, None)
+        # A watch() that came after the follower's last wait (while it released its
+        # lock, say) poked a task that no longer reads: that print starts over now
+        # rather than at the next rescan.
+        if poke is not None and poke.is_set() and not self._closing:
+            self.watch(output_id)
 
     async def start(self) -> None:
         await self.resume()
@@ -225,6 +232,7 @@ class PrintWatcher:
             await self.resume()
 
     async def aclose(self) -> None:
+        self._closing = True
         tasks = [*self._tasks.values(), *([self._rescanner] if self._rescanner else [])]
         for task in tasks:
             task.cancel()
