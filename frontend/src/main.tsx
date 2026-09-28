@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client'
 import { BrowserRouter } from 'react-router'
 import { installAgentBridge } from './agent'
 import { App } from './App'
+import { installStaleChunkReload } from './lib/staleChunks'
 import './index.css'
 
 async function start() {
@@ -14,6 +15,7 @@ async function start() {
     })
   }
 
+  installStaleChunkReload()
   installAgentBridge()
 
   const root = document.getElementById('root')
