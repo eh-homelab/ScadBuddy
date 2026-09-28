@@ -20,17 +20,15 @@ export interface PrintProgressState {
  * Three things about the backend's answer decide when this stops, and none of them can
  * be worked out in the browser:
  *
- * - **`settled` is the only stop condition.** A pipeline run whose slice failed keeps
- *   reporting `status: "in_progress"` with `copies_in_progress: 1` for ever — the
- *   recorded `pipeline-run.json` is exactly that — so a poll that waited for `stage` to
- *   move, or for the counters to account for every copy, would never end. The backend
- *   settles it from `completed_at`; re-deriving "finished" here would reintroduce the
- *   infinite poll.
+ * - **`settled` is the only stop condition.** A slice job that failed carries no status
+ *   that moves and no counters to fill in — Bambuddy's own failure text is all there
+ *   is — so a poll waiting for `stage` to change, or for a copy count to be accounted
+ *   for, would never end. The backend settles it directly; re-deriving "finished" here
+ *   would reintroduce the infinite poll.
  * - **`null` is an answer**, not an error: the output has never been printed. There is
  *   nothing to wait for, so the poll stops rather than retrying.
- * - **The queue entries do not exist when the run is accepted.** `run` answers 202 and
- *   creates them in a background task, which is why this polls at all rather than
- *   reading the run response once.
+ * - **The queue item does not exist until the plate has sliced.** That is why this
+ *   polls at all rather than reading one response once.
  */
 export function usePrintProgress(
   outputId: string | undefined,

@@ -1111,16 +1111,12 @@ export interface paths {
         };
         /**
          * How the last print of this output is going
-         * @description Follow whichever of Bambuddy's two routes this output last took (#89).
+         * @description Follow this output's last print, slice then queue (#89).
          *
          *     ``null`` means this output has never been printed — that is an answer, not an
          *     error, and the send bar shows nothing rather than a failure.
          *
-         *     The poll is needed rather than optional on the pipeline route: ``run`` answers 202
-         *     and creates the queue entries in a background task, so ``jobs[].queue_entry_id`` is
-         *     still null when the run response arrives. ``settled`` is what says the polling can
-         *     stop; it is computed from the copies, because a run can report a terminal status
-         *     while a copy is still being dispatched.
+         *     ``settled`` is what says the polling can stop.
          */
         get: operations["get_progress_api_v1_print_outputs__output_id__progress_get"];
         put?: never;
@@ -1144,10 +1140,10 @@ export interface paths {
          * File this output's queue entries under its project
          * @description ``add-queue`` now, and ``add-archives`` for whatever the entries have produced.
          *
-         *     Separate from the run because neither id exists when a print starts: a pipeline
-         *     run's queue entries are created by a background task, and an archive only exists
-         *     once a print has finished. Calling this again later is how the archives eventually
-         *     land on the project's page, and attaching the same id twice is Bambuddy's to dedupe.
+         *     Separate from the run because neither id exists when a print starts: a plate's
+         *     queue item only exists once it has sliced, and an archive only exists once a print
+         *     has finished. Calling this again later is how the archives eventually land on the
+         *     project's page, and attaching the same id twice is Bambuddy's to dedupe.
          */
         post: operations["post_attach_project_api_v1_print_outputs__output_id__project_post"];
         delete?: never;
@@ -1596,9 +1592,8 @@ export interface components {
          * CopyProgress
          * @description One copy of a print: where it went and what it is doing.
          *
-         *     A pipeline run reports one of these per copy; the queue route has exactly one,
-         *     because Bambuddy's queue models repeats through ``quantity`` rather than through
-         *     separate rows.
+         *     The queue route has one per plate, because Bambuddy's queue models repeats through
+         *     ``quantity`` rather than through separate rows.
          */
         CopyProgress: {
             /** Copy Index */
@@ -2325,12 +2320,10 @@ export interface components {
             };
             /** Parts */
             parts?: components["schemas"]["PartInfo"][];
-            /** Pipeline Run Id */
-            pipeline_run_id?: number | null;
             /** Plates */
             plates?: components["schemas"]["PlateSend"][];
             /** Print Route */
-            print_route?: ("pipeline" | "slice_queue") | null;
+            print_route?: "slice_queue" | null;
             /** Project Id */
             project_id?: number | null;
             /** Queue Item Id */
@@ -2799,15 +2792,13 @@ export interface components {
             error_message?: string | null;
             /** Fix */
             fix?: string | null;
-            /** Pipeline Run Id */
-            pipeline_run_id?: number | null;
             /** Queue Item Id */
             queue_item_id?: number | null;
             /**
              * Route
-             * @enum {string}
+             * @constant
              */
-            route: "pipeline" | "slice_queue";
+            route: "slice_queue";
             /**
              * Settled
              * @default false
@@ -2928,9 +2919,8 @@ export interface components {
          * ProjectAttach
          * @description Which of this output's queue entries to file under the project.
          *
-         *     The ids come from the progress read (#89): a pipeline run's
-         *     ``jobs[].queue_entry_id`` is null when the run answers 202, so the caller is the
-         *     only one that knows them, and only once it has polled.
+         *     The ids come from the progress read (#89): a plate's queue item only exists once it
+         *     has sliced, so the caller learns them by polling.
          */
         ProjectAttach: {
             /** Project Id */

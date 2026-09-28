@@ -1,18 +1,8 @@
-"""Following a print to its queue entries, whichever route started it (#89).
+"""Following a print to its queue entries (#89).
 
-A print leaves ScadBuddy by one of two routes and they report progress completely
-differently, so this module is the one place that knows both:
-
-* **pipeline** — ``POST /slicer-pipelines/{id}/run`` answers **202** immediately and
-  hands the work to a background task. Its ``jobs[].queue_entry_id`` is therefore
-  *null* when the response arrives: the queue entries do not exist yet. "Every copy is
-  queued" is a polled condition, not something the first answer can state, which is the
-  whole reason this exists rather than reading the run response once.
-* **slice + queue** — the route a chosen filament mapping forces (#87). There is no run
-  at all: a slice job finishes, and a single queue item carries ``quantity``.
-
-Both are normalised into one :class:`PrintProgress`, because the send bar shows one
-thing and should not branch on how the print happened to leave.
+A print leaves ScadBuddy by one route, slice then queue: a slice job finishes, and a
+queue item per plate carries ``quantity``. The send bar's old pipeline route (#312)
+is gone; a record left by it reads as never printed (``OutputMeta``).
 
 **The fix that applies is derived from where it failed, not from the wording.** A
 failure's own text is Bambuddy's and is shown verbatim; the suggested action is chosen
@@ -29,7 +19,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.client import BambuddyClient
-from scadbuddy.bambuddy.models import PipelineRun, QueueItem, SliceJob
+from scadbuddy.bambuddy.models import QueueItem, SliceJob
 from scadbuddy.core.events import EventBus, PrintEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import OutputMeta, PrintRoute
@@ -70,9 +60,8 @@ def stage_of(status: str | None) -> Stage:
 class CopyProgress(BaseModel):
     """One copy of a print: where it went and what it is doing.
 
-    A pipeline run reports one of these per copy; the queue route has exactly one,
-    because Bambuddy's queue models repeats through ``quantity`` rather than through
-    separate rows.
+    The queue route has one per plate, because Bambuddy's queue models repeats through
+    ``quantity`` rather than through separate rows.
     """
 
     copy_index: int | None = None
@@ -95,7 +84,6 @@ class PrintProgress(BaseModel):
     stage: Stage = "unknown"
     #: True when nothing further will change without another print. Polling stops here.
     settled: bool = False
-    pipeline_run_id: int | None = None
     slice_job_id: int | None = None
     queue_item_id: int | None = None
     copies: int = 1
@@ -114,84 +102,13 @@ class PrintProgress(BaseModel):
 #: The fix per failing stage. Each is an action the user can actually take from the
 #: dialog, and each is tied to *where* the failure happened, not to what it said.
 SLICE_FIX = (
-    "Bambuddy could not slice this plate. Choose a different pipeline or plate, or fix "
-    "the model, and print again."
-)
-NEVER_QUEUED_FIX = (
-    "The copy never reached the queue, so no printer matched it. Re-check eligibility "
-    "for this pipeline, or pick a printer's own pipeline instead of a class-targeted one."
+    "Bambuddy could not slice this plate. Change the plate or print settings, or fix the "
+    "model, and print again."
 )
 QUEUED_THEN_FAILED_FIX = (
     "The queue entry was created and then refused. Check the filament mapping and the "
     "loaded spools, then retry it from Bambuddy's queue."
 )
-RUN_FIX = "Re-check eligibility for this pipeline, then run it again."
-
-
-def from_run(run: PipelineRun, *, bambuddy_url: str) -> PrintProgress:
-    """A pipeline run, as the send bar reads it.
-
-    **``status`` and the copy counters both lie on a failed run.** The recorded
-    ``pipeline-run.json`` is a real run whose slice failed: it reports
-    ``status: "in_progress"`` and ``copies_in_progress: 1`` while also carrying
-    ``completed_at`` and ``error_message: "Slice failed: …"``. A poll that waited for
-    the status to move, or for the counters to account for every copy, would never
-    stop. ``completed_at`` is the signal that does settle, so it is the one used.
-
-    The fix is likewise structural: ``slice_job_id`` set with ``sliced_library_file_id``
-    still null means the failure was the *slice*, whatever the message says.
-    """
-    copies = [
-        CopyProgress(
-            copy_index=job.copy_index,
-            printer_name=job.assigned_printer_name,
-            queue_entry_id=job.queue_entry_id,
-            stage=stage_of(job.status),
-            message=job.error_message,
-        )
-        for job in run.jobs
-    ]
-    accounted = run.copies_completed + run.copies_failed + run.copies_cancelled
-    settled = run.completed_at is not None or accounted >= run.copies
-    stage = stage_of(run.status)
-    if settled and run.error_message and stage not in ("failed", "cancelled"):
-        # The run is over and recorded a reason; reporting it as still in progress
-        # because Bambuddy left `status` alone would show a spinner over an error.
-        stage = "failed"
-
-    failed = [copy for copy in copies if copy.stage == "failed"]
-    fix: str | None = None
-    message = run.error_message
-    if run.slice_job_id is not None and run.sliced_library_file_id is None and message:
-        # Nothing was ever sliced, so no copy could have been queued: the failure is
-        # the slicer's, whatever wording it arrived in.
-        fix = SLICE_FIX
-    elif failed:
-        first = failed[0]
-        message = message or first.message
-        # A copy that failed *with* a queue entry got as far as the queue and was
-        # refused there; one without never matched a printer at all. Different causes,
-        # different fixes, and the distinction is structural rather than textual.
-        fix = QUEUED_THEN_FAILED_FIX if first.queue_entry_id is not None else NEVER_QUEUED_FIX
-    elif stage == "failed":
-        fix = RUN_FIX
-
-    return PrintProgress(
-        route="pipeline",
-        stage=stage,
-        settled=settled,
-        pipeline_run_id=run.id,
-        slice_job_id=run.slice_job_id,
-        copies=run.copies,
-        copies_completed=run.copies_completed,
-        copies_failed=run.copies_failed,
-        copies_cancelled=run.copies_cancelled,
-        copies_in_progress=run.copies_in_progress,
-        error_message=message,
-        fix=fix,
-        copies_detail=copies,
-        bambuddy_url=bambuddy_url,
-    )
 
 
 def from_queue(
@@ -344,59 +261,47 @@ async def progress_for(client: BambuddyClient, meta: OutputMeta) -> PrintProgres
     """Read the progress of whatever this output last printed, or ``None``.
 
     ``None`` means the output has never been printed — not an error, and not something
-    to retry. The route is taken from the record rather than guessed from which ids are
-    set, because an output printed both ways carries both.
+    to retry.
 
     A read that 404s is reported as such rather than swallowed: an id ScadBuddy recorded
     and Bambuddy no longer has is a real thing to tell the user, not a blank panel.
     """
     route = meta.print_route
-    if route is None:
-        # Records written before #89 carry no route. A run id is the older send bar's
-        # only outcome, so it is the safe reading of one.
-        route = "pipeline" if meta.pipeline_run_id is not None else None
-        if route is None and meta.queue_item_id is not None:
-            route = "slice_queue"
+    if route is None and meta.queue_item_id is not None:
+        # Records written before #89 carry no route; a queue item is this route's.
+        route = "slice_queue"
+    if route != "slice_queue":
+        return None
     url = client.config.web_url(QUEUE_PATH)
 
-    if route == "pipeline":
-        if meta.pipeline_run_id is None:
-            return None
-        return from_run(await client.pipeline_run(meta.pipeline_run_id), bambuddy_url=url)
-
-    if route == "slice_queue":
-        if len(meta.plates) > 1:
-            # Polled together. A failing read cancels the other plates' reads, and the
-            # caller sees that read's own error rather than an ExceptionGroup.
-            try:
-                async with asyncio.TaskGroup() as group:
-                    tasks = [
-                        group.create_task(
-                            _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
-                        )
-                        for plate in meta.plates
-                    ]
-            except ExceptionGroup as grouped:
-                # The group is in completion order; the earliest failing plate is the
-                # one reported, so the same failures always surface the same error.
-                failures = [
-                    error
-                    for task in tasks
-                    if task.done()
-                    and not task.cancelled()
-                    and (error := task.exception()) is not None
+    if len(meta.plates) > 1:
+        # Polled together. A failing read cancels the other plates' reads, and the
+        # caller sees that read's own error rather than an ExceptionGroup.
+        try:
+            async with asyncio.TaskGroup() as group:
+                tasks = [
+                    group.create_task(
+                        _queued_progress(client, plate.slice_job_id, plate.queue_item_id, url)
+                    )
+                    for plate in meta.plates
                 ]
-                raise (failures or grouped.exceptions)[0] from None
-            return from_plates(
-                [task.result() for task in tasks],
-                [plate.plate_id for plate in meta.plates],
-                slice_job_id=meta.slice_job_id,
-                queue_item_id=meta.queue_item_id,
-                bambuddy_url=url,
-            )
-        return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url)
-
-    return None
+        except ExceptionGroup as grouped:
+            # The group is in completion order; the earliest failing plate is the
+            # one reported, so the same failures always surface the same error.
+            failures = [
+                error
+                for task in tasks
+                if task.done() and not task.cancelled() and (error := task.exception()) is not None
+            ]
+            raise (failures or grouped.exceptions)[0] from None
+        return from_plates(
+            [task.result() for task in tasks],
+            [plate.plate_id for plate in meta.plates],
+            slice_job_id=meta.slice_job_id,
+            queue_item_id=meta.queue_item_id,
+            bambuddy_url=url,
+        )
+    return await _queued_progress(client, meta.slice_job_id, meta.queue_item_id, url)
 
 
 #: Outputs whose last observed progress :class:`ProgressObserver` remembers.

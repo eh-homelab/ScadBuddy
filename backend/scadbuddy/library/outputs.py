@@ -10,9 +10,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.library.deeplink import edit_url
@@ -37,8 +37,15 @@ GEOMETRY_NAME = "geometry.json"
 
 OUTPUT_ID_PATTERN = r"^[0-9a-f]{32}$"
 
-#: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``.
-PrintRoute = Literal["pipeline", "slice_queue"]
+#: Which Bambuddy route produced the ids below; see ``bambuddy/dispatch.py``. The
+#: ``"pipeline"`` route went with the send bar's queue mode (#312).
+PrintRoute = Literal["slice_queue"]
+
+#: What the last print left on a record. A record whose last print was a pipeline run
+#: may still carry an *older* slice-and-queue print's ids here, so they go with it.
+_LAST_PRINT_FIELDS = frozenset(
+    {"print_route", "pipeline_run_id", "queue_item_id", "slice_job_id", "plates"}
+)
 
 
 class OutputNotFoundError(KeyError):
@@ -82,7 +89,6 @@ class OutputMeta(BaseModel):
     #: for the printer in play, so a cached id is only reusable while the target
     #: has not changed. ``None`` on records written before #105.
     library_file_plate: str | None = None
-    pipeline_run_id: int | None = None
     queue_item_id: int | None = None
     #: Which of Bambuddy's two routes the last print took (#87). Without it an output
     #: that has been printed both ways carries a run id *and* a queue item id, and
@@ -93,9 +99,23 @@ class OutputMeta(BaseModel):
     #: history shows what each print was filed under rather than only that it happened.
     project_id: int | None = None
     #: Every plate the last slice-and-queue print put on the queue (#83), in order.
-    #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on a
-    #: pipeline run and on records written before multi-plate prints.
+    #: ``queue_item_id`` / ``slice_job_id`` above are the last of these. Empty on
+    #: records written before multi-plate prints.
     plates: list[PlateSend] = Field(default_factory=list)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _forget_a_pipeline_run(cls, data: Any) -> Any:
+        """Records from before #312 can say their last print was a pipeline run: either
+        ``print_route: "pipeline"``, or (before #89) no route and a run id. That route is
+        gone, so the record reads as never printed rather than failing to load or
+        reporting an older print's queue item as the current one."""
+        if not isinstance(data, dict):
+            return data
+        route = data.get("print_route")
+        if route == "pipeline" or (route is None and data.get("pipeline_run_id") is not None):
+            return {key: value for key, value in data.items() if key not in _LAST_PRINT_FIELDS}
+        return data
 
 
 @dataclass(frozen=True)
@@ -227,7 +247,6 @@ class OutputStore:
         *,
         library_file_id: int | None = None,
         library_file_plate: str | None = None,
-        pipeline_run_id: int | None = None,
         queue_item_id: int | None = None,
         print_route: PrintRoute | None = None,
         slice_job_id: int | None = None,
@@ -249,7 +268,6 @@ class OutputStore:
                 for key, value in (
                     ("library_file_id", library_file_id),
                     ("library_file_plate", library_file_plate),
-                    ("pipeline_run_id", pipeline_run_id),
                     ("queue_item_id", queue_item_id),
                     ("print_route", print_route),
                     ("slice_job_id", slice_job_id),

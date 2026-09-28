@@ -390,7 +390,7 @@ def _meta() -> OutputMeta:
 
 
 def _progress(stage: str, *, settled: bool = False) -> PrintProgress:
-    return PrintProgress(route="pipeline", stage=stage, settled=settled, bambuddy_url="x")  # type: ignore[arg-type]
+    return PrintProgress(route="slice_queue", stage=stage, settled=settled, bambuddy_url="x")  # type: ignore[arg-type]
 
 
 def test_progress_is_announced_on_change_and_settled_once() -> None:
