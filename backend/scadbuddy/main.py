@@ -6,6 +6,7 @@ import logging
 import pkgutil
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime
 from functools import partial
 from typing import Any
 
@@ -32,6 +33,7 @@ from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.store import sweep_blobs
+from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.bambuddy import RenderSettingsSource
 from scadbuddy.store.cache import CachedBlobStore
 from scadbuddy.store.content import sweep_content
@@ -175,19 +177,35 @@ async def sweep_library_checkouts(state: AppState) -> list[str]:
     return removed
 
 
-async def drop_swept_assets(state: AppState, removed: list[str]) -> None:
-    """The store's copies of what `sweep_assets` just removed from the volume."""
-    store = getattr(state, "store", None)  # Task 8's StoreBundle; the guard goes then
-    if store is not None and store.remote_assets is not None and removed:
-        await store.remote_assets.drop(removed)
+def _remote_assets(state: AppState) -> RemoteAssets | None:
+    return state.store.remote_assets
 
 
-async def _sweep_assets_logged(state: AppState) -> None:
+async def drop_swept_assets(state: AppState, removed: list[str], *, cutoff: datetime) -> None:
+    """The store's copies of what `sweep_assets` just removed from the volume; only
+    those not stored again since ``cutoff``, the sweep's start."""
+    remote = _remote_assets(state)
+    if remote is not None and removed:
+        await remote.drop(removed, cutoff=cutoff)
+
+
+async def _sweep_assets_logged(state: AppState, *, converge: bool = True) -> None:
     # Best effort, like the boot's other sweeps: a store or volume error skips this
     # sweep (removing nothing it could not prove unused) and the next one retries.
+    # The boot's sweep does not converge: reconcile and backfill talk to Bambuddy at
+    # length, so they run from the periodic sweep and never hold up the start.
     try:
+        remote = _remote_assets(state)
+        cutoff = await remote.clock() if remote is not None else None
         removed = await asyncio.to_thread(sweep_assets, state)
-        await drop_swept_assets(state, removed)
+        if remote is not None and cutoff is not None:
+            await drop_swept_assets(state, removed, cutoff=cutoff)
+            if not converge:
+                return
+            # What an earlier drop failed to remove, and what the store lost (a copy an
+            # `ensure` dropped, a race with a delete): both converge here, per sweep.
+            await remote.reconcile(state.assets, cutoff=cutoff)
+            await remote.backfill(state.assets)
     except Exception:
         logger.exception("could not sweep unused uploads")
 
@@ -436,7 +454,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.print_watcher.start()
         # After the projection has opened: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
-            await _sweep_assets_logged(state)
+            await _sweep_assets_logged(state, converge=False)
             sweeper = asyncio.create_task(_asset_sweeper(state))
         if state.store.content is not None:
             backfill = asyncio.create_task(

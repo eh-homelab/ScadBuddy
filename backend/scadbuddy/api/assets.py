@@ -37,7 +37,7 @@ from scadbuddy.library.assets import (
 from scadbuddy.library.history import GitError, RevisionNotFoundError
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.schema import BARE_FILENAME_PATTERN
-from scadbuddy.store.content import template_title
+from scadbuddy.store.content import StoreFullError, template_title
 
 router = APIRouter(tags=["assets"])
 
@@ -110,8 +110,14 @@ async def upload_asset(
     # A failed mirror (Bambuddy unreachable) fails the upload with Bambuddy's problem:
     # a file a worker could not read must not look uploaded.
     if state.store.remote_assets is not None:
-        title = template_title(state.paths.model_source(slug).parent, slug)
-        await state.store.remote_assets.mirror(assets, meta, slug=slug, title=title)
+        title = await asyncio.to_thread(template_title, state.paths.model_source(slug).parent, slug)
+        try:
+            await state.store.remote_assets.mirror(assets, meta, slug=slug, title=title)
+        except StoreFullError as error:
+            raise ApiError(
+                status.HTTP_507_INSUFFICIENT_STORAGE,
+                f"the blob store has no room for this file: {error}",
+            ) from None
     return meta
 
 

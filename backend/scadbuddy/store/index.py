@@ -112,6 +112,14 @@ class BlobIndex:
                 )
             return cursor.rowcount == 1
 
+    def now(self) -> datetime:
+        """The database's clock, which every `touched_at` is stamped with."""
+        with self._pool.connection() as conn:
+            row = conn.execute("SELECT now() AS now").fetchone()
+        assert row is not None
+        now: datetime = row["now"]
+        return now
+
     def touch(self, key: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("UPDATE store_blobs SET touched_at = now() WHERE key = %s", (key,))

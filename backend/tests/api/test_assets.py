@@ -23,6 +23,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import MAX_ASSET_BYTES
 from scadbuddy.main import create_app, sweep_assets
 from scadbuddy.render.provenance import read as read_provenance
+from scadbuddy.store.content import StoreFullError
 from scadbuddy.worker import worker_deps_from_state
 from tests.api.conftest import wait_for_job
 from tests.conftest import MODEL_SLUG
@@ -501,3 +502,20 @@ def test_a_failed_mirror_fails_the_upload_with_its_problem(
     )
     assert response.status_code == 502
     assert response.json()["detail"] == "Bambuddy is unreachable"
+
+
+def test_an_upload_the_blob_store_has_no_room_for_is_a_507(
+    client: TestClient, app: FastAPI
+) -> None:
+    class Full:
+        async def mirror(self, *_: object, **__: object) -> None:
+            raise StoreFullError("past SCADBUDDY_STORE_MAX_TOTAL_BYTES (10)")
+
+    state = getattr(app.state, STATE_ATTR)
+    object.__setattr__(state, "store", SimpleNamespace(remote_assets=Full()))
+    response = client.post(
+        f"/api/v1/models/{MODEL_SLUG}/assets",
+        files={"file": ("heart.svg", HEART_SVG, "application/octet-stream")},
+    )
+    assert response.status_code == 507, response.text
+    assert "SCADBUDDY_STORE_MAX_TOTAL_BYTES" in response.json()["detail"]
