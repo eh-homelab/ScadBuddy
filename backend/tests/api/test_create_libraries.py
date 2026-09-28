@@ -19,6 +19,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.libraries import LibraryStore
 from tests.api import test_libraries as shared
+from tests.api.conftest import set_fake_env
 from tests.api.test_libraries import SLUG, SOURCE, create_model, pin
 
 pytestmark = pytest.mark.requires_git
@@ -45,11 +46,10 @@ def test_a_paste_pins_its_libraries_in_its_first_revision_and_checks_with_them(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url, commits = upstream
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     created = lib_client.post(
         "/api/v1/models",
@@ -100,15 +100,64 @@ def test_a_create_naming_a_library_outside_the_catalogue_clones_nothing(
 
 
 def test_a_create_naming_something_that_is_not_a_library_name_is_a_422(
-    lib_client: TestClient,
+    lib_client: TestClient, libraries_app: FastAPI
 ) -> None:
-    refused = lib_client.post(
-        "/api/v1/models",
-        json={"name": "Widget", "source": SOURCE, "libraries": ["../etc"]},
-    )
+    """The same refusal the multipart form's field gets (#437)."""
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post(
+            "/api/v1/models",
+            json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2", "../etc", "../etc"]},
+        )
 
     assert refused.status_code == 422, refused.text
+    assert refused.json()["libraries"] == ["../etc"]
+    resolve.assert_not_called()
     assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
+@pytest.mark.parametrize("multipart", [False, True], ids=["json", "multipart"])
+def test_a_create_that_would_conflict_clones_nothing(
+    lib_client: TestClient, libraries_app: FastAPI, multipart: bool
+) -> None:
+    """The slug conflict is found before a catalogued library is cloned (#436, #441)."""
+    create_model(lib_client)
+
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        if multipart:
+            refused = lib_client.post(
+                "/api/v1/models",
+                files={"file": (f"{SLUG}.scad", SOURCE.encode(), "application/octet-stream")},
+                data={"libraries": ["BOSL2"]},
+            )
+        else:
+            refused = lib_client.post(
+                "/api/v1/models",
+                json={"name": "Widget", "source": SOURCE, "libraries": ["BOSL2"]},
+            )
+
+    assert refused.status_code == 409, refused.text
+    resolve.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "request_kwargs",
+    [
+        {"json": {"name": "!!!", "source": SOURCE, "libraries": ["BOSL2"]}},
+        {
+            "files": {"file": ("!!!.scad", SOURCE.encode(), "application/octet-stream")},
+            "data": {"libraries": ["BOSL2"]},
+        },
+    ],
+    ids=["json", "multipart"],
+)
+def test_a_create_with_no_usable_slug_clones_nothing(
+    lib_client: TestClient, libraries_app: FastAPI, request_kwargs: dict[str, Any]
+) -> None:
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post("/api/v1/models", **request_kwargs)
+
+    assert refused.status_code == 422, refused.text
+    resolve.assert_not_called()
 
 
 def test_an_upload_naming_something_that_is_not_a_library_name_is_a_422(

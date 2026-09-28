@@ -37,7 +37,7 @@ from scadbuddy.api.deps import (
     QueueDep,
     SlugPath,
 )
-from scadbuddy.api.library_pins import pinned_at_create
+from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
@@ -291,6 +291,21 @@ def _rejected(error: NotOpenSCADError, check: SourceCheck | None = None) -> ApiE
     )
 
 
+def _refuse_binary(source: str) -> None:
+    if "\x00" in source:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
+        )
+
+
+def _require_new(catalogue: Catalogue, slug: str) -> None:
+    """A 409 when ``slug`` is taken. Checked by `_create`, and by a create that names
+    libraries before it clones them (#436): a create bound to fail spends no clone."""
+    if catalogue.exists(slug):
+        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+
+
 async def _guard_source(
     source: str,
     *,
@@ -308,11 +323,7 @@ async def _guard_source(
     `decode_source` already rejects binary, and pasted text must not be the way a
     binary blob gets into the models repository, where it breaks the diff route.
     """
-    if "\x00" in source:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            "the source contains a NUL byte, so it is binary, not OpenSCAD text",
-        )
+    _refuse_binary(source)
     if force:
         return None
     checked = await inspect_source(source, config=config, limit=limit, context=context)
@@ -400,8 +411,21 @@ async def create_model(
     if content_type == "application/json":
         try:
             pasted = PastedSource.model_validate(await request.json())
-        except (*_BAD_JSON, ValidationError) as error:
+        except ValidationError as error:
+            # A malformed library name reads as the multipart form's does (#437).
+            require_library_names(
+                str(detail["input"])
+                for detail in error.errors()
+                if detail["loc"][:1] == ("libraries",)
+                and detail["type"] == "string_pattern_mismatch"
+            )
             raise _malformed_body(error) from None
+        except _BAD_JSON as error:
+            raise _malformed_body(error) from None
+        # Everything that can fail without the network, before any library is cloned.
+        pasted_slug = _slug_from_name(pasted.name)
+        _require_new(catalogue, pasted_slug)
+        _refuse_binary(pasted.source)
         async with pinned_at_create(
             pasted.libraries,
             ModelMeta(name=pasted.name, description=pasted.description, tags=list(pasted.tags)),
@@ -414,7 +438,7 @@ async def create_model(
                 config,
                 checks,
                 events,
-                slug=_slug_from_name(pasted.name),
+                slug=pasted_slug,
                 source=pasted.source,
                 meta=pasted_meta,
                 # Either spelling forces, as the design and the OpenAPI both promise.
@@ -460,6 +484,8 @@ async def create_model(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             f"the upload needs a filename that yields a slug: {exc}",
         ) from None
+    # Before the parts are read, and so before any library is cloned (#436).
+    _require_new(catalogue, slug)
 
     try:
         source = decode_source(await file.read())
@@ -647,8 +673,7 @@ async def _create(
     readme: str | None = None,
 ) -> ModelRecord:
     """The one path every create takes, whatever carried the source in."""
-    if catalogue.exists(slug):
-        raise ApiError(status.HTTP_409_CONFLICT, f"a model named {slug!r} already exists")
+    _require_new(catalogue, slug)
     # The pins a dropped model.json carries (#93) are on the parse check's
     # OPENSCADPATH, as they will be on every render; none for any other create. A
     # pin whose checkout is not on this volume is the 409 every render would be.
