@@ -376,7 +376,8 @@ class Ctx:
   from the store and, for filament-aware goals, spool state from Bambuddy.
   `plate_of` is pure in-workflow construction of an explicit plate. Both yield a
   `Layout`; `output` writes it (multi-plate 3MF via
-  #289's writer, thumbnails, `bom`, extra `files`) to the store and records the
+  the multi-plate writer of base spec §6.4, thumbnails, `bom`, extra `files`) to the
+  store and records the
   output row. A pipeline may call `output` more than once (one 3MF per storey).
 - `bom` is structured, not a file: `[{piece, label, count, plates: [int], part: PartRef}]`,
   stored on the output and rendered by the host as a table; the agent reads it.
@@ -395,7 +396,7 @@ async def run(ctx, inputs):
     await ctx.output(plates=await ctx.pack([part]), name=inputs.get("name"))
 ```
 
-which is today's behaviour, including #289's `plates = N` echo handling inside
+which is today's behaviour, including base spec §6.4's `plates = N` echo handling inside
 `pack`. Every Generate, on every template, goes through `TemplatePipeline`; there is
 one code path.
 
@@ -673,8 +674,8 @@ manifests from 4.
 
 ## 12. Relationship to open issues
 
-- #289 (multi-plate templates, PR #386): its writer becomes `output`'s; its `plates =
-  N` echo is honoured by the default pipeline's `pack`.
+- #289 (multi-plate templates, merged as #386; base spec §6.4): its writer becomes
+  `output`'s; its `plates = N` echo is honoured by the default pipeline's `pack`.
 - #314 (combine objects onto one plate): becomes `Arrange` over several outputs.
 - #316 / #317 (library file layout; project file on Generate): the store's folder
   rules; `output` writes where #317 says.
