@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import path from 'node:path'
 import {
   forkSession as sdkForkSession,
   type McpSdkServerConfigWithInstance,
@@ -17,8 +18,18 @@ import {
   type HarnessRun,
   runHarness,
 } from '../harness/run.js'
+import { browserTierOf, GRANT_SERVER, SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
+import { headlessGrantServer } from '../harness/headlessGrants.js'
 import type { PluginsForRun } from '../plugins/forwarder.js'
-import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
+import type { PackagesForRun } from '../plugins/packages/install.js'
+import {
+  ensureSessionDir,
+  isUuid,
+  removeSessionBrowserDirs,
+  sessionBrowserDir,
+  sessionBrowserTmpDir,
+  sessionWorkDir,
+} from '../harness/stateDirs.js'
 import { type ApprovalRecord, ApprovalService, type GrantCheck, type ResumeResult } from '../approvals/service.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { canSee, event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -46,14 +57,14 @@ import { PostgresSessionStore } from './store.js'
 //     (bearer token → { kind: 'bearer', id: 'token:<id>', label: <token name> }).
 //     sessions.approve/deny → approvals.decide (#258, src/approvals/service.ts),
 //     with the token's approval grant as `approvalGrants`.
-//   - #251's registry also supplies `tierOf` and the in-process MCP servers
-//     (`mcpServers` below). BEFORE it wires in real (above all outward, #258)
-//     tools, settle how tool payloads are redacted: tool.call inputs and
-//     tool.result summaries go into the durable, multi-watcher event log,
-//     scrubbed only by sdkEvents.ts `scrubForLog` (the turn's credential,
-//     arguments named like secrets, a size cap). A tool that takes a secret
-//     under another name must declare it to the registry, and scrubForLog must
-//     read that declaration.
+//   - #251's registry supplies `tierOf` and the in-process MCP servers
+//     (`mcpServers` below; main.ts passes tools/harness.ts `harnessTools`).
+//     Tool payloads: tool.call inputs and tool.result summaries go into the
+//     durable, multi-watcher event log, scrubbed only by sdkEvents.ts
+//     `scrubForLog` (the turn's credential, arguments named like secrets, a
+//     size cap). No registry tool takes a secret argument; one that takes a
+//     secret under another name must declare it to the registry, and
+//     scrubForLog must read that declaration.
 //   - #266's WebSocket gateway maps the panel's client messages onto send
 //     (user.message), interrupt, handoff and attach, and sends `snapshot()`.
 //   - #264 publishes `session.*` on the bus and calls EventLog.wake() from its
@@ -184,6 +195,26 @@ export type SessionManagerDeps = {
    * released when the turn ends.
    */
   remotePlugins?: () => Promise<PluginsForRun>
+  /**
+   * The enabled plugin packages for a turn (#297), each materialised from its
+   * pin and verified: in production
+   * `loadPackagesForRun(packageStore, installer)`. Read once per turn; a
+   * package that cannot be loaded is reported in the session and left out.
+   */
+  packagePlugins?: () => Promise<PackagesForRun>
+  /**
+   * The headless browser (#349, spec §5.3). A session's turns get it only when
+   * this is set AND the `headless_browser_enabled` setting is `true`; it is off
+   * by default. `backendUrl` is SCADBUDDY_BACKEND_URL, which serves the SPA and
+   * is the one origin the browser may open.
+   */
+  headlessBrowser?: {
+    backendUrl: string
+    /** Tests only: a Chromium other than the pinned one. */
+    executablePath?: string
+    /** Whether Chromium's sandbox works here (harness/headlessSandbox.ts); asked once per turn. */
+    sandbox?: () => Promise<boolean>
+  }
   run?: QueryRunner
   /** Per-token approval grants (spec §6); nobody but the browser user may approve without one. */
   approvalGrants?: GrantCheck
@@ -573,8 +604,9 @@ export class SessionManager {
     const sql = this.deps.sql
     const tierOf = this.deps.tierOf ?? (() => undefined)
     // Widened with the plugins' tiers once they are loaded below, so the
-    // panel shows a plugin tool at the tier the permission seam applies.
-    let eventTierOf: TierResolver = tierOf
+    // panel shows a plugin tool at the tier the permission seam applies. The
+    // headless browser's tools are tiered too (spec §5.3, "Tiers").
+    let eventTierOf: TierResolver = (name) => browserTierOf(name) ?? tierOf(name)
     const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
 
@@ -603,7 +635,10 @@ export class SessionManager {
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
     let forwarded: PluginsForRun | undefined
+    let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
+    /** Whether this turn wrote headless-browser folders, removed when it ends. */
+    let browserDirs = false
     try {
       // The credential first, and into `secrets` at once: whatever fails
       // after this point is redacted before it reaches the event log.
@@ -615,7 +650,8 @@ export class SessionManager {
       // event log like the credential. Claude Code never holds them (the
       // forwarder adds them), but a plugin could echo one in a tool result.
       secrets.push(...(forwarded?.secrets ?? []))
-      eventTierOf = harnessTierOf({ remotePlugins, tierOf })
+      const pluginTiers = harnessTierOf({ remotePlugins, tierOf })
+      eventTierOf = (name) => browserTierOf(name) ?? pluginTiers(name)
       // A plugin left out of this turn is said so in the session, not only in the log.
       const unavailable = (message: string) =>
         this.events.append(id, [
@@ -625,8 +661,23 @@ export class SessionManager {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
+      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+      for (const problem of packages?.problems ?? []) {
+        this.deps.stderr?.(`${problem}\n`)
+        await unavailable(problem)
+      }
+      const pluginPaths = [...(this.deps.pluginPaths ?? []), ...(packages?.paths ?? [])]
       pluginCheck = async (message: SDKMessage) => {
         if (message.type !== 'system' || message.subtype !== 'init') return
+        // The SDK skips a plugin it cannot load; the init message lists what it did load
+        // (https://code.claude.com/docs/en/agent-sdk/plugins, "Verifying plugin installation").
+        const listed = (message as { plugins?: { path: string }[] }).plugins ?? []
+        const loaded = new Set(listed.map((p) => path.resolve(p.path)))
+        for (const dir of packages?.paths ?? []) {
+          if (!loaded.has(path.resolve(dir))) {
+            await unavailable(`plugin package ${path.basename(path.dirname(dir))} was not loaded by Claude Code`)
+          }
+        }
         for (const plugin of remotePlugins) {
           const status = message.mcp_servers.find((s) => s.name === plugin.name)?.status
           if (status !== 'connected') {
@@ -636,11 +687,30 @@ export class SessionManager {
           }
         }
       }
-      const [cwd, resume, model] = await Promise.all([
+      const [cwd, resume, model, browserSetting] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
         this.deps.settings?.get<string>(SETTING_MODEL),
+        this.deps.headlessBrowser ? this.deps.settings?.get<unknown>(SETTING_HEADLESS_BROWSER) : undefined,
       ])
+      const sandbox =
+        this.deps.headlessBrowser?.sandbox && browserSetting === true
+          ? await this.deps.headlessBrowser.sandbox()
+          : false
+      const browser =
+        this.deps.headlessBrowser && browserSetting === true
+          ? {
+              ...(sandbox ? { sandbox: true } : {}),
+              sessionId: id,
+              backendUrl: this.deps.headlessBrowser.backendUrl,
+              dir: sessionBrowserDir(this.deps.paths, id),
+              tmpDir: sessionBrowserTmpDir(id),
+              ...(this.deps.headlessBrowser.executablePath
+                ? { executablePath: this.deps.headlessBrowser.executablePath }
+                : {}),
+            }
+          : undefined
+      browserDirs = browser !== undefined
       const run: HarnessRun = {
         paths: this.deps.paths,
         credential,
@@ -659,11 +729,30 @@ export class SessionManager {
           secrets: () => secrets,
           signal: controller.signal,
         }),
+        ...(browser ? { headlessBrowser: browser } : {}),
         // First turn: the SDK session gets OUR id; later turns resume it.
         ...(resume ? { resume: id } : { sessionId: id }),
         ...(typeof model === 'string' && model ? { model } : {}),
-        ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
-        ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(this.deps.mcpServers || browser
+          ? {
+              mcpServers: {
+                ...(this.deps.mcpServers ? this.deps.mcpServers(session) : {}),
+                // The one way past the backend's agent-actor gate: a human
+                // approves one exact outward request (harness/headlessGrants.ts).
+                ...(browser
+                  ? {
+                      [GRANT_SERVER]: headlessGrantServer({
+                        sql,
+                        sessionId: id,
+                        turnId,
+                        hash: (tool, input) => this.approvals.hash(tool, input),
+                      }),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(pluginPaths.length ? { pluginPaths } : {}),
         ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
@@ -683,9 +772,17 @@ export class SessionManager {
       if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
       forwarded?.release()
+      packages?.release()
       local.settling = true
       clearInterval(renew)
       await renewing
+      // The query has ended, and with it the playwright server and Chromium:
+      // its screenshots and profile go now, not when the volume fills.
+      if (browserDirs) {
+        await removeSessionBrowserDirs(this.deps.paths, id).catch((err: unknown) =>
+          this.deps.stderr?.(`cannot remove the headless-browser folders of session ${id}: ${String(err)}\n`),
+        )
+      }
     }
     // The loop has ended only after the SDK's last transcript append (measured:
     // `last-prompt` and `cost-state` entries arrive after the `result`

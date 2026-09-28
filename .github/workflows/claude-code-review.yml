@@ -700,6 +700,7 @@ jobs:
           REVIEW_ERROR: ${{ needs.claude-review-run.outputs.review_error }}
           GATE_ERROR: ${{ needs.claude-review-run.outputs.gate_error }}
           GH_TOKEN: ${{ steps.app-token.outputs.token || github.token }}
+          APP_TOKEN: ${{ steps.app-token.outputs.token }}
           REPO: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.inputs.pr_number }}
           HEAD_SHA: ${{ github.sha }}
@@ -871,6 +872,26 @@ jobs:
           if [ "$VERDICT" = "pass" ]; then
             echo "All review findings are addressed (fixed in branch or tracked in a pr-feedback issue). Merge gate passes."
             pass "All review findings are addressed (fixed in this branch or tracked in a \`pr-feedback\` issue)."
+          fi
+
+          # A PR merged before its review finished can no longer take a fix on
+          # its branch, so file the findings instead of waiting for someone to
+          # apply the label by hand. The label must be applied with the App
+          # token: a label added by GITHUB_TOKEN does not trigger
+          # pr-follow-up-issues.yml.
+          merged_at="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json mergedAt --jq '.mergedAt // empty' 2>/dev/null || true)"
+          if [ -n "$merged_at" ]; then
+            [ -n "${APP_TOKEN:-}" ] || echo "::warning::No App token; the label below will not trigger pr-follow-up-issues.yml."
+            if gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label claude-make-follow-up-issues >/dev/null; then
+              echo "PR was merged at ${merged_at}; applied 'claude-make-follow-up-issues' to file the outstanding findings."
+              fail "This PR was merged before its review findings were addressed, so the \`claude-make-follow-up-issues\` label was applied automatically to file them as \`pr-feedback\` issues.
+
+          **Why:** ${REASON:-_no reason provided_}
+
+          **Outstanding findings**
+          ${FINDINGS:-_none listed_}"
+            fi
+            echo "::warning::PR is merged but applying 'claude-make-follow-up-issues' failed; apply it by hand."
           fi
 
           echo "::error::Merge gate failed: review findings are neither fixed in this branch nor tracked in a pr-feedback issue. Push a fix, or apply the 'claude-make-follow-up-issues' label to file them — the gate re-evaluates on the next dispatch."
