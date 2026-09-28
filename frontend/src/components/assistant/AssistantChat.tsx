@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useCallback, useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useLocation } from 'react-router'
 import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
@@ -6,9 +6,12 @@ import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
 import type { ChatTransportFactory } from '../../agent/chat/transport'
 import { useAgentChat } from '../../agent/chat/useAgentChat'
+import { useSpeakReplies } from '../../agent/chat/voice'
 import { Button } from '../ui/Button'
 import { OriginBadge, OwnerBadge } from './badges'
 import { FeedItemView } from './FeedItemView'
+import { useDictation, useSpokenReplies } from './useVoice'
+import { MicButton, SpeakRepliesToggle } from './VoiceControls'
 
 function prefersReducedMotion(): boolean {
   return typeof window.matchMedia === 'function' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
@@ -23,10 +26,12 @@ interface Props {
   onClose: () => void
   /** Bumped each time the panel opens, so the composer takes focus. */
   focusKey: number
+  /** Inside Bambuddy's iframe, where the microphone may be blocked (#257). */
+  embedded?: boolean
 }
 
 /** The assistant panel's body: sessions, the stream and action feed, and the composer. */
-export function AssistantChat({ factory, onClose, focusKey }: Props) {
+export function AssistantChat({ factory, onClose, focusKey, embedded = false }: Props) {
   const chat = useAgentChat(factory)
   const { state } = chat
   const { pathname } = useLocation()
@@ -43,6 +48,19 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
   const pendingApproval = active?.items.some((i) => i.kind === 'approval' && i.state === 'pending') ?? false
   const itemCount = active?.items.length ?? 0
 
+  // Voice (#257): dictation fills the draft for the user to review; replies can be read aloud.
+  const getDraft = useCallback(() => composer.current?.value ?? '', [])
+  const focusComposer = useCallback(() => composer.current?.focus(), [])
+  const speakReplies = useSpeakReplies()
+  const speech = useSpokenReplies(state.activeId, active?.items, speakReplies)
+  const dictation = useDictation({
+    getDraft,
+    setDraft,
+    onDone: focusComposer,
+    onStart: speech.stop,
+    embedded,
+  })
+
   useEffect(() => {
     composer.current?.focus()
   }, [focusKey])
@@ -58,6 +76,8 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
 
   const submit = (text: string) => {
     if (!text.trim() || busy || !owned) return
+    dictation.cancel()
+    speech.arm()
     const { tools, dialogs, page } = bridge.snapshot()
     chat.send(text, pageContext(pathname, { tools, dialogs, page }))
     setDraft('')
@@ -232,8 +252,25 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
           }
           className="w-full resize-none rounded-[6px] border border-line bg-bg px-2.5 py-1.5 text-[13px] outline-none focus:border-line-strong disabled:opacity-50"
         />
+        {dictation.error && (
+          <p role="alert" className="mt-1 text-[12px] text-warn">
+            {dictation.error}
+          </p>
+        )}
+        <p className="sr-only" role="status">
+          {dictation.announcement}
+        </p>
         <div className="mt-1.5 flex items-center justify-end gap-2">
+          <div className="mr-auto flex items-center gap-2">
+            <SpeakRepliesToggle />
+            {speech.speaking && (
+              <Button size="sm" variant="ghost" onClick={speech.stop}>
+                Stop speaking
+              </Button>
+            )}
+          </div>
           {busy && <span className="text-[11.5px] text-faint">Wait for this turn to finish, or stop it.</span>}
+          <MicButton dictation={dictation} disabled={!owned} embedded={embedded} />
           <Button type="submit" variant="primary" size="sm" disabled={!draft.trim() || busy || !owned}>
             Send
           </Button>
