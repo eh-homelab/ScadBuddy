@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { BUILTIN_SLUG, GALLERY_SLUG, media } from '../mocks/fixtures'
-import { ApiError, api } from './client'
+import { http, HttpResponse } from 'msw'
+import { server } from '../mocks/server'
+import { ApiError, api, printRunPoll } from './client'
 import type { MediaView } from './types'
 
 const video = media[GALLERY_SLUG]!.find((item) => item.kind === 'video')!
@@ -147,5 +149,68 @@ describe('media writes against the mock API (#274)', () => {
 
     const deleted = await api.deleteMedia(copy.slug, third!)
     expect(deleted.media?.map((item) => item.id)).toEqual([fourth, second, first])
+  })
+})
+
+describe('runPrint follows the run the server answers with 202 (#470)', () => {
+  const body = { choices: { nozzles: [], tier: 'standard' } } as unknown as Parameters<
+    typeof api.runPrint
+  >[1]
+  const started = {
+    id: 'run-1',
+    output_id: 'out-1',
+    status: 'running',
+    created_at: '2026-09-28T10:00:00Z',
+    finished_at: null,
+    result: null,
+    error: null,
+  }
+
+  afterEach(() => {
+    server.resetHandlers()
+    printRunPoll.intervalMs = 1000
+  })
+
+  it('reads the run until it succeeds and returns its result', async () => {
+    printRunPoll.intervalMs = 1
+    const result = { queue_item_ids: [7], warnings: [] }
+    let reads = 0
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () => {
+        reads += 1
+        return HttpResponse.json(
+          reads < 2 ? started : { ...started, status: 'succeeded', result },
+        )
+      }),
+    )
+
+    await expect(api.runPrint('out-1', body)).resolves.toEqual(result)
+    expect(reads).toBe(2)
+  })
+
+  it("throws the failed run's problem, as the route used to answer it", async () => {
+    printRunPoll.intervalMs = 1
+    server.use(
+      http.post('/api/v1/print/outputs/out-1/run', () => HttpResponse.json(started, { status: 202 })),
+      http.get('/api/v1/print/runs/run-1', () =>
+        HttpResponse.json({
+          ...started,
+          status: 'failed',
+          error: {
+            status: 502,
+            title: 'Bad Gateway',
+            detail: 'Bambuddy failed to slice the plate: no support',
+            extensions: { slice_job_id: 9 },
+          },
+        }),
+      ),
+    )
+
+    const error = await api.runPrint('out-1', body).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(ApiError)
+    expect((error as ApiError).status).toBe(502)
+    expect((error as ApiError).message).toBe('Bambuddy failed to slice the plate: no support')
+    expect((error as ApiError).problem).toMatchObject({ slice_job_id: 9 })
   })
 })

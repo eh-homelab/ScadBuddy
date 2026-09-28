@@ -33,6 +33,7 @@ import type {
   PlateFit,
   PrinterBedType,
   PrintProgress,
+  PrintRun,
   PrintRunRequest,
   PrintRunResult,
   PrintOptionsState,
@@ -161,6 +162,9 @@ function xhrProblem(xhr: XMLHttpRequest): Problem {
 }
 
 const seg = encodeURIComponent
+
+/** How often `runPrint` reads a running print run (#470); tests shorten it. */
+export const printRunPoll = { intervalMs: 1000 }
 
 export const api = {
   listModels: () => request<ModelSummary[]>('/models'),
@@ -570,11 +574,29 @@ export const api = {
    * spec 2026-09-27 §4 — the spool-first run: no pipeline is named, every slicer preset
    * is derived server-side from the dialog's spools, nozzles, quality and plate.
    */
-  runPrint: (outputId: string, body: PrintRunRequest) =>
-    request<PrintRunResult>(`/print/outputs/${seg(outputId)}/run`, {
+  runPrint: async (outputId: string, body: PrintRunRequest): Promise<PrintRunResult> => {
+    // #470: the server answers 202 with a run and slices and queues in the background,
+    // since that takes longer than the proxies in front wait. A repeat of the same
+    // request is the same run, so following it again never queues a second print.
+    let run = await request<PrintRun>(`/print/outputs/${seg(outputId)}/run`, {
       method: 'POST',
       body: JSON.stringify(body),
-    }),
+    })
+    while (run.status === 'running') {
+      await new Promise((resolve) => setTimeout(resolve, printRunPoll.intervalMs))
+      run = await request<PrintRun>(`/print/runs/${seg(run.id)}`)
+    }
+    if (run.status === 'failed' || !run.result) {
+      const error = run.error
+      throw new ApiError({
+        ...error?.extensions,
+        title: error?.title ?? 'Print failed',
+        status: error?.status ?? 500,
+        detail: error?.detail ?? 'The print run ended without a result.',
+      })
+    }
+    return run.result
+  },
 
   /**
    * #79 — Bambuddy's projects, each with the library folder that belongs to it, plus
