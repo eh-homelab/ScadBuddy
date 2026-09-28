@@ -7,7 +7,9 @@ print uses (#316), so a later print on the same printer and nozzle reuses that o
 
 from __future__ import annotations
 
+import json
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -15,10 +17,14 @@ import pytest
 import respx
 from fastapi.testclient import TestClient
 
+from scadbuddy.api import outputs as outputs_api
 from scadbuddy.bambuddy.project_file import project_stem
+from scadbuddy.core.paths import DataPaths
+from scadbuddy.library.outputs import META_NAME
 from scadbuddy.render.schema import ParamValue
+from tests.api.conftest import set_fake_env
 from tests.api.test_print_filaments import queue_route, slice_routes
-from tests.api.test_print_run_choices import run_request, run_routes
+from tests.api.test_print_run_choices import _uploaded_colours, run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output
 
 pytestmark = pytest.mark.requires_postgres
@@ -71,6 +77,23 @@ def file_into_project(client: TestClient, output_id: str) -> httpx.Response:
     return response
 
 
+def named_output(client: TestClient, model: str, name: str = "Elan") -> str:
+    """An output whose model's schema is cached, as every real render of it leaves it
+    (the test render is faked). The file name reads the defaults from that cache."""
+    output_id = make_output(client, model, name=name)
+    assert client.get(f"/api/v1/models/{model}/schema").status_code == 200
+    return output_id
+
+
+def in_spool_nines_colour(paths: DataPaths, model: str, output_id: str) -> None:
+    """Make the output's own colour spool 9's (#688197, inventory-spools.json), so a
+    print from spool 9 is in the colours Generate filed the project file in."""
+    meta_path = paths.output_dir(model, output_id) / META_NAME
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    meta["colors"] = ["#688197"]
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
 def remember_h2c_at(client: TestClient, nozzle: str) -> None:
     """What the print dialog last chose for the model: printer 1 (an H2C) and a nozzle."""
     assert (
@@ -116,7 +139,7 @@ def test_the_file_is_named_after_the_template_and_the_changed_params(
     """``Demo`` is the template's name; ``width`` 12 is the one value off its default
     (``label`` is left at ``hi``)."""
     configure(client)
-    output_id = make_output(client, model)
+    output_id = named_output(client, model)
     project_folder_routes()
     uploaded = uploads(41)
 
@@ -128,7 +151,7 @@ def test_the_file_is_named_after_the_template_and_the_changed_params(
 @respx.mock
 def test_a_name_already_in_the_folder_is_made_unique(client: TestClient, model: str) -> None:
     configure(client)
-    output_id = make_output(client, model)
+    output_id = named_output(client, model)
     project_folder_routes(
         [
             {"id": 30, "folder_id": FOLDER, "filename": "Demo — 12.3mf"},
@@ -142,14 +165,15 @@ def test_a_name_already_in_the_folder_is_made_unique(client: TestClient, model: 
 
 
 @respx.mock
-def test_a_later_print_on_the_same_printer_reuses_the_project_file(
-    client: TestClient, model: str
+def test_a_later_print_on_the_same_printer_in_the_models_colours_reuses_the_project_file(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """One file in the project folder, plus its slice. The print chose spools, so its
-    layout key names their colours; the Generate copy is in the model's own colours
-    and is still the one the print uses, rather than a second copy beside it."""
+    layout key names their colours; they are the model's own, so the Generate copy is
+    the one the print uses, rather than a second copy beside it."""
     configure(client)
     output_id = make_output(client, model)
+    in_spool_nines_colour(paths, model, output_id)
     remember_h2c_at(client, "0.2")
     project_folder_routes()
     uploaded = uploads(41, 42)
@@ -169,8 +193,79 @@ def test_a_later_print_on_the_same_printer_reuses_the_project_file(
 
 
 @respx.mock
-def test_generate_lays_the_file_out_for_the_projects_last_print(
+def test_a_print_into_the_project_in_other_spools_colours_uploads_a_copy_in_theirs(
     client: TestClient, model: str
+) -> None:
+    """#476 in a project's folder: the Generate copy is in the model's colours (#FF0000),
+    and spool 9 is #688197. Reusing it would show Bambuddy's queue a print that will
+    not come out, so the print gets its own copy beside it, in the spool's colour."""
+    configure(client)
+    output_id = make_output(client, model)
+    remember_h2c_at(client, "0.2")
+    project_folder_routes()
+    uploaded = uploads(41, 42)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    assert file_into_project(client, output_id).json()["library_file_id"] == 41
+    assert _uploaded_colours(uploaded) == ["#FF0000"]
+
+    ran = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
+    )
+    assert ran.status_code == 200, ran.text
+    assert (ran.json()["library_file_id"], ran.json()["folder_id"]) == (42, FOLDER)
+    assert uploaded.calls.last.request.url.params["folder_id"] == str(FOLDER)
+    assert _uploaded_colours(uploaded) == ["#688197"]
+
+
+@respx.mock
+def test_naming_the_file_never_fails_the_print(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Whatever resolving the name raises (a library checkout that cannot be cloned
+    back, say), the print goes ahead under a plain name."""
+    configure(client)
+    output_id = make_output(client, model)
+    project_folder_routes()
+    uploaded = uploads(41)
+    run_routes()
+    slice_routes()
+    queue_route()
+
+    def broken(*args: object) -> str:
+        raise RuntimeError("the library checkout is gone")
+
+    monkeypatch.setattr(outputs_api, "_output_stem", broken)
+    ran = client.post(
+        f"/api/v1/print/outputs/{output_id}/run", json=run_request(project_id=PROJECT)
+    )
+    assert ran.status_code == 200, ran.text
+    assert uploaded_name(uploaded) == f"{project_stem(model, {}, {}, name='Elan')}.3mf"
+
+
+@respx.mock
+def test_the_name_runs_no_openscad_when_no_schema_is_cached(
+    client: TestClient, model: str, tmp_path: Path
+) -> None:
+    """Without the cached schema every param counts as changed; the name is still the
+    template's, and nothing is derived inline to get it."""
+    configure(client)
+    output_id = make_output(client, model)
+    project_folder_routes()
+    uploaded = uploads(41)
+    log = tmp_path / "invocations.log"
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_LOG", str(log))
+
+    assert file_into_project(client, output_id).status_code == 200
+    assert uploaded_name(uploaded) == "Demo — 12.3mf"
+    assert not log.exists()
+
+
+@respx.mock
+def test_generate_lays_the_file_out_for_the_projects_last_print(
+    client: TestClient, model: str, paths: DataPaths
 ) -> None:
     """A print into a project remembers its printer and nozzle (in Postgres), and the
     next output filed into that project is laid out for them, so it too is reused."""
@@ -187,6 +282,7 @@ def test_generate_lays_the_file_out_for_the_projects_last_print(
     assert first.status_code == 200, first.text
 
     fresh = make_output(client, model, name="Second")
+    in_spool_nines_colour(paths, model, fresh)
     assert file_into_project(client, fresh).json()["library_file_id"] == 42
     detail = client.get(f"/api/v1/outputs/{fresh}").json()
     assert [copy["target_key"] for copy in detail["library_files"]] == ["Bambu Lab H2C@0.2"]
@@ -203,7 +299,7 @@ def test_a_print_on_a_different_printer_adds_a_second_copy_named_for_it(
     """The project keeps the Generate copy; the second printer model gets its own,
     named after that model so the two are told apart in the folder."""
     configure(client)
-    output_id = make_output(client, model)
+    output_id = named_output(client, model)
     project_folder_routes().side_effect = [
         httpx.Response(200, json=[]),
         httpx.Response(200, json=[{"id": 41, "folder_id": FOLDER, "filename": "Demo — 12.3mf"}]),

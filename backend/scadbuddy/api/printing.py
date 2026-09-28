@@ -15,12 +15,8 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
-    ConfigDep,
-    FetcherDep,
-    HistoryDep,
     OutputIdPath,
     OutputsDep,
-    PathsDep,
     PrintProgressDep,
     PrintWatcherDep,
     SettingsStoreDep,
@@ -129,10 +125,6 @@ async def post_run(
     observer: PrintProgressDep,
     watcher: PrintWatcherDep,
     catalogue: CatalogueDep,
-    paths: PathsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    fetcher: FetcherDep,
 ) -> PrintRunResult:
     """Derive every slicer preset from the chosen spools, nozzles, quality and plate
     (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
@@ -145,9 +137,7 @@ async def post_run(
     settings = store.load()
     # A copy uploaded into a project's folder is named like the one Generate files (#317).
     stem = (
-        await output_stem(
-            meta, outputs, catalogue, paths=paths, history=history, config=config, fetcher=fetcher
-        )
+        await output_stem(meta, outputs, catalogue)
         if (body.project_id or settings.last_project_id) is not None
         else None
     )

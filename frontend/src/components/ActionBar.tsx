@@ -154,6 +154,9 @@ export function ActionBar({
           'There is no generated output for these values yet; call generate first.',
         )
       }
+      if (kind !== 'send' && live.current.generating) {
+        throw new AgentToolError('invalid_args', 'Generate is still filing the project file.')
+      }
       if (kind === 'send') setSendOpen(true)
       else setPrintOpen(true)
       await committed(() => (kind === 'send' ? live.current.sendOpen : live.current.printOpen), 'the dialog to open')
@@ -255,7 +258,8 @@ export function ActionBar({
           <Button
             variant={misfit ? 'danger' : 'default'}
             onClick={() => setPrintOpen(true)}
-            disabled={!output}
+            // #317 — Generate is still filing the project file, which the print reuses.
+            disabled={!output || generating}
             data-testid="print"
             title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >

@@ -1269,6 +1269,35 @@ describe('CustomizePage, project file (#317)', () => {
     expect(screen.queryByTestId('project-filed')).not.toBeInTheDocument()
   })
 
+  it('keeps Print disabled until the project file is filed, so the print reuses it', async () => {
+    withLastProject(1)
+    let answer: (() => void) | undefined
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve
+    })
+    server.use(
+      http.post('/api/v1/outputs/:id/project-file', async () => {
+        await answered
+        return HttpResponse.json({
+          project_id: 1,
+          folder_id: 9,
+          library_file_id: 41,
+          filename: 'Keychain.3mf',
+          created: true,
+          bambuddy_url: 'http://bambuddy.local/projects/1',
+        })
+      }),
+    )
+    const { user } = render()
+    await waitFor(() => expect(pagePicker()).toHaveValue('1'))
+    await generate(user)
+
+    expect(screen.getByTestId('print')).toBeDisabled()
+    answer?.()
+    await screen.findByTestId('project-filed')
+    expect(screen.getByTestId('print')).toBeEnabled()
+  })
+
   it('shares one choice with the print dialog', async () => {
     withLastProject(null)
     const { user } = render()
@@ -1276,6 +1305,7 @@ describe('CustomizePage, project file (#317)', () => {
     await user.selectOptions(pagePicker(), '2')
     await generate(user)
 
+    await waitFor(() => expect(screen.getByTestId('print')).toBeEnabled())
     await user.click(screen.getByTestId('print'))
     const dialog = await screen.findByRole('dialog')
     const dialogPicker = await within(dialog).findByTestId('project-select')

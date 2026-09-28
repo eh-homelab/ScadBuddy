@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
@@ -13,11 +15,8 @@ from scadbuddy.api.deps import (
     CatalogueDep,
     ConfigDep,
     EventsDep,
-    FetcherDep,
-    HistoryDep,
     OutputIdPath,
     OutputsDep,
-    PathsDep,
     PrintProgressDep,
     PrintWatcherDep,
     QueueDep,
@@ -37,13 +36,10 @@ from scadbuddy.bambuddy.project_file import (
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
-from scadbuddy.core.config import Config
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.catalogue import Catalogue, ModelNotFoundError
-from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.library.outputs import (
     MODEL_NAME,
     PREVIEW_NAME,
@@ -55,10 +51,10 @@ from scadbuddy.library.outputs import (
 )
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
-from scadbuddy.render.jobs import resolve_source
-from scadbuddy.render.runner import OpenSCADError, cached_schema
-from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.schema import CustomizerSchema, ParamValue, source_sha256
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["outputs"])
 
@@ -436,36 +432,46 @@ async def send_output_to_bambuddy(
     return result
 
 
-async def output_stem(
-    meta: OutputMeta,
-    outputs: OutputStore,
-    catalogue: Catalogue,
-    *,
-    paths: DataPaths,
-    history: ModelHistory,
-    config: Config,
-    fetcher: CheckoutFetcher,
-) -> str:
+def _cached_defaults(paths: DataPaths, slug: str) -> dict[str, ParamValue | None]:
+    """The model's param defaults from its cached schema, or ``{}`` when none matching
+    the live source is cached.
+
+    Only read: a name hangs on them, so neither openscad nor a library checkout (which
+    may clone) is run for them. Every render of the live model caches the schema.
+    """
+    try:
+        source = paths.model_source(slug).read_text(encoding="utf-8")
+        body = json.loads(paths.model_schema_cache(slug).read_text(encoding="utf-8"))
+        schema = CustomizerSchema.model_validate(body["schema"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+    if schema.source_sha256 != source_sha256(source):
+        return {}
+    return {param.name: param.initial for param in schema.parameters}
+
+
+def _output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
+    params = outputs.params(meta.id)
+    try:
+        template = catalogue.record(meta.slug).name
+    except ModelNotFoundError:
+        return project_stem(meta.slug, params, {}, name=meta.name)
+    defaults = _cached_defaults(outputs.paths, meta.slug)
+    return project_stem(template, params, defaults, name=meta.name)
+
+
+async def output_stem(meta: OutputMeta, outputs: OutputStore, catalogue: Catalogue) -> str:
     """The name a project file of this output goes by (#317): the template's name and
     the params that differ from its defaults (`project_stem`).
 
-    The defaults are the model's current schema, which is cached with the source. A
-    model deleted since, or a schema OpenSCAD cannot build, costs only the summary: the
-    name is then the template (or slug) and the output's own name.
+    Naming never fails what it names: when the model, its params or its cached schema
+    cannot be read, the name falls back to the slug and the output's own name.
     """
-    params = await asyncio.to_thread(outputs.params, meta.id)
     try:
-        template = catalogue.record(meta.slug).name
-        source = await resolve_source(
-            meta.slug, None, paths=paths, history=history, fetcher=fetcher
-        )
-        schema = await cached_schema(
-            source.scad, source.schema_cache, config=source.configure(config)
-        )
-    except (ModelNotFoundError, FileNotFoundError, OpenSCADError):
-        return project_stem(meta.slug, params, {}, name=meta.name)
-    defaults = {param.name: param.initial for param in schema.parameters}
-    return project_stem(template, params, defaults, name=meta.name)
+        return await asyncio.to_thread(_output_stem, meta, outputs, catalogue)
+    except Exception:
+        logger.warning("could not name the project file; using a plain name", exc_info=True)
+        return project_stem(meta.slug, {}, {}, name=meta.name)
 
 
 @router.post(
@@ -480,10 +486,6 @@ async def post_project_file(
     uploads: UploadsDep,
     store: SettingsStoreDep,
     catalogue: CatalogueDep,
-    paths: PathsDep,
-    history: HistoryDep,
-    config: ConfigDep,
-    fetcher: FetcherDep,
 ) -> ProjectFile:
     """Upload the editable project 3MF into the project's folder (#317), as Generate does
     when a project is chosen.
@@ -495,9 +497,7 @@ async def post_project_file(
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
-    stem = await output_stem(
-        meta, outputs, catalogue, paths=paths, history=history, config=config, fetcher=fetcher
-    )
+    stem = await output_stem(meta, outputs, catalogue)
     async with client_for(settings) as client:
         return await file_into_project(
             client, outputs, uploads, meta, settings, body.project_id, stem=stem
