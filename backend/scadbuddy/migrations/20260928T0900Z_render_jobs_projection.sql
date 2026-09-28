@@ -17,5 +17,4 @@ CREATE TABLE blob_refs (
     holder_id   text NOT NULL,
     PRIMARY KEY (key, holder_kind, holder_id)
 );
-CREATE INDEX blob_refs_key ON blob_refs (key);
 CREATE INDEX blob_refs_holder ON blob_refs (holder_kind, holder_id);
