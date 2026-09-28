@@ -58,6 +58,8 @@ from typing import Annotated, Literal, Protocol, Self, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
+from scadbuddy.core.metrics import RenderStage
+
 logger = logging.getLogger(__name__)
 
 #: The channel a Postgres backend NOTIFYs and LISTENs on (spec §7).
@@ -97,6 +99,16 @@ class JobEvent(BaseEvent):
     kind: JobKind
     job_id: str
     slug: str
+
+
+class JobProgress(BaseEvent):
+    """A running render started one of its steps (#267): the same steps
+    ``scadbuddy_render_stage_seconds`` times (``core/metrics.py`` ``RenderStage``)."""
+
+    kind: Literal["job.progress"] = "job.progress"
+    job_id: str
+    slug: str
+    stage: RenderStage
 
 
 class ModelEvent(BaseEvent):
@@ -181,6 +193,18 @@ class SettingsChanged(BaseEvent):
     section: SettingsSection
 
 
+class AnalyzerDecisionEvent(BaseEvent):
+    """A print-analyzer decision (accept, ignore, suppress) was recorded or removed
+    (#284). The ids say which rule at which scope; re-read the decisions for the rest."""
+
+    kind: Literal["analyzer.decision"] = "analyzer.decision"
+    decision_id: str
+    diagnostic_id: str
+    scope: str
+    scope_key: str
+    action: Literal["recorded", "removed"]
+
+
 #: The resync marker's kind. Every subscription receives it, whatever its filter.
 RESYNC_KIND = "bus.resync"
 
@@ -201,6 +225,7 @@ class BusResync(BaseEvent):
 
 Event = Annotated[
     JobEvent
+    | JobProgress
     | ModelEvent
     | SourceChanged
     | VersionCommitted
@@ -211,6 +236,7 @@ Event = Annotated[
     | LibraryRemoved
     | FontInstalled
     | SettingsChanged
+    | AnalyzerDecisionEvent
     | BusResync,
     Field(discriminator="kind"),
 ]

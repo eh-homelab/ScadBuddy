@@ -139,6 +139,7 @@ export function CustomizePage() {
     error: renderError,
     busy: renderBusy,
     settledFor,
+    stage: renderStage,
   } = useRenderJob(slug, settled ? debounced : undefined, version)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
@@ -588,6 +589,7 @@ export function CustomizePage() {
             <Preview
               job={job}
               rendering={rendering || !settled}
+              stage={renderStage}
               plate={plate}
               captureRef={captureRef}
               leading={

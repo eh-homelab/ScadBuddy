@@ -17,6 +17,14 @@ export async function frontendParseServerEvent(): Promise<(raw: unknown) => Pars
   return mod.parseServerEvent
 }
 
+/** The panel's own client-message builder and parser, to feed what it sends into the agent. */
+export async function frontendClientMessages(): Promise<{
+  clientMessage: (body: Record<string, unknown> & { type: string }) => Record<string, unknown>
+  parseClientMessage: (raw: unknown) => ParseResult
+}> {
+  return (await import(modulePath)) as Awaited<ReturnType<typeof frontendClientMessages>>
+}
+
 /** Throws, naming the event, when the panel would drop it. */
 export async function expectPanelAccepts(events: readonly unknown[]): Promise<void> {
   const parse = await frontendParseServerEvent()
