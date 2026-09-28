@@ -143,6 +143,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.catalogue.sweep_tombstones)
     except OSError:
         logger.exception("could not sweep tombstones")
+    # A duplicate the process died in the middle of left its staging copy. Nothing
+    # is duplicating yet: no request has been served.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
+    except OSError:
+        logger.exception("could not sweep duplicate staging folders")
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
