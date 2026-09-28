@@ -154,11 +154,11 @@ async def get_print_options(
 ) -> PrintOptionsState:
     settings = store.load()
     printer_id = settings.printer_id
-    # ``pipeline_for`` is the Settings pipeline for every model now (a legacy per-model
-    # one is no longer read). A caller that has already chosen one passes it (#145),
-    # and the run keys the scope on that pipeline's target.
+    # The Settings pipeline, for every model (a legacy per-model one is no longer read,
+    # so ``slug`` does not change it). A caller that has already chosen one passes it
+    # (#145), and the run keys the scope on that pipeline's target.
     if pipeline_id is None:
-        pipeline_id = settings.pipeline_for(slug) if slug is not None else settings.pipeline_id
+        pipeline_id = settings.pipeline_id
     if printer_id is None and pipeline_id is not None:
         try:
             async with client_for(settings) as client:
