@@ -65,4 +65,5 @@ markers = [
     "requires_git: needs a real git binary on PATH",
     "requires_openscad_lsp: needs a real openscad-lsp binary on PATH",
     "requires_postgres: needs SCADBUDDY_TEST_DATABASE_URL pointing at a Postgres",
+    "requires_temporal: needs SCADBUDDY_TEST_TEMPORAL_ADDRESS or a temporal CLI on PATH",
 ]
