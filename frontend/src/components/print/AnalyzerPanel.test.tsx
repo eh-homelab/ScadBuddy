@@ -17,6 +17,7 @@ const output = fixtures.outputs[0]!
 const request: AnalysisRequest = {
   printer_id: 1,
   plate_id: 1,
+  all_plates: false,
   choices: {
     nozzles: [{ size: '0.4', flow: 'standard' }],
     tier: 'standard',
@@ -157,7 +158,9 @@ describe('AnalyzerPanel', () => {
   it('names the plate the mesh checks read when every plate is printed', async () => {
     renderPanel({ allPlates: true })
     await screen.findByTestId('diagnostic-SB1003')
-    expect(screen.getByTestId('print-checks')).toHaveTextContent(/mesh checks read plate 1/)
+    expect(screen.getByTestId('print-checks')).toHaveTextContent(
+      'The mesh checks read plate 1; the plate-fit and filament checks read every plate.',
+    )
   })
 
   it('says why decisions were not applied when the store cannot be read', async () => {

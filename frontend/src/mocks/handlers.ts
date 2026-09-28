@@ -47,6 +47,7 @@ import type {
 } from '../api/types'
 import { editPath } from '../lib/deeplink'
 import { emitRealtime, realtimeHandler } from './realtime'
+import { mcpTokenHandlers, resetMcpTokens } from './mcpTokens'
 import {
   MAX_META_BYTES,
   MAX_META_SIZE,
@@ -237,6 +238,7 @@ export function resetMockState(): void {
   state.seq = 0
   state.pendingPreviews.clear()
   state.analyzerDecisions = []
+  resetMcpTokens()
 }
 
 /** As the backend's `PreviewScheduler.request`: queue a default render of `slug`. */
@@ -292,6 +294,11 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 /** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
 export function setMockUploadLimit(bytes: number): void {
   state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
+/** #279 — replaces a template's media list, e.g. with a video whose file is gone. */
+export function setMockMedia(slug: string, media: MediaView[]): void {
+  state.models = state.models.map((m) => (m.slug === slug ? { ...m, media } : m))
 }
 
 export function setCatalogueOffline(offline: boolean): void {
@@ -954,6 +961,8 @@ function refusal(check: SourceCheck) {
 
 export const handlers = [
   realtimeHandler,
+  // The agent service's routes (#251); the rest of this list is the backend.
+  ...mcpTokenHandlers,
 
   http.get(`${base}/models`, () => {
     landPreviews()
@@ -2266,7 +2275,12 @@ export const handlers = [
     const output = state.outputs.find((o) => o.id === body.target.output_id)
     if (!output) return problem(404, 'Output not found')
     return HttpResponse.json(
-      analysisReport(output, body.request ?? { plate_id: 1 }, undefined, state.analyzerDecisions),
+      analysisReport(
+        output,
+        body.request ?? { plate_id: 1, all_plates: false },
+        undefined,
+        state.analyzerDecisions,
+      ),
     )
   }),
 
