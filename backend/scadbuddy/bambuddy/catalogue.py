@@ -69,15 +69,6 @@ def _local_choice(preset: LocalPreset) -> PresetChoice:
     )
 
 
-def _fits(choice: PresetChoice, printer_preset_name: str | None) -> bool:
-    """A preset with no ``compatible_printers`` declares no restriction."""
-    if not choice.compatible_printers:
-        return True
-    if printer_preset_name is None:
-        return True
-    return printer_preset_name in choice.compatible_printers
-
-
 @dataclass(frozen=True)
 class _Catalogue:
     """Every preset Bambuddy offers, normalised into :class:`PresetChoice` rows.
@@ -113,20 +104,3 @@ async def _catalogue(client: BambuddyClient) -> _Catalogue:
     processes.extend(_local_choice(row) for row in local.process)
     filaments.extend(_local_choice(row) for row in local.filament)
     return _Catalogue(printer=printers, process=processes, filament=filaments)
-
-
-def filament_preset_index(catalogue: _Catalogue) -> dict[str, PresetRef]:
-    """``preset id -> ref``, so a spool's ``slicer_filament`` string can be resolved.
-
-    The inventory stores the preset as a bare id ("GFG00", or a local preset's row id
-    "2") with no tier, while a :class:`PresetRef` needs both. The catalogue is the only
-    place the tier is written down, so an id it does not hold cannot be turned into a
-    ref — and is left as the pipeline's own preset rather than guessed at.
-
-    A cloud id and a local id could in principle collide; the first tier read wins and
-    the later one is ignored, which matches ``_catalogue``'s own ordering.
-    """
-    index: dict[str, PresetRef] = {}
-    for choice in catalogue.filament:
-        index.setdefault(choice.ref.id, choice.ref)
-    return index
