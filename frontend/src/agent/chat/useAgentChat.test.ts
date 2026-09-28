@@ -116,6 +116,27 @@ describe('useAgentChat', () => {
     expect(approval(result.current.state)).toMatchObject({ state: 'sent' })
   })
 
+  it('says a message sent while disconnected is queued, keeps waiting for its session, and clears that on reconnect', () => {
+    let answer: SendResult = 'queued'
+    const t = scripted(() => answer)
+    const { result } = renderHook(() => useAgentChat(t.factory))
+    act(() => {
+      t.h().onOpen?.()
+      t.h().onClose?.('Lost the connection to the assistant; reconnecting…')
+    })
+    act(() => result.current.send('hello', { route: '/' }))
+    expect(t.sent).toContainEqual({ v: 1, type: 'user.message', text: 'hello', context: { route: '/' } })
+    expect(result.current.state.notice).toMatch(/will be sent once it reconnects/)
+    expect(result.current.state.awaitingStart).toBe(true)
+    // Back: the transport sends what it held, and the session starts as usual.
+    answer = 'sent'
+    act(() => t.h().onOpen?.())
+    expect(result.current.state.notice).toBeNull()
+    act(() => t.h().onFrame(frame({ type: 'session.started', sessionId: 's1', origin: 'chat', owner, title: 'hello' })))
+    expect(result.current.state.awaitingStart).toBe(false)
+    expect(result.current.state.activeId).toBe('s1')
+  })
+
   it('says a refused message was not sent, and stops waiting for its session', () => {
     const t = scripted(() => 'refused')
     const { result } = renderHook(() => useAgentChat(t.factory))

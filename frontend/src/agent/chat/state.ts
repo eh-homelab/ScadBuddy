@@ -69,6 +69,8 @@ export type ChatAction =
   | { type: 'decided'; sessionId: string; approvalId: string; queued?: boolean }
   /** The transport refused a message (its queue is full): nothing was sent. */
   | { type: 'not-sent'; message: string }
+  /** The transport holds a message until the connection is back; it will be sent. */
+  | { type: 'queued'; message: string }
 
 export const initialChatState: ChatState = {
   sessions: {},
@@ -312,6 +314,9 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
     }
     case 'not-sent':
       return { ...state, awaitingStart: false, notice: action.message }
+    case 'queued':
+      // Still awaiting its session's start, if it starts one: the message goes out on reconnect.
+      return { ...state, notice: action.message }
     case 'decided':
       return patchSession(state, action.sessionId, (s) =>
         mapItems(s, (i) =>

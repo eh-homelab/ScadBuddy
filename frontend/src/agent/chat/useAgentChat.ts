@@ -4,6 +4,7 @@ import { chatReducer, initialChatState, type ChatState } from './state'
 import type { ChatTransport, ChatTransportFactory } from './transport'
 
 const NOT_SENT = 'The assistant is unreachable and too much is waiting to be sent; try again once it reconnects.'
+const QUEUED = 'The assistant is unreachable; your message will be sent once it reconnects.'
 
 export interface AgentChat {
   state: ChatState
@@ -78,7 +79,10 @@ export function useAgentChat(factory: ChatTransportFactory): AgentChat {
         context,
       }),
     )
+    // Like a decision, a message held for the reconnect is shown as such (the
+    // composer has cleared); `connected` clears the notice when it goes out.
     if (result === 'refused') dispatch({ type: 'not-sent', message: NOT_SENT })
+    else if (result === 'queued') dispatch({ type: 'queued', message: QUEUED })
   }, [])
 
   const decide = useCallback((sessionId: string, approvalId: string, approve: boolean) => {
