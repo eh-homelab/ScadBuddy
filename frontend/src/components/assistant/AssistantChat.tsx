@@ -1,5 +1,6 @@
 import { useEffect, useId, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useLocation } from 'react-router'
+import { bridge } from '../../agent/bridge'
 import { statusLabel } from '../../agent/chat/labels'
 import { pageContext, suggestedPrompts } from '../../agent/chat/pageContext'
 import { isBusy, isOwnedByBrowser, type SessionState } from '../../agent/chat/state'
@@ -57,7 +58,8 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
 
   const submit = (text: string) => {
     if (!text.trim() || busy || !owned) return
-    chat.send(text, pageContext(pathname))
+    const { tools, dialogs, page } = bridge.snapshot()
+    chat.send(text, pageContext(pathname, { tools, dialogs, page }))
     setDraft('')
   }
 
@@ -190,7 +192,7 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
             <ul className="flex flex-col items-start gap-1.5">
               {prompts.map((prompt) => (
                 <li key={prompt}>
-                  <Button size="sm" onClick={() => submit(prompt)}>
+                  <Button size="sm" data-agent-user-only="" onClick={() => submit(prompt)}>
                     {prompt}
                   </Button>
                 </li>
@@ -212,7 +214,8 @@ export function AssistantChat({ factory, onClose, focusKey }: Props) {
         {pendingApproval ? 'The assistant needs your approval.' : ''}
       </p>
 
-      <form onSubmit={onSubmit} className="shrink-0 border-t border-line p-2.5">
+      {/* The user's own voice: the bridge's fill/click never type or send here (#254). */}
+      <form onSubmit={onSubmit} data-agent-user-only="" className="shrink-0 border-t border-line p-2.5">
         <label htmlFor="assistant-composer" className="sr-only">
           Message the assistant
         </label>
