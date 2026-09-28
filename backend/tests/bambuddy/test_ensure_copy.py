@@ -33,7 +33,10 @@ class SlowBambuddy:
         self.uploaded: list[str] = []
 
     async def library_files(self, folder_id: int) -> list[LibraryFile]:
-        return []
+        return [
+            LibraryFile(id=number, filename=name)
+            for number, name in enumerate(self.uploaded, start=1)
+        ]
 
     async def library_file(self, file_id: int) -> LibraryFile:
         return LibraryFile(id=file_id, filename=self.uploaded[file_id - 1])
@@ -48,13 +51,24 @@ class SlowBambuddy:
 
 class MemoryUploads:
     def __init__(self) -> None:
-        self.copies: list[LibraryCopy] = []
+        self.copies: dict[str, list[LibraryCopy]] = {}
 
     async def for_output(self, output_id: str) -> list[LibraryCopy]:
-        return list(self.copies)
+        return list(self.copies.get(output_id, []))
 
     async def record(self, output_id: str, copy: LibraryCopy) -> None:
-        self.copies.append(copy)
+        self.copies.setdefault(output_id, []).append(copy)
+
+
+def output(letter: str) -> OutputMeta:
+    return OutputMeta(
+        id=letter * 32,
+        slug="demo",
+        job_id="d" * 32,
+        created_at=datetime(2026, 9, 28, tzinfo=UTC),
+        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
+        colors=["#FF0000"],
+    )
 
 
 async def test_filing_and_a_print_at_once_upload_one_copy(
@@ -63,14 +77,7 @@ async def test_filing_and_a_print_at_once_upload_one_copy(
     monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
     monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
     bambuddy = SlowBambuddy()
-    meta = OutputMeta(
-        id="c" * 32,
-        slug="demo",
-        job_id="d" * 32,
-        created_at=datetime(2026, 9, 28, tzinfo=UTC),
-        bbox_mm=BoundingBox(min=(0, 0, 0), max=(1, 1, 1), size=(1, 1, 1)),
-        colors=["#FF0000"],
-    )
+    meta = output("c")
 
     def ensure(target: Target) -> asyncio.Future[send.EnsuredCopy]:
         return asyncio.ensure_future(
@@ -95,3 +102,33 @@ async def test_filing_and_a_print_at_once_upload_one_copy(
     assert bambuddy.uploaded == ["Demo.3mf"]
     assert (filed.created, printed.created) == (True, False)
     assert printed.library_file_id == filed.library_file_id
+
+
+async def test_two_outputs_filed_into_one_folder_at_once_get_different_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two customizations with the same changed params name the same stem. The folder's
+    listing and the upload that takes a name from it are one step per folder, or both
+    see ``Demo.3mf`` free and both upload under it (#540 review)."""
+    monkeypatch.setattr(send, "_read_3mf", lambda store, meta: b"3mf")
+    monkeypatch.setattr(send, "_laid_out_for", lambda payload, target: payload)
+    bambuddy = SlowBambuddy()
+    uploads = MemoryUploads()
+
+    def ensure(meta: OutputMeta) -> asyncio.Future[send.EnsuredCopy]:
+        return asyncio.ensure_future(
+            ensure_copy(
+                cast(BambuddyClient, bambuddy),
+                cast(OutputStore, None),
+                cast(BambuddyUploadStore, uploads),
+                meta,
+                StoredSettings(library_folder_id=2),
+                target=Target(DEFAULT_PLATE),
+                folder_id=FOLDER,
+                stem="Demo",
+            )
+        )
+
+    await asyncio.gather(ensure(output("a")), ensure(output("b")))
+
+    assert sorted(bambuddy.uploaded) == ["Demo (2).3mf", "Demo.3mf"]

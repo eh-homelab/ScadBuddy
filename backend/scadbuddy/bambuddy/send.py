@@ -434,12 +434,13 @@ async def ensure_copy(
     other colours get a copy in theirs, as in the inbox (#476). An exact match is still
     preferred.
 
-    Finding and uploading hold one lock per output and folder, so Generate's filing and
-    a print started while it runs cannot both upload the same copy.
+    Finding and uploading hold one lock per folder (per output and folder in the inbox),
+    so Generate's filing and a print started while it runs cannot both upload the same
+    copy, and two outputs filed into one project cannot both take the same free name.
     """
     target = target if target is not None else await target_for(client, settings, meta.slug)
     folder = folder_id if folder_id is not None else settings.library_folder_id
-    async with _copy_lock(meta.id, folder):
+    async with _copy_lock(meta.id, folder, settings):
         for copy in await _reusable(uploads, meta, settings, target, folder):
             filename = await _still_there(client, uploads, meta, copy)
             if filename is not None:
@@ -450,15 +451,19 @@ async def ensure_copy(
     return EnsuredCopy(library_file_id, filename, created=True)
 
 
-#: One per output and folder while :func:`ensure_copy` holds it; weak, so an idle
-#: pair's lock is dropped rather than kept for the life of the process.
-_COPY_LOCKS: weakref.WeakValueDictionary[tuple[str, int | None], asyncio.Lock] = (
+#: One per folder while :func:`ensure_copy` holds it; weak, so an idle folder's lock is
+#: dropped rather than kept for the life of the process.
+_COPY_LOCKS: weakref.WeakValueDictionary[tuple[str | None, int | None], asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
 
 
-def _copy_lock(output_id: str, folder: int | None) -> asyncio.Lock:
-    key = (output_id, folder)
+def _copy_lock(output_id: str, folder: int | None, settings: StoredSettings) -> asyncio.Lock:
+    """A project folder's lock is shared by every output: :func:`project_filename` lists
+    the folder and the upload takes a name from that listing, so two outputs must not
+    interleave there. The inbox keeps :func:`download_filename`, which is not made
+    unique, so there only one output's copies are serialized."""
+    key = (output_id if is_inbox(folder, settings) else None, folder)
     lock = _COPY_LOCKS.get(key)
     if lock is None:
         lock = _COPY_LOCKS[key] = asyncio.Lock()
