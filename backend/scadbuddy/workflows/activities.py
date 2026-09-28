@@ -17,11 +17,12 @@ from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
 from scadbuddy.core.config import Config
-from scadbuddy.core.metrics import Metrics
+from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
+from scadbuddy.render.job_models import Job, now
 from scadbuddy.render.job_store import JobNotFoundError
 from scadbuddy.render.jobs import (
     Prepared,
@@ -30,6 +31,7 @@ from scadbuddy.render.jobs import (
     prepare_source,
     render_main,
     render_solids_stage,
+    timed_stage,
 )
 from scadbuddy.render.previews import render_preview
 from scadbuddy.render.projection import JobProjection
@@ -153,6 +155,21 @@ def _process_output(main: RenderMainResult) -> ProcessOutput:
     )
 
 
+def _observe_settled(metrics: Metrics, job: Job) -> None:
+    """What `RenderQueue` observes when a render settles: its outcome, the latency
+    from the submit, and the render's own duration (here from `mark_started`)."""
+    assert job.state in ("done", "failed") and job.finished_at is not None
+    outcome: RenderOutcome = job.state
+    metrics.render_finished.labels(outcome).inc()
+    metrics.job_latency.labels(outcome).observe(
+        max(0.0, (job.finished_at - job.created_at).total_seconds())
+    )
+    started = job.started_at or job.created_at
+    metrics.render_duration.labels(outcome).observe(
+        max(0.0, (job.finished_at - started).total_seconds())
+    )
+
+
 class RenderActivities:
     def __init__(self, deps: WorkerDeps) -> None:
         self.deps = deps
@@ -190,14 +207,15 @@ class RenderActivities:
     async def prepare(self, req: PieceRequest) -> PrepareResult:
         d = self.deps
         try:
-            prepared, _ = await prepare_source(
-                req.slug,
-                req.revision,
-                config=d.config,
-                paths=d.paths,
-                history=d.history,
-                fetcher=d.fetcher,
-            )
+            with timed_stage(d.metrics)("source"):
+                prepared, _ = await prepare_source(
+                    req.slug,
+                    req.revision,
+                    config=d.config,
+                    paths=d.paths,
+                    history=d.history,
+                    fetcher=d.fetcher,
+                )
         except OpenSCADError as error:
             raise _failure(error) from None
         return PrepareResult(
@@ -219,6 +237,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
+                stage=timed_stage(d.metrics),
             )
         )
         try:
@@ -242,6 +261,7 @@ class RenderActivities:
                 assets=d.assets,
                 checkouts=d.checkouts,
                 holder=f"piece:{req.piece_key}",
+                stage=timed_stage(d.metrics),
             )
         )
         try:
@@ -268,6 +288,7 @@ class RenderActivities:
                     paths=d.paths,
                     slug=req.slug,
                     thumbnail_executor=d.thumbnail_executor,
+                    stage=timed_stage(d.metrics),
                 )
         except OpenSCADError as error:
             raise _failure(error) from None
@@ -330,8 +351,12 @@ class RenderActivities:
         if projection.blob_key is not None and projection.state == "done":
             # Before `finish`, so a sweep between the two cannot take the blob.
             await asyncio.to_thread(self.deps.refs.add, projection.blob_key, "job", job.id)
+        job.finished_at = job.finished_at or now()
         if not await asyncio.to_thread(p.finish, job):
             logger.debug(
                 "job already settled; projection ignored",
                 extra={"job_id": job.id, "state": projection.state},
             )
+            return
+        if self.deps.metrics is not None and job.state in ("done", "failed"):
+            _observe_settled(self.deps.metrics, job)
