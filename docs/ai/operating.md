@@ -404,15 +404,21 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credential.
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
-  The keys read today are `model` (`main.ts`), and `session_max_turns` and
+  The keys read today are `model` (`main.ts`); `session_max_turns` and
   `session_max_budget_usd` (`SETTING_SESSION_MAX_TURNS` and
-  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)),
-  and `mcp_oidc`, the OIDC configuration for `/mcp` (#262; see
-  [§6a](#6a-mcp-sign-in-with-oidc)), which `PUT /api/v1/ai/mcp/oidc` writes.
+  `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts));
+  `approval_expiry_seconds` (`SETTING_APPROVAL_EXPIRY_SECONDS` in
+  [`agent/src/approvals/service.ts`](../../agent/src/approvals/service.ts));
+  `mcp_auth_mode` and `mcp_anonymous_cap` ([§10](#10-mcp-auth-mode)); and `mcp_oidc`, the
+  OIDC configuration for `/mcp` (#262; see [§6a](#6a-mcp-sign-in-with-oidc)), which
+  `PUT /api/v1/ai/mcp/oidc` writes.
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
-  "HTTP routes").
+  `20260928T0107Z_sessions.sql`). `main.ts` builds the session manager, but no HTTP
+  route starts a session yet (#266, #300).
+- `ai_approvals`: approvals of outward calls, from session turns and from `/mcp`
+  prepares (#471, `20260928T0734Z_approvals.sql`; see
+  [security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
 - `ai_mcp_tokens`: MCP bearer tokens (#251, `20260928T0734Z_mcp_tokens.sql`), one row per token with its
   name, tier, `created_at`, `expires_at`, `revoked_at` and `last_used_at`. Only the
   SHA-256 of the token is stored (`token_hash`, 64 hex characters, enforced by a
@@ -504,3 +510,34 @@ in-page agent's `click` and `fill` refuse it. The area follows the assistant's
 availability (`useAiAvailability()`), so it is hidden in production builds until the
 agent service is deployed.
 
+## 10. MCP auth mode
+
+The `/mcp` auth mode and the anonymous cap are `ai_settings` keys, never environment
+variables (spec §8.3, §9). They are read on every `/mcp` request by
+`mcpAuthSettings()` in [`agent/src/auth/authenticate.ts`](../../agent/src/auth/authenticate.ts),
+so a change applies to the next request on every replica, with no restart:
+
+| Key | Values | Unset |
+|---|---|---|
+| `mcp_auth_mode` | `"bearer"`, `"disabled"` | `"bearer"` |
+| `mcp_anonymous_cap` | `"read"`, `"write"`, `"outward"` (used in `disabled` mode only) | `"outward"` |
+
+`oidc` is not chosen with this key: it is on while the OIDC configuration (`mcp_oidc`,
+[§6a](#6a-mcp-sign-in-with-oidc)) is enabled, and then it wins over `mcp_auth_mode`, even
+over `"disabled"`. A stored `"oidc"` without an enabled configuration reads as `bearer`.
+
+A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
+`disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
+this once, and again after any change to either key. Settings has no route or UI for
+these keys yet (#255), so set them in the database for now. Each value is a JSON
+string:
+
+```sql
+INSERT INTO ai_settings (key, value) VALUES ('mcp_auth_mode', '"disabled"')
+  ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now();
+-- back to the default:
+DELETE FROM ai_settings WHERE key = 'mcp_auth_mode';
+```
+
+Outward tools still need a human approval in the UI in every mode (spec §8.2; see
+[security.md](security.md#mcp-prepareconfirm-on-the-approval-store)).
