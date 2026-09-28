@@ -307,7 +307,9 @@ class RenderActivities:
         d = self.deps
         # It renders into a directory it never fetched: the compare-and-swap baseline is
         # what the index holds now, and the directory is no hit until this publishes.
-        baseline = await d.blobs.checkout_fresh(req.piece_key)
+        # Heartbeated as `_checkout` is: it waits on the key's lock, which another fetch
+        # of the same key in this process may hold for a whole transfer.
+        baseline = await _heartbeating(asyncio.create_task(d.blobs.checkout_fresh(req.piece_key)))
         missing = await _ensure_assets(d, req.params)
         work = asyncio.create_task(
             render_main(

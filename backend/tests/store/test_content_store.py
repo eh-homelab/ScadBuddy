@@ -258,3 +258,20 @@ async def test_a_failed_release_that_loses_to_a_put_releases_the_old_object(
     row = store.index.get("k")
     assert row is not None and row.ref.sha256 == hashlib.sha256(b"new").hexdigest()
     assert not (tmp_path / "remote" / old.backend_id).exists()  # not left untracked
+
+
+async def test_a_refused_delete_of_the_replaced_object_does_not_fail_the_put(
+    tmp_path: Path, pool: Pool, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Final review m1: the old object was moved out of `Work/` in Bambuddy's UI. The
+    new one is stored and indexed; the old one is left untracked, as the sweep does."""
+    store = local_content(tmp_path / "remote", pool)
+    store.backend = _RefusingBackend(
+        tmp_path / "remote", f"piece/{hashlib.sha256(b'old').hexdigest()}"
+    )
+    await store.put("piece", b"old", name="p", scope=SCOPE, key="k")
+    with caplog.at_level(logging.ERROR, logger="scadbuddy.store.content"):
+        new = await store.put("piece", b"new", name="p", scope=SCOPE, key="k")
+    stat = store.index.get("k")
+    assert stat is not None and stat.ref == new
+    assert [r for r in caplog.records if getattr(r, "key", None) == "k"]
