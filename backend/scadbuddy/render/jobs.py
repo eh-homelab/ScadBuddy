@@ -498,7 +498,7 @@ async def resolve_source(
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
         library_path=await resolve_search_path(
-            fetcher, partial(revision_search_path, history, paths, directory, requested)
+            fetcher, partial(revision_search_path, paths, directory)
         ),
     )
 

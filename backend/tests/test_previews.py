@@ -57,7 +57,21 @@ def test_the_source_key_follows_the_source_and_its_libraries_only(paths: DataPat
     paths.model_meta(SLUG).write_text(json.dumps({"name": "Widget"}), encoding="utf-8")
     assert source_key(paths, SLUG) == key
 
-    paths.model_meta(SLUG).write_text(json.dumps({"libraries": ["BOSL2"]}), encoding="utf-8")
+    paths.model_meta(SLUG).write_text(
+        json.dumps(
+            {
+                "libraries": [
+                    {
+                        "name": "BOSL2",
+                        "url": "https://x.invalid/b.git",
+                        "ref": "v1",
+                        "commit": "a" * 40,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     with_library = source_key(paths, SLUG)
     assert with_library != key
 
