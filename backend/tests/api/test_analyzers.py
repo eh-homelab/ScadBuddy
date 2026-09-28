@@ -6,6 +6,7 @@ the print routes' tests do. Nothing here posts to Bambuddy: the analyzers only r
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
+from scadbuddy.bambuddy.uploads import LibraryCopy
 from scadbuddy.core.events import Event, InProcessEventBus
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
@@ -237,6 +239,7 @@ VERIFIED = Analyzer(
 )
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_an_uploaded_output_is_judged_on_the_inventory_too(
     client: TestClient, model: str, app: FastAPI
@@ -244,7 +247,8 @@ def test_an_uploaded_output_is_judged_on_the_inventory_too(
     configure(client)
     bambuddy_routes()
     output_id = make_output(client, model)
-    getattr(app.state, STATE_ATTR).outputs.record_send(output_id, library_file_id=41)
+    uploads = getattr(app.state, STATE_ATTR).uploads
+    asyncio.run(uploads.record(output_id, LibraryCopy(id=41, folder_id=2, target_key="H2C")))
     respx.get(f"{API}/library/files/41/filament-requirements").mock(
         return_value=httpx.Response(
             200,

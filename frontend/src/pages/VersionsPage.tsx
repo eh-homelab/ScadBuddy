@@ -15,8 +15,9 @@ const PARENT = ''
 export function VersionsPage() {
   const { slug = '' } = useParams()
   const navigate = useNavigate()
-  const modelState = useAsync(() => api.getModel(slug), [slug])
-  const versionsState = useAsync(() => api.listVersions(slug), [slug])
+  // #269 — live: a revision committed elsewhere (another tab, an agent) appears here.
+  const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
+  const versionsState = useAsync(() => api.listVersions(slug), [slug], [`model:${slug}`])
 
   const [selected, setSelected] = useState<string | undefined>(undefined)
   const [base, setBase] = useState<string>(PARENT)

@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { keychainReadme } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { EditDetailsButton } from './EditDetailsButton'
@@ -381,5 +382,51 @@ describe('EditDetailsButton', () => {
     const { dialog, user } = await open()
     await user.clear(within(dialog).getByLabelText('Name'))
     expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled()
+  })
+})
+
+describe('EditDetailsButton, live (#269)', () => {
+  it('keeps what is being typed and offers the details changed elsewhere', async () => {
+    const { user, dialog } = await open()
+    const name = within(dialog).getByLabelText('Name')
+    await user.clear(name)
+    await user.type(name, 'Typed here')
+
+    await api.updateModel('name-keychain', { name: 'Changed Elsewhere' })
+    emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
+    expect(await within(dialog).findByText(/changed elsewhere since you opened them/)).toBeInTheDocument()
+    expect(name).toHaveValue('Typed here')
+
+    await user.click(within(dialog).getByRole('button', { name: 'Load the latest' }))
+    await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveValue('Changed Elsewhere'))
+  })
+
+  it('shows the latest load when an earlier, slower one answers after it', async () => {
+    const model = await api.getModel('name-keychain')
+    let answerFirst: (() => void) | undefined
+    vi.spyOn(api, 'getModel')
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            answerFirst = () => resolve({ ...model, name: 'Stale' })
+          }),
+      )
+      .mockResolvedValueOnce({ ...model, name: 'Fresh' })
+    const view = renderPage(<EditDetailsButton slug="name-keychain" onSaved={vi.fn()} />)
+    await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+    await view.user.keyboard('{Escape}')
+    await view.user.click(screen.getByRole('button', { name: 'Edit details' }))
+    const dialog = screen.getByRole('dialog', { name: 'Edit details' })
+    await waitFor(() => expect(within(dialog).getByLabelText('Name')).toHaveValue('Fresh'))
+    answerFirst?.()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(within(dialog).getByLabelText('Name')).toHaveValue('Fresh')
+  })
+
+  it('ignores a model update that leaves these details as they were (a pin, a source save)', async () => {
+    const { dialog } = await open()
+    emitRealtime('model.updated', ['model:name-keychain'], { slug: 'name-keychain' })
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(within(dialog).queryByText(/changed elsewhere since you opened them/)).not.toBeInTheDocument()
   })
 })

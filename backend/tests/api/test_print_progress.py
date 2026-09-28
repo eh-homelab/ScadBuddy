@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import httpx
+import pytest
 import respx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -42,6 +43,7 @@ def test_an_output_that_has_never_printed_answers_null(client: TestClient, model
     assert watched == []
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, model: str) -> None:
     # The send bar is what still runs a pipeline; the picker slices and queues.
@@ -100,6 +102,7 @@ def test_a_pipeline_run_is_followed_to_its_queue_entries(client: TestClient, mod
     assert [copy["queue_entry_id"] for copy in body["copies_detail"]] == [71, 72]
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
     client: TestClient, model: str
@@ -128,6 +131,7 @@ def test_a_run_whose_slice_failed_reports_bambuddys_words_and_the_fix(
     assert "slice" in body["fix"].lower()
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_the_slice_and_queue_route_reports_through_the_same_shape(
     client: TestClient, model: str

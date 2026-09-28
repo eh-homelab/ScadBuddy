@@ -96,6 +96,45 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
+- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
+  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+  the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
+  argv (`sdk.mjs`), so a header value written there would be on the command line; a
+  header written as `${VAR}` with the value in the query's `env` is expanded by Claude
+  Code and reaches the server, and the argv holds only the reference. A configured
+  `{ type: 'http' }` server named `my-memory` gives tools `mcp__my-memory__<tool>` and
+  reports `{ name, status: 'connected', source: 'dynamic' }` in the init message;
+  `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
+  `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
+  server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
+  tools in the first turn. The permission seam applies to them as to in-process tools: a
+  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
+  server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  - **Tool-name normalisation.** Claude Code names an MCP tool
+    `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    `files_list` therefore collide on one name, and a name with a space or a dot cannot be
+    matched literally. The registry now tiers only names in that alphabet, maps disabled
+    names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
+    `harnessToolName`, `agent/src/plugins/forwarder.ts`). This is measured end to end in
+    `agent/test/plugins.e2e.test.ts`: `files.delete` is disabled as
+    `mcp__my-memory__files_delete`, the colliding pair is never offered, and a call to
+    the colliding name never reaches the server.
+  - **Redirects and OAuth discovery.** Claude Code's own MCP client follows 30x redirects
+    and a `WWW-Authenticate` `resource_metadata` URL, and sends the configured header
+    there too. The probe showed a 307 to another origin receiving every request with the
+    header, and `resource_metadata="http://169.254.169.254/…"` receiving a GET with it.
+    Claude Code is therefore never given a plugin's URL or secret. A loopback forwarder
+    in the agent (`agent/src/plugins/forwarder.ts`):
+    - connects to the egress-checked address;
+    - refuses redirects;
+    - turns a 401 into a 502;
+    - adds the header itself.
+
+    The e2e test measures that a redirecting plugin is not `connected` and that the
+    redirect target and metadata URL are never contacted. That supersedes the `${VAR}`
+    header mechanism above.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -106,6 +145,26 @@ dependency of `agent/`.
   request. Claude does not see the tool and cannot attempt it." Tool-name globs work in
   deny rules. An allow rule only pre-approves; "Auto-approved tools never reach
   `canUseTool`". [Permissions][sdk-permissions]
+- Read and measured in #258 on SDK 0.3.283 (moved up from §3.2): **`canUseTool` can
+  park a tool call on an asynchronous human decision, with no deadline of its own.**
+  `sdk.d.ts` on `CanUseTool`: "permission prompts have no park deadline"; the
+  `dialogExpiry` setting (default 5 minutes) is for a dialog "forwarded to a remote
+  client", and "Local-only permission prompts (no remote client) are unaffected".
+  Measured against the local fake endpoint (`agent/test/approvals.sdk.test.ts`): a call
+  parked for 5 s with that remote deadline forced down to 1 s
+  (`CLAUDE_CODE_USER_DIALOG_TIMEOUT_MS=1000`), and once for 5.5 minutes with the
+  default left in place, still waited; the model was sent nothing meanwhile; on
+  approval the tool ran with the `updatedInput` the callback returned, and on denial
+  the callback's `message` reached the model as the tool's error result. A
+  `PreToolUse` hook answering `ask` hands the call to `canUseTool` ("With a permission
+  prompt surface (stdio/SDK canUseTool), the 'ask' path surfaces via a
+  can_use_tool control_request", `sdk.d.ts`). Aborting the query while a call is
+  parked fails that call ("Tool permission request failed: AbortError: Tool
+  permission stream closed before response received"); Claude Code may still send
+  that to the model and yield a `result` before it exits
+  (`agent/test/approvals.e2e.test.ts`), and the tool does not run. #258 therefore
+  parks (§8.2), and uses deny-then-resume only for an approval whose turn is gone
+  after a restart.
 
 **Playwright plugin and `@playwright/mcp`** (#349; the `@playwright/mcp` items were read
 from the **0.0.82** npm tarball's `README.md`, the `latest` dist-tag on 2026-09-27,
@@ -182,7 +241,6 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 
 | Item | Where it matters | Verified by |
 |---|---|---|
-| Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
 | Bambu Studio's hand-off mechanism for "Open in Bambu Studio" | #284 | #284 |
@@ -477,8 +535,19 @@ including `disabled`. Where it is enforced:
 - **Harness:** the SDK permission callback and a `PreToolUse` hook
   ([permissions][sdk-permissions], [hooks][sdk-hooks]). The session goes to
   `waiting_approval`, the UI shows a confirmation card, and the decision resumes it.
-  Whether the callback can wait on an asynchronous human decision, or the hook must deny
-  and the session be resumed afterwards, is in §3.2.
+  The callback parks the call until the decision (§3.1, #258). Approvals live in
+  `ai_approvals`, so a pending one survives a restart; approving one whose turn is gone
+  resumes the session with a turn that repeats the call. The approval is bound to that
+  turn and used once, by a call with the same tool and input hash; if the session cannot
+  resume, the approval is voided and the session is told. Resuming one of several such
+  approvals of a session cancels the others. A decision binds to the input hash (an
+  HMAC under a key derived from the key-encryption key); a changed input needs a new
+  approval. Only the browser user decides, or another principal with a per-token grant
+  (§6), and never for its own calls or sessions. Interrupt, handoff and a new turn
+  cancel a pending approval and void an approved one that was not used yet, as does
+  the end of the turn it belongs to; one that nobody decides expires
+  (`approval_expiry_seconds` in `ai_settings`). The code is
+  `agent/src/approvals/service.ts`.
 - **External MCP clients:** a two-step `prepare` (returns a pending action id and a
   human-readable summary) then `confirm`, where the confirm completes only after the UI
   approval.
@@ -550,6 +619,7 @@ agent service:
 - plugins: source, pinned commit, enabled parts, endpoint credentials (encrypted), and
   tier map;
 - sessions (§6), MCP subscriptions, and the resumability event log;
+- approvals of outward actions (§8.2, `ai_approvals`);
 - the audit log.
 
 There are **no AI-*configuration* env vars**: providers, credentials, auth mode,

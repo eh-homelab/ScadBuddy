@@ -451,6 +451,29 @@ function nextNumber(): number {
   return 8800 + state.seq
 }
 
+/**
+ * #316 — the output's library copy in `folderId` (the inbox when null), recording a new
+ * one when there is none. The mock has one target, so the folder alone is the key.
+ */
+function copyIn(output: Output, folderId: number | null): number {
+  const folder = folderId ?? state.settings.library_folder_id ?? null
+  const existing = (output.library_files ?? []).find((copy) => copy.folder_id === folder)
+  if (existing) return existing.id
+  const id = nextNumber()
+  state.outputs = state.outputs.map((o) =>
+    o.id === output.id
+      ? {
+          ...o,
+          library_files: [
+            ...(o.library_files ?? []),
+            { id, folder_id: folder, target_key: 'Bambu Lab H2C', sliced: [] },
+          ],
+        }
+      : o,
+  )
+  return id
+}
+
 function num(params: Record<string, ParamValue>, key: string, fallback: number): number {
   const value = params[key]
   return typeof value === 'number' ? value : fallback
@@ -1749,7 +1772,7 @@ export const handlers = [
       return problem(409, 'Bambuddy is not connected', 'Add an API key on the settings page.')
     }
     await delay(250)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, null)
     const queued = body.mode === 'queue'
     const pipelineRunId = queued && state.settings.pipeline_id ? nextNumber() : null
     const queueItemId = queued && !pipelineRunId ? nextNumber() : null
@@ -1757,7 +1780,6 @@ export const handlers = [
       o.id === id
         ? {
             ...o,
-            library_file_id: libraryFileId,
             pipeline_run_id: pipelineRunId,
             queue_item_id: queueItemId,
           }
@@ -1839,7 +1861,8 @@ export const handlers = [
     return HttpResponse.json({
       ...fixtures.filamentOptions,
       ...hardware,
-      library_file_id: output.library_file_id ?? fixtures.filamentOptions.library_file_id,
+      library_file_id:
+        output.library_files?.[0]?.id ?? fixtures.filamentOptions.library_file_id,
       printer_id: printerId === null ? null : Number(printerId),
     } satisfies FilamentOptions)
   }),
@@ -1880,11 +1903,11 @@ export const handlers = [
       projectId === null
         ? null
         : (state.projects.find((project) => project.id === projectId)?.folder_id ?? null)
-    const libraryFileId = output.library_file_id ?? nextNumber()
+    const libraryFileId = copyIn(output, folderId)
     const queueItemIds = [nextNumber()]
     state.outputs = state.outputs.map((o) =>
       o.id === output.id
-        ? { ...o, library_file_id: libraryFileId, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
+        ? { ...o, pipeline_run_id: null, queue_item_id: queueItemIds[0] }
         : o,
     )
     await delay(200)

@@ -286,6 +286,12 @@ class PostgresJobStore:
     def close(self) -> None:
         self._pool.close()
 
+    @property
+    def pool(self) -> ConnectionPool[Connection[DictRow]]:
+        """The process's one pool, shared with the other Postgres stores
+        (`bambuddy.uploads.BambuddyUploadStore`). Opened and migrated by `open`."""
+        return self._pool
+
     def listener(
         self,
         *,
