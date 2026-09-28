@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -231,6 +232,45 @@ async def test_a_failing_colour_fails_the_render_and_cancels_its_siblings(
     assert sorted(fake.cancelled) == [colours[0], colours[2], colours[3]]
     assert fake.active == 0
     assert not list(tmp_path.glob(f"{WRAPPER_PREFIX}*"))
+
+
+async def test_a_second_colour_failing_at_once_is_logged_not_lost(
+    fake: FakeRenders, tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    model, work = _model(tmp_path)
+    colours = MANY_COLOURS[:2]
+    fake.fail = {colours[0]: RuntimeError("first broke"), colours[1]: RuntimeError("second broke")}
+
+    with pytest.raises(RuntimeError, match="broke") as raised:
+        await render_solids(
+            model, CustomizerSchema(), {}, colours, work, config=Config(solid_concurrency=2)
+        )
+
+    logged = [r.exc_info[1] for r in caplog.records if r.exc_info is not None]
+    assert len(logged) == 1
+    assert {str(raised.value), str(logged[0])} == {"first broke", "second broke"}
+
+
+async def test_the_solid_mesh_is_parsed_off_the_event_loop(
+    fake: FakeRenders, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    model, work = _model(tmp_path)
+    threads: list[int] = []
+
+    def split(path: Path) -> list[ColourPart]:
+        threads.append(threading.get_ident())
+        # Two parts, so the concatenate runs in the same thread too.
+        return _box(1) + _box(2)
+
+    monkeypatch.setattr(solids_module, "split_by_material", split)
+
+    result = await render_solids(
+        model, CustomizerSchema(), {}, MANY_COLOURS[:3], work, config=Config(solid_concurrency=3)
+    )
+
+    assert len(threads) == 3
+    assert threading.get_ident() not in threads
+    assert [round(float(m.volume)) for m in result.meshes.values()] == [3, 3, 3]
 
 
 async def test_a_many_colour_model_renders_in_a_fraction_of_the_sequential_time(

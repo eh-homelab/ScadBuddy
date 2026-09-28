@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import secrets
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -14,6 +15,8 @@ from scadbuddy.render.colours import CSS_COLOURS
 from scadbuddy.render.runner import OpenSCADError, render_3mf
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 from scadbuddy.render.split import split_by_material
+
+logger = logging.getLogger(__name__)
 
 #: The wrapper has to live beside the model so its ``include <>`` resolves, which
 #: puts a transient .scad inside the directory `provenance.source_version` hashes —
@@ -70,6 +73,16 @@ def _vector_literal(values: Sequence[str]) -> str:
     return "[" + ", ".join(f'"{value}"' for value in values) + "]"
 
 
+def _solid_mesh(path: Path) -> trimesh.Trimesh | None:
+    """The wrapper render's geometry as one mesh, or None when it drew nothing."""
+    meshes = [part.mesh for part in split_by_material(path)]
+    if not meshes:
+        return None
+    if len(meshes) == 1:
+        return meshes[0]
+    return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+
+
 async def render_solids(
     scad_path: Path,
     schema: CustomizerSchema,
@@ -111,18 +124,18 @@ async def render_solids(
                     config=config,
                     extra_defines=["-D", f"_sb_targets={targets}"],
                 )
-                parts = split_by_material(out_path)
+                # Parsing and joining the mesh is CPU work: off the loop, which every
+                # other job's drain, the queue and /healthz share -- and several colours
+                # can now finish their `openscad` at nearly the same moment.
+                mesh = await asyncio.to_thread(_solid_mesh, out_path)
             except OpenSCADError as error:
                 return f"{colour}: no closed solid ({error}); {SPLIT_FALLBACK}"
             except BaseException:
                 stopping = True
                 raise
-        if not parts:
+        if mesh is None:
             return f"{colour}: the solid render was empty; {SPLIT_FALLBACK}"
-        meshes = [part.mesh for part in parts]
-        if len(meshes) == 1:
-            return meshes[0]
-        return cast(trimesh.Trimesh, trimesh.util.concatenate(meshes))
+        return mesh
 
     wrapper.write_text(wrapper_source(scad_path.name), encoding="utf-8")
     try:
@@ -133,7 +146,15 @@ async def render_solids(
             ]
     except BaseExceptionGroup as group_error:
         # The job's error is the colour's own, not "unhandled errors in a TaskGroup".
-        raise group_error.exceptions[0] from None
+        # Two colours can fail before the cancellation lands; the job can carry only
+        # one error, so the others are logged rather than lost.
+        first, *others = group_error.exceptions
+        for other in others:
+            logger.error(
+                "another colour's solid render failed too",
+                exc_info=(type(other), other, other.__traceback__),
+            )
+        raise first from None
     finally:
         wrapper.unlink(missing_ok=True)
 
