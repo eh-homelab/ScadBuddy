@@ -47,6 +47,8 @@ export function SettingsPage() {
   const [url, setUrl] = useState('')
   const [publicUrl, setPublicUrl] = useState('')
   const [apiKey, setApiKey] = useState('')
+  const [renderKey, setRenderKey] = useState('')
+  const [storeBackend, setStoreBackend] = useState<'local' | 'bambuddy'>('local')
   const [folderId, setFolderId] = useState('')
   const [pipelineId, setPipelineId] = useState('')
   const [printerId, setPrinterId] = useState('')
@@ -67,7 +69,7 @@ export function SettingsPage() {
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
-  const usage = useAsync(() => api.getAssetUsage(), []).data
+  const usage = useAsync(() => api.getStoreUsage(), []).data
   const plateNames = (platesState.data?.plates ?? []).map((plate) => plate.name)
 
   // The pickers need a live Bambuddy, so they are only fetched once one is configured.
@@ -85,6 +87,7 @@ export function SettingsPage() {
     setPrinterId(idValue(settings.printer_id))
     setDefaultPlate(settings.default_plate ?? '')
     setUnit(settings.display_unit)
+    setStoreBackend(settings.store_backend)
   }, [settings])
 
   // #269 — the settings changed elsewhere (another tab, an agent). An untouched form
@@ -93,6 +96,7 @@ export function SettingsPage() {
   const loadLatest = () => {
     setChangedElsewhere(false)
     setApiKey('')
+    setRenderKey('')
     settingsState.refresh()
   }
 
@@ -108,6 +112,8 @@ export function SettingsPage() {
     }
     // Omitted entirely, so an unchanged field leaves the stored key alone.
     if (apiKey.length > 0) body.bambuddy_api_key = apiKey
+    if (renderKey.length > 0) body.bambuddy_render_api_key = renderKey
+    body.store_backend = storeBackend
     return body
   }
 
@@ -135,8 +141,10 @@ export function SettingsPage() {
   // Unsaved: the form differs from what the server has, or a key has been typed.
   const dirty =
     apiKey.length > 0 ||
+    renderKey.length > 0 ||
     (settings !== undefined &&
       (url !== (settings.bambuddy_url ?? '') ||
+        storeBackend !== settings.store_backend ||
         publicUrl !== (settings.public_url ?? '') ||
         folderId !== idValue(settings.library_folder_id) ||
         pipelineId !== idValue(settings.pipeline_id) ||
@@ -235,6 +243,7 @@ export function SettingsPage() {
       settingsState.setData(next)
       setDisplayUnit(next.display_unit)
       setApiKey('')
+      setRenderKey('')
       setSavedAt(new Date().toLocaleTimeString())
       targetsState.reload()
     } catch (cause) {
@@ -252,6 +261,7 @@ export function SettingsPage() {
       // The server tests what it has stored, so save first or the test lags the form.
       settingsState.setData(await api.putSettings(draft()))
       setApiKey('')
+      setRenderKey('')
       setTest(await api.testSettings())
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.detail : 'The connection test could not run.')
@@ -340,6 +350,58 @@ export function SettingsPage() {
               />
               <p className="mt-1.5 text-[12px] text-muted">
                 Needs Manage Library and Manage Queue; Read Status lets ScadBuddy list printers.
+              </p>
+            </div>
+
+            <div>
+              <label htmlFor="bambuddy-render-key" className="block text-[13px]">
+                Render key
+              </label>
+              <input
+                id="bambuddy-render-key"
+                type="password"
+                value={renderKey}
+                autoComplete="off"
+                onChange={(event) => setRenderKey(event.target.value)}
+                placeholder={
+                  settings?.has_render_api_key
+                    ? 'A key is stored. Paste a new one to replace it.'
+                    : 'Paste the key'
+                }
+                className="sb-field sb-num mt-1.5"
+              />
+              <p className="mt-1.5 text-[12px] text-muted">
+                A second key with Manage Library only. Render workers run template code and
+                hold this key alone.
+              </p>
+              {settings?.render_key_fallback && (
+                <p
+                  role="alert"
+                  data-testid="render-key-fallback"
+                  className="mt-1.5 rounded-[6px] border border-warn px-2 py-1.5 text-[12px]"
+                >
+                  Render workers hold the full Bambuddy key; template code can print.
+                </p>
+              )}
+            </div>
+
+            <div>
+              <label htmlFor="store-backend" className="block text-[13px]">
+                Blob store
+              </label>
+              <select
+                id="store-backend"
+                value={storeBackend}
+                onChange={(event) => setStoreBackend(event.target.value as 'local' | 'bambuddy')}
+                className="sb-field mt-1.5"
+              >
+                <option value="local">This server&rsquo;s volume (one render worker)</option>
+                <option value="bambuddy" disabled={!settings?.bambuddy_url || folderId === ''}>
+                  Bambuddy library (any number of render workers)
+                </option>
+              </select>
+              <p className="mt-1.5 text-[12px] text-muted">
+                Takes effect when ScadBuddy and its render workers restart.
               </p>
             </div>
 
@@ -487,13 +549,15 @@ export function SettingsPage() {
         {usage && (
           <section className="mt-4 rounded-[6px] border border-line bg-surface">
             <h2 className="border-b border-line px-4 py-2.5 text-[13px] font-medium">
-              Uploaded files
+              Store
             </h2>
             <div className="p-4">
               <dl
                 className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-[13px]"
-                data-testid="asset-usage"
+                data-testid="store-usage"
               >
+                <dt className="text-muted">Where</dt>
+                <dd>{usage.backend === 'bambuddy' ? 'Bambuddy library' : 'This server’s volume'}</dd>
                 <dt className="text-muted">Files</dt>
                 <dd className="sb-num">{ofLimit(String(usage.count), usage.max_count, String)}</dd>
                 <dt className="text-muted">Size</dt>
@@ -502,9 +566,10 @@ export function SettingsPage() {
                 </dd>
               </dl>
               <p className="mt-1.5 text-[12px] text-muted">
-                The SVGs and PNGs attached to file parameters. One that no saved output, preset
-                or render uses is removed once it has gone unused for the sweep&rsquo;s grace
-                period (a week by default). Past either limit, a new upload is refused.
+                Rendered pieces, template snapshots, uploaded SVGs and PNGs, and downloaded
+                fonts. What no job, output or preset uses is removed once unused for the
+                sweep&rsquo;s grace period (a week by default). Past either limit, new files are
+                refused.
               </p>
             </div>
           </section>
