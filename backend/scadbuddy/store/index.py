@@ -120,6 +120,16 @@ class BlobIndex:
         now: datetime = row["now"]
         return now
 
+    def mark(self, keys: Sequence[str], *, backend: str, cutoff: datetime, **meta: Any) -> None:
+        """Merge ``meta`` into the rows of ``keys`` on ``backend`` not touched since
+        ``cutoff``. A later `put` rewrites `meta`, which clears the mark."""
+        with self._pool.connection() as conn:
+            conn.execute(
+                "UPDATE store_blobs SET meta = meta || %s"
+                " WHERE key = ANY(%s) AND backend = %s AND touched_at <= %s",
+                (Jsonb(meta), list(keys), backend, cutoff),
+            )
+
     def touch(self, key: str) -> None:
         with self._pool.connection() as conn:
             conn.execute("UPDATE store_blobs SET touched_at = now() WHERE key = %s", (key,))
