@@ -155,6 +155,7 @@ def test_the_filament_step_shows_the_mounted_nozzles(client: TestClient, model: 
     assert not pipeline.called
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, model: str) -> None:
     """#469 — the recorded H2C has the Filament Track Switch: AMS 0/1 on inlet B (the
