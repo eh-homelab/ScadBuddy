@@ -34,7 +34,7 @@ UPLOAD=_scadbuddy_solid_asset_0123456789abcdef.PNG
 cp sample-cat.png "$UPLOAD"
 trap 'rm -f "$UPLOAD"' EXIT
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 options() {
     sed -n "s/^$1 = .*\/\/ \[\(.*\)\]\$/\1/p" model.scad | tr ',' '\n' | sed 's/:.*//; s/[" ]//g'
