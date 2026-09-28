@@ -612,6 +612,7 @@ export class SessionManager {
     /** Redacted from everything this turn writes to the durable event log. */
     let secrets: string[] = []
     let forwarded: PluginsForRun | undefined
+    let packages: PackagesForRun | undefined
     let pluginCheck: ((message: SDKMessage) => Promise<void>) | undefined
     try {
       // The credential first, and into `secrets` at once: whatever fails
@@ -634,7 +635,7 @@ export class SessionManager {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
       }
-      const packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
+      packages = this.deps.packagePlugins ? await this.deps.packagePlugins() : undefined
       for (const problem of packages?.problems ?? []) {
         this.deps.stderr?.(`${problem}\n`)
         await unavailable(problem)
@@ -707,6 +708,7 @@ export class SessionManager {
       if (!result && !controller.signal.aborted) failure = redact(describe(err), secrets)
     } finally {
       forwarded?.release()
+      packages?.release()
       local.settling = true
       clearInterval(renew)
       await renewing

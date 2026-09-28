@@ -41,6 +41,9 @@ export type PackagePin = {
 
 export type PendingPin = {
   ref: string
+  /** Where the new commit is fetched from; replaces the pin's on approval. */
+  plugin_url: string
+  plugin_path: string
   commit_sha: string
   content_hash: string
   review: PackageReview
@@ -79,6 +82,8 @@ type Row = {
   approved_at: Date | null
   enabled: boolean
   pending_ref: string | null
+  pending_fetch_url: string | null
+  pending_fetch_path: string | null
   pending_commit_sha: string | null
   pending_content_hash: string | null
   pending_files: FileList | null
@@ -108,9 +113,12 @@ function view(row: Row): PackageView {
     approved_at: row.approved_at?.toISOString() ?? null,
     enabled: row.enabled,
     pending:
-      row.pending_commit_sha && row.pending_content_hash && row.pending_review && row.pending_files && row.pending_ref
+      row.pending_commit_sha && row.pending_content_hash && row.pending_review && row.pending_files && row.pending_ref &&
+      row.pending_fetch_url !== null && row.pending_fetch_path !== null
         ? {
             ref: row.pending_ref,
+            plugin_url: row.pending_fetch_url,
+            plugin_path: row.pending_fetch_path,
             commit_sha: row.pending_commit_sha,
             content_hash: row.pending_content_hash,
             review: row.pending_review,
@@ -197,12 +205,18 @@ export class PackageStore implements PackageRepo {
     return this.sql.begin(async (tx) => {
       const [current] = await tx<Row[]>`SELECT * FROM ai_plugin_packages WHERE name = ${name} FOR UPDATE`
       if (!current) throw new PluginError(`no plugin package named "${name}"`, 404)
-      if (current.commit_sha === p.commit && current.content_hash === p.contentHash) {
+      if (
+        current.commit_sha === p.commit &&
+        current.content_hash === p.contentHash &&
+        current.fetch_url === p.fetchUrl &&
+        current.fetch_path === p.fetchPath
+      ) {
         throw new PluginError(`"${name}" is already pinned to ${p.commit}`, 409)
       }
       const [row] = await tx<Row[]>`
         UPDATE ai_plugin_packages SET
-          pending_ref = ${p.source.ref}, pending_commit_sha = ${p.commit}, pending_content_hash = ${p.contentHash},
+          pending_ref = ${p.source.ref}, pending_fetch_url = ${p.fetchUrl}, pending_fetch_path = ${p.fetchPath},
+          pending_commit_sha = ${p.commit}, pending_content_hash = ${p.contentHash},
           pending_files = ${tx.json(p.files)}, pending_review = ${tx.json(p.review)}, updated_at = now()
         WHERE name = ${name}
         RETURNING *`
@@ -212,7 +226,8 @@ export class PackageStore implements PackageRepo {
 
   async discardPending(name: string): Promise<PackageView> {
     const [row] = await this.sql<Row[]>`
-      UPDATE ai_plugin_packages SET pending_ref = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
+      UPDATE ai_plugin_packages SET pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL,
+        pending_commit_sha = NULL, pending_content_hash = NULL,
         pending_files = NULL, pending_review = NULL, updated_at = now()
       WHERE name = ${name}
       RETURNING *`
@@ -228,9 +243,10 @@ export class PackageStore implements PackageRepo {
         // The re-pin under review becomes the pin; enabled stays as it was.
         const [row] = await tx<Row[]>`
           UPDATE ai_plugin_packages SET
-            source_ref = pending_ref, commit_sha = pending_commit_sha, content_hash = pending_content_hash,
+            source_ref = pending_ref, fetch_url = pending_fetch_url, fetch_path = pending_fetch_path,
+            commit_sha = pending_commit_sha, content_hash = pending_content_hash,
             files = pending_files, review = pending_review, approved_at = now(),
-            pending_ref = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
+            pending_ref = NULL, pending_fetch_url = NULL, pending_fetch_path = NULL, pending_commit_sha = NULL, pending_content_hash = NULL,
             pending_files = NULL, pending_review = NULL, updated_at = now()
           WHERE name = ${name}
           RETURNING *`

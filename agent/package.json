@@ -27,6 +27,7 @@
     "hono": "^4.13.9",
     "openapi-fetch": "^0.17.0",
     "postgres": "^3.4.9",
+    "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {

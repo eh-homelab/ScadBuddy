@@ -1,5 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import path from 'node:path'
+import { parseDocument } from 'yaml'
 import { declaredConfigs, isInside, pluginProblems } from '../../harness/plugins.js'
 import { PLUGIN_NAME_RE, RESERVED_PLUGIN_NAMES } from '../registry.js'
 
@@ -94,27 +95,27 @@ function listFiles(root: string, rel = ''): string[] {
   return out.sort()
 }
 
-/** The YAML frontmatter's top-level keys, with scalar or list values. Enough for the keys vetted here. */
+/**
+ * The YAML frontmatter's top-level keys, each value as a list of strings (a
+ * scalar is one item; anything else is kept as JSON so a tool check refuses
+ * it). Parsed with a real YAML parser, so a quoted (`"hooks":`), explicit
+ * (`? hooks`), flow (`{hooks: …}`) or merged (`<<: {hooks: …}`) key is seen
+ * the way Claude Code would see it. Throws when the frontmatter is not a
+ * clean YAML mapping: the caller refuses it (fail closed).
+ */
 export function frontmatter(text: string): Map<string, string[]> | undefined {
-  const match = /^---\r?\n([\s\S]*?)\r?\n---\s*(?:\r?\n|$)/.exec(text)
+  const match = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/.exec(text)
   if (!match) return undefined
+  const doc = parseDocument(match[1]!, { merge: true, uniqueKeys: true, prettyErrors: false })
+  const issue = doc.errors[0] ?? doc.warnings[0]
+  if (issue) throw new Error(`frontmatter is not valid YAML: ${issue.message.split('\n')[0]}`)
+  const data: unknown = doc.toJS({ maxAliasCount: 100 })
+  if (data === null || data === undefined) return new Map()
+  if (!isRecord(data)) throw new Error('frontmatter is not a YAML mapping')
   const keys = new Map<string, string[]>()
-  let current: string[] | undefined
-  for (const line of match[1]!.split(/\r?\n/)) {
-    const key = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line)
-    if (key) {
-      current = []
-      keys.set(key[1]!, current)
-      const value = key[2]!.trim()
-      if (value.startsWith('[') && value.endsWith(']')) {
-        current.push(...value.slice(1, -1).split(','))
-      } else if (value && !/^[|>]/.test(value)) {
-        current.push(value)
-      }
-      continue
-    }
-    const item = /^\s+-\s+(.*)$/.exec(line)
-    if (item && current) current.push(item[1]!)
+  const item = (v: unknown): string => (typeof v === 'string' ? v : JSON.stringify(v))
+  for (const [key, value] of Object.entries(data)) {
+    keys.set(key, value === null || value === undefined ? [] : Array.isArray(value) ? value.map(item) : [item(value)])
   }
   return keys
 }
@@ -139,7 +140,13 @@ function checkMarkdown(rel: string, text: string, problems: string[]): void {
   if (INJECTION_INLINE.test(text) || INJECTION_BLOCK.test(text)) {
     problems.push(`${rel}: runs a shell command through dynamic context injection (!\`...\`)`)
   }
-  const fm = frontmatter(text)
+  let fm: Map<string, string[]> | undefined
+  try {
+    fm = frontmatter(text)
+  } catch (err) {
+    problems.push(`${rel}: ${(err as Error).message}`)
+    return
+  }
   if (!fm) return
   for (const key of ['hooks', 'mcpServers', 'permissionMode']) {
     if (fm.has(key)) problems.push(`${rel}: frontmatter "${key}" is not allowed in a plugin package`)

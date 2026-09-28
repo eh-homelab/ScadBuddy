@@ -34,8 +34,12 @@ CREATE TABLE ai_plugin_packages (
   -- Set when an admin approved exactly this pin in the UI (spec §8.2).
   approved_at       timestamptz,
   enabled           boolean NOT NULL DEFAULT false,
-  -- A re-pin waiting for approval: the same four columns for the new commit.
+  -- A re-pin waiting for approval: the same columns for the new commit,
+  -- including where it is fetched from (a marketplace entry may have moved to
+  -- another repository or path since the current pin).
   pending_ref          text,
+  pending_fetch_url    text,
+  pending_fetch_path   text,
   pending_commit_sha   text CHECK (pending_commit_sha ~ '^([0-9a-f]{40}|[0-9a-f]{64})$'),
   pending_content_hash text CHECK (pending_content_hash ~ '^sha256:[0-9a-f]{64}$'),
   pending_files        jsonb,
@@ -51,6 +55,8 @@ CREATE TABLE ai_plugin_packages (
     (pending_commit_sha IS NULL) = (pending_content_hash IS NULL) AND
     (pending_commit_sha IS NULL) = (pending_files IS NULL) AND
     (pending_commit_sha IS NULL) = (pending_review IS NULL) AND
-    (pending_commit_sha IS NULL) = (pending_ref IS NULL)
+    (pending_commit_sha IS NULL) = (pending_ref IS NULL) AND
+    (pending_commit_sha IS NULL) = (pending_fetch_url IS NULL) AND
+    (pending_commit_sha IS NULL) = (pending_fetch_path IS NULL)
   )
 );

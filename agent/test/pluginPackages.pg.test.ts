@@ -121,6 +121,32 @@ describe.skipIf(skip)(`plugin packages on Postgres${skip ? ` (skipped: ${why})` 
       expect((await store.enabledPins())[0]?.commit).toBe(next)
     })
 
+    it('re-pins a marketplace entry that moved to another repository, and loads from the new one', async () => {
+      const market = (url: string) =>
+        JSON.stringify({ name: 'm', owner: { name: 'o' }, plugins: [{ name: 'greeter', source: { source: 'url', url } }] })
+      repos.market = gitRepo({ '.claude-plugin/marketplace.json': market('https://git.test/greeter.git') })
+      const source = validateSource({ kind: 'marketplace', url: 'https://git.test/market.git', entry: 'greeter', ref: 'main' })
+      const installed = await store.create(await installer.prepare(source))
+      await store.approve('greeter', installed.commit_sha, installed.content_hash)
+      await store.setEnabled('greeter', true)
+
+      // The entry moves to another repository, whose history the old one lacks.
+      repos.moved = gitRepo({ ...GREETER, 'skills/hello/SKILL.md': '---\ndescription: Moved.\n---\n\nHi.\n' })
+      repos.market.commitFiles({ '.claude-plugin/marketplace.json': market('https://git.test/moved.git') })
+      const pending = await store.setPending('greeter', await installer.prepare((await store.pinOf('greeter'))!.source))
+      expect(pending.pending).toMatchObject({ plugin_url: 'https://git.test/moved.git', plugin_path: '', commit_sha: repos.moved.commit })
+      expect((await store.enabledPins())[0]?.fetchUrl).toBe('https://git.test/greeter.git') // until approved
+
+      const approved = await store.approve('greeter', repos.moved.commit, pending.pending!.content_hash)
+      expect(approved.source).toMatchObject({ plugin_url: 'https://git.test/moved.git' })
+      expect((await store.enabledPins())[0]).toMatchObject({ fetchUrl: 'https://git.test/moved.git', commit: repos.moved.commit })
+      rmSync(cacheRoot, { recursive: true, force: true }) // a fresh replica: fetched from the pin
+      const loaded = await loadPackagesForRun(store, installer)
+      expect(loaded.problems).toEqual([])
+      expect(loaded.paths).toHaveLength(1)
+      loaded.release()
+    })
+
     it('discards a pending re-pin, and deletes', async () => {
       await install()
       repos.greeter!.commitFiles({ 'skills/hello/SKILL.md': 'v2\n' })

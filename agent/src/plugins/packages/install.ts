@@ -126,8 +126,12 @@ export class PackageInstaller {
   readonly cacheRoot: string
   private readonly fetcher: RepoFetcher
   private readonly resolve: Resolver
-  /** One materialisation per package at a time in this process. */
-  private readonly inFlight = new Map<string, Promise<string>>()
+  /** Per package, the tail of its queue: materialising and pruning run one at a time. */
+  private readonly queues = new Map<string, Promise<unknown>>()
+  /** Turns using each cached directory; a leased directory is never pruned. */
+  private readonly leases = new Map<string, number>()
+  /** Per package, the cached directory most recently materialised: kept by prune. */
+  private readonly current = new Map<string, string>()
 
   constructor(options: InstallerOptions) {
     this.fetcher = options.fetcher
@@ -297,15 +301,49 @@ export class PackageInstaller {
    * loaded.
    */
   async materialise(pin: PackagePin): Promise<string> {
-    const running = this.inFlight.get(pin.name)
-    if (running) await running.catch(() => undefined)
-    const work = this.materialiseNow(pin)
-    this.inFlight.set(pin.name, work)
-    try {
-      return await work
-    } finally {
-      if (this.inFlight.get(pin.name) === work) this.inFlight.delete(pin.name)
+    const { dir, release } = await this.acquire(pin)
+    release()
+    return dir
+  }
+
+  /**
+   * As `materialise`, and leases the directory to the caller until `release`
+   * (once the turn that loads it has ended): a newer version materialised
+   * meanwhile does not delete it; it is pruned when its last lease goes.
+   */
+  async acquire(pin: PackagePin): Promise<{ dir: string; release: () => void }> {
+    const dir = await this.serial(pin.name, async () => {
+      const ready = await this.materialiseNow(pin)
+      this.leases.set(ready, (this.leases.get(ready) ?? 0) + 1)
+      this.current.set(pin.name, ready)
+      await this.prune(pin.name)
+      return ready
+    })
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      const left = (this.leases.get(dir) ?? 1) - 1
+      if (left > 0) {
+        this.leases.set(dir, left)
+        return
+      }
+      this.leases.delete(dir)
+      void this.serial(pin.name, () => this.prune(pin.name)).catch(() => undefined)
     }
+    return { dir, release }
+  }
+
+  /** Runs `work` after every earlier queued step for package `name`. */
+  private serial<T>(name: string, work: () => Promise<T>): Promise<T> {
+    const next = (this.queues.get(name) ?? Promise.resolve()).catch(() => undefined).then(work)
+    this.queues.set(name, next)
+    void next
+      .finally(() => {
+        if (this.queues.get(name) === next) this.queues.delete(name)
+      })
+      .catch(() => undefined)
+    return next
   }
 
   private async materialiseNow(pin: PackagePin): Promise<string> {
@@ -342,27 +380,40 @@ export class PackageInstaller {
       problems.push(`the package names itself "${vetting.review.name}", not "${pin.name}"`)
     }
     if (problems.length) throw new PackageRefusedError(problems)
-    await this.prune(pin)
     return dir
   }
 
-  /** Removes other cached versions of this package (best effort). */
-  private async prune(pin: PackagePin): Promise<void> {
-    const keep = path.basename(this.cacheDir(pin))
-    const parent = path.join(this.cacheRoot, pin.name)
+  /**
+   * Removes cached versions of package `name` that are neither the current one
+   * nor leased to a running turn (best effort). Runs in the package's queue.
+   */
+  private async prune(name: string): Promise<void> {
+    const parent = path.join(this.cacheRoot, name)
+    const keep = this.current.get(name)
     const entries = await readdir(parent).catch(() => [] as string[])
     await Promise.all(
-      entries.filter((e) => e !== keep).map((e) => rm(path.join(parent, e), { recursive: true, force: true })),
+      entries
+        .map((e) => path.join(parent, e))
+        .filter((dir) => dir !== keep && !this.leases.has(dir))
+        .map((dir) => rm(dir, { recursive: true, force: true })),
     )
   }
 
-  /** Removes every cached version of a package (on delete). */
+  /** Removes every cached version of a package (on delete); one a running turn uses goes when the turn ends. */
   async evict(name: string): Promise<void> {
-    await rm(path.join(this.cacheRoot, name), { recursive: true, force: true })
+    await this.serial(name, async () => {
+      this.current.delete(name)
+      await this.prune(name)
+    })
   }
 }
 
-export type PackagesForRun = { paths: string[]; problems: string[] }
+export type PackagesForRun = {
+  paths: string[]
+  problems: string[]
+  /** Call when the turn has ended: its package directories may then be pruned. */
+  release: () => void
+}
 
 /**
  * The enabled packages for one harness run, each materialised and verified.
@@ -371,13 +422,16 @@ export type PackagesForRun = { paths: string[]; problems: string[] }
  */
 export async function loadPackagesForRun(
   store: Pick<PackageRepo, 'enabledPins'>,
-  installer: Pick<PackageInstaller, 'materialise'>,
+  installer: Pick<PackageInstaller, 'acquire'>,
 ): Promise<PackagesForRun> {
   const paths: string[] = []
   const problems: string[] = []
+  const releases: (() => void)[] = []
   for (const pin of await store.enabledPins()) {
     try {
-      paths.push(await installer.materialise(pin))
+      const { dir, release } = await installer.acquire(pin)
+      paths.push(dir)
+      releases.push(release)
     } catch (err) {
       if (err instanceof PackageRefusedError) {
         problems.push(`plugin package ${pin.name} was not loaded: ${err.problems.join('; ')}`)
@@ -388,5 +442,5 @@ export async function loadPackagesForRun(
       }
     }
   }
-  return { paths, problems }
+  return { paths, problems, release: () => releases.forEach((r) => r()) }
 }

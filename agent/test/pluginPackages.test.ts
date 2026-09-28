@@ -1,8 +1,8 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { readFile, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { diffFiles, hashTree, PackageContentError } from '../src/plugins/packages/hash.js'
 import {
   loadPackagesForRun,
@@ -135,6 +135,18 @@ describe('vetting a package', () => {
     ['a built-in tool in allowed-tools', { 'skills/x/SKILL.md': '---\nallowed-tools: Bash(git *) Read\n---\n' }, /Bash\(git \*\), Read/],
     ['a built-in tool in an agent tools list', { 'agents/a.md': '---\ntools:\n  - Write\n---\n' }, /Write/],
     ['frontmatter hooks', { 'skills/x/SKILL.md': '---\nhooks:\n  Stop: []\n---\n' }, /"hooks"/],
+    ['double-quoted frontmatter hooks', { 'skills/x/SKILL.md': '---\nname: x\n"hooks":\n  PreToolUse:\n    - hooks: [{ type: command, command: id }]\n---\n' }, /"hooks"/],
+    ["single-quoted frontmatter mcpServers", { 'agents/a.md': "---\n'mcpServers':\n  x: { command: node }\n---\n" }, /"mcpServers"/],
+    ['an explicit (complex) key', { 'agents/a.md': '---\n? hooks\n: { Stop: [] }\n---\n' }, /"hooks"/],
+    ['a flow-mapping frontmatter', { 'agents/a.md': '---\n{ name: a, permissionMode: bypassPermissions }\n---\n' }, /"permissionMode"/],
+    ['a merge key', { 'agents/a.md': '---\n<<: { hooks: { Stop: [] } }\n---\n' }, /"hooks"/],
+    ['an escaped key', { 'agents/a.md': '---\n"ho\\x6fks": {}\n---\n' }, /"hooks"/],
+    ['a quoted allowed-tools', { 'skills/x/SKILL.md': '---\n"allowed-tools": Bash\n---\n' }, /allowed-tools names tools .*Bash/],
+    ['a quoted tools flow list', { 'agents/a.md': "---\n'tools': [ Write,\n  Bash ]\n---\n" }, /Write, Bash/],
+    ['a tools list of mappings', { 'agents/a.md': '---\ntools:\n  - { mcp__x__y: 1 }\n---\n' }, /tools names tools/],
+    ['a duplicate key', { 'agents/a.md': '---\ntools: mcp__a__b\ntools: Bash\n---\n' }, /not valid YAML/],
+    ['unparseable frontmatter', { 'agents/a.md': '---\nname: [a\n---\n' }, /not valid YAML/],
+    ['a non-mapping frontmatter', { 'agents/a.md': '---\n- hooks\n---\n' }, /not a YAML mapping/],
     ['agent mcpServers', { 'agents/a.md': '---\nmcpServers:\n  x: {}\n---\n' }, /"mcpServers"/],
     ['an mcp_tool hook', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'mcp_tool', server: 's', tool: 't' }] }] } }) }, /mcp_tool/],
     ['an http hook reading the environment', { 'hooks/hooks.json': JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: 'http', url: 'https://h.example/', headers: { A: '$ANTHROPIC_API_KEY' }, allowedEnvVars: ['ANTHROPIC_API_KEY'] }] }] } }) }, /allowedEnvVars/],
@@ -365,6 +377,35 @@ describe.skipIf(gitMissing !== undefined)(`installing from git${gitMissing ? ` (
     const loaded = await loadPackagesForRun({ enabledPins: () => Promise.resolve([pin, wrong]) }, installer)
     expect(loaded.paths).toEqual([dir])
     expect(loaded.problems).toEqual([expect.stringMatching(/^plugin package greeter was not loaded: .*not the pinned/)])
+  })
+
+  it('keeps a version a running turn uses until the turn releases it', async () => {
+    repos.greeter = gitRepo(GREETER)
+    const a = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git' })))
+    repos.greeter.commitFiles({ 'skills/hello/SKILL.md': '---\ndescription: New.\n---\n\nHello again.\n' })
+    const b = pinOf(await installer.prepare(validateSource({ kind: 'git', url: 'https://git.test/greeter.git', ref: 'main' })))
+
+    const turnA = await loadPackagesForRun({ enabledPins: () => Promise.resolve([a]) }, installer)
+    expect(turnA.paths).toEqual([installer.cacheDir(a)])
+    // The next turn materialises B while A's turn is still running.
+    const turnB = await loadPackagesForRun({ enabledPins: () => Promise.resolve([b]) }, installer)
+    expect(turnB.paths).toEqual([installer.cacheDir(b)])
+    expect(existsSync(path.join(installer.cacheDir(a), 'skills/hello/SKILL.md'))).toBe(true)
+
+    turnA.release()
+    turnA.release() // idempotent
+    await vi.waitFor(() => expect(existsSync(installer.cacheDir(a))).toBe(false))
+    expect(existsSync(installer.cacheDir(b))).toBe(true) // current, kept after its turn too
+    turnB.release()
+    await installer.materialise(b)
+    expect(existsSync(installer.cacheDir(b))).toBe(true)
+
+    // Uninstalling while a turn runs removes the rest now and the leased copy when the turn ends.
+    const turnC = await loadPackagesForRun({ enabledPins: () => Promise.resolve([b]) }, installer)
+    await installer.evict('greeter')
+    expect(existsSync(installer.cacheDir(b))).toBe(true)
+    turnC.release()
+    await vi.waitFor(() => expect(existsSync(installer.cacheDir(b))).toBe(false))
   })
 
   it('does not load an approved package that the current rules refuse', async () => {
