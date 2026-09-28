@@ -43,6 +43,12 @@ PROJECT_RETRY = RetryPolicy(
     backoff_coefficient=2.0,
 )
 SHORT = timedelta(seconds=60)
+#: One piece up to or down from the store: the Bambuddy client's per-request budget
+#: (`bambuddy.client.DEFAULT_UPLOAD_TIMEOUT`, 180 s), written out here because a
+#: workflow module keeps its imports to the workflow's own models.
+TRANSFER = timedelta(seconds=180)
+#: Every stage that moves a piece beats while it does (`activities._heartbeating`).
+HEARTBEAT = timedelta(seconds=30)
 
 
 def _openscad_timeout() -> timedelta:
@@ -52,10 +58,26 @@ def _openscad_timeout() -> timedelta:
     return timedelta(seconds=memo)
 
 
+def _main_timeout() -> timedelta:
+    """`render_main`: the openscad run, then its piece published."""
+    return _openscad_timeout() + TRANSFER
+
+
+def _solids_timeout() -> timedelta:
+    """`render_solids`: the piece fetched, the openscad runs, the piece published."""
+    return _openscad_timeout() + 2 * TRANSFER
+
+
+#: `cached_piece`: an index read and, on a miss, one download.
+CACHED_TIMEOUT = SHORT + TRANSFER
+#: `finish_piece`: the piece fetched, the short stage, the piece published.
+FINISH_TIMEOUT = SHORT + 2 * TRANSFER
+
+
 def _waiter_recheck() -> timedelta:
-    # Three attempts of a piece's worst case (two openscad activities plus two short
-    # ones): a live piece is rarely re-checked, and harmlessly (the re-signal is idempotent).
-    return 3 * (2 * _openscad_timeout() + 2 * SHORT)
+    # Three attempts of a piece's worst case (every stage at its bound): a live piece
+    # is rarely re-checked, and harmlessly (the re-signal is idempotent).
+    return 3 * (CACHED_TIMEOUT + SHORT + _main_timeout() + _solids_timeout() + FINISH_TIMEOUT)
 
 
 def _failure_of(error: BaseException) -> Failure:
@@ -96,7 +118,8 @@ class RenderPiece:
             "cached_piece",
             req,
             result_type=PieceResult,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=CACHED_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
         if cached is not None:
@@ -112,22 +135,23 @@ class RenderPiece:
             "render_main",
             args=[req, prepared],
             result_type=RenderMainResult,
-            start_to_close_timeout=_openscad_timeout(),
-            heartbeat_timeout=timedelta(seconds=30),
+            start_to_close_timeout=_main_timeout(),
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
         await workflow.execute_activity(
             "render_solids",
             args=[req, prepared, main],
-            start_to_close_timeout=_openscad_timeout(),
-            heartbeat_timeout=timedelta(seconds=30),
+            start_to_close_timeout=_solids_timeout(),
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
         result: PieceResult = await workflow.execute_activity(
             "finish_piece",
             args=[req, prepared, main],
             result_type=PieceResult,
-            start_to_close_timeout=SHORT,
+            start_to_close_timeout=FINISH_TIMEOUT,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
         return result

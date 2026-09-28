@@ -4,9 +4,12 @@ directory shape (spec 2026-09-27 §6.2).
 Each render stage runs in `dir_for(key)` exactly as on the shared volume; `publish`
 packs the directory into one blob when a stage ends, `fetch` unpacks it on whichever
 worker the next stage lands on. A directory whose marker matches the index is a hit and
-costs one index read. Sticky scheduling would make every fetch a hit; nothing depends
-on it. Publishing is a compare-and-swap on the sha the directory was fetched at, so an
-attempt Temporal has already retried elsewhere cannot overwrite its successor.
+costs one index read. The marker means "exactly the published bytes": a stage about to
+write removes it (`checkout`) and only an unpack or a successful publish writes it, so a
+directory a stage changed but never published is a miss, never an answer. Sticky
+scheduling would make every fetch a hit; nothing depends on it. Publishing is a
+compare-and-swap on the sha the stage checked out, so an attempt Temporal has already
+retried elsewhere cannot overwrite its successor.
 """
 
 from __future__ import annotations
@@ -14,13 +17,20 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+import weakref
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from scadbuddy.render.job_models import JobResult
-from scadbuddy.store import BlobStore
-from scadbuddy.store.archive import pack_dir, read_marker, unpack_dir, write_marker
-from scadbuddy.store.content import BlobCorruptError, BlobMissingError, BlobScope, ContentStore
+from scadbuddy.store import BlobStore, PieceStateLostError
+from scadbuddy.store.archive import clear_marker, pack_dir, read_marker, unpack_dir, write_marker
+from scadbuddy.store.content import (
+    BlobCorruptError,
+    BlobMissingError,
+    BlobScope,
+    BlobStat,
+    ContentStore,
+)
 from scadbuddy.store.local import LocalBlobStore
 
 if TYPE_CHECKING:
@@ -57,6 +67,10 @@ class CachedBlobStore:
         self.min_age = min_age
         self.metrics = metrics
         self.backend = content.name
+        #: One per key being fetched: a second miss on it waits, then finds a hit.
+        self._fetching: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+            weakref.WeakValueDictionary()
+        )
 
     # --- phase 1's BlobStore, over the local cache ---------------------------
 
@@ -64,7 +78,9 @@ class CachedBlobStore:
         return self.local.dir_for(key)
 
     def exists(self, key: str) -> bool:
-        return self.local.exists(key) or self.content.index.get(key) is not None
+        """Synchronous: it reads the index. Call it from a thread (as the sweep does),
+        never from the event loop."""
+        return self.local.exists(key) or self._row(key) is not None
 
     def remove(self, key: str) -> None:
         self.local.remove(key)
@@ -81,10 +97,40 @@ class CachedBlobStore:
         if self.metrics is not None:
             self.metrics.worker_cache.labels(result).inc()
 
+    def _row(self, key: str) -> BlobStat | None:
+        """The index row, when it is this store's backend's (as `ContentStore.stat`)."""
+        stat = self.content.index.get(key)
+        return stat if stat is not None and stat.ref.backend == self.content.name else None
+
+    def _lock(self, key: str) -> asyncio.Lock:
+        lock = self._fetching.get(key)
+        if lock is None:
+            lock = self._fetching[key] = asyncio.Lock()
+        return lock
+
     async def fetch(self, key: str) -> bool:
-        stat = await asyncio.to_thread(self.content.index.get, key)
+        async with self._lock(key):
+            return await self._fetch(key) is not None
+
+    async def checkout(self, key: str) -> str | None:
+        async with self._lock(key):
+            sha = await self._fetch(key)
+            if sha is None:
+                raise PieceStateLostError(key)
+            await asyncio.to_thread(clear_marker, self.local.dir_for(key))
+            return sha
+
+    async def checkout_fresh(self, key: str) -> str | None:
+        async with self._lock(key):
+            await asyncio.to_thread(clear_marker, self.local.dir_for(key))
+            return await self.indexed_sha(key)
+
+    async def _fetch(self, key: str) -> str | None:
+        """Under the key's lock: make the directory hold the stored blob; its sha, or
+        None when nothing (of this backend) is stored."""
+        stat = await asyncio.to_thread(self._row, key)
         if stat is None:
-            return False
+            return None
         directory = self.local.dir_for(key)
         if read_marker(directory) == stat.ref.sha256:
             self._cache("hit")
@@ -98,18 +144,18 @@ class CachedBlobStore:
                     extra={"key": key, "error": repr(error)},
                 )
                 await self.content.forget(key)
-                return False
+                return None
             await asyncio.to_thread(unpack_dir, data, directory, sha256=stat.ref.sha256)
         # Claimed: the sweep's `delete_if_stale` now skips it (see `sweep_content`).
         await self.content.touch(key)
-        return True
+        return stat.ref.sha256
 
     async def publish(self, key: str, *, scope: BlobScope) -> None:
         directory = self.local.dir_for(key)
         await self._publish(key, scope, expected=read_marker(directory))
 
     async def indexed_sha(self, key: str) -> str | None:
-        stat = await asyncio.to_thread(self.content.index.get, key)
+        stat = await asyncio.to_thread(self._row, key)
         return stat.ref.sha256 if stat is not None else None
 
     async def publish_fresh(self, key: str, *, scope: BlobScope, expected: str | None) -> None:
