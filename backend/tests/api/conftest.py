@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 import trimesh
 from fastapi import FastAPI
@@ -18,7 +19,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.glb import BoundingBox
-from scadbuddy.render.jobs import Job, JobResult, PartInfo, RenderQueue
+from scadbuddy.render.jobs import Job, JobResult, JobStore, PartInfo, RenderQueue
 from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.split import ColourPart
@@ -69,6 +70,23 @@ if "%%FAIL%%" in text:
 if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
     # Exit 0, and an export with a parameter that has no name.
     pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
+    raise SystemExit(0)
+
+if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
+    # A customizer range and a select, as `// [1:100]` and `// [a, b]` export (#432).
+    pathlib.Path(out).write_text(
+        json.dumps(
+            {
+                "parameters": [
+                    {"name": "width", "type": "number", "initial": 10, "group": "Main",
+                     "min": 1, "max": 100, "step": 1},
+                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
+                     "options": [{"name": "Round", "value": "round"},
+                                 {"name": "Square", "value": "square"}]},
+                ],
+            }
+        )
+    )
     raise SystemExit(0)
 
 if out is not None and out.endswith(".param"):
@@ -129,22 +147,14 @@ def seed_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings(
-    request: pytest.FixtureRequest, data_dir: Path, seed_dir: Path, fake_openscad: str
-) -> Settings:
-    """A test marked ``requires_postgres`` gets a database of its own (a throwaway
-    schema): an output's Bambuddy upload records live only there (#455)."""
-    database_url = (
-        request.getfixturevalue("pg_conninfo")
-        if request.node.get_closest_marker("requires_postgres")
-        else None
-    )
+def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
+    """The app's settings, on a throwaway Postgres schema: it will not start without one."""
     return Settings(
         openscad=fake_openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
-        database_url=database_url,
+        database_url=pg_conninfo,
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,
@@ -242,6 +252,32 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
 def client(app: FastAPI) -> Iterator[TestClient]:
     with TestClient(app) as test_client:
         yield test_client
+
+
+def job_file(paths: DataPaths, job_id: str, name: str) -> Path:
+    """Where a finished job's ``model.3mf`` or ``preview.glb`` is: under the template
+    once the worker kept the render (`render_cache`), the work directory otherwise."""
+    result = JobStore(paths).read(job_id).result
+    assert result is not None, f"job {job_id} has no result"
+    return paths.root / {"model.3mf": result.model_3mf, "preview.glb": result.preview_glb}[name]
+
+
+def read_stored(conninfo: str) -> dict[str, Any]:
+    """What the settings store persisted, read straight from its tables rather than
+    through the store: ``settings`` rows by name, plus the per-model choices and
+    per-printer plates under the names they have on ``StoredSettings``."""
+    with psycopg.connect(conninfo) as conn:
+        stored: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+        stored["model_print_choices"] = dict(
+            conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
+        )
+        stored["printer_bed_types"] = {
+            str(printer_id): bed_type
+            for printer_id, bed_type in conn.execute(
+                "SELECT printer_id, bed_type FROM printer_bed_types"
+            ).fetchall()
+        }
+    return stored
 
 
 def wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:

@@ -179,6 +179,22 @@ def test_a_create_with_no_usable_slug_clones_nothing(
     resolve.assert_not_called()
 
 
+def test_a_create_with_a_nul_byte_clones_nothing(
+    lib_client: TestClient, libraries_app: FastAPI
+) -> None:
+    """A NUL-byte refusal happens before a catalogued library is cloned (#436, #486)."""
+    with patch.object(_store(libraries_app), "resolve") as resolve:
+        refused = lib_client.post(
+            "/api/v1/models",
+            json={"name": "Widget", "source": "cube(1);\x00\n", "libraries": ["BOSL2"]},
+        )
+
+    assert refused.status_code == 422, refused.text
+    assert "NUL" in refused.json()["detail"]
+    resolve.assert_not_called()
+    assert lib_client.get(f"/api/v1/models/{SLUG}").status_code == 404
+
+
 def test_an_upload_naming_something_that_is_not_a_library_name_is_a_422(
     lib_client: TestClient, libraries_app: FastAPI
 ) -> None:

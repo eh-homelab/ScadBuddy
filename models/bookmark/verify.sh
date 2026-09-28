@@ -105,16 +105,18 @@ CASES=(
     "largest|base_color,border_color,text_color,overlay_color,bead_color,bead_color_2|length=250;width=80;mask_repeat=4;bead_count=6;overlay_file=\"sample-leaf.png\";overlay_type=\"png_threshold\";overlay_scale=40;overlay_y=90;label=\"Largest bookmark\""
 )
 
-# Every dropdown value of shape and mask_mode must appear in some case.
+# Every dropdown value of shape and mask_mode must appear in some case. `grep`
+# reads all of its input (no -q): `grep -q` exits at the first match, printf then
+# dies of SIGPIPE, and under pipefail the pipeline fails as if nothing matched.
 options() {
     sed -n "s/^$1 = .*\/\/ \[\(.*\)\]\$/\1/p" model.scad | tr ',' '\n' | sed 's/:.*//; s/[" ]//g'
 }
 for s in $(options shape); do
-    printf '%s\n' "${CASES[@]}" | grep -q "shape=\"$s\"" || [ "$s" = "tassel" ] \
+    printf '%s\n' "${CASES[@]}" | grep "shape=\"$s\"" >/dev/null || [ "$s" = "tassel" ] \
         || { echo "FAIL: no case covers shape $s"; exit 1; }
 done
 for m in $(options mask_mode); do
-    printf '%s\n' "${CASES[@]}" | grep -q "mask_mode=\"$m\"" || [ "$m" = "cutout" ] \
+    printf '%s\n' "${CASES[@]}" | grep "mask_mode=\"$m\"" >/dev/null || [ "$m" = "cutout" ] \
         || { echo "FAIL: no case covers mask_mode $m"; exit 1; }
 done
 
