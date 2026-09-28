@@ -55,18 +55,20 @@ against a local fake Anthropic endpoint; `test/pg.test.ts` needs
 -e POSTGRES_DB=scadbuddy_test -p 5432:5432 postgres:17`, then
 `SCADBUDDY_TEST_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/scadbuddy_test pnpm test`).
 
-Generated files (the `freshness` job regenerates them on PRs and pushes a fix; run
-them yourself when you change an API model or route, in this order):
+Generated API files (#492): `backend/openapi.json`, `frontend/src/api/schema.d.ts` and
+`agent/src/api/schema.d.ts` are gitignored and never committed. In frontend and agent,
+`pnpm gen:api` (`scripts/gen-api.mjs`) exports the spec with uv, then writes the
+client. `typecheck`, `test` and (in the agent) `build` run it first, so both packages need
+uv and the backend tree. With `SCADBUDDY_OPENAPI_JSON` set, it reads that spec and skips
+the export. That's how the Dockerfile's `frontend` and `agent-build` stages use the spec
+from its `api-spec` stage. The `freshness` job no longer commits anything. It checks
+that two exports are byte-identical, checks the committed msw worker, and posts the API
+diff against main as one PR comment, edited in place. The msw worker
+(`public/mockServiceWorker.js`) stays committed; regenerate it after an msw bump:
 
 ```bash
-cd backend && uv run --frozen python -m scadbuddy.tools.export_openapi   # backend/openapi.json
-cd frontend && pnpm gen:api                                             # src/api/schema.d.ts
-cd frontend && pnpm exec msw init public --save                         # public/mockServiceWorker.js
-cd agent && pnpm gen:api                                                # agent/src/api/schema.d.ts
+cd frontend && pnpm exec msw init public --save   # --save, or it prompts and dies with no TTY
 ```
-
-Both `gen:api` steps read the exported spec, so export first. `--save` is required on `msw init`
-(without it the CLI prompts and dies with no TTY).
 
 Workflow/Dockerfile lint (the `lint` job): actionlint, hadolint with `.hadolint.yaml`,
 `shellcheck .github/scripts/*.sh models/*/verify.sh`, `lint-verify-labels.sh`, and the
@@ -245,8 +247,8 @@ the image because `pnpm build` copies them into `dist/db/migrations/`.
   `claude-code-review.yml` differs from `main`'s), the gate passes **only if the PR
   itself edits that file**. A PR merely branched before `main` changed it fails closed
   (#487): merge `main` and re-dispatch the review.
-- The freshness job may push a `chore: regenerate committed generated files` commit to
-  your branch; pull before pushing again.
+- Never commit `backend/openapi.json` or either `schema.d.ts`. An API change shows up
+  as the `freshness` job's diff comment on the PR, not in the PR's own diff.
 
 ## Known flakes
 
