@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import psycopg
 import pytest
+import trimesh
 from psycopg.conninfo import make_conninfo
 
 from scadbuddy.core import settings as settings_module
@@ -337,6 +338,44 @@ def write_openscad_3mf(
     with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("3D/3dmodel.model", model)
     return path
+
+
+#: Writes a `.param`, copies the 3MF named in `fake-env.json` to every `.3mf` output,
+#: and exits 1 on a source containing `%%FAIL%%`.
+FAKE_3MF_OPENSCAD = """#!/usr/bin/env python3
+import json
+import pathlib
+import shutil
+import sys
+
+args = sys.argv[1:]
+settings = json.loads(pathlib.Path(sys.argv[0]).with_name("fake-env.json").read_text())
+out = args[args.index("-o") + 1] if "-o" in args else None
+source = pathlib.Path(args[-1])
+if "%%FAIL%%" in source.read_text(encoding="utf-8"):
+    print("ERROR: Parser error: syntax error", file=sys.stderr)
+    raise SystemExit(1)
+if out is not None and out.endswith(".param"):
+    pathlib.Path(out).write_text(
+        json.dumps({"parameters": [{"name": "width", "type": "number", "initial": 10}]})
+    )
+elif out is not None and out.endswith(".3mf"):
+    shutil.copyfile(settings["FAKE_3MF"], out)
+"""
+
+
+def fake_3mf_openscad(directory: Path) -> str:
+    """A fake openscad in ``directory`` whose every 3MF export is one blue box."""
+    binary = directory / "fake-openscad"
+    directory.mkdir(parents=True)
+    binary.write_text(FAKE_3MF_OPENSCAD, encoding="utf-8")
+    binary.chmod(0o755)
+    model = write_openscad_3mf(
+        directory / "drawn.3mf",
+        [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))],
+    )
+    (directory / "fake-env.json").write_text(json.dumps({"FAKE_3MF": str(model)}))
+    return str(binary)
 
 
 def read_png(data: bytes) -> np.ndarray:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -11,7 +10,6 @@ from pathlib import Path
 
 import psycopg
 import pytest
-import trimesh
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -38,31 +36,8 @@ from scadbuddy.workflows.activities import (
 from scadbuddy.workflows.client import make_current, render_worker
 from scadbuddy.workflows.models import Failure, PieceRequest, PieceResult, Projection, piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
-from tests.conftest import write_openscad_3mf
+from tests.conftest import fake_3mf_openscad
 from tests.support.temporal import temporal_client
-
-#: Writes a `.param`, copies the 3MF named in `fake-env.json` to every `.3mf` output,
-#: and exits 1 on a source containing `%%FAIL%%`.
-FAKE_OPENSCAD = """#!/usr/bin/env python3
-import json
-import pathlib
-import shutil
-import sys
-
-args = sys.argv[1:]
-settings = json.loads(pathlib.Path(sys.argv[0]).with_name("fake-env.json").read_text())
-out = args[args.index("-o") + 1] if "-o" in args else None
-source = pathlib.Path(args[-1])
-if "%%FAIL%%" in source.read_text(encoding="utf-8"):
-    print("ERROR: Parser error: syntax error", file=sys.stderr)
-    raise SystemExit(1)
-if out is not None and out.endswith(".param"):
-    pathlib.Path(out).write_text(
-        json.dumps({"parameters": [{"name": "width", "type": "number", "initial": 10}]})
-    )
-elif out is not None and out.endswith(".3mf"):
-    shutil.copyfile(settings["FAKE_3MF"], out)
-"""
 
 
 REVISION = "c0ffee"
@@ -86,16 +61,7 @@ def _paths(tmp_path: Path, source: str = "cube();\n") -> DataPaths:
 
 
 def _config(tmp_path: Path, paths: DataPaths) -> Config:
-    binary = tmp_path / "bin" / "fake-openscad"
-    binary.parent.mkdir()
-    binary.write_text(FAKE_OPENSCAD, encoding="utf-8")
-    binary.chmod(0o755)
-    model = write_openscad_3mf(
-        tmp_path / "bin" / "drawn.3mf",
-        [("Color 1", "#0047BB00", trimesh.creation.box(extents=(10, 10, 2)))],
-    )
-    (binary.parent / "fake-env.json").write_text(json.dumps({"FAKE_3MF": str(model)}))
-    return Config(openscad=str(binary), data_dir=paths.root)
+    return Config(openscad=fake_3mf_openscad(tmp_path / "bin"), data_dir=paths.root)
 
 
 def _deps(
