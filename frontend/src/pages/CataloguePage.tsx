@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { Link, useLocation, useNavigate, useNavigationType, useSearchParams } from 'react-router'
+import { useEffect, useMemo, useState } from 'react'
+import { Link, useLocation, useNavigate, useSearchParams } from 'react-router'
 import { AgentToolError } from '../agent/types'
 import { touch } from '../agent/highlight'
 import { useAgentHandlers } from '../agent/useAgentHandlers'
@@ -32,6 +32,13 @@ import { timeAgo } from '../lib/format'
 import { safeHttpUrl } from '../lib/safeUrl'
 import { useAsync } from '../lib/useAsync'
 
+/** History state marking a catalogue entry whose view is settled (#278). */
+const SEEN = { catalogueView: 'seen' } as const
+
+function isSeen(state: unknown): boolean {
+  return typeof state === 'object' && state !== null && 'catalogueView' in state
+}
+
 export function CataloguePage() {
   // #269 — live: models created, duplicated, renamed or deleted anywhere appear here.
   const { data, error, loading, setData, reload } = useAsync(() => api.listModels(), [], ['models'])
@@ -44,21 +51,18 @@ export function CataloguePage() {
   const query = useMemo(() => parseQuery(params), [params])
   // #278 — arriving with no `view` in the URL, the one this browser last chose is
   // written into it (replacing this entry), so the URL stays the one source of truth
-  // and back/forward move between views like any other filter (#276). That covers any
-  // in-app navigation to `/` while the page stays mounted (the Models tab, the agent's
-  // `navigate`), but not Back/Forward to an entry without a view, which keeps Cards.
+  // and back/forward move between views like any other filter (#276). Each entry the
+  // catalogue has seen is marked in its history state, which outlives this component
+  // (leaving for a model unmounts it) and the tab's own storage: Back/Forward or a
+  // reload onto a marked entry shows what its URL says, even when another tab has
+  // since chosen another view. An unmarked entry is a fresh arrival: the first load,
+  // the Models tab, the agent's `navigate`.
   const location = useLocation()
-  const navigationType = useNavigationType()
-  const arrived = useRef(false)
   useEffect(() => {
-    const first = !arrived.current
-    arrived.current = true
-    // The first load is a POP too; only a later one is Back/Forward.
-    if (!first && navigationType === 'POP') return
+    if (isSeen(location.state)) return
     const stored = readStoredView()
-    if (!params.has('view') && stored && stored !== query.view) {
-      setParams(toParams({ ...query, view: stored }), { replace: true })
-    }
+    const view = !params.has('view') && stored ? stored : query.view
+    setParams(toParams({ ...query, view }), { replace: true, state: SEEN })
     // Per navigation only: between navigations the URL alone decides.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.key])
@@ -68,7 +72,7 @@ export function CataloguePage() {
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
     if (next.view !== query.view) storeView(next.view)
-    setParams(toParams(next), options)
+    setParams(toParams(next), { ...options, state: SEEN })
   }
 
   function addTag(tag: string) {
