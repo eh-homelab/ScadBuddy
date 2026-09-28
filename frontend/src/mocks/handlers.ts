@@ -26,6 +26,8 @@ import type {
   ParamValue,
   Plate,
   PlateFit,
+  PrintDetail,
+  PrintPage,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -779,6 +781,34 @@ function mediaBytes(slug: string, file: string, kind: MediaView['kind']): ArrayB
   if (stored) return stored
   const base64 = kind === 'video' ? fixtures.MEDIA_MP4_BASE64 : fixtures.MEDIA_PNG_BASE64
   return Uint8Array.from(atob(base64), (c) => c.charCodeAt(0)).buffer
+}
+
+/** The `PrintSummary` half of a fixture print: what the list serves. */
+function printSummary(print: PrintDetail): PrintPage['items'][number] {
+  const { provenance: _p, files: _f, media: _m, outcome: _o, printer_media: _pm, links: _l, ...summary } = print
+  return summary
+}
+
+/** `api/print_history.py` `_matches`. */
+function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
+  const status = query.get('status')
+  if (status !== null && print.status !== status) return false
+  const printer = query.get('printer_id')
+  if (printer !== null && print.printer_id !== Number(printer)) return false
+  const day = print.started_at?.slice(0, 10) ?? null
+  const from = query.get('from')
+  const to = query.get('to')
+  if ((from !== null || to !== null) && day === null) return false
+  if (from !== null && day !== null && day < from) return false
+  if (to !== null && day !== null && day > to) return false
+  const slug = query.get('slug')
+  if (slug !== null && print.slug !== slug) return false
+  const q = query.get('q')?.toLowerCase()
+  if (q) {
+    const haystack = [print.output_name ?? '', print.slug, JSON.stringify(print.provenance.params)]
+    if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
+  }
+  return true
 }
 
 /** A multipart file part as `_staged` reads it: absent, or sent empty, is none. */
@@ -2063,6 +2093,56 @@ export const handlers = [
       },
     })
   }),
+
+  http.get(`${base}/outputs/:id/preview.glb`, ({ params }) => {
+    const output = state.outputs.find((o) => o.id === params['id'])
+    if (!output) return problem(404, 'Output not found')
+    const [x, y, z] = output.bbox_mm.size
+    const glb = keychainGlb(output.colors ?? ['#9AA4B2'], { x, y, z })
+    return HttpResponse.arrayBuffer(glb.buffer.slice(0) as ArrayBuffer, {
+      headers: { 'Content-Type': 'model/gltf-binary' },
+    })
+  }),
+
+  // #308 — the prints API, filtered and paged as `api/print_history.py` does.
+  http.get(`${base}/prints`, ({ request }) => {
+    const query = new URL(request.url).searchParams
+    const limit = Number(query.get('limit') ?? 50)
+    const cursor = query.get('cursor')
+    if (!Number.isInteger(limit) || limit < 1 || limit > 100 || (cursor !== null && !/^[1-9][0-9]*$/.test(cursor))) {
+      return problem(422, 'Unprocessable Content', 'the request did not match the expected shape')
+    }
+    const matches = fixtures.prints.filter((print) => printMatches(print, query))
+    const after = cursor === null ? matches : matches.filter((print) => print.archive_id < Number(cursor))
+    const items = after.slice(0, limit).map(printSummary)
+    const last = items.at(-1)
+    return HttpResponse.json({
+      items,
+      next_cursor: after.length > limit && last ? String(last.archive_id) : null,
+    } satisfies PrintPage)
+  }),
+
+  http.get(`${base}/prints/:archiveId`, ({ params, request }) => {
+    const print = fixtures.prints.find((p) => String(p.archive_id) === params['archiveId'])
+    if (!print) return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+    const wantsPrinter = ['1', 'true'].includes(new URL(request.url).searchParams.get('printer_media') ?? '')
+    return HttpResponse.json({
+      ...print,
+      printer_media:
+        wantsPrinter && print.status !== 'deleted_in_bambuddy'
+          ? { archive_id: print.archive_id, printer_id: print.printer_id, local_timelapse: null, remote_files: [], warnings: [] }
+          : null,
+    } satisfies PrintDetail)
+  }),
+
+  ...['thumbnail', 'photos/:name', 'plates/:index/thumbnail'].map((path) =>
+    http.get(`${base}/prints/:archiveId/${path}`, ({ params }) => {
+      if (!fixtures.prints.some((p) => String(p.archive_id) === params['archiveId'])) {
+        return problem(404, 'Not Found', `archive ${String(params['archiveId'])} is not a print of any ScadBuddy output`)
+      }
+      return HttpResponse.arrayBuffer(mediaBytes('', '', 'image'), { headers: { 'Content-Type': 'image/png' } })
+    }),
+  ),
 
   // #83 — every ScadBuddy render is one plate; a test overrides this for a multi-plate 3MF.
   http.get(`${base}/outputs/:id/plates`, ({ params }) => {

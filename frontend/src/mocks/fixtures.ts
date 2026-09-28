@@ -16,7 +16,9 @@ import type {
   Param,
   ParamPreset,
   Plate,
+  PrintDetail,
   PrintProgress,
+  PrintSummary,
   Settings,
 } from '../api/types'
 
@@ -1078,3 +1080,122 @@ export const filamentOptions: FilamentOptions = {
     { nozzle_type: 'HS01', nozzle_diameter: '0.4' },
   ],
 }
+
+/**
+ * #308 — the prints API (`GET /prints`, `GET /prints/{archive_id}`), newest archive
+ * first: a completed print with a finish photo and a timelapse, a failed one without a
+ * timelapse, one still printing, and one whose archive was deleted in Bambuddy. Shaped
+ * from the live archive 35 (`backend/tests/bambuddy/recordings/archive-detail.json`).
+ */
+function printOf(
+  archive_id: number,
+  output: Output,
+  fields: Partial<PrintDetail> & Pick<PrintDetail, 'status'>,
+  failureReason: string | null = null,
+): PrintDetail {
+  const prints = `/api/v1/prints/${archive_id}`
+  const download = `name-keychain-${(output.name ?? output.id).toLowerCase()}`
+  const summary: PrintSummary = {
+    archive_id,
+    output_id: output.id,
+    slug: output.slug,
+    output_name: output.name ?? null,
+    printer_id: 1,
+    started_at: '2026-09-27T04:09:36.529201',
+    completed_at: '2026-09-27T05:56:53.660315',
+    actual_time_seconds: 6437,
+    filament_used_grams: 16.36,
+    cover: { kind: 'thumbnail', url: `${prints}/thumbnail` },
+    has_timelapse: false,
+    attachment_count: 0,
+    params_diff: { name: output.params?.['name'] ?? '' },
+    run_count: 1,
+    ...fields,
+  }
+  return {
+    ...summary,
+    provenance: {
+      slug: output.slug,
+      model_version: output.model_version ?? null,
+      params: output.params ?? {},
+      output_id: output.id,
+      edit_url: `/edit/${output.id}`,
+    },
+    files: [
+      { kind: 'output_3mf', name: `${download}.3mf`, size: 48213, url: `/api/v1/outputs/${output.id}/model.3mf` },
+      { kind: 'preview_glb', name: `${download}.glb`, size: 30512, url: `/api/v1/outputs/${output.id}/preview.glb` },
+      { kind: 'sliced', name: `${download}.gcode.3mf`, size: 2091667, url: `${prints}/files/sliced` },
+    ],
+    media: { finish_photo: null, photos: [], timelapse: null, plate_thumbnails: [], attachments: [] },
+    outcome: {
+      status: summary.status,
+      failure_reason: failureReason,
+      estimated_time_seconds: 5647,
+      actual_time_seconds: summary.actual_time_seconds,
+      filament_used_grams: summary.filament_used_grams,
+      filament_type: 'PLA',
+      filament_color: '#00629B,#FF9425',
+      cost: 0.43,
+      printer_id: summary.printer_id,
+      printer_name: '3DP-31B-598',
+      runs: [],
+    },
+    printer_media: null,
+    links: { bambuddy_url: 'https://bambuddy.example/archives', customize_url: `/m/${output.slug}` },
+    ...fields,
+  }
+}
+
+const [reagan, nova, workshop] = outputs as [Output, Output, Output]
+const FINISH_PHOTO = 'finish_20260927_015703_93372185.jpg'
+
+export const prints: PrintDetail[] = [
+  printOf(38, workshop, {
+    status: 'deleted_in_bambuddy',
+    started_at: null,
+    completed_at: null,
+    actual_time_seconds: null,
+    filament_used_grams: null,
+    cover: null,
+    run_count: 0,
+    files: [
+      { kind: 'output_3mf', name: 'name-keychain-workshop.3mf', size: 45120, url: `/api/v1/outputs/${workshop.id}/model.3mf` },
+    ],
+    links: { bambuddy_url: null, customize_url: `/m/${workshop.slug}` },
+  }),
+  printOf(37, nova, {
+    status: 'printing',
+    printer_id: 2,
+    started_at: '2026-09-28T09:12:00',
+    completed_at: null,
+    actual_time_seconds: null,
+  }),
+  printOf(
+    36,
+    reagan,
+    {
+      status: 'failed',
+      started_at: '2026-09-26T20:01:00',
+      completed_at: '2026-09-26T20:44:10',
+      actual_time_seconds: 2590,
+      filament_used_grams: 4.1,
+    },
+    'Spaghetti detected',
+  ),
+  printOf(35, reagan, {
+    status: 'completed',
+    cover: { kind: 'photo', url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` },
+    has_timelapse: true,
+    media: {
+      finish_photo: null,
+      photos: [{ name: FINISH_PHOTO, url: `/api/v1/prints/35/photos/${FINISH_PHOTO}` }],
+      timelapse: {
+        url: '/api/v1/prints/35/timelapse',
+        info: { duration: 5.208256, width: 1680, height: 1080, fps: 24, codec: 'h264', file_size: 2143595, has_audio: false },
+        poster_frames: [{ timestamp: 0, data_url: `data:image/png;base64,${MEDIA_PNG_BASE64}` }],
+      },
+      plate_thumbnails: [{ index: 1, url: '/api/v1/prints/35/plates/1/thumbnail' }],
+      attachments: [],
+    },
+  }),
+]

@@ -940,3 +940,42 @@ describe('mock API: metadata PATCH on a model that is not there', () => {
   })
 })
 
+
+/** #308 — the prints API mock that #310's history and #311's detail are built on. */
+describe('the prints mock', () => {
+  beforeEach(() => resetMockState())
+
+  async function ids(query = ''): Promise<{ ids: number[]; next: string | null }> {
+    const body = (await (await fetch(`/api/v1/prints${query}`)).json()) as {
+      items: { archive_id: number }[]
+      next_cursor: string | null
+    }
+    return { ids: body.items.map((item) => item.archive_id), next: body.next_cursor }
+  }
+
+  it('lists succeeded, failed, in-progress and deleted prints, newest archive first', async () => {
+    expect(await ids()).toEqual({ ids: [38, 37, 36, 35], next: null })
+  })
+
+  it('filters and pages as the backend does', async () => {
+    expect((await ids('?status=failed')).ids).toEqual([36])
+    expect((await ids('?printer_id=2')).ids).toEqual([37])
+    expect((await ids('?from=2026-09-27')).ids).toEqual([37, 35])
+    expect((await ids('?q=nova')).ids).toEqual([37])
+    const first = await ids('?limit=2')
+    expect(first).toEqual({ ids: [38, 37], next: '37' })
+    expect(await ids(`?limit=2&cursor=${first.next}`)).toEqual({ ids: [36, 35], next: null })
+  })
+
+  it('serves a detail with and without a timelapse, and 404s an unlinked archive', async () => {
+    const done = (await (await fetch('/api/v1/prints/35')).json()) as { media: { timelapse: unknown } }
+    const failed = (await (await fetch('/api/v1/prints/36')).json()) as {
+      media: { timelapse: unknown }
+      outcome: { failure_reason: string }
+    }
+    expect(done.media.timelapse).not.toBeNull()
+    expect(failed.media.timelapse).toBeNull()
+    expect(failed.outcome.failure_reason).toBe('Spaghetti detected')
+    expect((await fetch('/api/v1/prints/99')).status).toBe(404)
+  })
+})
