@@ -278,7 +278,8 @@ workflows; the default is to let them finish on the old build.
 
 ### 3.6 Verified against the pinned `temporalio` (1.33.0)
 
-Measured while phase 1 landed (the base spec's §3 rule), in `backend/tests/test_workflows.py`:
+Measured while phase 1 landed (the base spec's §3 rule), in
+`backend/tests/test_workflows.py`:
 
 - `workflow.start_child_workflow` / `execute_child_workflow` take `id_reuse_policy`
   and **no `id_conflict_policy`**; the core `StartChildWorkflowExecution` command has
