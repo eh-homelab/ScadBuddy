@@ -11,8 +11,14 @@ from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Folder, Pipeline, PresetRef, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
 from scadbuddy.bambuddy.send import SidebarLink, register_sidebar
+from scadbuddy.core.config import StoreBackend
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.settings_store import DisplayUnit, SettingsPatch, StoredSettings
+from scadbuddy.library.settings_store import (
+    DisplayUnit,
+    SettingsPatch,
+    StoredSettings,
+    StoreNotReadyError,
+)
 
 router = APIRouter(tags=["settings"])
 
@@ -24,6 +30,11 @@ class SettingsView(BaseModel):
 
     bambuddy_url: str | None = None
     has_api_key: bool = False
+    has_render_api_key: bool = False
+    #: True while render workers would hold the full key (spec §9): a key is stored and
+    #: no render key is. The Settings page shows a persistent warning.
+    render_key_fallback: bool = False
+    store_backend: StoreBackend = "local"
     public_url: str | None = None
     library_folder_id: int | None = None
     pipeline_id: int | None = None
@@ -108,6 +119,10 @@ def _view(settings: StoredSettings, media_upload_max_bytes: int) -> SettingsView
     return SettingsView(
         bambuddy_url=settings.bambuddy_url,
         has_api_key=bool(settings.bambuddy_api_key),
+        has_render_api_key=bool(settings.bambuddy_render_api_key),
+        render_key_fallback=bool(settings.bambuddy_api_key)
+        and not settings.bambuddy_render_api_key,
+        store_backend=settings.store_backend,
         public_url=settings.public_url,
         library_folder_id=settings.library_folder_id,
         pipeline_id=settings.pipeline_id,
@@ -129,7 +144,11 @@ def get_settings(store: SettingsStoreDep, state: StateDep) -> SettingsView:
 
 @router.put("/settings", response_model=SettingsView, summary="Update the connection")
 def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep) -> SettingsView:
-    return _view(store.save(patch), state.settings.media_upload_max_bytes)
+    try:
+        saved = store.save(patch)
+    except StoreNotReadyError as error:
+        raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    return _view(saved, state.settings.media_upload_max_bytes)
 
 
 def _options_view(settings: StoredSettings) -> PrintOptionsView:

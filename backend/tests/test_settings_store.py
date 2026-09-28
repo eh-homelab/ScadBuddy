@@ -22,9 +22,12 @@ from scadbuddy.core.events import Event, InProcessEventBus, SettingsChanged
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.settings_store import (
     ModelPrintChoices,
+    RenderStoreSettings,
     SettingsPatch,
     SettingsStore,
     StoredSettings,
+    StoreNotReadyError,
+    load_render_store_settings,
 )
 from scadbuddy.render.pg_store import MIGRATIONS
 from tests.conftest import UNUSED_TEMPORAL_ADDRESS
@@ -221,3 +224,58 @@ def test_settings_changed_is_published_once_the_write_is_visible(settings: Setti
     finally:
         store.close()
     assert seen == ["Cool Plate"]
+
+
+def test_the_render_key_is_seeded_stored_and_cleared_like_the_full_key(
+    tmp_path: Path, pg_conninfo: str
+) -> None:
+    seeded = Settings(
+        data_dir=tmp_path, database_url=pg_conninfo, bambuddy_render_api_key="from-env"
+    )
+    store = SettingsStore(seeded)
+    store.open()
+    try:
+        assert store.load().bambuddy_render_api_key == "from-env"
+        store.save(SettingsPatch(bambuddy_render_api_key="rotated"))
+        assert store.load().bambuddy_render_api_key == "rotated"
+        store.save(SettingsPatch(bambuddy_render_api_key=""))
+        assert store.load().bambuddy_render_api_key is None  # cleared beats the env
+    finally:
+        store.close()
+
+
+def test_render_workers_fall_back_to_the_full_key_and_say_so(store: SettingsStore) -> None:
+    store.save(SettingsPatch(bambuddy_api_key="full"))
+    assert store.load().render_bambuddy_key() == ("full", True)
+    store.save(SettingsPatch(bambuddy_render_api_key="narrow"))
+    assert store.load().render_bambuddy_key() == ("narrow", False)
+
+
+def test_a_render_worker_reads_only_its_fields(store: SettingsStore, settings: Settings) -> None:
+    store.save(
+        SettingsPatch(
+            bambuddy_url="https://b.test",
+            bambuddy_api_key="full",
+            bambuddy_render_api_key="narrow",
+            library_folder_id=7,
+            pipeline_id=3,
+        )
+    )
+    assert load_render_store_settings(store.pool, settings) == RenderStoreSettings(
+        store_backend="local",
+        bambuddy_url="https://b.test",
+        api_key="narrow",
+        key_is_fallback=False,
+        library_folder_id=7,
+    )
+
+
+def test_the_bambuddy_store_needs_a_url_and_an_inbox_first(store: SettingsStore) -> None:
+    with pytest.raises(StoreNotReadyError, match="library folder"):
+        store.save(SettingsPatch(store_backend="bambuddy"))
+    store.save(
+        SettingsPatch(bambuddy_url="https://b.test", library_folder_id=7, store_backend="bambuddy")
+    )
+    assert store.load().store_backend == "bambuddy"
+    store.save(SettingsPatch(store_backend=None))
+    assert store.load().store_backend == "local"

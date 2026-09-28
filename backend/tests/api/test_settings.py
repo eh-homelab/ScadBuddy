@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -30,6 +31,9 @@ def test_defaults_are_empty_and_the_key_is_absent(client: TestClient) -> None:
         "default_plate": None,
         "display_unit": "mm",
         "media_upload_max_bytes": 1024**3,
+        "has_render_api_key": False,
+        "render_key_fallback": False,
+        "store_backend": "local",
     }
 
 
@@ -200,3 +204,24 @@ def test_the_upload_limit_is_read_only(client: TestClient) -> None:
     assert saved.status_code == 200, saved.text
     assert saved.json()["media_upload_max_bytes"] == 1024**3
     assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024**3
+
+
+def test_the_render_key_is_write_only_and_its_absence_is_flagged(client: TestClient) -> None:
+    body = client.put(
+        "/api/v1/settings",
+        json={"bambuddy_url": "https://bambuddy.test", "bambuddy_api_key": "full"},
+    ).json()
+    assert body["render_key_fallback"] is True
+    assert body["has_render_api_key"] is False
+    response = client.put("/api/v1/settings", json={"bambuddy_render_api_key": "narrow"})
+    body = response.json()
+    assert body["has_render_api_key"] is True
+    assert body["render_key_fallback"] is False
+    assert "narrow" not in response.text
+    assert "bambuddy_render_api_key" not in json.dumps(body)
+
+
+def test_choosing_the_bambuddy_store_without_an_inbox_is_refused(client: TestClient) -> None:
+    response = client.put("/api/v1/settings", json={"store_backend": "bambuddy"})
+    assert response.status_code == 422
+    assert "library folder" in response.json()["detail"]
