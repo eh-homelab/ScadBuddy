@@ -442,26 +442,52 @@ class PlateEntry:
     thumbnail: str | None
 
 
+def _metadata(node: ET.Element) -> dict[str, str]:
+    """A ``model_settings.config`` node's ``<metadata key= value=>`` children."""
+    return {entry.get("key") or "": entry.get("value") or "" for entry in node.findall("metadata")}
+
+
+@dataclass(frozen=True)
+class PlateSettings:
+    """One ``<plate>`` of ``model_settings.config`` as written: its ``plater_id``,
+    its metadata, and the object id its ``model_instance`` names (``None`` when it
+    has none). The one reader of that structure, for :func:`plates_of` and
+    :func:`laid_out_plates` alike."""
+
+    index: int
+    metadata: dict[str, str]
+    object_id: str | None
+
+
+def plate_settings(config: ET.Element) -> list[PlateSettings]:
+    """Every ``<plate>`` of a parsed ``model_settings.config``, in file order.
+
+    Raises `ValueError` for a plate with no ``plater_id``.
+    """
+    plates: list[PlateSettings] = []
+    for plate in config.iter("plate"):
+        metadata = _metadata(plate)
+        if "plater_id" not in metadata:
+            raise ValueError("a <plate> in the 3MF's model settings has no plater_id")
+        instance = plate.find("model_instance")
+        object_id = _metadata(instance).get("object_id") if instance is not None else None
+        plates.append(PlateSettings(int(metadata["plater_id"] or 0), metadata, object_id))
+    return plates
+
+
 def plates_of(path: Path) -> list[PlateEntry]:
     """Every plate the 3MF lays out, in index order (#83).
 
-    ScadBuddy's own writer always produces one; a Bambu Studio project can hold more.
+    ScadBuddy's own writer produces one unless the template asks for more (#289); a
+    Bambu Studio project can hold more too.
     """
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
     plates: list[PlateEntry] = []
-    for plate in config.iter("plate"):
-        metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
-        cover = metadata.get("thumbnail_file")
-        if "plater_id" not in metadata:
-            raise ValueError("a <plate> in the 3MF's model settings has no plater_id")
-        plates.append(
-            PlateEntry(
-                index=int(metadata["plater_id"] or 0),
-                thumbnail=cover if cover in names else None,
-            )
-        )
+    for plate in plate_settings(config):
+        cover = plate.metadata.get("thumbnail_file")
+        plates.append(PlateEntry(plate.index, cover if cover in names else None))
     return sorted(plates, key=lambda plate: plate.index)
 
 
@@ -640,16 +666,9 @@ def laid_out_plates(archive: zipfile.ZipFile) -> list[LaidOutPlate]:
     plates: list[tuple[int, str]] = []
     if MODEL_SETTINGS_NAME in names:
         config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
-        for plate in config.iter("plate"):
-            metadata = {entry.get("key"): entry.get("value") for entry in plate.findall("metadata")}
-            instance = plate.find("model_instance")
-            if instance is None:
-                continue
-            object_id = {
-                entry.get("key"): entry.get("value") for entry in instance.findall("metadata")
-            }.get("object_id")
-            if object_id in items:
-                plates.append((int(metadata.get("plater_id") or 0), object_id))
+        for each in plate_settings(config):
+            if each.object_id is not None and each.object_id in items:
+                plates.append((each.index, each.object_id))
     if len(plates) != len(items):
         # Not a layout this writer produced plate by plate: one plate, placed by its
         # first build item, holding every object file.

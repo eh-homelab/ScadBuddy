@@ -14,6 +14,7 @@ import trimesh
 from scadbuddy.render.bambu3mf import (
     BAMBU_APPLICATION,
     CORE_NS,
+    MODEL_SETTINGS_NAME,
     PLACEHOLDER_NOZZLE_DIAMETER,
     PLATE_PICK,
     PLATE_THUMBNAIL,
@@ -22,8 +23,10 @@ from scadbuddy.render.bambu3mf import (
     PRODUCTION_NS,
     PlateParts,
     cover_names,
+    laid_out_plates,
     plate_columns,
     plate_origin,
+    plate_settings,
     plates_of,
     replate_3mf,
     write_bambu_3mf,
@@ -682,6 +685,28 @@ class TestMultiplePlates:
         assert [(p.material_index, p.name, p.colour) for p in parts_from_3mf(path, 2)] == [
             (3, "Lid", LID),
         ]
+
+    def test_both_plate_readers_share_one_parse_of_the_plate_list(self, tmp_path: Path) -> None:
+        path = _write_plates(tmp_path / "maze.3mf")
+        with zipfile.ZipFile(path) as archive:
+            config = ET.fromstring(archive.read(MODEL_SETTINGS_NAME))
+            laid_out = laid_out_plates(archive)
+        settings = plate_settings(config)
+
+        assert [(each.index, each.object_id) for each in settings] == [
+            (each.index, each.assembly_id) for each in laid_out
+        ]
+        assert [each.index for each in plates_of(path)] == [each.index for each in settings]
+        assert [each.metadata["thumbnail_file"] for each in settings] == [
+            each.thumbnail for each in plates_of(path)
+        ]
+
+        plate = next(config.iter("plate"))
+        for entry in plate.findall("metadata"):
+            if entry.get("key") == "plater_id":
+                plate.remove(entry)
+        with pytest.raises(ValueError, match="no plater_id"):
+            plate_settings(config)
 
     def test_cover_images_are_one_set_per_plate_or_none(self, tmp_path: Path) -> None:
         plates, colours = _two_plates()
