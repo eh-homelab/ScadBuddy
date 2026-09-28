@@ -682,7 +682,11 @@ def test_the_all_plates_filament_read_reads_the_spools_once(
     split_plates_routes()
     hardware_routes()
     before = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
-    client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true")
+    response = client.get(
+        f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1&all_plates=true"
+    )
+    assert response.status_code == 200, response.text
+    assert [slot["slot_id"] for slot in response.json()["slots"]] == [1, 2]
     reads = sum(1 for call in respx.calls if call.request.url.path.endswith("/inventory/spools"))
     assert reads - before == 1
 
