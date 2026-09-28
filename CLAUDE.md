@@ -3,7 +3,9 @@
 Self-hosted OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. The design,
 and the measured facts it rests on, are in
 `docs/superpowers/specs/2026-09-22-scadbuddy-design.md` (§3 is the verified-facts list);
-the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`.
+the print dialog is `docs/superpowers/specs/2026-09-24-print-flow-design.md`; template-owned
+UIs and pipelines on Temporal, the blob store and Arrange are
+`docs/superpowers/specs/2026-09-27-template-pipelines-design.md`.
 Deployment is described in `README.md` ("Deploying").
 
 ## Commands (what CI runs)
@@ -144,8 +146,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `docs/superpowers/specs/2026-09-27-ai-integration-design.md` (issue #250; on branch
   `claude/scad-buddy-ai-integration-pfn00c` until that spec merges).
   The 09-22 design spec's "No database" statement (`2026-09-22-scadbuddy-design.md`
-  line 185) describes the backend container; the
-  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole.
+  §4, "Architecture") describes the backend container; the
+  AI spec (#250, PR #303) adds Postgres (#241) for the system as a whole, and the
+  09-27 template-pipelines spec makes Postgres and Temporal required.
 - `models/` — bundled example models (`models/<name>/verify.sh`).
 - `plugins/scadbuddy/` — ScadBuddy's Claude plugin (#299): skills (`authoring`,
   `customize`, `print`), subagents, and a `.mcp.json` for external installs; listed by
