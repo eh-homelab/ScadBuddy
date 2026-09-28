@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import { ok } from './call.js'
 import { outputId, slug } from './common.js'
-import { defineTool, json, type Tool, ToolError } from './registry.js'
+import { defineTool, json, type Tool } from './registry.js'
 
 // Bambuddy (issue #251, spec D8): ScadBuddy's own tools over its backend's
 // Bambuddy client, so the API key stays server-side and the backend's
@@ -10,10 +10,18 @@ import { defineTool, json, type Tool, ToolError } from './registry.js'
 //
 // - Print flow, outward: anything that uploads to, creates in, or queues on
 //   Bambuddy goes through the approval gate (spec §8.2).
+// - The print flow is spool-first (#335, docs/superpowers/specs/
+//   2026-09-27-spool-first-print-design.md): spools, nozzles, quality and plate
+//   are chosen, and the backend's resolver derives Bambu's printer, process and
+//   filament presets from them. There are no pipelines, presets or eligibility
+//   tools any more: their routes went with the pipeline picker (that spec §7,
+//   "Removed from the dialog"). The send bar alone still runs the Settings
+//   pipeline (send_to_bambuddy; spool-first there is #312).
 // - Farm context, read: printers and live status (get_print_targets in
-//   settings.ts), spools with per-slot remaining grams (get_print_filaments),
-//   and print progress. The queue, the print archive and aggregate stats have
-//   no backend route yet, so they have no tool yet.
+//   settings.ts), the print dialog's choices (get_print_choices), spools with
+//   per-slot remaining grams (get_print_filaments), and print progress. The
+//   queue, the print archive and aggregate stats have no backend route yet, so
+//   they have no tool yet.
 // - Printer control (pause/stop/lights/motion/G-code) is out of scope.
 
 const nullable = <T extends z.ZodType>(schema: T) => schema.nullable().optional()
@@ -45,28 +53,86 @@ const presetRef = z.object({
   source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']),
   id: z.string().min(1),
 })
+/** `NozzleChoice`: one extruder's nozzle. One size for the job (spool-first spec §2 step 3). */
+const nozzleChoice = z.object({
+  size: z.enum(['0.2', '0.4', '0.6', '0.8']),
+  flow: z.enum(['standard', 'high_flow']).default('standard'),
+})
+const nozzles = z.array(nozzleChoice).min(1).max(2)
+const tier = z.enum(['fine', 'standard', 'draft'])
+
+type NozzleChoice = z.infer<typeof nozzleChoice>
+type SlotChoice = z.infer<typeof slotChoice>
+
+/** The dialog's own default: 0.4 mm standard on both sides (frontend PrintPicker `DEFAULT_NOZZLES`). */
+const DEFAULT_NOZZLES: NozzleChoice[] = [
+  { size: '0.4', flow: 'standard' },
+  { size: '0.4', flow: 'standard' },
+]
+
+/**
+ * The model's remembered spool per slot where that spool is still in the
+ * inventory, else the backend's suggestion: frontend/src/lib/filaments.ts
+ * `seedPlan`, so an agent's print starts from what the dialog would show.
+ */
+function seedPlan(
+  options: { slots?: { slot_id: number }[]; spools?: { spool_id: number }[]; suggested?: SlotChoice[] },
+  remembered: SlotChoice[],
+): SlotChoice[] {
+  const inventory = new Set((options.spools ?? []).map((spool) => spool.spool_id))
+  return (options.slots ?? []).flatMap((slot) => {
+    const kept = remembered.find((choice) => choice.slot_id === slot.slot_id && inventory.has(choice.spool_id))
+    const choice = kept ?? options.suggested?.find((entry) => entry.slot_id === slot.slot_id)
+    return choice ? [{ slot_id: choice.slot_id, spool_id: choice.spool_id }] : []
+  })
+}
 
 export const printTools: Tool[] = [
   // ── read: farm context and planning ─────────────────────────────────────
   defineTool({
+    name: 'get_print_choices',
+    description:
+      'Everything the print dialog offers for an output, in one read: printers (and the one chosen), the ' +
+      'installed nozzles, quality tiers and Bambu processes per nozzle size, filament presets per size, plate ' +
+      "types with the one last printed on, the filament step (as get_print_filaments), and this model's " +
+      'remembered choices. What print_output fills omitted choices from.',
+    input: z.object({ output_id: outputId, printer_id: z.number().int().optional() }),
+    risk: 'read',
+    // Printers, status and archives (Read Status); slicer presets and the 3MF's
+    // filament requirements (Manage Library). backend/scadbuddy/bambuddy/choices.py.
+    bambuddyScope: ['Read Status', 'Manage Library'],
+    routes: ['GET /api/v1/print/outputs/{output_id}/choices'],
+    handler: async ({ output_id, printer_id }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/print/outputs/{output_id}/choices', {
+            params: { path: { output_id }, query: { printer_id } },
+          }),
+          `get print choices for ${output_id}`,
+        ),
+      ),
+  }),
+
+  defineTool({
     name: 'get_print_filaments',
     description:
       "Bambuddy's spool inventory joined to where each spool is loaded and, with `printer_id`, the " +
-      "remaining grams per slot and the mounted nozzles — plus what this output's plates need.",
+      'remaining grams per slot and the mounted nozzles — plus what this output\'s plate (or, with ' +
+      '`all_plates`, every plate) needs and a suggested spool per slot.',
     input: z.object({
       output_id: outputId,
       printer_id: z.number().int().optional(),
-      nozzle_diameter: z.string().max(16).optional().describe('e.g. "0.4"'),
       plate_id: z.number().int().min(1).optional(),
+      all_plates: z.boolean().optional(),
     }),
     risk: 'read',
-    bambuddyScope: ['Read Status'],
+    bambuddyScope: ['Read Status', 'Manage Library'],
     routes: ['GET /api/v1/print/outputs/{output_id}/filaments'],
-    handler: async ({ output_id, printer_id, nozzle_diameter, plate_id }, { backend }) =>
+    handler: async ({ output_id, printer_id, plate_id, all_plates }, { backend }) =>
       json(
         await ok(
           backend.GET('/api/v1/print/outputs/{output_id}/filaments', {
-            params: { path: { output_id }, query: { printer_id, nozzle_diameter, plate_id } },
+            params: { path: { output_id }, query: { printer_id, plate_id, all_plates } },
           }),
           `get filaments for ${output_id}`,
         ),
@@ -92,40 +158,6 @@ export const printTools: Tool[] = [
   }),
 
   defineTool({
-    name: 'list_pipelines',
-    description: "Bambuddy's slicer pipelines, with this model's remembered default.",
-    input: z.object({ slug }),
-    risk: 'read',
-    bambuddyScope: ['Manage Queue'],
-    routes: ['GET /api/v1/print/models/{slug}/pipelines'],
-    handler: async ({ slug }, { backend }) =>
-      json(
-        await ok(backend.GET('/api/v1/print/models/{slug}/pipelines', { params: { path: { slug } } }), `list pipelines for ${slug}`),
-      ),
-  }),
-
-  defineTool({
-    name: 'list_print_presets',
-    description:
-      'Printer presets and bed types and, once `printer_preset_id` is given, the process and filament ' +
-      'presets compatible with it: what a new pipeline is built from.',
-    input: z.object({
-      printer_preset_source: z.enum(['orca_cloud', 'cloud', 'local', 'standard']).optional(),
-      printer_preset_id: z.string().optional(),
-    }),
-    risk: 'read',
-    bambuddyScope: ['Manage Library'],
-    routes: ['GET /api/v1/print/presets'],
-    handler: async ({ printer_preset_source, printer_preset_id }, { backend }) =>
-      json(
-        await ok(
-          backend.GET('/api/v1/print/presets', { params: { query: { printer_preset_source, printer_preset_id } } }),
-          'list print presets',
-        ),
-      ),
-  }),
-
-  defineTool({
     name: 'list_print_projects',
     description: "Bambuddy's projects, to file prints under.",
     input: z.object({}),
@@ -139,37 +171,35 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'remember_model_print_choices',
     description:
-      "Remember a model's printer, pipeline and per-slot spools for next time. Any omitted part is left " +
-      'as it is.',
+      "Remember what a model's print dialog opens on next time: the printer, per-slot spools, nozzles, and " +
+      'the quality tier or named process. Replaces the model\'s entry whole: an omitted part is forgotten, ' +
+      'and passing nothing forgets them all (get_print_choices shows the current `model_choices`).',
     input: z.object({
       slug,
       printer_id: z.number().int().nullable().optional(),
-      filament_plan: z.array(slotChoice).optional(),
-      pipeline_id: z.number().int().nullable().optional(),
+      filament_plan: z.array(slotChoice).optional().describe('Only spools moved off the suggestion'),
+      nozzles: z.array(nozzleChoice).max(2).optional(),
+      tier: tier.nullable().optional(),
+      process_name: z.string().max(200).nullable().optional().describe('An Advanced-mode Bambu process, in place of a tier'),
     }),
     risk: 'write',
-    routes: ['PUT /api/v1/print/models/{slug}/choices', 'PUT /api/v1/print/models/{slug}/pipeline'],
-    handler: async ({ slug, printer_id, filament_plan, pipeline_id }, { backend }) => {
-      const path = { slug }
-      const result: Record<string, unknown> = {}
-      if (printer_id !== undefined || filament_plan !== undefined) {
-        result.choices = await ok(
+    routes: ['PUT /api/v1/print/models/{slug}/choices'],
+    handler: async ({ slug, printer_id, filament_plan, nozzles, tier, process_name }, { backend }) =>
+      json(
+        await ok(
           backend.PUT('/api/v1/print/models/{slug}/choices', {
-            params: { path },
-            body: { printer_id: printer_id ?? null, filament_plan: filament_plan ?? [] },
+            params: { path: { slug } },
+            body: {
+              printer_id: printer_id ?? null,
+              filament_plan: filament_plan ?? [],
+              nozzles: nozzles ?? [],
+              tier: tier ?? null,
+              process_name: process_name ?? null,
+            },
           }),
           `remember choices for ${slug}`,
-        )
-      }
-      if (pipeline_id !== undefined) {
-        result.pipeline = await ok(
-          backend.PUT('/api/v1/print/models/{slug}/pipeline', { params: { path }, body: { pipeline_id } }),
-          `remember pipeline for ${slug}`,
-        )
-      }
-      if (Object.keys(result).length === 0) throw new ToolError('nothing to remember: pass printer_id, filament_plan or pipeline_id')
-      return json(result)
-    },
+        ),
+      ),
   }),
 
   defineTool({
@@ -189,34 +219,10 @@ export const printTools: Tool[] = [
 
   // ── outward: everything that uploads to, creates in or queues on Bambuddy ──
   defineTool({
-    name: 'check_print_eligibility',
-    description:
-      "Ask Bambuddy's pipelines whether they would accept this output. Bambuddy judges a library file, so " +
-      'this uploads the 3MF first if Bambuddy does not have it: that is why it needs an approval.',
-    input: z.object({ output_id: outputId, pipeline_ids: z.array(z.number().int()).optional() }),
-    risk: 'outward',
-    bambuddyScope: ['Manage Library', 'Manage Queue'],
-    routes: ['POST /api/v1/print/outputs/{output_id}/eligibility'],
-    summarize: ({ output_id, pipeline_ids }) =>
-      `Upload output ${output_id} to Bambuddy (if needed) and check it against ${
-        pipeline_ids ? `pipelines ${pipeline_ids.join(', ')}` : 'every pipeline'
-      }`,
-    handler: async ({ output_id, pipeline_ids }, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/print/outputs/{output_id}/eligibility', {
-            params: { path: { output_id } },
-            body: { pipeline_ids: pipeline_ids ?? null },
-          }),
-          `check eligibility of ${output_id}`,
-        ),
-      ),
-  }),
-
-  defineTool({
     name: 'send_to_bambuddy',
     description:
-      "Send an output's 3MF to Bambuddy's library folder, or in `queue` mode also slice and queue it.",
+      "Send an output's 3MF to Bambuddy's library folder, or in `queue` mode also run the Settings slicer " +
+      'pipeline to queue it (the send bar; print_output is the spool-first print).',
     input: z.object({
       output_id: outputId,
       mode: z.enum(['library', 'queue']).default('library'),
@@ -245,75 +251,104 @@ export const printTools: Tool[] = [
   defineTool({
     name: 'print_output',
     description:
-      "Print an output: resolves the pipeline (the given one, else the model's, else the global default), " +
-      'checks its eligibility, then runs it (or slices and queues when a filament plan, plate or remembered ' +
-      'option needs it), behind one approval. Refuses on a blocking eligibility issue unless `force` is ' +
-      'true, and when no pipeline resolves. Follow it with get_print_progress.',
+      'Print an output, spool-first: slice with presets the backend derives from the chosen spools, nozzles, ' +
+      'quality and plate, then queue it on one printer, behind one approval. Any choice left out is filled ' +
+      "the way the print dialog opens: the chosen printer, this model's remembered nozzles, tier or process " +
+      "and spools (else 0.4 mm standard, the Standard tier and the suggested spools), and the printer's " +
+      'preselected plate type. A choice the backend cannot resolve (mixed nozzle sizes, a slot with no ' +
+      'spool or preset) is refused before anything is sliced. Follow it with get_print_progress.',
     input: z.object({
       output_id: outputId,
-      pipeline_id: z.number().int().optional().describe("Defaults to the model's pipeline, then the global one"),
       printer_id: z.number().int().optional(),
       copies: z.number().int().min(1).max(1000).optional(),
       plate_id: z.number().int().min(1).default(1),
       all_plates: z.boolean().default(false),
-      bed_type: z.string().max(64).optional(),
       filament_plan: z
         .object({ slots: z.array(slotChoice), force_colour_match: z.boolean().default(false) })
         .optional(),
+      nozzles: nozzles.optional().describe('One size for the job; a second entry is the other extruder'),
+      tier: tier.optional(),
+      process_name: z.string().max(200).optional().describe('A Bambu process by name, in place of `tier`'),
+      bed_type: z.string().max(64).optional(),
+      // `catchall`, not `z.record`: see `params` in common.ts.
+      filament_overrides: z
+        .object({})
+        .catchall(presetRef)
+        .optional()
+        .describe('A filament preset per slot id, in place of the spool\'s own'),
       project_id: z.number().int().optional(),
       options: printOptions,
-      force: z.boolean().default(false),
     }),
     risk: 'outward',
-    bambuddyScope: ['Manage Library', 'Manage Queue'],
+    bambuddyScope: ['Read Status', 'Manage Library', 'Manage Queue'],
     routes: ['POST /api/v1/print/outputs/{output_id}/run'],
-    summarize: ({ output_id, pipeline_id, printer_id, copies, plate_id, all_plates }) =>
-      `Print output ${output_id}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
-        all_plates ? 'every plate' : `plate ${plate_id}`
-      }` +
-      `${pipeline_id !== undefined ? ` via pipeline ${pipeline_id}` : ' via the default pipeline'}` +
-      `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}`,
+    summarize: (args) => {
+      const { output_id, printer_id, copies, plate_id, all_plates, nozzles, tier, process_name } = args
+      const defaulted =
+        nozzles === undefined ||
+        (tier === undefined && process_name === undefined) ||
+        args.filament_plan === undefined ||
+        args.bed_type === undefined
+      return (
+        `Print output ${output_id}: ${copies ?? 1} cop${(copies ?? 1) === 1 ? 'y' : 'ies'} of ${
+          all_plates ? 'every plate' : `plate ${plate_id}`
+        }` +
+        `${nozzles?.[0] ? ` with a ${nozzles[0].size} mm nozzle` : ''}` +
+        `${process_name ? `, process "${process_name}"` : tier ? `, ${tier} quality` : ''}` +
+        `${printer_id !== undefined ? ` on printer ${printer_id}` : ''}` +
+        `${defaulted ? ' (other choices as the print dialog opens)' : ''}`
+      )
+    },
     handler: async (args, { backend }) => {
       const path = { output_id: args.output_id }
-      // Resolve the pipeline the way /run would, so the one checked is the one
-      // run. backend/scadbuddy/bambuddy/pipelines.py `run_for_output`:
-      // `request.pipeline_id or settings.pipeline_for(meta.slug)` (the model's
-      // pipeline, then the global one; library/settings_store.py), refusing
-      // when neither is set. The eligibility route does NOT do this: with no
-      // `pipeline_ids` it checks every pipeline (`check_pipelines`). So the
-      // default is read from GET /print/models/{slug}/pipelines, whose
-      // `default_pipeline_id` is that same `settings.pipeline_for(slug)`
-      // (`describe_pipelines`), and passed to /run explicitly.
-      let pipelineId = args.pipeline_id
-      if (pipelineId === undefined) {
-        const output = await ok(
-          backend.GET('/api/v1/outputs/{output_id}', { params: { path } }),
-          `get output ${args.output_id}`,
+      let { printer_id: printerId, nozzles: chosenNozzles, bed_type: bedType } = args
+      let slots = args.filament_plan?.slots
+      let chosenTier: z.infer<typeof tier> | null | undefined = args.tier
+      let processName: string | null | undefined = args.process_name
+      if (processName !== undefined) chosenTier = null
+      // Fill what was left out the way the dialog does (frontend PrintPicker
+      // `seedDialog`, spool-first spec §7), from the one read the dialog opens
+      // on: GET /print/outputs/{id}/choices. /run takes no defaults of its own
+      // for nozzles, spools or plate, so an omitted choice must be made here.
+      if (
+        printerId === undefined ||
+        chosenNozzles === undefined ||
+        bedType === undefined ||
+        slots === undefined ||
+        (chosenTier === undefined && processName === undefined)
+      ) {
+        const view = await ok(
+          backend.GET('/api/v1/print/outputs/{output_id}/choices', { params: { path, query: { printer_id: printerId } } }),
+          `get print choices for ${args.output_id}`,
         )
-        const choices = await ok(
-          backend.GET('/api/v1/print/models/{slug}/pipelines', { params: { path: { slug: output.slug } } }),
-          `resolve the default pipeline of ${output.slug}`,
-        )
-        if (choices.default_pipeline_id === null || choices.default_pipeline_id === undefined) {
-          throw new ToolError(
-            `no slicer pipeline is set for model ${output.slug} and there is no global default: pass ` +
-              'pipeline_id (see list_pipelines) or remember one with remember_model_print_choices',
-          )
+        printerId ??= view.printer_id ?? undefined
+        bedType ??= view.bed_type
+        const last = view.model_choices
+        const remembered = last?.nozzles ?? []
+        if (chosenNozzles === undefined) chosenNozzles = remembered.length > 0 ? remembered : DEFAULT_NOZZLES
+        if (chosenTier === undefined && processName === undefined) {
+          // A remembered process belongs to the remembered nozzle size.
+          processName = remembered.length > 0 && args.nozzles === undefined ? (last?.process_name ?? null) : null
+          chosenTier = processName ? null : (last?.tier ?? 'standard')
         }
-        pipelineId = choices.default_pipeline_id
-      }
-      if (!args.force) {
-        const overview = await ok(
-          backend.POST('/api/v1/print/outputs/{output_id}/eligibility', {
-            params: { path },
-            body: { pipeline_ids: [pipelineId] },
-          }),
-          `check eligibility of ${args.output_id}`,
-        )
-        // A report with `error` could not be judged; the run decides then (Bambuddy's 409).
-        const blocked = (overview.reports ?? []).filter((r) => r.report?.ok === false)
-        if (blocked.length > 0) {
-          return { ...json({ status: 'ineligible', pipeline_id: pipelineId, reports: blocked }), isError: true }
+        if (slots === undefined) {
+          // The choices read carries plate 1's filament step; any other plate,
+          // or all of them, is read for itself (PrintPicker does the same).
+          const filaments =
+            args.plate_id === 1 && !args.all_plates
+              ? view.filaments
+              : await ok(
+                  backend.GET('/api/v1/print/outputs/{output_id}/filaments', {
+                    params: {
+                      path,
+                      query: args.all_plates
+                        ? { printer_id: printerId, all_plates: true }
+                        : { printer_id: printerId, plate_id: args.plate_id },
+                    },
+                  }),
+                  `get filaments for ${args.output_id}`,
+                )
+          slots = seedPlan(filaments, last?.filament_plan ?? [])
         }
       }
       return json(
@@ -321,16 +356,20 @@ export const printTools: Tool[] = [
           backend.POST('/api/v1/print/outputs/{output_id}/run', {
             params: { path },
             body: {
-              pipeline_id: pipelineId,
-              printer_id: args.printer_id ?? null,
+              printer_id: printerId ?? null,
               copies: args.copies ?? null,
               plate_id: args.plate_id,
               all_plates: args.all_plates,
-              bed_type: args.bed_type ?? null,
-              filament_plan: args.filament_plan ?? null,
+              filament_plan: { slots, force_colour_match: args.filament_plan?.force_colour_match ?? false },
+              choices: {
+                nozzles: chosenNozzles,
+                tier: chosenTier ?? null,
+                process_name: processName ?? null,
+                bed_type: bedType,
+                filament_overrides: args.filament_overrides ?? {},
+              },
               project_id: args.project_id ?? null,
               options: args.options,
-              force: args.force,
             },
           }),
           `print ${args.output_id}`,
@@ -401,29 +440,4 @@ export const printTools: Tool[] = [
       ),
   }),
 
-  defineTool({
-    name: 'create_pipeline',
-    description: 'Create a Bambuddy slicer pipeline from a printer, process and filament presets.',
-    input: z.object({
-      name: z.string().min(1),
-      description: z.string().optional(),
-      bed_type: z.string().optional(),
-      printer_preset: presetRef,
-      process_preset: presetRef,
-      filament_presets: z.array(presetRef).min(1),
-    }),
-    risk: 'outward',
-    bambuddyScope: ['Manage Queue'],
-    routes: ['POST /api/v1/print/pipelines'],
-    summarize: ({ name }) => `Create the Bambuddy pipeline "${name}"`,
-    handler: async (args, { backend }) =>
-      json(
-        await ok(
-          backend.POST('/api/v1/print/pipelines', {
-            body: { ...args, description: args.description ?? null, bed_type: args.bed_type ?? null },
-          }),
-          `create pipeline ${args.name}`,
-        ),
-      ),
-  }),
 ]

@@ -299,12 +299,12 @@ describe('/mcp: outward tools prepare, and confirm is refused until approvals ex
     const client = await open(app, { headers: auth })
     const prepared = await client.callTool({
       name: 'print_output',
-      arguments: { output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3, copies: 2 },
+      arguments: { output_id: '0123456789abcdef0123456789abcdef', nozzles: [{ size: '0.4' }], tier: 'fine', copies: 2 },
     })
     expect(prepared.isError).toBeFalsy()
     const body = firstText(prepared) as { status: string; pending_action_id: string; summary: string }
     expect(body.status).toBe('pending_approval')
-    expect(body.summary).toBe('Print output 0123456789abcdef0123456789abcdef: 2 copies of plate 1 via pipeline 3')
+    expect(body.summary).toBe('Print output 0123456789abcdef0123456789abcdef: 2 copies of plate 1 with a 0.4 mm nozzle, fine quality (other choices as the print dialog opens)')
 
     const listed = firstText(await client.callTool({ name: 'list_pending_actions', arguments: {} }))
     expect(listed).toEqual([expect.objectContaining({ pending_action_id: body.pending_action_id, tool: 'print_output' })])

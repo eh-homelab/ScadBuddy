@@ -185,84 +185,142 @@ describe('uploads', () => {
   })
 })
 
-describe('print_output (as it will run once approved, #258)', () => {
-  it('checks eligibility, then runs the pipeline', async () => {
-    let run: unknown
-    server.use(
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, () =>
-        HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 3, report: { ok: true, issues: [] } }] }),
-      ),
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, async ({ request }) => {
-        run = await request.json()
-        return HttpResponse.json({ route: 'pipeline' })
-      }),
+describe('print_output (as it will run once approved, #258): spool-first, #335', () => {
+  const OUT = '0123456789abcdef0123456789abcdef'
+  const FILAMENTS = {
+    library_file_id: 5,
+    slots: [{ slot_id: 1 }, { slot_id: 2 }],
+    spools: [{ spool_id: 10, material: 'PLA' }, { spool_id: 11, material: 'PETG' }, { spool_id: 12, material: 'PLA' }],
+    suggested: [
+      { slot_id: 1, spool_id: 10 },
+      { slot_id: 2, spool_id: 11 },
+    ],
+  }
+  function choicesView(model_choices: Record<string, unknown> = {}) {
+    return http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/choices`, () =>
+      HttpResponse.json({ printer_id: 1, bed_type: 'Cool Plate', filaments: FILAMENTS, model_choices }),
     )
-    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3, copies: 2 }, ctx())
-    expect(result.isError).toBeFalsy()
-    expect(run).toMatchObject({ pipeline_id: 3, copies: 2, plate_id: 1, all_plates: false, force: false, options: {} })
-  })
-
-  it('stops on a blocking eligibility issue unless forced', async () => {
-    server.use(
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, () =>
-        HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 3, report: { ok: false, issues: [{ kind: 'nozzle' }] } }] }),
-      ),
-    )
-    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', pipeline_id: 3 }, ctx())
-    expect(result.isError).toBe(true)
-    expect(firstText(result)).toMatchObject({ status: 'ineligible' })
-  })
-
-  function defaultPipeline(id: number | null) {
-    return [
-      http.get(`${BACKEND}/api/v1/outputs/0123456789abcdef0123456789abcdef`, () => HttpResponse.json({ id: '0123456789abcdef0123456789abcdef', slug: 'box' })),
-      http.get(`${BACKEND}/api/v1/print/models/box/pipelines`, () =>
-        HttpResponse.json({ pipelines: [], printers: [], default_pipeline_id: id, model_choices: {}, printer_bed_types: {} }),
-      ),
-    ]
+  }
+  function capturedRun(into: { body?: unknown }) {
+    return http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, async ({ request }) => {
+      into.body = await request.json()
+      return HttpResponse.json({ library_file_id: 5, copies: 1, bambuddy_url: 'http://b', queue_item_ids: [9] })
+    })
   }
 
-  it('checks the DEFAULT pipeline too, and never runs when it is blocked', async () => {
-    let checked: unknown
-    let ran = false
-    server.use(
-      ...defaultPipeline(7),
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/eligibility`, async ({ request }) => {
-        checked = await request.json()
-        return HttpResponse.json({ library_file_id: 5, reports: [{ pipeline_id: 7, report: { ok: false, issues: [{ kind: 'printer_offline' }] } }] })
-      }),
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, () => {
-        ran = true
-        return HttpResponse.json({})
-      }),
+  it('with every choice given, runs without reading the dialog', async () => {
+    const run: { body?: unknown } = {}
+    // No choices handler: reading it would be an unhandled request.
+    server.use(capturedRun(run))
+    const result = await tool('print_output').execute(
+      {
+        output_id: OUT,
+        printer_id: 2,
+        copies: 2,
+        filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }] },
+        nozzles: [{ size: '0.6' }],
+        tier: 'draft',
+        bed_type: 'Textured PEI Plate',
+        filament_overrides: { '1': { source: 'cloud', id: 'GFSA04' } },
+      },
+      ctx(),
     )
-    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef' }, ctx())
-    expect(result.isError).toBe(true)
-    expect(firstText(result)).toMatchObject({ status: 'ineligible', pipeline_id: 7 })
-    expect(checked).toEqual({ pipeline_ids: [7] })
-    expect(ran).toBe(false)
-  })
-
-  it('with force, skips the check and runs the resolved default pipeline', async () => {
-    let run: unknown
-    server.use(
-      ...defaultPipeline(7),
-      // No eligibility handler: calling it would be an unhandled request.
-      http.post(`${BACKEND}/api/v1/print/outputs/0123456789abcdef0123456789abcdef/run`, async ({ request }) => {
-        run = await request.json()
-        return HttpResponse.json({ route: 'pipeline' })
-      }),
-    )
-    const result = await tool('print_output').execute({ output_id: '0123456789abcdef0123456789abcdef', force: true }, ctx())
     expect(result.isError).toBeFalsy()
-    expect(run).toMatchObject({ pipeline_id: 7, force: true })
+    expect(run.body).toEqual({
+      printer_id: 2,
+      copies: 2,
+      plate_id: 1,
+      all_plates: false,
+      filament_plan: { slots: [{ slot_id: 1, spool_id: 12 }], force_colour_match: false },
+      choices: {
+        nozzles: [{ size: '0.6', flow: 'standard' }],
+        tier: 'draft',
+        process_name: null,
+        bed_type: 'Textured PEI Plate',
+        filament_overrides: { '1': { source: 'cloud', id: 'GFSA04' } },
+      },
+      project_id: null,
+      options: {},
+    })
   })
 
-  it('refuses clearly when no pipeline resolves', async () => {
-    server.use(...defaultPipeline(null))
-    const result = await runTool({ ...tool('print_output'), gated: false }, { output_id: '0123456789abcdef0123456789abcdef' }, ctx())
+  it('fills omitted choices the way the dialog opens: defaults and the suggested spools', async () => {
+    const run: { body?: unknown } = {}
+    server.use(choicesView(), capturedRun(run))
+    const result = await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(result.isError).toBeFalsy()
+    expect(run.body).toMatchObject({
+      printer_id: 1,
+      filament_plan: { slots: FILAMENTS.suggested },
+      choices: {
+        nozzles: [
+          { size: '0.4', flow: 'standard' },
+          { size: '0.4', flow: 'standard' },
+        ],
+        tier: 'standard',
+        process_name: null,
+        bed_type: 'Cool Plate',
+      },
+    })
+  })
+
+  it("prefers the model's remembered nozzles, process and in-stock spools", async () => {
+    const run: { body?: unknown } = {}
+    server.use(
+      choicesView({
+        nozzles: [{ size: '0.2', flow: 'standard' }],
+        tier: null,
+        process_name: '0.06mm Fine @BBL H2C 0.2 nozzle',
+        // Spool 99 is gone from the inventory, so slot 2 falls back to the suggestion.
+        filament_plan: [
+          { slot_id: 1, spool_id: 12 },
+          { slot_id: 2, spool_id: 99 },
+        ],
+      }),
+      capturedRun(run),
+    )
+    await tool('print_output').execute({ output_id: OUT }, ctx())
+    expect(run.body).toMatchObject({
+      filament_plan: {
+        slots: [
+          { slot_id: 1, spool_id: 12 },
+          { slot_id: 2, spool_id: 11 },
+        ],
+      },
+      choices: { nozzles: [{ size: '0.2', flow: 'standard' }], tier: null, process_name: '0.06mm Fine @BBL H2C 0.2 nozzle' },
+    })
+  })
+
+  it('reads the filament step for all plates itself', async () => {
+    const run: { body?: unknown } = {}
+    let asked: URLSearchParams | undefined
+    server.use(
+      choicesView(),
+      http.get(`${BACKEND}/api/v1/print/outputs/${OUT}/filaments`, ({ request }) => {
+        asked = new URL(request.url).searchParams
+        return HttpResponse.json({ ...FILAMENTS, slots: [{ slot_id: 3 }], suggested: [{ slot_id: 3, spool_id: 12 }] })
+      }),
+      capturedRun(run),
+    )
+    await tool('print_output').execute({ output_id: OUT, all_plates: true }, ctx())
+    expect(asked?.get('all_plates')).toBe('true')
+    expect(asked?.get('printer_id')).toBe('1')
+    expect(run.body).toMatchObject({ all_plates: true, filament_plan: { slots: [{ slot_id: 3, spool_id: 12 }] } })
+  })
+
+  it("passes the resolver's refusal through", async () => {
+    server.use(
+      http.post(`${BACKEND}/api/v1/print/outputs/${OUT}/run`, () =>
+        HttpResponse.json({ title: 'Unprocessable', detail: 'Slot 2 has no spool chosen.' }, { status: 422 }),
+      ),
+    )
+    const result = await runTool(
+      { ...tool('print_output'), gated: false },
+      { output_id: OUT, printer_id: 1, filament_plan: { slots: [] }, nozzles: [{ size: '0.4' }], tier: 'standard', bed_type: 'Cool Plate' },
+      ctx(),
+    )
     expect(result.isError).toBe(true)
-    expect(firstText(result)).toContain('no slicer pipeline is set for model box')
+    expect(firstText(result)).toContain('Slot 2 has no spool chosen.')
   })
 
   it('passes a Bambuddy scope error through with its detail', async () => {

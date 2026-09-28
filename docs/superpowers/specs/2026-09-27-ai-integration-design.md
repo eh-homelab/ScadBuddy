@@ -297,8 +297,10 @@ when an operation in `backend/openapi.json` has neither a tool nor an explicit a
 entry.
 
 Tools are **task-shaped**, not one per route. For example, `render_model` submits a
-render and streams progress until it settles, and `print_output` wraps
-eligibility → send → run behind a single approval.
+render and streams progress until it settles, and `print_output` fills any omitted
+choice the way the print dialog opens, then slices and queues behind a single approval.
+(It wrapped eligibility → send → run until the spool-first print flow, #335, removed the
+pipeline and eligibility routes; see `2026-09-27-spool-first-print-design.md` §7.)
 
 ### 5.2 Browser tools
 
