@@ -4,10 +4,12 @@ import asyncio
 import json
 import os
 import re
+import signal
 import tempfile
 import time
 from collections import deque
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -301,6 +303,13 @@ async def _drain(
             plates.append(count)
 
 
+def _kill_group(process: asyncio.subprocess.Process) -> None:
+    """Kill the child and everything it spawned: a template activity's helper, or a
+    fontconfig cache rebuild openscad forked (spec §3.4, a phase-1 requirement)."""
+    with suppress(ProcessLookupError):
+        os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+
+
 async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> ProcessOutput:
     started = time.monotonic()
     # FONTCONFIG_FILE, so `text(font = ...)` resolves the families downloaded onto
@@ -320,6 +329,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
         env=env,
+        start_new_session=True,
     )
     tail: deque[str] = deque(maxlen=LOG_TAIL_LINES)
     missing: list[str] = []
@@ -331,7 +341,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     try:
         returncode = await asyncio.wait_for(process.wait(), timeout=config.render_timeout)
     except TimeoutError:
-        process.kill()
+        _kill_group(process)
         await process.wait()
         drain.cancel()
         raise RenderTimeoutError(
@@ -344,7 +354,7 @@ async def run_openscad(args: Sequence[str], *, cwd: Path, config: Config) -> Pro
     except asyncio.CancelledError:
         # A cancelled caller (a superseded parse check, a shutting-down worker) must not
         # leave the subprocess running: it would hold the CPU the next one needs.
-        process.kill()
+        _kill_group(process)
         await process.wait()
         drain.cancel()
         raise
