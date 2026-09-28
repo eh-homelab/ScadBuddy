@@ -17,19 +17,22 @@ import { jsonBodyLimit, type RemoteAddress, uiReadProblem, uiRequestProblem } fr
 // /api/v1/ai/approvals (routes/approvals.ts, #258).
 //
 //   GET  /api/v1/ai/sessions[?status=&limit=]     list, newest first
-//   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?}
+//   POST /api/v1/ai/sessions                      {title?, prompt?} → 201 {session, turn_id?};
+//                                                 429 past the owner's new-session limit
+//                                                 (sessions/manager.ts MAX_NEW_SESSIONS)
 //   GET  /api/v1/ai/sessions/:id                  one session
 //   POST /api/v1/ai/sessions/:id/messages         {text} → 202 {turn_id}; 409 while a turn runs
 //   GET  /api/v1/ai/sessions/:id/events           Server-Sent Events: the panel-protocol
-//                                                 events, replayed from `?after=` or
-//                                                 `Last-Event-ID`, then live; `id:` is the seq,
+//                                                 events, replayed from `Last-Event-ID`
+//                                                 (a reconnect) or else `?after=`, then
+//                                                 live; `id:` is the seq,
 //                                                 and every event is an unnamed `message`
 //                                                 (its `type` is in the JSON)
 //   POST /api/v1/ai/sessions/:id/interrupt        {interrupted}
 //   POST /api/v1/ai/sessions/:id/handoff          take the session over as the browser user
 //
 // Error bodies are `{ detail }`, the backend's FastAPI shape; a SessionError's
-// status is used as it is (404, 403, 409, 400).
+// status is used as it is (404, 403, 409, 429, 400).
 
 export type SessionRouteDeps = {
   sessions: SessionManager | undefined
@@ -217,7 +220,9 @@ export function registerSessionRoutes(app: Hono, deps: SessionRouteDeps): void {
     `${base}/:id/events`,
     route('read', async (c, sessions) => {
       const id = idOf(c)
-      const after = seqFrom(c.req.query('after')) ?? seqFrom(c.req.header('last-event-id')) ?? 0
+      // Last-Event-ID first: an EventSource reconnects to the same URL, `?after=`
+      // included, and adds the last seq it got, which is where to resume.
+      const after = seqFrom(c.req.header('last-event-id')) ?? seqFrom(c.req.query('after')) ?? 0
       // Checks visibility before the stream starts, so an unknown id is a 404, not an empty stream.
       await sessions.get(id, BROWSER_USER)
       // No proxy in the path may buffer this (spec §8.4); X-Accel-Buffering

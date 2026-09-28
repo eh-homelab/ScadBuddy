@@ -482,13 +482,17 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   |---|---|
   | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
   | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
-  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`), one |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`; `429` past 10 new sessions a minute per owner, counted with the socket's), one |
   | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
-  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `?after=` or `Last-Event-ID`, then live |
+  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `Last-Event-ID` (a reconnect) or else `?after=`, then live |
 
   A write body over `JSON_BODY_MAX` (about 251 KiB: the longest message in any
   script, fully JSON-escaped, plus 64 KiB; `agent/src/routes/guard.ts`) gets `413`
-  before it is read; the socket caps a frame at 256 KiB. Approvals
+  before it is read; the socket caps a frame at 256 KiB. New sessions, from the
+  socket or `POST`, are limited per owner (`MAX_NEW_SESSIONS` in
+  `agent/src/sessions/manager.ts`, counted in `ai_sessions`, so reconnecting or
+  another replica does not reset it); the socket answers an `error` frame with
+  code `rate_limited`. Approvals
   are decided on the socket or through `/api/v1/ai/approvals`. A chat
   session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
   their tiers), plus enabled plugins. Every agent response carries

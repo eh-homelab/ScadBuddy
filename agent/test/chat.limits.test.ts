@@ -2,13 +2,13 @@ import { randomUUID } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 import { ChatConnection, type ChatConnectionOptions } from '../src/routes/chat.js'
 import type { LoggedEvent } from '../src/sessions/eventLog.js'
-import type { SessionManager } from '../src/sessions/manager.js'
+import { SessionError, type SessionManager } from '../src/sessions/manager.js'
 import { event, type ServerEvent } from '../src/sessions/protocol.js'
 import { frontendClientMessages } from './support/frontendProtocol.js'
 
 // ChatConnection's limits, against a stand-in SessionManager: a client that
 // does not read (backpressure, then closing it), repeated attaches, and a
-// flood of frames (the queue cap and the new-session rate limit).
+// flood of frames (the queue cap), and the manager's new-session limit.
 
 const settle = (ms = 100) => new Promise((r) => setTimeout(r, ms))
 
@@ -180,7 +180,7 @@ describe('ChatConnection inbound limits', () => {
     const out: ServerEvent[] = []
     const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
       log: () => {},
-      limits: { maxQueued: 8, maxNewSessions: 1000 },
+      limits: { maxQueued: 8 },
     })
     await connection.open()
     const { clientMessage } = await frontendClientMessages()
@@ -199,27 +199,18 @@ describe('ChatConnection inbound limits', () => {
     connection.close()
   })
 
-  it('rate-limits new sessions per connection with rate_limited', async () => {
+  it("passes the manager's new-session refusal (per owner, not per connection) on as rate_limited", async () => {
     const fake = fakeManager()
+    const refusing = {
+      ...fake.manager,
+      start: () => Promise.reject(new SessionError('rate_limited', 'too many new sessions')),
+    } as unknown as SessionManager
     const out: ServerEvent[] = []
-    const connection = new ChatConnection(fake.manager, (e) => out.push(e), {
-      log: () => {},
-      limits: { maxNewSessions: 3, newSessionWindowMs: 200 },
-    })
+    const connection = new ChatConnection(refusing, (e) => out.push(e), { log: () => {} })
     await connection.open()
     const { clientMessage } = await frontendClientMessages()
-    const frame = JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' } }))
-    for (let i = 0; i < 5; i++) await connection.receive(frame)
-    expect(fake.started()).toBe(3)
-    expect(errors(out, 'rate_limited')).toBe(2)
-    // Messages to an existing session are not new sessions.
-    await connection.receive(
-      JSON.stringify(clientMessage({ type: 'user.message', sessionId: randomUUID(), text: 'hi', context: { route: '/' } })),
-    )
-    expect(errors(out, 'rate_limited')).toBe(2)
-    await settle(250)
-    await connection.receive(frame)
-    expect(fake.started()).toBe(4)
+    await connection.receive(JSON.stringify(clientMessage({ type: 'user.message', text: 'hi', context: { route: '/' } })))
+    expect(out.at(-1)).toMatchObject({ type: 'error', code: 'rate_limited', message: 'too many new sessions' })
     connection.close()
   })
 })
