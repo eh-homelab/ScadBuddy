@@ -499,6 +499,39 @@ describe('CataloguePage cards (#277)', () => {
     expect(await screen.findByText('Customizer')).toBeInTheDocument()
   })
 
+  it('tabs from one card into the next, with a bounded set of stops per card', async () => {
+    const { user } = renderWithRoutes()
+    const card = await coasterCard()
+    // Sorted by updated: the keychain comes just before the coaster, the bin after it.
+    const keychain = screen.getByRole('heading', { name: 'Name Keychain' }).closest(
+      'li',
+    ) as HTMLElement
+    within(keychain).getByRole('button', { name: 'Duplicate' }).focus()
+
+    const stops: string[] = []
+    for (;;) {
+      await user.tab()
+      const focused = document.activeElement as HTMLElement
+      if (!card.contains(focused)) break
+      stops.push(focused.getAttribute('aria-label') ?? focused.textContent ?? '')
+    }
+
+    // The carousel, its visible media, the enabled arrow and only the current dot:
+    // not one stop per slide.
+    expect(stops).toEqual([
+      'Crème Coaster',
+      'Open Printed in blue and orange',
+      'Next slide',
+      'Go to slide 1',
+      'Crème Coaster',
+      'Filter by kitchen',
+      'Filter by Tea & Coffee',
+      'Duplicate',
+    ])
+    const bin = screen.getByRole('heading', { name: 'Gridfinity Bin' }).closest('li') as HTMLElement
+    expect(document.activeElement).toBe(within(bin).getByRole('link', { name: 'Gridfinity Bin' }))
+  })
+
   it('shows the fallback, with no carousel chrome, for a template with no media', async () => {
     renderWithRoutes()
     const bin = (await screen.findByRole('heading', { name: 'Gridfinity Bin' })).closest(
