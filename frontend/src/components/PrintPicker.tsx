@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
 import { USER_ONLY } from '../agent/dom'
 import { api } from '../api/client'
-import type { Output, PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
+import type { PrintOptions, PrintOptionsState, PrintRunResult } from '../api/types'
 import { openExternal } from '../lib/embed'
 import { resolveOptions } from '../lib/printOptions'
+import { sourceApi, type PrintSource } from '../lib/printSource'
 import { useFilamentPlan } from '../lib/useFilamentPlan'
 import { usePrintChoices } from '../lib/usePrintChoices'
 import { usePrintProgress } from '../lib/usePrintProgress'
@@ -31,10 +32,12 @@ import { Spinner } from './ui/Spinner'
  * those choices server-side, then slices and queues through Bambuddy. There are no
  * slicer pipelines here any more; they stay in Bambuddy untouched.
  *
- * - One read, `GET /print/outputs/{id}/choices`, opens the dialog: printers, installed
+ * - One read, the source's choices read (`/print/outputs/{id}/…` or
+ *   `/print/library/{file_id}/…`, #313), opens the dialog: printers, installed
  *   nozzles, tiers and processes per size, plate types with the one last printed on,
  *   the filament step, and what this model last printed with (#78).
- * - One write, `POST /print/outputs/{id}/run`, prints. A 422 is the resolver refusing a
+ * - One write, the source's run (`/print/outputs/{id}/…` or `/print/library/{file_id}/…`,
+ *   #313), prints. A 422 is the resolver refusing a
  *   combination (an unpicked slot, no process, no preset for a spool at this size); its
  *   `detail` is shown above Print and the dialog stays open.
  * - Simple mode offers the tiers; Advanced adds the full process list, per-side flow and
@@ -47,21 +50,24 @@ import { Spinner } from './ui/Spinner'
 
 interface Props {
   open: boolean
-  slug: string
-  output: Output | undefined
+  /** #313 — an output ScadBuddy rendered, or a file in Bambuddy's library. */
+  source: PrintSource | undefined
+  /** The model, for its print-options scope; a library file has none. */
+  slug?: string
   onClose: () => void
   onRan: (result: PrintRunResult) => void
   /** #81 — the model of the printer in view, so the preview can draw its plate. */
   onPrinterModel?: (model: string | null) => void
 }
 
-export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel }: Props) {
-  const outputId = output?.id
-  const picker = usePrintChoices(open, outputId)
+export function PrintPicker({ open, source, slug, onClose, onRan, onPrinterModel }: Props) {
+  // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
+  const outputId = source?.kind === 'output' ? source.output.id : undefined
+  const picker = usePrintChoices(open, source)
   const { choices, loading, loadError, printers, printerId, printer, selection, size } = picker
   const { nozzles, tier, processName, bedType, overrides, plate } = selection
   const { filaments, plan, setPlan, planChanged, filamentError } = useFilamentPlan(
-    outputId,
+    source,
     choices,
     plate,
     size,
@@ -78,8 +84,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
   const [projectId, setProjectId] = useState<number | null>(null)
 
   const runPrint = useRunPrint({
-    outputId,
-    slug,
+    source,
     choices,
     printerId,
     selection,
@@ -150,7 +155,7 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
     resolveOptions(
       remembered?.global_options,
       printerId === null ? undefined : remembered?.printers?.[String(printerId)],
-      remembered?.models?.[slug],
+      slug === undefined ? undefined : remembered?.models?.[slug],
     ).quantity ?? null
   const effectiveCopies = copies ?? rememberedCopies ?? 1
 
@@ -304,12 +309,12 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
                 />
               )}
 
-              {picker.plates.length > 1 && outputId && (
+              {picker.plates.length > 1 && source && (
                 <PlatesToPrint
-                  outputId={outputId}
                   plates={picker.plates}
                   value={plate}
                   onChange={picker.setPlate}
+                  thumbnailUrl={sourceApi(source).plateThumbnailUrl}
                 />
               )}
 

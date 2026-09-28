@@ -24,7 +24,7 @@ function renderPicker(
     <PrintPicker
       open
       slug="name-keychain"
-      output={{ ...output, library_files: [] }}
+      source={{ kind: 'output', output }}
       onClose={vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
@@ -228,7 +228,7 @@ describe('PrintPicker', () => {
     const second = fixtures.outputs[1] as Output
     const { bodies } = watch('POST', '/run')
     const { user, rerender } = renderPage(
-      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+      <PrintPicker open slug="name-keychain" source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await loaded()
 
@@ -237,7 +237,7 @@ describe('PrintPicker', () => {
 
     rerender(
       <MemoryRouter>
-        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+        <PrintPicker open slug="name-keychain" source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
       </MemoryRouter>,
     )
     await loaded()
@@ -647,7 +647,7 @@ describe('PrintPicker · Remembered choices', () => {
           <PrintPicker
             open={open}
             slug="name-keychain"
-            output={target}
+            source={{ kind: 'output', output: target }}
             onClose={() => setOpen(false)}
             onRan={vi.fn()}
           />
@@ -959,15 +959,46 @@ describe('PrintPicker · Plates of a 3MF', () => {
       }),
     )
     const { rerender } = renderPage(
-      <PrintPicker open slug="name-keychain" output={first} onClose={vi.fn()} onRan={vi.fn()} />,
+      <PrintPicker open slug="name-keychain" source={{ kind: 'output', output: first }} onClose={vi.fn()} onRan={vi.fn()} />,
     )
     await screen.findByTestId('plate-choice')
 
     rerender(
       <MemoryRouter>
-        <PrintPicker open slug="name-keychain" output={second} onClose={vi.fn()} onRan={vi.fn()} />
+        <PrintPicker open slug="name-keychain" source={{ kind: 'output', output: second }} onClose={vi.fn()} onRan={vi.fn()} />
       </MemoryRouter>,
     )
     await waitFor(() => expect(screen.queryByTestId('plate-choice')).not.toBeInTheDocument())
+  })
+})
+
+describe('PrintPicker · A library file (#313)', () => {
+  it('prints a library file through the library run and remembers per file', async () => {
+    const run = vi.spyOn(api, 'runLibraryPrint')
+    const remember = vi.spyOn(api, 'putLibraryChoices')
+    const { user } = renderPage(
+      <PrintPicker open source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />,
+    )
+    await loaded()
+    await user.click(screen.getByRole('radio', { name: /0\.2 mm/ }))
+    await user.click(screen.getByRole('button', { name: /^Print$/ }))
+    await screen.findByTestId('queued-items')
+    expect(run).toHaveBeenCalledWith(89, expect.objectContaining({ printer_id: expect.any(Number) }))
+    await waitFor(() => expect(remember).toHaveBeenCalledWith(89, expect.objectContaining({ nozzles: expect.any(Array) })))
+    expect(screen.queryByTestId('print-progress')).toBeNull()
+    expect(screen.queryByRole('option', { name: 'This model' })).toBeNull()
+  })
+
+  it('library choices seed through the same seedPlan', async () => {
+    server.use(
+      http.get('/api/v1/print/library/89/choices', () =>
+        HttpResponse.json({ ...choicesView, model_choices: { printer_id: 1, filament_plan: [{ slot_id: 1, spool_id: 99999 }] } }),
+      ),
+    )
+    renderPage(<PrintPicker open source={{ kind: 'library', file: { id: 89, filename: 'bag-clip.3mf' } }} onClose={vi.fn()} onRan={vi.fn()} />)
+    await loaded()
+    // A remembered spool that is no longer in the inventory falls back to the suggestion.
+    const suggested = choicesView.filaments.suggested?.[0]?.spool_id
+    expect(within(screen.getByTestId('filament-slot-1')).getByTestId(`spool-${suggested}`)).toBeChecked()
   })
 })

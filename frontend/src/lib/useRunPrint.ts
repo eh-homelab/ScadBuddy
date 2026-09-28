@@ -7,11 +7,12 @@ import type {
   PrintRunResult,
   SlotChoice,
 } from '../api/types'
+import { sourceApi, type PrintSource } from './printSource'
 import type { PrintSelection } from './usePrintChoices'
 
 interface RunInput {
-  outputId: string | undefined
-  slug: string
+  /** #313 — an output or a library file. */
+  source: PrintSource | undefined
   choices: ChoicesView | null
   printerId: number | null
   selection: PrintSelection
@@ -28,13 +29,13 @@ interface RunInput {
 }
 
 /**
- * The print dialog's one write, `POST /print/outputs/{id}/run`. A 422 is the resolver
+ * The print dialog's one write, the source's run (`POST /print/outputs/{id}/run` or
+ * `POST /print/library/{file_id}/run`, #313). A 422 is the resolver
  * refusing a combination; its `detail` is `runError`, and `refused` keeps Print disabled
  * until one of the choices changes. `reset` clears the run for the dialog's next open.
  */
 export function useRunPrint({
-  outputId,
-  slug,
+  source,
   choices,
   printerId,
   selection,
@@ -81,7 +82,7 @@ export function useRunPrint({
       process_name: last?.process_name ?? null,
     }
     if (JSON.stringify(next) === JSON.stringify(before)) return
-    void api.putModelChoices(slug, next).catch(() => undefined)
+    if (source) void sourceApi(source).remember(next).catch(() => undefined)
   }
 
   /** #83 — the plate this printer now has on it, the fallback when it has no archives. */
@@ -91,7 +92,7 @@ export function useRunPrint({
   }
 
   async function run() {
-    if (!outputId || !choices || bedType === null) return
+    if (!source || !choices || bedType === null) return
     setRunning(true)
     setRunError(null)
     setRefused(false)
@@ -112,7 +113,7 @@ export function useRunPrint({
         project_id: projectId,
         options,
       }
-      const ran = await api.runPrint(outputId, body)
+      const ran = await sourceApi(source).run(body)
       setResult(ran)
       onRan(ran)
       rememberChoices()
