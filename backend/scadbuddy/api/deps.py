@@ -37,7 +37,7 @@ from scadbuddy.library.media_store import PostgresMediaStore
 from scadbuddy.library.outputs import OUTPUT_ID_PATTERN, OutputMeta, OutputStore
 from scadbuddy.library.presets import PresetStore
 from scadbuddy.library.previews import PreviewStore
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
+from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.job_store import JobBackend, JobStore
 from scadbuddy.render.jobs import RenderQueue
@@ -234,9 +234,8 @@ def build_state(settings: Settings) -> AppState:
         # Everything that can change whether a model needs a preview, or which one.
         catalogue.on_change = previews.request
         outputs.on_change = previews.request
-    elif settings.preview_renders:
-        logger.warning("default-render previews need SCADBUDDY_DATABASE_URL; none are made")
-    settings_store = SettingsStore(paths.root / SETTINGS_NAME, settings, events=events)
+    # Nothing connects here either: the lifespan opens it first thing.
+    settings_store = SettingsStore(settings, events=events)
     print_progress = ProgressObserver(events)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:

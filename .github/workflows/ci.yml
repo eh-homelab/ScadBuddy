@@ -132,8 +132,8 @@ jobs:
           if [ -d models ]; then models=true; fi
 
           # Can the image actually SERVE yet? The Dockerfile's CMD is
-          # `uvicorn scadbuddy.main:app`. When this gate was written the API
-          # epic had not landed and starting the container died with
+          # `uvicorn --factory scadbuddy.main:create_app`. When this gate was
+          # written the API epic had not landed and starting the container died with
           # `exec uvicorn failed`; it has landed since, so this now reads true.
           # Kept because it is the honest precondition for the container smoke
           # test, and because it costs one `[ -f ]`.
@@ -501,9 +501,11 @@ jobs:
     if: ${{ needs.layout.outputs.image == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    # For the `requires_postgres` tests: the render queue's Postgres store. The
-    # test container reaches it on the runner's loopback (`--network host`), and
-    # each test works in a schema of its own.
+    # For the backend tests that need Postgres: every one that builds the app
+    # (the settings live there, #401) and the render queue's store. The test
+    # container reaches it on the runner's loopback (`--network host`), and each
+    # test works in a schema of its own. The container smoke test below uses it
+    # too, since the app will not start without it.
     services:
       postgres:
         image: postgres:17
@@ -593,7 +595,13 @@ jobs:
         if: ${{ needs.layout.outputs.app == 'true' }}
         run: |
           set -euo pipefail
-          docker run -d --name scadbuddy-ci -p 18080:8080 scadbuddy:ci
+          # The database is required (#401). The service container is on the
+          # runner, reached through the host gateway; the app migrates the
+          # default schema, which the pytest step's per-test schemas never touch.
+          docker run -d --name scadbuddy-ci -p 18080:8080 \
+            --add-host=host.docker.internal:host-gateway \
+            -e SCADBUDDY_DATABASE_URL=postgresql://postgres:postgres@host.docker.internal:5432/scadbuddy_test \
+            scadbuddy:ci
 
           # `|| true` on the inspect: under `bash -e` a failed inspect (the
           # container exited and was reaped, or the image somehow carries no
