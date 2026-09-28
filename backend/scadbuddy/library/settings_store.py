@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.models import PresetRef, SlotChoice
 from scadbuddy.bambuddy.options import OptionScope, PrintOptions
+from scadbuddy.core.config import DEFAULT_MEDIA_UPLOAD_MAX_BYTES
 from scadbuddy.core.events import EventBus, SettingsChanged, SettingsSection, emit
 from scadbuddy.core.settings import Settings
 
@@ -19,7 +20,16 @@ KEY_FILE_MODE = 0o600
 DisplayUnit = Literal["mm", "in"]
 
 #: The fields the environment seeds (``SCADBUDDY_<FIELD>``); see :class:`SettingsStore`.
-ENV_SEEDED = ("bambuddy_url", "bambuddy_api_key", "public_url", "default_plate")
+ENV_SEEDED = (
+    "bambuddy_url",
+    "bambuddy_api_key",
+    "public_url",
+    "default_plate",
+    "media_upload_max_bytes",
+)
+#: The env-seeded fields with no ``None``: a clear puts the environment's value back,
+#: and keeps following it.
+NEVER_NONE = frozenset({"media_upload_max_bytes"})
 
 
 class BambuddyIds(BaseModel):
@@ -59,6 +69,9 @@ class StoredSettings(BambuddyIds):
     default_plate: str | None = None
     #: The unit the UI shows dimensions in, for every model.
     display_unit: DisplayUnit = "mm"
+    #: The largest media upload (#274), in bytes. Never cleared: a clear puts the
+    #: environment's value back.
+    media_upload_max_bytes: int = Field(default=DEFAULT_MEDIA_UPLOAD_MAX_BYTES, gt=0)
 
     # Used by "Slice and queue" when no pipeline is configured.
     printer_preset: PresetRef | None = None
@@ -120,6 +133,8 @@ class SettingsPatch(BaseModel):
     default_plate: str | None = None
     #: ``null`` puts it back to millimetres.
     display_unit: DisplayUnit | None = None
+    #: ``null`` puts it back to ``SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`` (or 1 GiB).
+    media_upload_max_bytes: int | None = Field(default=None, gt=0)
 
 
 class SettingsStore:
@@ -145,6 +160,7 @@ class SettingsStore:
             bambuddy_api_key=self.defaults.bambuddy_api_key,
             public_url=self.defaults.public_url,
             default_plate=self.defaults.default_plate,
+            media_upload_max_bytes=self.defaults.media_upload_max_bytes,
         )
 
     def load(self) -> StoredSettings:
@@ -153,9 +169,12 @@ class SettingsStore:
             return stored
         on_disk = StoredSettings.model_validate_json(self.path.read_text(encoding="utf-8"))
         merged = stored.model_dump()
-        merged.update(on_disk.model_dump(exclude_none=True))
+        # `exclude_unset` too: a field a file from before it existed does not hold
+        # would otherwise come back as its default and beat the environment's value.
+        merged.update(on_disk.model_dump(exclude_none=True, exclude_unset=True))
         for name in on_disk.cleared:
-            merged[name] = None
+            # A field that is never None follows the environment once cleared.
+            merged[name] = stored.model_dump()[name] if name in NEVER_NONE else None
         return StoredSettings.model_validate(merged)
 
     def save(self, patch: SettingsPatch) -> StoredSettings:
@@ -174,6 +193,8 @@ class SettingsStore:
                 continue
             if changes[name] is None:
                 cleared.add(name)
+                if name in NEVER_NONE:
+                    changes[name] = getattr(self.defaults, name)
             else:
                 cleared.discard(name)
         current.update(changes, cleared=sorted(cleared))

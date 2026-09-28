@@ -34,6 +34,8 @@ class SettingsView(BaseModel):
     bed_type: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
+    #: The largest media upload (#274), in bytes.
+    media_upload_max_bytes: int
 
 
 class PrintOptionsView(BaseModel):
@@ -114,6 +116,7 @@ def _view(settings: StoredSettings) -> SettingsView:
         bed_type=settings.bed_type,
         default_plate=settings.default_plate,
         display_unit=settings.display_unit,
+        media_upload_max_bytes=settings.media_upload_max_bytes,
     )
 
 

@@ -116,6 +116,12 @@ for the project picker).
     next duplicate.
   - Settings shows the usage under "Uploaded files"; so do
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
+- **Template media** (images and videos, in `/data/models/<slug>/media`):
+  `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default 1073741824, 1 GiB) is the largest
+  single upload; it is the starting value of Settings > Uploads, which overrides it.
+  The upload is streamed to the data volume, never held in memory. Images (and
+  posters) are also capped at 10 MiB, since they are committed to the models'
+  history; videos are not committed.
 - **Render queue.** By default every render request is accepted;
   `SCADBUDDY_RENDER_CONCURRENCY` jobs are rendered at once per process, oldest
   first. A preview replaced before it started is dropped, and identical waiting
