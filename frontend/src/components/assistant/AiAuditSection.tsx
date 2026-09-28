@@ -31,6 +31,7 @@ export const AUDIT_PAGE = 25
 
 const KIND_LABEL: Record<AuditKind, string> = {
   tool_call: 'Tool calls',
+  resource: 'MCP resources',
   approval: 'Approvals',
   credential: 'Credentials',
   plugin: 'Plugins',
@@ -63,6 +64,8 @@ function describe(entry: AuditEntry): string {
       return toolName(entry.action)
     case 'approval':
       return `Approval ${entry.action}`
+    case 'resource':
+      return `Resource ${entry.action}`
     default:
       return `${KIND_LABEL[entry.kind]}: ${entry.action}`
   }
@@ -94,6 +97,7 @@ function AuditRow({ entry }: { entry: AuditEntry }) {
         {entry.client_ip && <> · <span className="sb-num">{entry.client_ip}</span></>}
         {entry.duration_ms !== null && <> · <span className="sb-num">{entry.duration_ms} ms</span></>}
         {entry.approval_id && <> · approval <span className="sb-num">{entry.approval_id.slice(0, 8)}</span></>}
+        {entry.approved_by && <> · approved by {entry.approved_by.label}</>}
       </div>
       {text && (
         <p className="mt-0.5 truncate font-mono text-[12px] text-muted" title={text}>

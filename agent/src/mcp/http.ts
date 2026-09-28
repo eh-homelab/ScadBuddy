@@ -202,7 +202,7 @@ export function mountMcp(
     const principal = sessionPrincipal(auth.principal, id)
     const server = createExternalServer(deps.tools, deps.services, deps.audit)
     const { detach } = deps.resources
-      ? installResources(server, { tools: deps.tools, services: deps.services, hub: deps.resources })
+      ? installResources(server, { tools: deps.tools, services: deps.services, hub: deps.resources, audit: deps.audit })
       : { detach: () => {} }
     const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => id,

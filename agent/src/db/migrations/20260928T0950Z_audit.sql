@@ -2,8 +2,8 @@
 -- audit log of AI actions (spec §8.3, §8.6, §9). See src/audit/log.ts.
 --
 -- Append-only. One row per tool call made by the harness (a session turn) or
--- over /mcp, per approval decision, and per credential, plugin, settings or
--- MCP-token write. Nothing secret is stored: `input_summary` is scrubbed by
+-- over /mcp, per MCP resource read or (un)subscription, per approval decision,
+-- and per credential, plugin, settings or MCP-token write. Nothing secret is stored: `input_summary` is scrubbed by
 -- sessions/sdkEvents.ts scrubForLog, and `input_hash` is the same keyed
 -- HMAC-SHA256 the approvals use (approvals/service.ts inputHash), so a row can
 -- be matched to its approval without the input being recoverable from it.
@@ -11,7 +11,7 @@ CREATE TABLE ai_audit (
   id               bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   at               timestamptz NOT NULL DEFAULT now(),
   -- What kind of action: a tool call, an approval decision, or a write.
-  kind             text NOT NULL CHECK (kind IN ('tool_call', 'approval', 'credential', 'plugin', 'settings', 'token')),
+  kind             text NOT NULL CHECK (kind IN ('tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token')),
   -- The tool name for a tool call; otherwise the verb (e.g. 'approved', 'mint', 'PUT').
   action           text NOT NULL,
   -- Where it came from: a session turn, /mcp, or an HTTP route of the UI.
@@ -29,6 +29,12 @@ CREATE TABLE ai_audit (
   input_hash       text,
   input_summary    text,
   approval_id      uuid,
+  -- Who approved it, for a tool call that ran on an approval: copied from
+  -- ai_approvals.decided_by_* when the row is written (src/audit/log.ts), so it
+  -- outlives the approval row (which goes with its session).
+  approved_by_kind  text,
+  approved_by_id    text,
+  approved_by_label text,
   -- ok: ran and succeeded; error: ran (or tried to) and failed; refused: not
   -- run by policy (tier, no approval surface, pending, expired, cancelled);
   -- denied: a human said no.

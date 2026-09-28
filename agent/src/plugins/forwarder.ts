@@ -11,6 +11,7 @@ import {
 import { request as httpsRequest } from 'node:https'
 import { type AddressInfo, isIP, type LookupFunction } from 'node:net'
 import { plainAddress } from '../http/origins.js'
+import { markUntrustedContent, wrapUntrustedText } from '../safety/untrusted.js'
 import { harnessToolName, headerSecretVariants, type LoadedPlugins, type RemotePlugin } from './registry.js'
 
 // The loopback forwarder between Claude Code and plugin endpoints (#297).
@@ -42,6 +43,9 @@ import { harnessToolName, headerSecretVariants, type LoadedPlugins, type RemoteP
 //     with another's, and a `tools/call` is refused for a disabled or hidden
 //     tool, or for one whose raw name differs from the `tool_tiers` entry its
 //     harness name matches.
+//   - marks every tools/call result as untrusted data (#258,
+//     `rewriteMessages`): Claude Code puts a plugin's result straight into the
+//     model's context, so it gets the same envelope as ScadBuddy's own tools.
 //
 // The token is a per-registration capability (144 random bits), released
 // when the run ends. It is on Claude Code's command line (the SDK passes MCP
@@ -148,17 +152,47 @@ function pick(headers: IncomingHttpHeaders, names: readonly string[]): OutgoingH
   return out
 }
 
-/** Rewrites each JSON-RPC response to a tools/list request in `ids`. */
-function rewriteMessages(payload: unknown, ids: Set<unknown>, route: Route): unknown {
+/** The requests of one POST whose responses are rewritten: tools/list ids, and tools/call ids with their tool. */
+export type Rewrites = { lists: Set<unknown>; calls: Map<unknown, string> }
+
+/** Where a plugin tool's content comes from, for the untrusted-data envelope. */
+export function pluginSource(plugin: Pick<RemotePlugin, 'name'>): string {
+  return `the remote plugin "${plugin.name}", a third-party MCP server; its results can carry anything its operator or its data sources wrote`
+}
+
+/**
+ * Rewrites each JSON-RPC response to a request in `rewrites`:
+ *   - tools/list: disabled and colliding tools dropped (`filterToolList`);
+ *   - tools/call (#258): the result's content marked as untrusted data, as
+ *     ScadBuddy's own tool results are (safety/untrusted.ts
+ *     `markUntrustedContent`: text in the envelope, a preamble before each
+ *     image, audio or blob), under the name the model knows the tool by
+ *     (`mcp__<plugin>__<tool>`); a JSON-RPC error's message is wrapped too,
+ *     since Claude Code hands it to the model as the tool's error.
+ */
+export function rewriteMessages(payload: unknown, rewrites: Rewrites, route: Pick<Route, 'plugin' | 'collided'>): unknown {
   const one = (m: unknown): unknown => {
-    if (!isRecord(m) || !ids.has(m.id) || !isRecord(m.result) || !Array.isArray(m.result.tools)) return m
-    return { ...m, result: { ...m.result, tools: filterToolList(route, m.result.tools) } }
+    if (!isRecord(m)) return m
+    if (rewrites.lists.has(m.id) && isRecord(m.result) && Array.isArray(m.result.tools)) {
+      return { ...m, result: { ...m.result, tools: filterToolList(route, m.result.tools) } }
+    }
+    const raw = rewrites.calls.get(m.id)
+    if (raw === undefined) return m
+    const tool = `mcp__${route.plugin.name}__${harnessToolName(raw)}`
+    const source = pluginSource(route.plugin)
+    if (isRecord(m.result) && Array.isArray(m.result.content)) {
+      return { ...m, result: { ...m.result, content: markUntrustedContent(m.result.content, tool, source) } }
+    }
+    if (isRecord(m.error) && typeof m.error.message === 'string') {
+      return { ...m, error: { ...m.error, message: wrapUntrustedText(tool, source, m.error.message) } }
+    }
+    return m
   }
   return Array.isArray(payload) ? payload.map(one) : one(payload)
 }
 
 /** Rewrites one SSE event block (without its terminating blank line). */
-function rewriteSseEvent(block: string, ids: Set<unknown>, route: Route): string {
+export function rewriteSseEvent(block: string, ids: Rewrites, route: Pick<Route, 'plugin' | 'collided'>): string {
   const lines = block.split(/\r?\n/)
   const data = lines.filter((l) => l.startsWith('data:')).map((l) => l.slice(5).replace(/^ /, ''))
   if (data.length === 0) return block
@@ -227,7 +261,7 @@ export class PluginForwarder {
     if (!['POST', 'GET', 'DELETE'].includes(method)) return fail(res, 405, 'method not allowed')
 
     let body: Buffer | undefined
-    const toolListIds = new Set<unknown>()
+    const rewrites: Rewrites = { lists: new Set(), calls: new Map() }
     if (method === 'POST') {
       const read = await readBody(req)
       if (read === 'too large') return fail(res, 413, 'request body too large')
@@ -241,7 +275,7 @@ export class PluginForwarder {
       const messages = (Array.isArray(parsed) ? parsed : [parsed]) as JsonRpc[]
       for (const m of messages) {
         if (!isRecord(m)) continue
-        if (m.method === 'tools/list' && route.filterTools && m.id !== undefined) toolListIds.add(m.id)
+        if (m.method === 'tools/list' && route.filterTools && m.id !== undefined) rewrites.lists.add(m.id)
         if (m.method === 'tools/call' && isRecord(m.params) && typeof m.params.name === 'string') {
           const refusal = callRefusal(route, m.params.name)
           if (refusal !== undefined) {
@@ -252,6 +286,7 @@ export class PluginForwarder {
             )
             return
           }
+          if (m.id !== undefined && m.id !== null) rewrites.calls.set(m.id, m.params.name)
         }
       }
     }
@@ -302,7 +337,7 @@ export class PluginForwarder {
       }
       const out = pick(up.headers, RESPONSE_HEADERS)
       const type = String(up.headers['content-type'] ?? '').toLowerCase()
-      if (toolListIds.size === 0 || status !== 200) {
+      if ((rewrites.lists.size === 0 && rewrites.calls.size === 0) || status !== 200) {
         res.writeHead(status, out)
         up.pipe(res)
         return
@@ -313,7 +348,7 @@ export class PluginForwarder {
         up.on('end', () => {
           let text = Buffer.concat(chunks).toString('utf8')
           try {
-            text = JSON.stringify(rewriteMessages(JSON.parse(text), toolListIds, route))
+            text = JSON.stringify(rewriteMessages(JSON.parse(text), rewrites, route))
           } catch {
             // not JSON: pass through as is
           }
@@ -332,7 +367,7 @@ export class PluginForwarder {
           while ((at = /\r?\n\r?\n/.exec(pending)) !== null) {
             const block = pending.slice(0, at.index)
             pending = pending.slice(at.index + at[0].length)
-            res.write(`${rewriteSseEvent(block, toolListIds, route)}\n\n`)
+            res.write(`${rewriteSseEvent(block, rewrites, route)}\n\n`)
           }
         })
         up.on('end', () => res.end(pending))

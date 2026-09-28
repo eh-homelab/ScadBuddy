@@ -13,7 +13,9 @@ import {
   UnsubscribeRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
+import type { AuditLog, AuditOutcome } from '../audit/log.js'
 import { hasTier, type Principal } from '../auth/principal.js'
+import { markUntrustedResourceContents } from '../safety/untrusted.js'
 import { principalFrom } from '../tools/projections.js'
 import { type Tool, type ToolContext, ToolError, type ToolServices } from '../tools/registry.js'
 import { expand, isTemplate, matchUri, RESOURCES, type ResourceDef, tierFor, variablesOf } from './catalog.js'
@@ -49,6 +51,8 @@ export type ResourceDeps = {
   tools: readonly Tool[]
   services: ToolServices
   hub: ResourceHub
+  /** Reads and (un)subscriptions are recorded here (#258, audit/log.ts). */
+  audit?: AuditLog | undefined
 }
 
 function notFound(uri: string, why = 'Resource not found'): McpError {
@@ -171,41 +175,88 @@ export function installResources(server: McpServer, deps: ResourceDeps): { detac
     }
   })
 
-  low.setRequestHandler(ReadResourceRequestSchema, async (req, extra) => {
-    const principal = principalOf(extra)
-    const { def, vars, uri } = resolve(req.params.uri, principal)
+  /**
+   * One `resource` row in the audit log (#258). `run` answers, or throws the
+   * McpError the client gets; either way the attempt is recorded, a tier
+   * refusal as `refused`.
+   */
+  async function audited<T>(action: string, uri: string, extra: Extra, run: () => Promise<T>): Promise<T> {
+    const startedAt = new Date()
+    const principal = principalFrom(extra)
+    let outcome: AuditOutcome = 'ok'
+    let detail = uri
     try {
-      return { contents: toContents(req.params.uri, def, await run(def, vars, principal, extra)) }
+      return await run()
+    } catch (err) {
+      const refusedTier = err instanceof McpError && err.code === ErrorCode.InvalidRequest && /tier/.test(err.message)
+      outcome = refusedTier ? 'refused' : 'error'
+      detail = `${uri}: ${err instanceof Error ? err.message : String(err)}`
+      throw err
+    } finally {
+      if (principal) {
+        const match = matchUri(uri)
+        await deps.audit?.record({
+          kind: 'resource',
+          action,
+          surface: 'mcp',
+          actor: { kind: principal.kind, id: principal.id, label: principal.id },
+          clientIp: principal.clientIp,
+          ...(match ? { tier: tierFor(match.def, toolOf(match.def)) } : {}),
+          outcome,
+          detail,
+          startedAt,
+          finishedAt: new Date(),
+        })
+      }
+    }
+  }
+
+  low.setRequestHandler(ReadResourceRequestSchema, (req, extra) =>
+    audited('read', req.params.uri, extra, () => read(req.params.uri, extra)),
+  )
+
+  async function read(requested: string, extra: Extra): Promise<ReadResourceResult> {
+    const principal = principalOf(extra)
+    const { def, vars, uri } = resolve(requested, principal)
+    try {
+      const tool = toolOf(def)
+      // Marked as untrusted data, as the same content is when a tool returns it (#258).
+      const contents = toContents(requested, def, await run(def, vars, principal, extra))
+      return { contents: markUntrustedResourceContents(contents, tool.name, tool.source) as ReadResourceResult['contents'] }
     } catch (err) {
       if (err instanceof McpError) throw err
       if (err instanceof z.ZodError) {
         throw new McpError(ErrorCode.InvalidParams, `invalid resource URI ${uri}: ${z.prettifyError(err)}`, { uri })
       }
-      if (err instanceof ToolError && err.status === 404) throw notFound(req.params.uri, `Resource not found: ${err.message}`)
+      if (err instanceof ToolError && err.status === 404) throw notFound(requested, `Resource not found: ${err.message}`)
       if (err instanceof ToolError && err.status === 422) throw new McpError(ErrorCode.InvalidParams, err.message, { uri })
       throw new McpError(ErrorCode.InternalError, err instanceof Error ? err.message : String(err), { uri })
     }
-  })
+  }
 
-  low.setRequestHandler(SubscribeRequestSchema, async (req, extra) => {
-    const principal = principalOf(extra)
-    const { uri } = resolve(req.params.uri, principal)
-    try {
-      subscriptions.add(uri)
-    } catch (err) {
-      if (err instanceof SubscriptionLimitError) throw new McpError(ErrorCode.InvalidRequest, err.message)
-      throw err
-    }
-    return {}
-  })
+  low.setRequestHandler(SubscribeRequestSchema, (req, extra) =>
+    audited('subscribe', req.params.uri, extra, async () => {
+      const principal = principalOf(extra)
+      const { uri } = resolve(req.params.uri, principal)
+      try {
+        subscriptions.add(uri)
+      } catch (err) {
+        if (err instanceof SubscriptionLimitError) throw new McpError(ErrorCode.InvalidRequest, err.message)
+        throw err
+      }
+      return {}
+    }),
+  )
 
-  low.setRequestHandler(UnsubscribeRequestSchema, async (req, extra) => {
-    principalOf(extra)
-    // Unsubscribing from something never subscribed is not an error.
-    const match = matchUri(req.params.uri)
-    if (match) subscriptions.delete(match.uri)
-    return {}
-  })
+  low.setRequestHandler(UnsubscribeRequestSchema, (req, extra) =>
+    audited('unsubscribe', req.params.uri, extra, async () => {
+      principalOf(extra)
+      // Unsubscribing from something never subscribed is not an error.
+      const match = matchUri(req.params.uri)
+      if (match) subscriptions.delete(match.uri)
+      return {}
+    }),
+  )
 
   async function slugs(principal: Principal, extra: Extra): Promise<{ slug: string; name: string }[]> {
     const rows = await readJson(byName.get('list_models')!, {}, principal, extra)

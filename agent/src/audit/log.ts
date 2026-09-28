@@ -16,6 +16,8 @@ import { redact } from '../secrets.js'
 // triggers refuse UPDATE, TRUNCATE and any DELETE but the retention sweep's).
 // What is recorded, and by whom:
 //
+//   resource    every /mcp resources/read, subscribe and unsubscribe
+//               (resources/server.ts), refused ones included
 //   tool_call   every tool call a session turn makes (sessions/manager.ts via
 //               TurnAuditor, audit/turn.ts: ScadBuddy's tools AND plugin tools,
 //               including calls that were refused or denied), and every call
@@ -42,7 +44,7 @@ import { redact } from '../secrets.js'
 // database blip stop every session; the table is in the same database as
 // everything the actions touch, so an outage stops those too.
 
-export const AUDIT_KINDS = ['tool_call', 'approval', 'credential', 'plugin', 'settings', 'token'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -110,6 +112,8 @@ export type AuditRecord = {
   input_hash: string | null
   input_summary: string | null
   approval_id: string | null
+  /** For a tool call that ran on an approval: who approved it. */
+  approved_by: AuditActor | null
   outcome: AuditOutcome
   detail: string | null
   started_at: string | null
@@ -168,6 +172,9 @@ type Row = {
   input_hash: string | null
   input_summary: string | null
   approval_id: string | null
+  approved_by_kind: string | null
+  approved_by_id: string | null
+  approved_by_label: string | null
   outcome: AuditOutcome
   detail: string | null
   started_at: Date | null
@@ -191,6 +198,10 @@ function view(row: Row): AuditRecord {
     input_hash: row.input_hash,
     input_summary: row.input_summary,
     approval_id: row.approval_id,
+    approved_by:
+      row.approved_by_kind && row.approved_by_id && row.approved_by_label
+        ? { kind: row.approved_by_kind, id: row.approved_by_id, label: row.approved_by_label }
+        : null,
     outcome: row.outcome,
     detail: row.detail,
     started_at: row.started_at?.toISOString() ?? null,
@@ -242,10 +253,15 @@ export class AuditLog implements AuditRepo {
     const started = entry.startedAt ?? null
     const finished = entry.finishedAt ?? null
     const duration = started && finished ? Math.max(0, finished.getTime() - started.getTime()) : null
+    const approvalId = entry.approvalId && isUuid(entry.approvalId) ? entry.approvalId : null
+    // A tool call that ran on an approval names who approved it, copied from
+    // ai_approvals now (it goes with its session; this row stays).
+    const approved = this.deps.sql`decision = 'approved' AND ${entry.kind === 'tool_call'}`
     try {
       await this.deps.sql`
         INSERT INTO ai_audit (kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
                               session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id,
+                              approved_by_kind, approved_by_id, approved_by_label,
                               outcome, detail, started_at, finished_at, duration_ms)
         VALUES (${entry.kind}, ${cap(entry.action, 200)}, ${entry.surface}, ${cap(entry.actor.kind, 50)},
                 ${cap(entry.actor.id, 200)}, ${cap(entry.actor.label, 200)}, ${entry.clientIp ?? null},
@@ -253,7 +269,10 @@ export class AuditLog implements AuditRepo {
                 ${entry.turnId && isUuid(entry.turnId) ? entry.turnId : null},
                 ${entry.toolUseId ?? null}, ${entry.tier ?? null}, ${entry.inputHash ?? null},
                 ${entry.inputSummary === undefined ? null : cap(entry.inputSummary, SUMMARY_MAX)},
-                ${entry.approvalId && isUuid(entry.approvalId) ? entry.approvalId : null},
+                ${approvalId},
+                (SELECT decided_by_kind FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                (SELECT decided_by_id FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
+                (SELECT decided_by_label FROM ai_approvals WHERE id = ${approvalId}::uuid AND ${approved}),
                 ${entry.outcome}, ${entry.detail === undefined ? null : cap(entry.detail, DETAIL_MAX)},
                 ${started}, ${finished}, ${duration})`
     } catch (err) {
@@ -281,8 +300,8 @@ export class AuditLog implements AuditRepo {
     params.push(limit + 1)
     const rows = await this.deps.sql.unsafe<Row[]>(
       `SELECT id::text AS id, at, kind, action, surface, principal_kind, principal_id, principal_label, client_ip,
-              session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id, outcome, detail,
-              started_at, finished_at, duration_ms
+              session_id, turn_id, tool_use_id, tier, input_hash, input_summary, approval_id, approved_by_kind,
+              approved_by_id, approved_by_label, outcome, detail, started_at, finished_at, duration_ms
        FROM ai_audit ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
        ORDER BY id DESC LIMIT $${params.length}`,
       params,

@@ -272,16 +272,25 @@ The code is [`agent/src/audit/`](../../agent/src/audit/), over `ai_audit`
 |---|---|---|
 | `tool_call` | `TurnAuditor` (`audit/turn.ts`), fed by `sessions/manager.ts` | every tool call a session turn makes: ScadBuddy's in-process tools and remote plugin tools, including calls refused or denied at the approval gate |
 | `tool_call` | `createExternalServer()` (`tools/projections.ts`) | every call over `/mcp`, with the client address |
+| `resource` | `installResources()` (`resources/server.ts`) | every `/mcp` `resources/read`, `subscribe` and `unsubscribe` (#264), with the URI; a tier refusal is `refused` |
 | `approval` | `ApprovalService` (`approvals/service.ts`) | approved, denied, expired, cancelled, and approved-but-voided |
 | `credential`, `plugin` | `auditWrites()` (`audit/writes.ts`, mounted in `app.ts`) | `PUT`/`DELETE /api/v1/ai/credentials`, `POST`/`PATCH`/`DELETE /api/v1/ai/plugins…`, refused attempts included; bodies are never read |
 | `settings` | `SettingsStore.set()` (`credentials.ts`) | every `ai_settings` write, with the key and value (the table holds no secrets by contract) |
-| `token` | `auditedTokenStore()` (`audit/writes.ts`) | MCP token mint and revoke; never the token |
+| `token` | `auditedTokenStore()` (`audit/writes.ts`), around the one store `main.ts` gives both the Settings token routes (#517) and `/mcp` | MCP token mint and revoke, with the token's id and name; never the token. A refused or failed `POST`/`DELETE /api/v1/ai/mcp-tokens…` is recorded by `auditWrites()` (failures only, so a mint is one row) |
 
 Each row has who (principal kind, id and label; session and turn), the tool and tier,
 the input as a **keyed HMAC** (the approvals' own key, so a row matches its approval's
 `input_hash`) and a **scrubbed summary** (`summariseInput()`: `scrubForLog()`, capped),
 the approval id, the outcome (`ok`, `error`, `refused`, `denied`) and timings. A turn's
 credential and plugin secrets are redacted from the summary and the detail.
+
+**Who ran it and who approved it, on one row.** A `tool_call` row with an approval id
+also has `approved_by_*`: the principal that approved it, copied from
+`ai_approvals.decided_by_*` in the same `INSERT` when the approval's decision is
+`approved` (`AuditLog.record()`). Copied, not joined at read time, because an approval
+row goes with its session (`ON DELETE CASCADE`) and the audit row must outlive it. A
+denied, expired or cancelled call has none; the approval's own `approval` row names
+its decider as the principal.
 
 - **Append-only.** Triggers refuse `UPDATE`, `TRUNCATE` and any `DELETE` except the
   retention sweep's, which sets `scadbuddy.audit_prune` for its own transaction only
@@ -320,6 +329,36 @@ so the marking is defence in depth and the approval gate is the boundary.
   instructions in tool results", the envelope carries no instruction. ScadBuddy's own
   messages (tier refusals, the pending-approval notice, a `ToolError` summary) are not
   wrapped. The panel's `tool.result` summary shows the content, unwrapped.
+- **Images, audio and blobs** (`markUntrustedContent()`). Bytes cannot be wrapped, and
+  an image can carry text as well as a README can; OWASP lists "multimodal" injection,
+  instructions hidden in images, among its scenarios
+  ([LLM01:2025 Prompt Injection](https://genai.owasp.org/llmrisk/llm01-prompt-injection/)).
+  So each image, audio or embedded-blob block is preceded by a text preamble,
+  `{"untrusted_data": {"tool", "source", "content_follows": {"type", "mime_type"}}}`,
+  which says only where the next block came from ("Tell Claude what the content is
+  and where it came from"), again with no instruction. An embedded *text* resource has
+  its text wrapped like any other text. A `resource_link` is a URI and is left alone.
+- **Plugin tool results** (`plugins/forwarder.ts` `rewriteMessages()`). Claude Code puts
+  a remote plugin's result straight into the model's context, and every plugin call
+  already passes through the loopback forwarder, so the forwarder rewrites each
+  `tools/call` response it relays (JSON or SSE) with `markUntrustedContent()`, under the
+  name the model knows the tool by (`mcp__<plugin>__<tool>`) and a source naming the
+  plugin as a third-party MCP server. A JSON-RPC error's message is wrapped too, since
+  Claude Code hands it to the model as the tool's error. `tools/list` is not: it is the
+  tool catalogue, which the registry already filters. Measured end to end in
+  `agent/test/plugins.e2e.test.ts` (the bundled Claude Code sends the model the wrapped
+  result) and `agent/test/plugins.untrusted.test.ts`.
+- **MCP resources** (#264, `resources/server.ts`, `markUntrustedResourceContents()`).
+  The resources serve the same READMEs, sources and Bambuddy data as the tools, so a
+  `resources/read` answer is marked as well: text contents become the envelope (with
+  the resource's own MIME type as `mime_type` inside it, and `application/json` as the
+  item's `mimeType`, which is what the text now is); a blob (a thumbnail, a 3MF) is
+  preceded by a preamble item. Every item also carries
+  `_meta["scadbuddy/untrusted"]` (tool, source, original MIME type) for a client that
+  reads metadata; `_meta` is the field MCP reserves "to allow clients and servers to
+  attach additional metadata to their interactions"
+  ([MCP basic protocol, `_meta`](https://modelcontextprotocol.io/specification/2025-06-18/basic)).
+  `resources/list` still names each resource's underlying MIME type.
 - **The boundary, stated where instructions belong.** `UNTRUSTED_CONTENT_POLICY` is
   appended to Claude Code's system prompt on every session turn
   (`sessions/manager.ts`, `systemPromptAppend`), per "State the policy in your system
@@ -341,11 +380,10 @@ so the marking is defence in depth and the approval gate is the boundary.
   its approval id. `agent/test/untrusted.test.ts` covers the envelope (a README that
   tries to close it stays inside the JSON string) and that tier decisions ignore
   content.
-- **Not covered.** Remote plugin tools' results reach Claude Code straight from the
-  loopback forwarder, unwrapped; the system prompt's policy names plugin output, and
-  unlisted plugin tools are `outward`. Images (renders, thumbnails) are passed as they
-  are. Tool results are not screened by a classifier (the guidance's "Screen tool
-  outputs" step).
+- **Not covered.** Tool results are not screened by a classifier (the guidance's
+  "Screen tool outputs" step). The preamble marks an image's provenance; it cannot
+  stop a model from reading text inside the image, which is why the approval gate,
+  not the marking, is the boundary.
 
 ## Known limitations
 

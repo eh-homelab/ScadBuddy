@@ -5,7 +5,7 @@
  * `agent/src/audit/log.ts` `AuditRecord`.
  */
 
-export const AUDIT_KINDS = ['tool_call', 'approval', 'credential', 'plugin', 'settings', 'token'] as const
+export const AUDIT_KINDS = ['tool_call', 'resource', 'approval', 'credential', 'plugin', 'settings', 'token'] as const
 export type AuditKind = (typeof AUDIT_KINDS)[number]
 export const AUDIT_OUTCOMES = ['ok', 'error', 'refused', 'denied'] as const
 export type AuditOutcome = (typeof AUDIT_OUTCOMES)[number]
@@ -36,6 +36,8 @@ export interface AuditEntry {
   /** Scrubbed by the agent: secrets are never in it. */
   input_summary: string | null
   approval_id: string | null
+  /** For a tool call that ran on an approval: who approved it. */
+  approved_by: AuditActor | null
   outcome: AuditOutcome
   detail: string | null
   started_at: string | null

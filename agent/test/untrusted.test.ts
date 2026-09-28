@@ -3,7 +3,9 @@ import { tiersUpTo } from '../src/auth/principal.js'
 import { decide } from '../src/harness/permissions.js'
 import {
   DEFAULT_SOURCE,
+  isPreamble,
   markUntrusted,
+  markUntrustedContent,
   MCP_UNTRUSTED_CONTENT_POLICY,
   UNTRUSTED_CONTENT_POLICY,
   UNTRUSTED_KEY,
@@ -41,22 +43,53 @@ describe('the untrusted-data envelope', () => {
     expect(JSON.parse(unwrapUntrusted(wrapped))).toEqual({ slug: 'k', description: INJECTED })
   })
 
-  it('leaves images, links and plain non-envelope text alone', () => {
+  it('puts a provenance preamble before each image, audio and blob; wraps embedded text; leaves links', () => {
     const result = markUntrusted(
       {
         content: [
           { type: 'image', data: 'AAAA', mimeType: 'image/png' },
           { type: 'text', text: 'hello' },
           { type: 'resource_link', uri: '/x', name: 'x' },
+          { type: 'audio', data: 'BBBB', mimeType: 'audio/wav' },
+          { type: 'resource', resource: { uri: 'r', mimeType: 'text/markdown', text: INJECTED } },
+          { type: 'resource', resource: { uri: 'b', mimeType: 'model/3mf', blob: 'UEsD' } },
         ],
       },
       'get_output_view',
+      'a render',
     )
-    expect(result.content[0]).toEqual({ type: 'image', data: 'AAAA', mimeType: 'image/png' })
-    expect(result.content[2]).toEqual({ type: 'resource_link', uri: '/x', name: 'x' })
-    expect(unwrapUntrusted((result.content[1] as { text: string }).text)).toBe('hello')
+    const texts = (i: number) => (result.content[i] as { text: string }).text
+    expect(result.content.map((c) => c.type)).toEqual(['text', 'image', 'text', 'resource_link', 'text', 'audio', 'resource', 'text', 'resource'])
+    expect(JSON.parse(texts(0))).toEqual({
+      [UNTRUSTED_KEY]: { tool: 'get_output_view', source: 'a render', content_follows: { type: 'image', mime_type: 'image/png' } },
+    })
+    expect(isPreamble(texts(0))).toBe(true)
+    expect(result.content[1]).toEqual({ type: 'image', data: 'AAAA', mimeType: 'image/png' })
+    expect(unwrapUntrusted(texts(2))).toBe('hello')
+    expect(isPreamble(texts(2))).toBe(false)
+    expect(result.content[3]).toEqual({ type: 'resource_link', uri: '/x', name: 'x' })
+    expect(JSON.parse(texts(4))[UNTRUSTED_KEY].content_follows).toEqual({ type: 'audio', mime_type: 'audio/wav' })
+    const embedded = result.content[6] as { resource: { text: string; mimeType: string } }
+    expect(embedded.resource.mimeType).toBe('text/markdown')
+    expect(unwrapUntrusted(embedded.resource.text)).toBe(INJECTED)
+    expect(JSON.parse(texts(7))[UNTRUSTED_KEY].content_follows).toEqual({ type: 'resource', mime_type: 'model/3mf' })
+    // The preamble names provenance only, like the envelope.
+    expect(Object.keys(JSON.parse(texts(0))[UNTRUSTED_KEY]).sort()).toEqual(['content_follows', 'source', 'tool'])
     expect(unwrapUntrusted('not an envelope')).toBe('not an envelope')
     expect(unwrapUntrusted('{"untrusted_data": 5}')).toBe('{"untrusted_data": 5}')
+  })
+
+  it('marks unknown JSON content the way a plugin sends it, and passes odd shapes through', () => {
+    const marked = markUntrustedContent<unknown>(
+      [{ type: 'text', text: 'x' }, 'not a block', { type: 'text', text: 5 }, { type: 'image', data: 'A' }],
+      'mcp__mem__recall',
+      'plugin mem',
+    )
+    expect(marked).toHaveLength(5)
+    expect(unwrapUntrusted((marked[0] as { text: string }).text)).toBe('x')
+    expect(marked[1]).toBe('not a block')
+    expect(marked[2]).toEqual({ type: 'text', text: 5 })
+    expect(isPreamble((marked[3] as { text: string }).text)).toBe(true)
   })
 
   it('puts no instruction in the tool result (instructions go in the system prompt)', () => {

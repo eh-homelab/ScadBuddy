@@ -1,12 +1,19 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { http, HttpResponse } from 'msw'
+import { setupServer } from 'msw/node'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { ApprovalService } from '../src/approvals/service.js'
 import { AuditLog, DEFAULT_AUDIT_RETENTION_DAYS, SETTING_AUDIT_RETENTION_DAYS, SYSTEM_ACTOR } from '../src/audit/log.js'
+import { TurnAuditor } from '../src/audit/turn.js'
 import { auditedTokenStore, UI_ACTOR } from '../src/audit/writes.js'
 import { PostgresTokenStore } from '../src/auth/tokens.js'
 import { SettingsStore } from '../src/credentials.js'
 import type { Database } from '../src/db.js'
+import { MemoryEventSource } from '../src/events/bus.js'
+import type { ApprovalVerdict } from '../src/harness/permissions.js'
+import { ResourceHub } from '../src/resources/hub.js'
 import { EventLog } from '../src/sessions/eventLog.js'
-import { connect, testApp } from './helpers/mcp.js'
+import { event } from '../src/sessions/protocol.js'
+import { BACKEND, connect, testApp } from './helpers/mcp.js'
 import { TEST_DATABASE_URL, TEST_DATABASE_URL_ENV, throwawayDatabase } from './support/postgres.js'
 import { browser } from './support/sessions.js'
 
@@ -14,6 +21,11 @@ import { browser } from './support/sessions.js'
 // that the table is append-only, retention, and the read route.
 
 const HASH_KEY = Buffer.alloc(32, 7)
+const backend = setupServer()
+beforeAll(() => backend.listen({ onUnhandledRequest: 'bypass' }))
+afterEach(() => backend.resetHandlers())
+afterAll(() => backend.close())
+
 const UI_READ = { host: 'scadbuddy.test', 'x-forwarded-proto': 'https', 'sec-fetch-site': 'same-origin' }
 
 describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_URL ? '' : ` (skipped: ${TEST_DATABASE_URL_ENV} is not set)`}`, () => {
@@ -216,5 +228,91 @@ describe.skipIf(!TEST_DATABASE_URL)(`the audit log in Postgres${TEST_DATABASE_UR
       input_summary: '{"slug":"keychain","force":false}',
       detail: expect.stringContaining('waiting for approval'),
     })
+  })
+
+  it('names who approved an executed call on its tool_call row, from ai_approvals (and nobody for a denied one)', async () => {
+    const approvals = new ApprovalService({ sql: db.sql, events: new EventLog(db.sql), hashKey: HASH_KEY, audit })
+    const ask = (toolUseId: string) =>
+      approvals.create({
+        sessionId: null,
+        turnId: null,
+        toolUseId,
+        tool: 'mcp__scadbuddy__delete_model',
+        input: { slug: 'keychain' },
+        tier: 'outward',
+        requestedBy: { kind: 'bearer', id: 'token:a', label: 'Agent A' },
+      })
+    const yes = await ask('t1')
+    await approvals.decide(browser, yes.id, true)
+    const no = await ask('t2')
+    await approvals.decide(browser, no.id, false)
+
+    // The harness side: a TurnAuditor sees the call, its verdict and its result.
+    const turn = new TurnAuditor(audit, {
+      sessionId: '11111111-1111-4111-8111-111111111111',
+      turnId: '22222222-2222-4222-8222-222222222222',
+      actor: { kind: 'bearer', id: 'token:a', label: 'Agent A' },
+      tierOf: () => 'outward',
+      secrets: () => [],
+    })
+    const verdicts: Record<string, ApprovalVerdict> = {
+      t1: { approved: true, input: { slug: 'keychain' }, approvalId: yes.id, decision: 'approved' },
+      t2: { approved: false, message: 'denied', approvalId: no.id, decision: 'denied' },
+    }
+    const gate = turn.gate(async (r) => verdicts[r.toolUseId]!)
+    for (const id of ['t1', 't2']) {
+      await turn.observe(event({ type: 'tool.call', sessionId: 's', id, name: 'mcp__scadbuddy__delete_model', input: { slug: 'keychain' }, risk: 'outward' }))
+      await gate({ toolName: 'mcp__scadbuddy__delete_model', input: { slug: 'keychain' }, toolUseId: id, tier: 'outward', signal: new AbortController().signal })
+      await turn.observe(event({ type: 'tool.result', sessionId: 's', id, ok: id === 't1', summary: id === 't1' ? 'deleted' : 'The user denied it' }))
+    }
+    const rows = (await audit.list({ kind: 'tool_call' })).entries
+    expect(rows.map((r) => [r.tool_use_id, r.outcome, r.actor.label, r.approved_by])).toEqual([
+      ['t2', 'denied', 'Agent A', null],
+      ['t1', 'ok', 'Agent A', browser],
+    ])
+    // Approval rows are the decider's own; they carry no approved_by.
+    expect((await audit.list({ kind: 'approval' })).entries.every((r) => r.approved_by === null)).toBe(true)
+  })
+
+  it('records /mcp resource reads, refusals and subscriptions', async () => {
+    backend.use(http.get(`${BACKEND}/api/v1/models/keychain/source`, () => HttpResponse.text('cube(1);')))
+    const hub = new ResourceHub(new MemoryEventSource())
+    const t = testApp({ deps: { audit }, mcp: { audit, resources: hub } })
+    const { token } = await t.tokens.mint({ name: 'reader', tier: 'read' })
+    const client = await connect(t.app, { headers: { authorization: `Bearer ${token}` } })
+    await client.readResource({ uri: 'scadbuddy://models/keychain/source' })
+    await expect(client.readResource({ uri: 'scadbuddy://settings' })).rejects.toThrow(/tier/)
+    await client.subscribeResource({ uri: 'scadbuddy://models/keychain/source' })
+    await client.unsubscribeResource({ uri: 'scadbuddy://models/keychain/source' })
+    await client.close()
+    const rows = (await audit.list({ kind: 'resource' })).entries.reverse()
+    expect(rows.map((r) => [r.action, r.outcome, r.surface, r.actor.kind])).toEqual([
+      ['read', 'ok', 'mcp', 'bearer'],
+      ['read', 'refused', 'mcp', 'bearer'],
+      ['subscribe', 'ok', 'mcp', 'bearer'],
+      ['unsubscribe', 'ok', 'mcp', 'bearer'],
+    ])
+    expect(rows[0]).toMatchObject({ tier: 'read', detail: 'scadbuddy://models/keychain/source' })
+    expect(rows[1]?.detail).toContain('needs the "write" tier')
+  })
+
+  it('token routes: a mint is recorded once by the audited store; a refused one by the route', async () => {
+    const tokens = auditedTokenStore(new PostgresTokenStore(db.sql), audit)
+    const t = testApp({ tokens, deps: { audit, tokens } })
+    const ui = { host: 'scadbuddy.test', origin: 'https://scadbuddy.test', 'x-forwarded-proto': 'https', 'content-type': 'application/json' }
+    const env = { incoming: { socket: { remoteAddress: '10.0.0.7' } } }
+    const body = JSON.stringify({ name: 'Desk', tier: 'read' })
+    const ok = await t.app.request('/api/v1/ai/mcp-tokens', { method: 'POST', headers: ui, body }, env)
+    expect(ok.status).toBe(201)
+    const { token } = (await ok.json()) as { token: string }
+    const refused = await t.app.request('/api/v1/ai/mcp-tokens', { method: 'POST', headers: { ...ui, origin: 'https://evil.example' }, body }, env)
+    expect(refused.status).toBe(403)
+    const rows = (await audit.list({ kind: 'token' })).entries.reverse()
+    expect(rows.map((r) => [r.action, r.outcome, r.actor.kind])).toEqual([
+      ['mint', 'ok', 'browser'],
+      ['mint', 'refused', 'anonymous'],
+    ])
+    expect(rows[1]).toMatchObject({ client_ip: '10.0.0.7', surface: 'http' })
+    expect(JSON.stringify(rows)).not.toContain(token)
   })
 })

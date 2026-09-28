@@ -63,18 +63,117 @@ export function wrapUntrustedText(tool: string, source: string, text: string): s
   return JSON.stringify(envelope, null, 2)
 }
 
+/** A text block that says the next (non-text) block comes from `tool` and `source`. */
+export type UntrustedPreamble = {
+  [UNTRUSTED_KEY]: { tool: string; source: string; content_follows: { type: string; mime_type?: string } }
+}
+
+/** The preamble's text: provenance only, like the envelope, and no instruction. */
+export function preambleText(tool: string, source: string, type: string, mimeType?: string): string {
+  const preamble: UntrustedPreamble = {
+    [UNTRUSTED_KEY]: { tool, source, content_follows: { type, ...(mimeType ? { mime_type: mimeType } : {}) } },
+  }
+  return JSON.stringify(preamble)
+}
+
+type Block = { type?: unknown; text?: unknown; mimeType?: unknown; resource?: unknown }
+
+function isBlock(value: unknown): value is Block {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
 /**
- * The result with every text block wrapped. Images, resources and links are
- * left as they are: they are not text the model reads as instructions, and a
- * client needs them intact. `structuredContent`, if a tool ever sets it, is
- * left alone too (clients validate it against the tool's output schema).
+ * Tool-result content with every block marked (#258):
+ *
+ *   text      re-encoded as the envelope;
+ *   image,    preceded by a text preamble naming the tool and the source: the
+ *   audio     bytes cannot be wrapped, and an image can carry text as well as
+ *             a README can;
+ *   resource  an embedded text resource has its text wrapped; an embedded
+ *             blob gets a preamble;
+ *   other     (resource_link) left as it is: a URI, not content.
+ *
+ * Works on unknown JSON as well, for the plugin forwarder
+ * (plugins/forwarder.ts), which sees results as the plugin sent them; what is
+ * not shaped like a content block passes through. `structuredContent` is
+ * never touched (clients validate it against the tool's output schema).
  */
+export function markUntrustedContent<T>(content: readonly T[], tool: string, source: string = DEFAULT_SOURCE): T[] {
+  return content.flatMap((block): T[] => {
+    if (!isBlock(block)) return [block]
+    const mime = typeof block.mimeType === 'string' ? block.mimeType : undefined
+    switch (block.type) {
+      case 'text':
+        return typeof block.text === 'string' ? [{ ...block, text: wrapUntrustedText(tool, source, block.text) } as T] : [block]
+      case 'image':
+      case 'audio':
+        return [{ type: 'text', text: preambleText(tool, source, block.type, mime) } as T, block]
+      case 'resource': {
+        const resource = isBlock(block.resource) ? block.resource : undefined
+        if (resource && typeof resource.text === 'string') {
+          return [{ ...block, resource: { ...resource, text: wrapUntrustedText(tool, source, resource.text) } } as T]
+        }
+        const inner = resource && typeof resource.mimeType === 'string' ? resource.mimeType : undefined
+        return [{ type: 'text', text: preambleText(tool, source, 'resource', inner) } as T, block]
+      }
+      default:
+        return [block]
+    }
+  })
+}
+
+/** The result with its content marked (`markUntrustedContent`). */
 export function markUntrusted(result: CallToolResult, tool: string, source: string = DEFAULT_SOURCE): CallToolResult {
-  return {
-    ...result,
-    content: result.content.map((block) =>
-      block.type === 'text' ? { ...block, text: wrapUntrustedText(tool, source, block.text) } : block,
-    ),
+  return { ...result, content: markUntrustedContent(result.content, tool, source) }
+}
+
+/** `_meta` key on a marked resource content item, for clients that read metadata (MCP `_meta`). */
+export const UNTRUSTED_META_KEY = 'scadbuddy/untrusted'
+
+type ResourceContent = { uri: string; mimeType?: string; text?: string; blob?: string; _meta?: Record<string, unknown> }
+
+/**
+ * `resources/read` contents marked as untrusted data (#258; the resources of
+ * #264 serve the same READMEs, sources and Bambuddy data as the tools):
+ *
+ *   text  re-encoded as the envelope, with the resource's own MIME type as
+ *         `mime_type` inside it; the item's `mimeType` becomes
+ *         `application/json`, which is what the text now is;
+ *   blob  (a thumbnail, a 3MF) preceded by a text item holding a preamble,
+ *         and left as it is.
+ *
+ * Every item also carries `_meta["scadbuddy/untrusted"]` with the tool, source
+ * and original MIME type, for a client that reads metadata rather than text.
+ */
+export function markUntrustedResourceContents<T extends ResourceContent>(
+  contents: readonly T[],
+  tool: string,
+  source: string = DEFAULT_SOURCE,
+): ResourceContent[] {
+  return contents.flatMap((item): ResourceContent[] => {
+    const meta = { ...item._meta, [UNTRUSTED_META_KEY]: { tool, source, mime_type: item.mimeType ?? null } }
+    if (typeof item.text === 'string') {
+      const envelope = {
+        [UNTRUSTED_KEY]: { tool, source, ...(item.mimeType ? { mime_type: item.mimeType } : {}), content: parsed(item.text) },
+      }
+      return [{ ...item, mimeType: 'application/json', text: JSON.stringify(envelope, null, 2), _meta: meta }]
+    }
+    return [
+      { uri: item.uri, mimeType: 'application/json', text: preambleText(tool, source, 'blob', item.mimeType), _meta: meta },
+      { ...item, _meta: meta },
+    ]
+  })
+}
+
+/** Whether `text` is a preamble: a block that only announces the next one. */
+export function isPreamble(text: string): boolean {
+  if (!text.includes('content_follows')) return false
+  try {
+    const value = JSON.parse(text) as Partial<UntrustedPreamble>
+    const inner = value[UNTRUSTED_KEY]
+    return typeof inner === 'object' && inner !== null && typeof inner.content_follows === 'object'
+  } catch {
+    return false
   }
 }
 

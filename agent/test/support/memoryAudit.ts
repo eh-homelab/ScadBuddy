@@ -41,6 +41,7 @@ export class MemoryAudit implements AuditRepo {
         input_hash: e.inputHash ?? null,
         input_summary: e.inputSummary ?? null,
         approval_id: e.approvalId ?? null,
+        approved_by: null,
         outcome: e.outcome,
         detail: e.detail ?? null,
         started_at: e.startedAt?.toISOString() ?? null,

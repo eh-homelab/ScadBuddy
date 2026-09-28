@@ -1,6 +1,6 @@
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk'
 import type { TierResolver } from '../harness/permissions.js'
-import { unwrapUntrusted } from '../safety/untrusted.js'
+import { isPreamble, unwrapUntrusted } from '../safety/untrusted.js'
 import { redact } from '../secrets.js'
 import { event, type ServerEvent } from './protocol.js'
 
@@ -102,6 +102,8 @@ function summarise(content: unknown): string {
   if (typeof content === 'string') text = unwrapUntrusted(content)
   else
     text = blocks(content)
+      // A preamble only announces the image after it, which shows as [image].
+      .filter((b) => !(b.type === 'text' && typeof b.text === 'string' && isPreamble(b.text)))
       .map((b) => (b.type === 'text' && typeof b.text === 'string' ? unwrapUntrusted(b.text) : `[${b.type}]`))
       .join('\n')
   return text.length > SUMMARY_MAX ? `${text.slice(0, SUMMARY_MAX - 1)}…` : text

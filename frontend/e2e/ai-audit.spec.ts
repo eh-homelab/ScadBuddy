@@ -11,9 +11,9 @@ test.describe('AI activity in Settings (#258)', () => {
     await expect(section).toBeVisible()
 
     const entries = section.getByRole('list', { name: 'AI activity entries' }).getByTestId('audit-entry')
-    await expect(entries).toHaveCount(6)
-    await expect(entries.first()).toContainText('delete_model')
-    await expect(entries.first()).toContainText('Denied')
+    await expect(entries).toHaveCount(8)
+    await expect(entries.first()).toContainText('set_print_options')
+    await expect(entries.first()).toContainText('approved by You')
 
     await section.getByLabel('Outcome').selectOption('denied')
     await expect(entries).toHaveCount(2)

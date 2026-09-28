@@ -436,6 +436,8 @@ describe('binary results: inline under the cap, a link over it', () => {
     const result = await runTool(tool('download_3mf'), { output_id: OUT }, ctx({ maxInlineBytes: 16 }))
     expect(result.isError).toBeFalsy()
     expect(result.content).toEqual([
+      // #258: a preamble names the tool and source of the blob that follows.
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
       {
         type: 'resource',
         resource: { uri: `scadbuddy://outputs/${OUT}/model.3mf`, mimeType: 'model/3mf', blob: 'AQIDBA==' },
@@ -497,7 +499,7 @@ describe('binary results: inline under the cap, a link over it', () => {
     )
     const args = { slug: 'box', asset_id: asset, include_content: true }
     const small = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
-    expect(small.content.map((c) => c.type)).toEqual(['text', 'image'])
+    expect(small.content.map((c) => c.type)).toEqual(['text', 'text', 'image'])
     size = 64
     const large = await runTool(tool('get_asset'), args, ctx({ maxInlineBytes: 16 }))
     expect(large.isError).toBeFalsy()
@@ -530,7 +532,14 @@ describe("tools for #324's routes", () => {
       }),
     )
     const inline = await runTool(tool('get_render_view'), { job_id: job, view: 'top', size: 256 }, ctx())
-    expect(inline.content[0]).toMatchObject({ type: 'image', mimeType: 'image/png' })
+    expect(JSON.parse((inline.content[0] as { text: string }).text)).toEqual({
+      untrusted_data: {
+        tool: 'get_render_view',
+        source: expect.any(String),
+        content_follows: { type: 'image', mime_type: 'image/png' },
+      },
+    })
+    expect(inline.content[1]).toMatchObject({ type: 'image', mimeType: 'image/png' })
     expect(requested).toBe('?size=256')
     const linked = await runTool(tool('get_render_view'), { job_id: job, view: 'top' }, ctx({ maxInlineBytes: 8 }))
     expect(linked.content[0]).toMatchObject({ type: 'resource_link', uri: `/api/v1/jobs/${job}/views/top.png` })
@@ -620,7 +629,7 @@ describe('print media (#307)', () => {
       ),
     )
     const result = await runTool(tool('get_print_image'), { archive_id: 35, photo: 'finish_1790488620_ab12.jpg' }, ctx())
-    expect(result.content[0]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
+    expect(result.content[1]).toMatchObject({ type: 'image', mimeType: 'image/jpeg' })
   })
 
   it('fetches a plate image, or the thumbnail with neither photo nor plate', async () => {
@@ -671,6 +680,7 @@ describe('print media (#307)', () => {
     )
     const result = await runTool(tool('download_print_file'), { archive_id: 35, file: 'source' }, ctx({ maxInlineBytes: 16 }))
     expect(result.content).toEqual([
+      { type: 'text', text: expect.stringContaining('"content_follows"') },
       { type: 'resource', resource: { uri: 'scadbuddy://prints/35/files/source', mimeType: 'model/3mf', blob: 'AQIDBA==' } },
     ])
     expect(tool('download_print_file').risk).toBe('read')
