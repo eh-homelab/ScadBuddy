@@ -44,6 +44,40 @@ export const CHAT_PATH = '/api/v1/ai/chat'
 /** Sessions one connection follows at once; the oldest is dropped past this. */
 export const MAX_FOLLOWS = 16
 
+/**
+ * Backpressure on the way out. A follow sends its next event only while the
+ * socket holds less than `SEND_HIGH_WATER` unsent bytes, so a slow reader
+ * pauses the log reads instead of piling the replay into memory. Frames sent
+ * outside a follow (the snapshot, errors) are not held back, so the buffer can
+ * still grow: past `SEND_BUFFER_MAX`, or when a follow has waited `DRAIN_STALL_MS`
+ * for the buffer to drain, the client is too slow and its connection is closed.
+ */
+export const SEND_HIGH_WATER = 1024 * 1024
+export const SEND_BUFFER_MAX = 8 * 1024 * 1024
+export const DRAIN_STALL_MS = 60_000
+const DRAIN_POLL_MS = 20
+
+/** Frames one connection may have waiting to be handled; past this a frame is refused with `busy`. */
+export const MAX_QUEUED_FRAMES = 32
+
+export type ChatLimits = {
+  highWater: number
+  bufferMax: number
+  drainStallMs: number
+  maxQueued: number
+}
+
+export type ChatConnectionOptions = {
+  principal?: Owner
+  log?: (message: string) => void
+  /** Bytes sent but not yet written to the client (the socket's `bufferedAmount`). */
+  buffered?: () => number
+  /** Called once when the client cannot keep up; the route closes the socket. */
+  overflow?: () => void
+  /** Overrides for tests. */
+  limits?: Partial<ChatLimits>
+}
+
 export type ChatRouteDeps = {
   /** Undefined without a database (spec §9); the upgrade then answers 503. */
   sessions: SessionManager | undefined
@@ -81,21 +115,58 @@ export class ChatConnection {
   /** Followed sessions, oldest first (Map keeps insertion order). */
   private readonly follows = new Map<string, AbortController>()
   private queue: Promise<void> = Promise.resolve()
+  private queued = 0
   private closed = false
+  private readonly buffered: () => number
+  private readonly overflow: () => void
+  private readonly limits: ChatLimits
 
-  constructor(
-    sessions: SessionManager,
-    out: (e: ServerEvent) => void,
-    options: { principal?: Owner; log?: (message: string) => void } = {},
-  ) {
+  constructor(sessions: SessionManager, out: (e: ServerEvent) => void, options: ChatConnectionOptions = {}) {
     this.sessions = sessions
     this.out = out
     this.principal = options.principal ?? BROWSER_USER
     this.log = options.log ?? ((m) => console.error(m))
+    this.buffered = options.buffered ?? (() => 0)
+    this.overflow = options.overflow ?? (() => {})
+    this.limits = {
+      highWater: SEND_HIGH_WATER,
+      bufferMax: SEND_BUFFER_MAX,
+      drainStallMs: DRAIN_STALL_MS,
+      maxQueued: MAX_QUEUED_FRAMES,
+      ...options.limits,
+    }
   }
 
   private emit(e: ServerEvent): void {
-    if (!this.closed) this.out(e)
+    if (this.closed) return
+    this.out(e)
+    if (this.buffered() > this.limits.bufferMax) this.giveUp('its send buffer passed the cap')
+  }
+
+  /** Closes a client that does not read what it is sent. */
+  private giveUp(why: string): void {
+    if (this.closed) return
+    this.log(`chat: closing a connection that cannot keep up: ${why}`)
+    this.close()
+    this.overflow()
+  }
+
+  /**
+   * Resolves once the socket's unsent bytes are under the high-water mark
+   * (true), or false when the follow should stop: aborted, closed, or stalled
+   * past `drainStallMs` (which closes the connection).
+   */
+  private async drained(signal: AbortSignal): Promise<boolean> {
+    const since = Date.now()
+    while (this.buffered() > this.limits.highWater) {
+      if (this.closed || signal.aborted) return false
+      if (Date.now() - since > this.limits.drainStallMs) {
+        this.giveUp(`nothing drained for ${this.limits.drainStallMs} ms`)
+        return false
+      }
+      await new Promise((r) => setTimeout(r, DRAIN_POLL_MS))
+    }
+    return !this.closed && !signal.aborted
   }
 
   /** Sends the session picker's snapshot. */
@@ -112,6 +183,21 @@ export class ChatConnection {
       return Promise.resolve()
     }
     const message = parsed.value
+    const where = 'sessionId' in message && message.sessionId ? { sessionId: message.sessionId } : {}
+    if (this.queued >= this.limits.maxQueued) {
+      this.emit(
+        event({
+          type: 'error',
+          ...where,
+          code: 'busy',
+          message: 'too many messages waiting on this connection; send it again later',
+        }),
+      )
+      return Promise.resolve()
+    }
+    // New sessions are rate-limited per owner by the manager (sessions/manager.ts
+    // MAX_NEW_SESSIONS), not per connection, so reconnecting does not reset it;
+    // a refusal comes back as an `error` frame with code `rate_limited`.
     return this.enqueue(() => this.handle(message))
   }
 
@@ -127,12 +213,15 @@ export class ChatConnection {
   }
 
   private enqueue(task: () => Promise<void>): Promise<void> {
+    this.queued += 1
     const run = this.queue.then(async () => {
-      if (this.closed) return
       try {
+        if (this.closed) return
         await task()
       } catch (err) {
         this.emit(errorEvent(err, undefined, this.log))
+      } finally {
+        this.queued -= 1
       }
     })
     this.queue = run
@@ -183,7 +272,11 @@ export class ChatConnection {
     }
   }
 
-  /** (Re)starts following a session's log after `afterSeq`. */
+  /**
+   * (Re)starts following a session's log after `afterSeq`. A follow already
+   * running for the session is aborted first, so a repeated attach replaces
+   * the replay instead of adding one.
+   */
   private follow(id: string, afterSeq: number): void {
     // The socket may have closed while handle() awaited start/get: close()
     // has run already and will not run again, so nothing may be registered.
@@ -207,7 +300,8 @@ export class ChatConnection {
           return
         }
         for await (const { event: e } of stream) {
-          if (controller.signal.aborted) return
+          // Wait for the client to read what it has before sending more.
+          if (!(await this.drained(controller.signal))) return
           this.emit(e)
         }
       } catch (err) {
@@ -244,7 +338,13 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
         onOpen: (_evt: Event, ws: WSContext) => {
           const sessions = deps.sessions
           if (!sessions) return ws.close(1011, 'no database')
-          connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), { log })
+          const raw = ws.raw as { bufferedAmount?: number } | undefined
+          connection = new ChatConnection(sessions, (e) => ws.send(JSON.stringify(e)), {
+            log,
+            buffered: () => raw?.bufferedAmount ?? 0,
+            // 1013 Try Again Later: the client is not reading what it is sent.
+            overflow: () => ws.close(1013, 'client too slow'),
+          })
           void connection.open()
         },
         onMessage: (evt: MessageEvent, ws: WSContext) => {

@@ -346,17 +346,20 @@ class BambuddyClient:
     async def archives(
         self,
         *,
-        printer_id: int,
+        printer_id: int | None = None,
         limit: int = 20,
         offset: int = 0,
         date_from: date | None = None,
         date_to: date | None = None,
     ) -> list[Archive]:
-        """This printer's archives, optionally within a date window. Bambuddy's order is
+        """Archives, of one printer or all, optionally within a date window (on
+        ``created_at``, which is when the print was dispatched). Bambuddy's order is
         not documented, so callers sort; ``limit`` keeps the read small. There is no
         filter by hash: a caller matching ``content_hash`` scans a window."""
         what = "list the archives"
-        params: dict[str, Any] = {"printer_id": printer_id, "limit": limit}
+        params: dict[str, Any] = {"limit": limit}
+        if printer_id is not None:
+            params["printer_id"] = printer_id
         if offset:
             params["offset"] = offset
         if date_from is not None:

@@ -344,4 +344,37 @@ export class SettingsStore {
     })
     if (failure !== undefined) throw failure
   }
+
+  /**
+   * Sets several keys in one transaction, so a reader on any replica sees all
+   * of them change or none (e.g. the MCP auth mode with its anonymous cap).
+   *
+   * With `check`, a compare-and-set: the table is locked against other writers
+   * (readers are not blocked), `check` reads the current values inside the
+   * transaction, and nothing is written unless it returns true. Answers
+   * whether the values were written.
+   */
+  async setMany(
+    values: Record<string, unknown>,
+    check?: (current: { get<T>(key: string): Promise<T | undefined> }) => Promise<boolean>,
+  ): Promise<boolean> {
+    return await this.sql.begin(async (tx) => {
+      if (check) {
+        await tx`LOCK TABLE ai_settings IN SHARE ROW EXCLUSIVE MODE`
+        const current = {
+          get: async <T>(key: string): Promise<T | undefined> => {
+            const [row] = await tx<{ value: T }[]>`SELECT value FROM ai_settings WHERE key = ${key}`
+            return row?.value
+          },
+        }
+        if (!(await check(current))) return false
+      }
+      for (const [key, value] of Object.entries(values)) {
+        await tx`
+          INSERT INTO ai_settings (key, value) VALUES (${key}, ${tx.json(value as never)})
+          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()`
+      }
+      return true
+    })
+  }
 }

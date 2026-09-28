@@ -54,6 +54,16 @@ export type ToolContext = ToolServices & {
   signal: AbortSignal
   /** The projection's own tools by name, so `confirm_action` can run the approved one. */
   lookup?: (name: string) => Tool | undefined
+  /**
+   * `harness`: the call came through the harness's permission seam
+   * (harness/permissions.ts), which runs before any tool and parks every
+   * outward call until a human approves it (or denies it when there is no
+   * approval gate), so a call that reaches here was approved and is not
+   * prepared a second time. Only the harness projection sets it
+   * (projections.ts `createHarnessServer`); the in-process server is reachable
+   * only from a harness query.
+   */
+  gate?: 'harness'
 }
 
 export type ToolSpec<S extends z.ZodRawShape> = {
@@ -223,7 +233,7 @@ export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolCon
     )
   }
   try {
-    if (tool.gated) {
+    if (tool.gated && ctx.gate !== 'harness') {
       // The prepare half of spec §8.2's prepare/confirm: record, do not act.
       const input = tool.parse(args)
       const action = await ctx.pending.prepare(ctx.principal, { tool: tool.name, input, summary: tool.summarize(args) })

@@ -136,6 +136,46 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     const first = new TextDecoder().decode((await lastId.body!.getReader().read()).value)
     resume.abort()
     expect(first).toMatch(/^data: .*"status":"idle".*\nid: 8\n\n$/s)
+
+    // An EventSource reconnects to the same URL, ?after= and all, adding
+    // Last-Event-ID: that one wins, so nothing already received is replayed.
+    const reconnect = new AbortController()
+    const both = await app.request(`/api/v1/ai/sessions/${session.id}/events?after=2`, {
+      headers: { ...UI_READ, 'last-event-id': '7' },
+      signal: reconnect.signal,
+    })
+    const resumed = new TextDecoder().decode((await both.body!.getReader().read()).value)
+    reconnect.abort()
+    expect(resumed).toMatch(/^data: .*"status":"idle".*\nid: 8\n\n$/s)
+  })
+
+  it("limits new sessions per owner across the routes and the manager (the chat socket's path), with 429", async () => {
+    m.abortAll()
+    const { runner } = scriptedRunner(() => next)
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, newSessions: { max: 3, windowMs: 60_000 } })
+    app = createApp(deps())
+    const post = () =>
+      app.request('/api/v1/ai/sessions', { method: 'POST', headers: JSON_UI, body: JSON.stringify({ title: 't' }) })
+    expect((await post()).status).toBe(201)
+    expect((await post()).status).toBe(201)
+    // What ChatConnection calls for a new chat: counted against the same owner.
+    await m.start(browser, { origin: 'chat' })
+    const refused = await post()
+    expect(refused.status).toBe(429)
+    expect(((await refused.json()) as { detail: string }).detail).toMatch(/too many new sessions/)
+    await expect(m.start(browser, { origin: 'chat' })).rejects.toMatchObject({ code: 'rate_limited' })
+    expect(await m.list(browser)).toHaveLength(3)
+    // Another owner has its own window.
+    await expect(m.start(agentA, { origin: 'chat' })).resolves.toMatchObject({ session: { id: expect.any(String) } })
+  })
+
+  it('counts concurrent new sessions against each other', async () => {
+    m.abortAll()
+    const { runner } = scriptedRunner(() => next)
+    m = manager({ sql: db.sql, paths: await tempPaths(), run: runner, newSessions: { max: 2, windowMs: 60_000 } })
+    const results = await Promise.allSettled(Array.from({ length: 6 }, () => m.start(browser, { origin: 'chat' })))
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2)
+    expect(await m.list(browser)).toHaveLength(2)
   })
 
   it('refuses writes without the UI origin, reads from another site, and unknown sessions', async () => {

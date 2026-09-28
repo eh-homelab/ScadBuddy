@@ -19,6 +19,10 @@ import type { CanUseTool, HookCallbackMatcher, PermissionResult } from '@anthrop
 // Without a gate (a bare harness run) needs_approval is a DENY whose message
 // says the action needs approval, so an outward tool can never run unattended.
 //
+// Before the tier, an optional InputGuard may DENY a call by its arguments
+// (the headless browser's origin allow-list and file names, #349); that
+// denial holds at every tier and is never parked for approval.
+//
 // It is enforced twice, as spec §8.2 asks ("the SDK permission callback and a
 // PreToolUse hook"):
 //   - the PreToolUse hook runs FIRST, before any allow rule or permission mode,
@@ -47,13 +51,22 @@ export type RiskTier = (typeof RISK_TIERS)[number]
  */
 export type TierResolver = (toolName: string) => RiskTier | undefined
 
+/**
+ * Refuses a call by its INPUT, whatever its tier: the reason it must not run,
+ * or undefined. The headless browser's origin and file-name checks
+ * (headlessBrowser.ts `browserInputProblem`, #349) are one.
+ */
+export type InputGuard = (toolName: string, input: unknown) => string | undefined
+
 export type ToolDecision =
   | { decision: 'allow'; tier: RiskTier }
   | { decision: 'needs_approval'; tier: RiskTier; reason: string }
   | { decision: 'deny'; tier: RiskTier; reason: string }
 
-export function decide(toolName: string, tierOf: TierResolver): ToolDecision {
+export function decide(toolName: string, tierOf: TierResolver, input?: unknown, guard?: InputGuard): ToolDecision {
   const tier = tierOf(toolName) ?? 'outward'
+  const refused = guard?.(toolName, input)
+  if (refused !== undefined) return { decision: 'deny', tier, reason: refused }
   if (tier === 'read' || tier === 'write') return { decision: 'allow', tier }
   return {
     decision: 'needs_approval',
@@ -108,14 +121,20 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-export function makeCanUseTool(tierOf: TierResolver, onDecision?: DecisionListener, gate?: ApprovalGate): CanUseTool {
+export function makeCanUseTool(
+  tierOf: TierResolver,
+  onDecision?: DecisionListener,
+  gate?: ApprovalGate,
+  guard?: InputGuard,
+): CanUseTool {
   return async (toolName, input, options): Promise<PermissionResult> => {
-    const decision = decide(toolName, tierOf)
+    const decision = decide(toolName, tierOf, input, guard)
     onDecision?.(toolName, decision)
     // The SDK passes the input to the tool from `updatedInput` when set; an
     // allowed call gets its own input back unchanged.
     if (decision.decision === 'allow') return { behavior: 'allow', updatedInput: input }
-    if (decision.decision === 'deny' || !gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
+    if (decision.decision === 'deny') return { behavior: 'deny', message: decision.reason }
+    if (!gate) return { behavior: 'deny', message: noGateMessage(decision.reason) }
     try {
       const verdict = await gate({ toolName, input, toolUseId: options.toolUseID, tier: decision.tier, signal: options.signal })
       // The approved input, not a later copy: the approval binds to it.
@@ -131,12 +150,17 @@ export function makeCanUseTool(tierOf: TierResolver, onDecision?: DecisionListen
   }
 }
 
-export function makePreToolUseHook(tierOf: TierResolver, onDecision?: DecisionListener, gate?: ApprovalGate): HookCallbackMatcher {
+export function makePreToolUseHook(
+  tierOf: TierResolver,
+  onDecision?: DecisionListener,
+  gate?: ApprovalGate,
+  guard?: InputGuard,
+): HookCallbackMatcher {
   return {
     hooks: [
       (input) => {
         if (input.hook_event_name !== 'PreToolUse') return Promise.resolve({})
-        const decision = decide(input.tool_name, tierOf)
+        const decision = decide(input.tool_name, tierOf, input.tool_input, guard)
         if (decision.decision === 'allow') return Promise.resolve({})
         if (decision.decision === 'needs_approval' && gate) {
           // Force the prompt; canUseTool parks the call and reports the decision.
@@ -153,7 +177,8 @@ export function makePreToolUseHook(tierOf: TierResolver, onDecision?: DecisionLi
           hookSpecificOutput: {
             hookEventName: 'PreToolUse' as const,
             permissionDecision: 'deny' as const,
-            permissionDecisionReason: noGateMessage(decision.reason),
+            permissionDecisionReason:
+              decision.decision === 'deny' ? decision.reason : noGateMessage(decision.reason),
           },
         })
       },
