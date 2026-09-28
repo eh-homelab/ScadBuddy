@@ -569,6 +569,10 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
+        # And any an earlier duplicate crashed out of, once it is old enough not to
+        # be another replica's copy in flight: a single replica that crashed and
+        # restarted inside the hour clears it here rather than never.
+        self.sweep_duplicate_staging()
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
@@ -929,8 +933,9 @@ class Catalogue:
     def sweep_duplicate_staging(self) -> list[str]:
         """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
 
-        Runs at boot, but another replica sharing ``/data`` may be mid-copy, so only
-        staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        Runs at boot and after each duplicate. Another replica sharing ``/data`` may
+        be mid-copy, so only staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        One that cannot be read or removed is logged and the rest still go.
         """
         root = self.paths.cache
         if not root.is_dir():
@@ -942,6 +947,11 @@ class Catalogue:
                 if entry.stat().st_mtime > cutoff:
                     continue
             except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception(
+                    "could not read a duplicate's staging", extra={"entry": entry.name}
+                )
                 continue
             if _remove_tree(entry):
                 removed.append(entry.name)

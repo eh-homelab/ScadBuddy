@@ -350,6 +350,22 @@ def test_the_boot_sweeps_a_crashed_duplicates_staging(app: FastAPI, paths: DataP
     assert kept.is_dir()
 
 
+def test_a_duplicate_sweeps_staging_an_earlier_one_crashed_out_of(
+    client: TestClient, paths: DataPaths
+) -> None:
+    """A single replica that crashed and restarted inside the hour still gets it
+    cleared, by the next duplicate once it is old enough."""
+    staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}dead" / "copy"
+    staged.mkdir(parents=True)
+    old = time.time() - DUPLICATE_STAGING_MAX_AGE - 60
+    os.utime(staged.parent, (old, old))
+
+    response = client.post(f"/api/v1/models/{BUILTIN}/duplicate", json={"name": "Copy"})
+
+    assert response.status_code == 201, response.text
+    assert _no_staging_left(paths)
+
+
 def test_the_boot_leaves_a_fresh_duplicate_staging_alone(app: FastAPI, paths: DataPaths) -> None:
     """Another replica sharing /data may be mid-copy into it."""
     staged = paths.cache / f"{DUPLICATE_STAGING_PREFIX}live" / "copy"
