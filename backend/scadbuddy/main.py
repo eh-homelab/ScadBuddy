@@ -37,6 +37,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import migrate_lockfile
+from scadbuddy.library.library_seed import seed_libraries
 
 API_PREFIX = "/api/v1"
 
@@ -165,6 +166,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.libraries.sweep_staging)
     except OSError:
         logger.exception("could not sweep library staging clones")
+    # The curated libraries baked into the image (#169), so a fresh volume renders
+    # a BOSL2 model offline. Before the queue starts: the first render finds them.
+    seed_libraries_dir = state.settings.resolve_seed_libraries_dir()
+    if seed_libraries_dir is not None:
+        try:
+            await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
+        except OSError:
+            logger.exception("could not seed library checkouts from the image")
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()

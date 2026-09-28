@@ -15,6 +15,11 @@
 # The one exception is `--target agent`: the AI agent service, a separate
 # Node image deployed as a sidecar container beside this one (see its stage).
 
+# The library pins the `libraries` stage bakes in (#169), global so that stage and
+# the `app` stage's catalogue check read one value. See that stage.
+ARG BOSL2_REF=v2.0.761
+ARG BOSL2_COMMIT=f47030c41d88d0676bca73be1c6b7ba58564f9dd
+
 # ── frontend bundle ───────────────────────────────────────────────────────────
 # Built here rather than copied from the host so a stale local `frontend/dist`
 # can never reach the image (.dockerignore drops it from the context too).
@@ -246,6 +251,41 @@ RUN case "$TARGETARCH" in \
     && install -m 0755 openscad-lsp /usr/local/bin/openscad-lsp \
     && openscad-lsp --version
 
+# ── libraries: the catalogue's common libraries, baked in (#169) ──────────────
+# A fresh install renders a BOSL2 model offline: at boot the backend copies each
+# checkout here onto the volume if it is not there yet
+# (backend/scadbuddy/library/library_seed.py). Laid out as the volume lays out
+# checkouts, `<name>/<commit>/<name>/`, without `.git`.
+#
+# The ref is the curated catalogue's (CURATED in
+# backend/scadbuddy/library/libraries.py; the `app` stage fails the build when
+# they differ), and the commit it resolves to is pinned here the way
+# OPENSCAD_VERSION is: a tag moved upstream fails the build rather than shipping a
+# different tree under the same commit's name. Bump the pair together with the
+# catalogue's ref.
+#
+# Only BOSL2, by size: its checkout is ~12 MB. dotSCAD (~17 MB) and NopSCADlib
+# (~44 MB) are left to be cloned when pinned; Round-Anything's ~8 MB is almost all
+# a demo STL; MCAD already ships in the base image
+# (/usr/local/share/openscad/libraries) and its catalogue ref is a branch, which
+# would fail this check on every upstream commit. Each seeded library costs its
+# size twice: once in the image, once on each volume.
+FROM base AS libraries
+
+ARG BOSL2_REF
+ARG BOSL2_COMMIT
+
+WORKDIR /opt/scadbuddy-libraries
+RUN git -c advice.detachedHead=false clone --quiet --depth 1 --branch "$BOSL2_REF" \
+        https://github.com/BelfrySCAD/BOSL2.git "BOSL2/${BOSL2_COMMIT}/BOSL2" \
+    && actual="$(git -C "BOSL2/${BOSL2_COMMIT}/BOSL2" rev-parse HEAD)" \
+    && if [ "$actual" != "$BOSL2_COMMIT" ]; then \
+         echo "ERROR: BOSL2 '${BOSL2_REF}' now resolves to '${actual}', this build pins '${BOSL2_COMMIT}'." >&2; \
+         echo "       Check what moved the tag upstream, then bump BOSL2_COMMIT." >&2; \
+         exit 1; \
+       fi \
+    && rm -rf "BOSL2/${BOSL2_COMMIT}/BOSL2/.git"
+
 # ── app: dependencies, backend, models, frontend bundle ───────────────────────
 FROM base AS app
 
@@ -355,6 +395,14 @@ ENV SCADBUDDY_DATA_DIR=/data \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HOME=/home/scadbuddy
+
+# The baked-in libraries (see the `libraries` stage), after everything above so a
+# bump rebuilds only these two layers. Root-owned and read-only: the boot copies
+# them onto the volume and never writes here. The check fails the build when a
+# seeded ref is not the catalogue's, or the seed holds anything not listed.
+ARG BOSL2_REF
+COPY --from=libraries /opt/scadbuddy-libraries /app/libraries
+RUN python -m scadbuddy.library.library_seed verify /app/libraries "BOSL2=${BOSL2_REF}"
 
 # ── test: the same tree plus dev dependencies ─────────────────────────────────
 # `pytest -m requires_openscad` can only run here — a real openscad binary is
