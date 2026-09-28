@@ -31,8 +31,9 @@ export function EditSourcePage() {
   // The preview is worked out afresh, so the source and the revision it merges agree.
   const merge =
     // #235: an update or a dismissed one, which still merges. The backend sets
-    // `preview` exactly when the state is 'update' or 'dismissed' (see
-    // Catalogue.upstream_status), so checking `preview` stands in for the state.
+    // `preview` only when the state is 'update' or 'dismissed' and there is a
+    // revision to merge (see Catalogue.upstream_status), so checking `preview`
+    // stands in for the state.
     upstream.data?.preview && upstream.data.revision
       ? {
           merged: upstream.data.preview.merged,

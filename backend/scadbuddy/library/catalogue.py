@@ -617,7 +617,8 @@ class Catalogue:
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
         # Sweep any staging an earlier duplicate crashed out of, once it is old
         # enough not to be another replica's copy in flight: a single replica that crashed and
-        # restarted inside the hour clears it here rather than never. Best-effort:
+        # restarted within SCADBUDDY_DUPLICATE_STAGING_MAX_AGE of the crash clears it
+        # here rather than never. Best-effort:
         # the duplicate is committed, so a failure here is logged, not reported.
         try:
             self.sweep_duplicate_staging()
