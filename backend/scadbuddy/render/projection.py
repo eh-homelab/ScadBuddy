@@ -241,8 +241,9 @@ class JobProjection:
     def finish(self, job: Job) -> bool:
         """Settle an unfinished job: any terminal state is a forward move from pending
         or running (spec §3.4). A job the API already cancelled (`release_claim`)
-        takes the cancellation handler's final projection -- log, steps, its error if
-        it has one -- without a second event. A done or failed job is left alone."""
+        takes the cancellation handler's final projection -- log and steps, and its
+        error only where the API stored none -- without a second event. A done or
+        failed job is left alone."""
         assert job.state in ("done", "failed", "cancelled")
         with self._pool.connection() as conn, conn.transaction():
             cursor = conn.execute(
@@ -271,7 +272,7 @@ class JobProjection:
                 return False
             cursor = conn.execute(
                 "UPDATE render_jobs SET finished_at = %s, log_tail = %s, steps = %s,"
-                " error = coalesce(nullif(%s, ''), error)"
+                " error = coalesce(error, nullif(%s, ''))"
                 " WHERE id = %s AND state = 'cancelled'",
                 (
                     job.finished_at or now(),

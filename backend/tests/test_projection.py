@@ -218,6 +218,18 @@ def test_finishing_as_cancelled_announces_superseded(pg_conninfo: str) -> None:
     assert _kinds(pg_conninfo) == ["job.pending", "job.running", "job.superseded"]
 
 
+def test_a_cancelled_projection_keeps_the_reason_the_api_stored(
+    projection: JobProjection,
+) -> None:
+    """The workflow read the row before the API cancelled it: its error must not win."""
+    job = projection.submit(_job(width=23), render_key("demo", {"width": 23}, None)).job
+    projection.mark_started(job.id)
+    assert projection.release_claim(job.id, slug="demo") is not None
+    job.state, job.error, job.finished_at = "cancelled", "cancelled", datetime.now(UTC)
+    assert projection.finish(job)
+    assert projection.read(job.id).error == CANCELLED_ERROR
+
+
 def test_prune_removes_settled_rows_and_their_blob_refs(
     pg_conninfo: str, projection: JobProjection
 ) -> None:
