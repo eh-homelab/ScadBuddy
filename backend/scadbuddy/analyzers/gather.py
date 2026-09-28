@@ -27,6 +27,8 @@ from scadbuddy.analyzers.context import (
 )
 from scadbuddy.bambuddy.client import BambuddyClient, client_for
 from scadbuddy.bambuddy.filaments import gather_options
+from scadbuddy.bambuddy.models import Printer
+from scadbuddy.bambuddy.resolver import DEFAULT_BED, PrintChoices
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
@@ -50,8 +52,6 @@ async def gather_context(
     meta: OutputMeta | None,
 ) -> AnalysisContext:
     context = AnalysisContext(slug=slug, params=params, request=request, output=meta)
-    if request.choices is None:
-        context.unavailable["choices"] = "no nozzle, quality or plate was chosen"
     if meta is None:
         context.unavailable["output"] = "this configuration has not been rendered yet"
         context.unavailable["geometry"] = "this configuration has not been rendered yet"
@@ -62,6 +62,7 @@ async def gather_context(
     if not settings.bambuddy_url:
         for name in BAMBUDDY_INPUTS:
             context.unavailable[name] = NO_BAMBUDDY
+        _read_choices(context, settings, request.printer_id or settings.printer_id)
     else:
         async with client_for(settings) as client:
             await _read_bambuddy(context, client, settings)
@@ -70,7 +71,11 @@ async def gather_context(
     plate = plate_for(model)
     # As the customizer does: an unknown or unchosen printer is the configured default.
     context.plate = plate if plate.model is not None else plate_for(settings.default_plate)
-    context.base = base_profile(request, context.printer, context.filaments, context.plate)
+    context.base = base_profile(
+        request, context.choices, context.printer, context.filaments, context.plate
+    )
+    if context.choices is not None:
+        context.base.choices_origin = context.choices_origin
     return context
 
 
@@ -98,20 +103,40 @@ async def _read_bambuddy(
 ) -> None:
     request = context.request
     meta = context.output
-    printer_id = request.printer_id or settings.printer_id
-    if printer_id is None:
-        context.unavailable["printer"] = "no printer is chosen and none is configured"
-    else:
-        try:
-            context.printer = next(
-                (row for row in await client.printers() if row.id == printer_id), None
+    remembered = settings.model_print_choices.get(context.slug)
+    printers: list[Printer] = []
+    try:
+        printers = [row for row in await client.printers() if row.is_active]
+    except ApiError as error:
+        context.unavailable["printer"] = error.detail
+    # As the print dialog's choices route picks it (spool-first spec §7): the request's,
+    # else the model's remembered printer, then the configured one, while active, else
+    # the first active printer.
+    active = {row.id for row in printers}
+    printer_id = (
+        request.printer_id
+        or next(
+            (
+                candidate
+                for candidate in (
+                    remembered.printer_id if remembered else None,
+                    settings.printer_id,
+                )
+                if candidate in active
+            ),
+            None,
+        )
+        or (printers[0].id if printers else None)
+    )
+    if "printer" not in context.unavailable:
+        context.printer = next((row for row in printers if row.id == printer_id), None)
+        if context.printer is None:
+            context.unavailable["printer"] = (
+                "no active printer is chosen or configured"
+                if printer_id is None
+                else f"Bambuddy has no active printer {printer_id}"
             )
-        except ApiError as error:
-            context.unavailable["printer"] = error.detail
-        else:
-            if context.printer is None:
-                context.unavailable["printer"] = f"Bambuddy has no printer {printer_id}"
-
+    _read_choices(context, settings, printer_id)
     await _read_filaments(context, client)
 
     if request.filament_plan is None:
@@ -131,6 +156,27 @@ async def _read_bambuddy(
         )
     except ApiError as error:
         context.unavailable["inventory"] = error.detail
+
+
+def _read_choices(
+    context: AnalysisContext, settings: StoredSettings, printer_id: int | None
+) -> None:
+    """The request's choices, else the ones the dialog reopens with for this model."""
+    if context.request.choices is not None:
+        context.choices = context.request.choices
+        return
+    remembered = settings.model_print_choices.get(context.slug)
+    if remembered is None or not remembered.nozzles:
+        context.unavailable["choices"] = "no nozzle, quality or plate was chosen"
+        return
+    bed = settings.printer_bed_types.get(str(printer_id)) if printer_id is not None else None
+    context.choices = PrintChoices(
+        nozzles=remembered.nozzles,
+        tier=remembered.tier or "standard",
+        process_name=remembered.process_name,
+        bed_type=bed or DEFAULT_BED,
+    )
+    context.choices_origin = "remembered"
 
 
 async def _read_filaments(context: AnalysisContext, client: BambuddyClient) -> None:

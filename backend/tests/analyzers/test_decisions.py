@@ -223,7 +223,8 @@ def test_an_accepted_fix_joins_the_effective_diff_until_its_diff_changes() -> No
 
     # A second silk slot changes the diff: the acceptance is stale, the finding open.
     ctx.filaments.append(silk_slot(2))
-    ctx.base = base_profile(ctx.request, ctx.printer, ctx.filaments, ctx.plate)
+    ctx.choices = ctx.request.choices
+    ctx.base = base_profile(ctx.request, ctx.choices, ctx.printer, ctx.filaments, ctx.plate)
     report = build_report(ctx, [accepted], detail="advanced")
     silk = next(row for row in report.diagnostics if row.id == "SB2001")
     assert silk.status == "open"
@@ -234,7 +235,8 @@ def test_an_accepted_fix_joins_the_effective_diff_until_its_diff_changes() -> No
 def test_the_report_lists_inputs_and_the_base() -> None:
     ctx = _silk_context()
     ctx.request = AnalysisRequest(copies=3, choices=choices("0.2", tier="fine"))
-    ctx.base = base_profile(ctx.request, ctx.printer, ctx.filaments, ctx.plate)
+    ctx.choices = ctx.request.choices
+    ctx.base = base_profile(ctx.request, ctx.choices, ctx.printer, ctx.filaments, ctx.plate)
     ctx.unavailable["inventory"] = "this output has not been uploaded to Bambuddy yet"
     report = build_report(ctx, [])
     inputs = {row.name: row for row in report.inputs}

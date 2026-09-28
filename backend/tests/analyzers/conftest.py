@@ -122,5 +122,9 @@ def context(**fields: Any) -> AnalysisContext:
     fields.setdefault("plate", plate_for("H2C"))
     built = AnalysisContext(**fields)
     # As ``gather_context`` does last: the base the diffs are judged against.
-    built.base = base_profile(built.request, built.printer, built.filaments, built.plate)
+    if built.choices is None:
+        built.choices = built.request.choices
+    built.base = base_profile(
+        built.request, built.choices, built.printer, built.filaments, built.plate
+    )
     return built

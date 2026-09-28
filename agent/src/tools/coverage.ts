@@ -5,8 +5,9 @@ import type { Operation } from './registry.js'
 // allowlist entry"). test/coverage.test.ts enforces it.
 
 const ANALYZERS_LATER =
-  'The print analyzers (#284) land API-first; their agent tools are a follow-up. Applying a fix or ' +
-  'recording a decision is outward and would need the approval flow (AI spec §8.1).'
+  'The print analyzers (#284) land API-first; their agent tools are a follow-up (#368 wraps them). ' +
+  'Recording a decision or applying a fix writes only to ScadBuddy (write tier) and sends nothing; ' +
+  'a send that consumes accepted diffs must go through the outward approval flow (AI spec §8.2).'
 
 /** Backend operations deliberately left without a tool, each with the reason. */
 export const NOT_A_TOOL: readonly { operation: Operation; reason: string }[] = [

@@ -48,8 +48,12 @@ class AnalysisRequest(BaseModel):
 
     Every field means what it means on
     :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
-    choices are optional here: an analysis can run before the dialog has them, and
-    the analyzers that need them say so.
+    choices are optional here: an analysis can run before the dialog has them.
+    ``printer_id`` omitted is the model's remembered printer, then the configured one,
+    then the first active one, as the dialog's choices route picks it; ``choices``
+    omitted is what the dialog reopens with for this model (its remembered nozzles,
+    tier and process, on the plate remembered for that printer). With neither, the
+    analyzers that need choices say so.
     """
 
     printer_id: int | None = None
@@ -89,6 +93,9 @@ class BaseProfile(BaseModel):
 
     printer_id: int | None = None
     printer_model: str | None = None
+    #: ``request`` when the caller sent the choices, ``remembered`` when they are
+    #: what the dialog reopens with for this model, ``None`` when there are none.
+    choices_origin: Literal["request", "remembered"] | None = None
     nozzle_sizes: list[str] = Field(default_factory=list)
     high_flow: bool = False
     printer_preset_name: str | None = None
@@ -113,11 +120,11 @@ class BaseProfile(BaseModel):
 
 def base_profile(
     request: AnalysisRequest,
+    choices: PrintChoices | None,
     printer: Printer | None,
     filaments: list[FilamentSlot],
     plate: PlateGeometry | None,
 ) -> BaseProfile:
-    choices = request.choices
     sizes: list[str] = [str(nozzle.size) for nozzle in choices.nozzles] if choices else []
     process = None
     if choices is not None:
@@ -165,19 +172,19 @@ class AnalysisContext:
     #: The filament step's own payload (inventory joined to assignments), when the
     #: output already has a Bambuddy library file to read the plate's slots from.
     filament_options: FilamentOptions | None = None
+    #: The nozzles, quality and plate the presets are derived from: the request's, else
+    #: the ones the dialog reopens with for this model (``choices_origin`` says which).
+    choices: PrintChoices | None = None
+    choices_origin: Literal["request", "remembered"] = "request"
     unavailable: dict[InputName, str] = field(default_factory=dict)
     base: BaseProfile = field(default_factory=BaseProfile)
-
-    @property
-    def choices(self) -> PrintChoices | None:
-        return self.request.choices
 
     def has(self, name: InputName) -> bool:
         return name not in self.unavailable and getattr(self, _ATTRIBUTE[name]) not in (None, [])
 
     @property
     def bed_type(self) -> str | None:
-        return self.request.choices.bed_type if self.request.choices else None
+        return self.choices.bed_type if self.choices else None
 
     @property
     def copies(self) -> int:

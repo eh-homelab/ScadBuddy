@@ -6,13 +6,16 @@ answer 503 (``test_analyzers.py``). Bambuddy is mocked with respx as there.
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from scadbuddy.analyzers import builtin
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import Event
 from scadbuddy.core.settings import Settings
 from tests.api.test_analyzers import (
@@ -21,13 +24,10 @@ from tests.api.test_analyzers import (
     _ok,
     _run,
     bambuddy_routes,
-    events,
 )
 from tests.api.test_send import configure, make_output
 
 pytestmark = pytest.mark.requires_postgres
-
-__all__ = ["events"]
 
 APPLY = "/api/v1/analyzers/fixes/apply"
 PREVIEW = "/api/v1/analyzers/fixes/preview"
@@ -46,12 +46,39 @@ def verified(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(builtin, "BUILTIN", (*builtin.BUILTIN, VERIFIED))
 
 
-def _decisions(events: list[Event]) -> list[dict[str, Any]]:
-    return [
-        event.model_dump(include={"decision_id", "action"})
-        for event in events
-        if event.kind == "analyzer.decision"
-    ]
+@pytest.fixture
+def events(app: FastAPI) -> list[Event]:
+    """Every event the app's bus delivers. With a database that is #374's Postgres bus,
+    which delivers each event over NOTIFY after its commit, so assertions wait for it."""
+    seen: list[Event] = []
+    getattr(app.state, STATE_ATTR).events.add_listener(seen.append)
+    return seen
+
+
+#: How long an event may take to come back over NOTIFY, and how long a check that
+#: none arrived waits for a straggler.
+EVENT_TIMEOUT = 5.0
+QUIET = 0.5
+
+
+def _decisions(events: list[Event], *, expect: int = 0) -> list[dict[str, Any]]:
+    """The ``analyzer.decision`` events so far: ``expect`` of them, waited for, or, with
+    ``expect=0``, whatever has arrived after a short quiet period."""
+
+    def found() -> list[dict[str, Any]]:
+        return [
+            event.model_dump(include={"decision_id", "action"})
+            for event in list(events)
+            if event.kind == "analyzer.decision"
+        ]
+
+    if expect == 0:
+        time.sleep(QUIET)
+        return found()
+    deadline = time.monotonic() + EVENT_TIMEOUT
+    while len(found()) < expect and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return found()
 
 
 @respx.mock
@@ -165,6 +192,7 @@ def test_applying_needs_a_strict_confirmation_and_a_scope_the_finding_is_in(
     assert decision["kind"] == "accept"
     assert decision["scope"] == {"kind": "print", "key": output_id}
     assert decision["changes"][0]["setting"] == "timelapse"
+    _decisions(events, expect=1)
     [event] = [event for event in events if event.kind == "analyzer.decision"]
     assert event.model_dump(exclude={"id", "at"}) == {
         "kind": "analyzer.decision",
@@ -287,7 +315,7 @@ def test_decisions_are_recorded_replaced_listed_and_removed_with_events(
     _ok(client.delete(f"{DECISIONS}/{created['id']}"), 204)
     _ok(client.delete(f"{DECISIONS}/{created['id']}"), 404)
     # The replaced decision is announced removed before its replacement is recorded.
-    assert _decisions(events) == [
+    assert _decisions(events, expect=5) == [
         {"decision_id": first["id"], "action": "recorded"},
         {"decision_id": first["id"], "action": "removed"},
         {"decision_id": created["id"], "action": "recorded"},

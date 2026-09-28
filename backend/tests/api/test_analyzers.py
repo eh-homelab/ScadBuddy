@@ -339,3 +339,27 @@ def test_a_database_that_cannot_be_reached_degrades_to_a_503(
     finally:
         state.decisions.close()
         state.decisions = None
+
+
+@respx.mock
+def test_without_choices_the_models_remembered_ones_and_printer_are_used(
+    client: TestClient, model: str
+) -> None:
+    configure(client)
+    bambuddy_routes()
+    remembered = {
+        "printer_id": 1,
+        "nozzles": [{"size": "0.2"}, {"size": "0.2"}],
+        "tier": "fine",
+    }
+    _ok(client.put(f"/api/v1/print/models/{model}/choices", json=remembered))
+    _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
+    output_id = make_output(client, model)
+    request = {"filament_plan": SILK_REQUEST["filament_plan"]}
+    report = _run(client, output_id, request=request, detail="advanced")
+    base = report["base"]
+    assert base["choices_origin"] == "remembered"
+    assert base["printer_id"] == 1
+    assert base["process_preset_name"] == "0.08mm High Quality @BBL H2C 0.2 nozzle"
+    assert base["bed_type"] == "Supertack Plate"
+    assert {row["id"] for row in report["diagnostics"]} >= {"SB2001", "SB2003"}

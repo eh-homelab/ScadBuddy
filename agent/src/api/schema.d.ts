@@ -41,10 +41,13 @@ export interface paths {
         put?: never;
         /**
          * Ignore or suppress a diagnostic at a scope
-         * @description Replaces an earlier decision about the same rule and instance at the same scope.
+         * @description Replaces an earlier decision about the same rule and instance at the same scope
+         *     (announced as ``removed``, then this one as ``recorded``).
          *
-         *     ScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec
-         *     §8.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.
+         *     ScadBuddy's own state, reversible by deleting it (AI spec §8.1's ``write`` tier).
+         *     ``enforced`` makes a broad decision win over narrower ones; enforcing the
+         *     suppression of an ``error`` rule also needs ``confirm: true``, since it hides that
+         *     problem from every print in the scope.
          */
         post: operations["post_decision_api_v1_analyzers_decisions_post"];
         delete?: never;
@@ -81,14 +84,18 @@ export interface paths {
         put?: never;
         /**
          * Apply a previewed fix
-         * @description Accept the fix at ``scope``: its diff joins this print's effective diff, and
-         *     every later print that falls in the same scope, until the diff changes.
+         * @description Record the fix as accepted at ``scope``: its diff joins the effective diff
+         *     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
          *
-         *     Refused, in this order: a diff that differs from the previewed ``fingerprint``
-         *     (409, ``analyzer-fix-stale``); a change whose target is still unverified (409,
-         *     ``analyzer-fix-unverified``, naming the §3.2 items in ``to_verify``); an outward
-         *     change without ``confirm: true`` (428, ``confirmation-required``); a scope this
-         *     print does not fall in (422).
+         *     Nothing is sent to Bambuddy: this is a ``write`` to ScadBuddy's own database,
+         *     removable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for
+         *     what a send that consumes it must do.
+         *
+         *     Refused, in this order: a scope this finding does not fall in (422); a fingerprint
+         *     that differs from the one this apply computes, because the diff, the scope, the
+         *     print or its base moved since the preview (409, ``analyzer-fix-stale``); a change
+         *     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
+         *     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
          */
         post: operations["post_apply_api_v1_analyzers_fixes_apply_post"];
         delete?: never;
@@ -108,8 +115,9 @@ export interface paths {
         put?: never;
         /**
          * Preview a fix
-         * @description The fix's whole diff, where each line lands, whether it can be applied yet, and
-         *     the fingerprint an apply confirms against. Changes nothing.
+         * @description The fix's whole diff, where each line would land, whether it can be applied yet,
+         *     and the fingerprint an apply confirms against (diff, scope, subject and base).
+         *     Changes nothing.
          */
         post: operations["post_preview_api_v1_analyzers_fixes_preview_post"];
         delete?: never;
@@ -130,19 +138,19 @@ export interface paths {
         /**
          * Run the analyzers
          * @description Judge an output or a configuration against the print request it would go out
-         *     with (the #84 base: printer, spool plan, nozzles, quality, plate type and options).
+         *     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
          *
          *     Reads only: nothing is uploaded, sliced or queued. An input that cannot be read
-         *     (no Bambuddy, no nozzle or quality chosen, an output not uploaded yet, a missing
-         *     API-key scope) is listed in ``inputs`` with the reason, and the analyzers needing it
-         *     in ``skipped``.
+         *     (no Bambuddy, no choices yet, an output not uploaded yet, a missing API-key scope)
+         *     is listed in ``inputs`` with the reason, and the analyzers needing it in
+         *     ``skipped``.
          *
          *     ``detail=simple`` returns the headline and the open findings with their sources and
          *     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
          *     ignored and ``hidden`` findings with the decision behind each.
          *
-         *     Without a database the analyzers still run; ``decisions_available`` is false and
-         *     ``decisions_reason`` says why, and the routes that record decisions answer 503.
+         *     Without a database, or with one that cannot be reached, the analyzers still run;
+         *     ``decisions_available`` is false and ``decisions_reason`` says why.
          */
         post: operations["post_run_api_v1_analyzers_run_post"];
         delete?: never;
@@ -1656,13 +1664,16 @@ export interface components {
         };
         /**
          * AnalysisRequest
-         * @description The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84, #335).
+         * @description The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).
          *
-         *     Every field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`.
+         *     Every field means what it means on
+         *     :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
+         *     choices are optional here: an analysis can run before the dialog has them.
          *     ``printer_id`` omitted is the model's remembered printer, then the configured one,
-         *     then the first active one, as the dialog's choices route picks it. ``choices``
-         *     omitted is what the dialog reopens with: the model's remembered nozzles, tier and
-         *     process, on the plate type remembered for that printer.
+         *     then the first active one, as the dialog's choices route picks it; ``choices``
+         *     omitted is what the dialog reopens with for this model (its remembered nozzles,
+         *     tier and process, on the plate remembered for that printer). With neither, the
+         *     analyzers that need choices say so.
          */
         AnalysisRequest: {
             choices?: components["schemas"]["PrintChoices"] | null;
@@ -1746,6 +1757,8 @@ export interface components {
              * @enum {string}
              */
             severity: "error" | "warning" | "info" | "hidden";
+            /** Slots */
+            slots?: number[];
             /** Sources */
             sources: components["schemas"]["Source"][];
             /**
@@ -1778,7 +1791,7 @@ export interface components {
             /** Name */
             name: string;
             /** Needs */
-            needs: ("output" | "geometry" | "plate" | "choices" | "printer" | "filaments" | "inventory")[];
+            needs: ("output" | "geometry" | "plate" | "printer" | "choices" | "filaments" | "inventory")[];
             /** Scope */
             scope: string;
             /**
@@ -1861,17 +1874,32 @@ export interface components {
         };
         /**
          * BaseProfile
-         * @description What the diffs are against: the print's choices and the presets they resolve
-         *     to by name (spool-first spec §4.1-4.2), the printer, plate and plan (#84).
+         * @description What the diffs are against: the presets the resolver derives from the choices.
+         *
+         *     Names follow the resolver's own derivation (``resolver.TIERS`` and
+         *     ``printer_preset_name``), so they are the presets a run would slice with.
          */
         BaseProfile: {
             /** Bed Type */
             bed_type?: string | null;
-            choices?: components["schemas"]["PrintChoices"] | null;
-            /** Copies */
+            /** Choices Origin */
+            choices_origin?: ("request" | "remembered") | null;
+            /**
+             * Copies
+             * @default 1
+             */
             copies: number;
-            filament_plan?: components["schemas"]["FilamentPlan"] | null;
-            /** Plate Id */
+            /**
+             * High Flow
+             * @default false
+             */
+            high_flow: boolean;
+            /** Nozzle Sizes */
+            nozzle_sizes?: string[];
+            /**
+             * Plate Id
+             * @default 1
+             */
             plate_id: number;
             /** Plate Model */
             plate_model?: string | null;
@@ -1881,8 +1909,19 @@ export interface components {
             printer_model?: string | null;
             /** Printer Preset Name */
             printer_preset_name?: string | null;
-            /** Process Name */
-            process_name?: string | null;
+            /** Process Preset Name */
+            process_preset_name?: string | null;
+            /** Slots */
+            slots?: components["schemas"]["BaseSlot"][];
+        };
+        /** BaseSlot */
+        BaseSlot: {
+            /** Preset */
+            preset?: string | null;
+            /** Slot Id */
+            slot_id: number;
+            /** Spool Id */
+            spool_id?: number | null;
         };
         /** Body_create_model_api_v1_models_post */
         Body_create_model_api_v1_models_post: {
@@ -2120,6 +2159,8 @@ export interface components {
             created_at?: string;
             /** Diagnostic Id */
             diagnostic_id: string;
+            /** Diff Digest */
+            diff_digest?: string | null;
             /**
              * Enforced
              * @default false
@@ -2148,6 +2189,11 @@ export interface components {
          *     apply, which is where its diff is confirmed.
          */
         DecisionCreate: {
+            /**
+             * Confirm
+             * @default false
+             */
+            confirm: boolean;
             /** Diagnostic Id */
             diagnostic_id: string;
             /**
@@ -2202,7 +2248,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "mesh" | "plate" | "filament_slot" | "print_choices" | "profile_setting" | "analyzer";
+            kind: "mesh" | "plate" | "filament_slot" | "choices" | "profile_setting" | "analyzer";
             /** Part */
             part?: number | null;
             /** Setting */
@@ -2382,9 +2428,10 @@ export interface components {
             outward: boolean;
             /**
              * Route Note
-             * @default An accepted settings diff lands on this print's slice and queue item: the print dialog always slices then queues (spool-first print spec §7). The send bar's pipeline run carries no per-print settings, so it does not apply one (AI spec §11).
+             * @default Applying records this diff as a decision at its scope; nothing sends it yet. A print that uses it will have to slice and queue with the diff, since a pipeline run carries no per-print settings (AI spec §11), and will go through the outward approval of AI spec §8.2 before it does.
              */
             route_note: string;
+            scope: components["schemas"]["ScopeRef"];
             /** Summary */
             summary: string;
         };
@@ -2395,6 +2442,7 @@ export interface components {
             /** Fix Id */
             fix_id: string;
             request?: components["schemas"]["AnalysisRequest"];
+            scope?: components["schemas"]["ScopeRef"] | null;
             target: components["schemas"]["AnalysisTarget"];
         };
         /**
@@ -2543,7 +2591,7 @@ export interface components {
              * Name
              * @enum {string}
              */
-            name: "output" | "geometry" | "plate" | "choices" | "printer" | "filaments" | "inventory";
+            name: "output" | "geometry" | "plate" | "printer" | "choices" | "filaments" | "inventory";
             /** Reason */
             reason?: string | null;
         };

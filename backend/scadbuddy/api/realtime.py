@@ -63,6 +63,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
     AnalyzerDecisionEvent,
+    BusResync,
     Event,
     FontInstalled,
     JobEvent,
@@ -149,6 +150,9 @@ def topics_of(event: Event) -> list[str]:
             return ["settings"]
         case AnalyzerDecisionEvent():
             return ["analyzers"]
+        case BusResync():
+            # Not news for a topic: `pump` turns it into a ``resync`` frame.
+            return []
         case _:
             assert_never(event)
 
@@ -212,13 +216,17 @@ async def pump(subscription: Subscription, topics: set[str], send: Send) -> None
     """Forward the bus to the socket until the subscription ends.
 
     Only events under a followed topic are sent. When the subscription has dropped
-    events (it fell ``maxsize`` behind) the client is told to ``resync`` instead of
-    being left with a gap."""
+    events (it fell ``maxsize`` behind), or the Postgres bus reports a gap in its
+    LISTEN connection (``BusResync``, #374), the client is told to ``resync``
+    instead of being left with a gap."""
     dropped = 0
     async for event in subscription:
         if subscription.dropped != dropped:
             dropped = subscription.dropped
             await send({"type": "resync"})
+        if isinstance(event, BusResync):
+            await send({"type": "resync"})
+            continue
         matched = [topic for topic in topics_of(event) if topic in topics]
         if matched:
             await send(event_frame(event, matched))
