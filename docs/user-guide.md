@@ -220,7 +220,7 @@ so it shows exactly what the 3MF will contain, with the bounding box in mm. Then
   thumbnail.
 - **Download 3MF** downloads that output.
 - **Send to Bambuddy** uploads the output to the library, laid out for the printer set
-  in Settings. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
+  in Settings, or on the default plate without one. It doesn't slice or queue; use **Print** for that. If ScadBuddy's own URL
   is set, the library file gets an "Edit in ScadBuddy" link that opens these parameters
   again.
 - **Print** opens the print picker.

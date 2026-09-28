@@ -109,7 +109,7 @@ export function SendDialog({ open, output, onClose, onSent }: Props) {
       ) : (
         <>
           <p className="text-[13px] text-ink">
-            Adds the 3MF to the Bambuddy library, laid out for the printer set in Settings.
+            Adds the 3MF to the Bambuddy library, laid out for the printer set in Settings, or on the default plate without one.
           </p>
           <p className="mt-1.5 text-[12px] text-muted">
             To slice and queue it, use Print instead.

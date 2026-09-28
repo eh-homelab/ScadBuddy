@@ -71,11 +71,11 @@ export const settingsTools: Tool[] = [
     description:
       'Remembered print options (timelapse, bed levelling, AMS, …) at each scope: global, per printer and ' +
       'per model, and the printer the per-printer scope keys on (the Settings printer).',
-    input: z.object({ slug: z.string().optional() }),
+    input: z.object({}),
     risk: 'read',
     routes: ['GET /api/v1/settings/print-options'],
-    handler: async ({ slug }, { backend }) =>
-      json(await ok(backend.GET('/api/v1/settings/print-options', { params: { query: { slug } } }), 'get print options')),
+    handler: async (_args, { backend }) =>
+      json(await ok(backend.GET('/api/v1/settings/print-options'), 'get print options')),
   }),
 
   // `outward`, deliberately, unlike the `remember_*` tools in print.ts (`write`).

@@ -223,7 +223,9 @@ export const printTools: Tool[] = [
     description:
       "Upload an output's 3MF to Bambuddy's library folder. Nothing is sliced or queued: printing is " +
       'print_output.',
-    input: z.object({ output_id: outputId }),
+    // Strict, so an older client still asking for `mode: 'queue'` or `copies` is refused
+    // rather than silently given a library upload (the HTTP route 422s the same, #312).
+    input: z.object({ output_id: outputId }).strict(),
     risk: 'outward',
     bambuddyScope: ['Manage Library'],
     routes: ['POST /api/v1/outputs/{output_id}/send'],

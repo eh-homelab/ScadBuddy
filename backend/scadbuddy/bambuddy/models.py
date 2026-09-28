@@ -518,7 +518,7 @@ class SpoolFilamentPreset(BambuddyModel):
     """A row of ``GET /api/v1/inventory/spools/{id}/filament-presets``.
 
     One per printer model and nozzle size. A spool's own ``slicer_filament`` is only its
-    default — typically the 0.4 nozzle's — so a pipeline for another nozzle needs the
+    default — typically the 0.4 nozzle's — so a print on another nozzle needs the
     row that matches it (#161).
     """
 

@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class PresetChoice(BaseModel):
-    """One row of the "New pipeline" form's pickers.
+    """One slicer preset in Bambuddy's catalogue, as the resolver reads it.
 
     ``compatible_printers`` is normalised to a list here: ``/slicer/presets`` returns
     one, while ``/local-presets/`` stores the same thing as a JSON-encoded *string*.

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Annotated, Self
+from typing import Self
 
-from fastapi import APIRouter, Query, status
+from fastapi import APIRouter, status
 from pydantic import BaseModel, Field, model_validator
 
 from scadbuddy.api.deps import SettingsStoreDep, StateDep
@@ -126,13 +126,7 @@ def _options_view(settings: StoredSettings) -> PrintOptionsView:
     response_model=PrintOptionsState,
     summary="Remembered print options",
 )
-def get_print_options(
-    store: SettingsStoreDep,
-    slug: Annotated[
-        str | None,
-        Query(description="The model about to be printed"),
-    ] = None,
-) -> PrintOptionsState:
+def get_print_options(store: SettingsStoreDep) -> PrintOptionsState:
     settings = store.load()
     return PrintOptionsState(**_options_view(settings).model_dump(), printer_id=settings.printer_id)
 
