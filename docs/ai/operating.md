@@ -279,8 +279,9 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
-  "HTTP routes").
+  `20260928T0107Z_sessions.sql`). `main.ts` builds the `SessionManager` and serves it
+  through the chat socket and the session routes (README, "Sessions and the
+  assistant's chat").
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
 (the comment on `MIGRATION_LOCK` in `migrations.ts`).

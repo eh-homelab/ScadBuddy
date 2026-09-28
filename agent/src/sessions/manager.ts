@@ -156,6 +156,18 @@ export type StartOptions = {
   scope?: Record<string, unknown>
   /** Sent as the first turn when given. */
   prompt?: string
+  /** With `prompt`: see SendOptions.context. */
+  context?: string
+}
+
+export type SendOptions = {
+  /**
+   * Text the model gets after the user's message in this turn only, and that
+   * the transcript's `user.turn` event does not show: the panel's page context
+   * (route, open model, what the page reports, #256), rendered by the chat
+   * route (routes/chat.ts `renderPageContext`).
+   */
+  context?: string
 }
 
 export type ListFilter = { status?: SessionStatus; origin?: Origin; limit?: number }
@@ -434,7 +446,7 @@ export class SessionManager {
       event({ type: 'session.status', sessionId: id, status: 'idle' }),
     ])
     if (!prompt) return { session }
-    const turn = await this.send(id, principal, prompt)
+    const turn = await this.send(id, principal, prompt, options.context ? { context: options.context } : {})
     return { session: await this.get(id, principal), turn }
   }
 
@@ -442,7 +454,7 @@ export class SessionManager {
    * Adds a user turn and starts it. Resolves once the turn has been claimed
    * and started; `done` settles when it ends. Only the owner may send.
    */
-  async send(id: string, principal: Owner, text: string): Promise<Turn> {
+  async send(id: string, principal: Owner, text: string, options: SendOptions = {}): Promise<Turn> {
     const prompt = text.trim()
     if (!prompt) throw new SessionError('invalid', 'the message is empty')
     const before = await this.get(id, principal)
@@ -457,7 +469,7 @@ export class SessionManager {
       [id, turnId, principal.kind, principal.id, this.leaseMs],
     )
     if (!claimed) throw await this.whyNotClaimed(id, principal, before)
-    return this.startTurn(record(claimed), turnId, prompt, principal)
+    return this.startTurn(record(claimed), turnId, prompt, principal, options.context ? { context: options.context } : {})
   }
 
   /**
@@ -515,14 +527,18 @@ export class SessionManager {
     turnId: string,
     prompt: string,
     author: Owner,
-    options: { keepResumeTurn?: string } = {},
+    options: { keepResumeTurn?: string; context?: string } = {},
   ): Promise<Turn> {
     const id = session.id
     // A new turn supersedes approvals left pending, or approved and unused,
     // by one that is gone (claiming proved no turn is live): their calls can
     // no longer run. A resumed turn keeps the approval bound to it; its
     // sibling orphans are cancelled with the rest (approvals/service.ts).
-    await this.approvals.cancelPending(id, 'superseded by a new turn', options)
+    await this.approvals.cancelPending(
+      id,
+      'superseded by a new turn',
+      options.keepResumeTurn === undefined ? {} : { keepResumeTurn: options.keepResumeTurn },
+    )
     await this.events.append(id, [
       event({ type: 'user.turn', sessionId: id, turnId, text: prompt, author }),
       event({ type: 'session.status', sessionId: id, status: 'running' }),
@@ -530,7 +546,8 @@ export class SessionManager {
     const controller = new AbortController()
     const local: LocalTurn = { controller, settling: false }
     this.active.set(id, local)
-    const done = this.runTurn(session, turnId, prompt, local)
+    const query = options.context ? `${prompt}\n\n${options.context}` : prompt
+    const done = this.runTurn(session, turnId, query, local)
       // Never rejects: callers may ignore `done`, and an unhandled rejection
       // would take the process down. The lease frees the claim if the
       // release itself failed.

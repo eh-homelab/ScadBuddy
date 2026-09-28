@@ -1,4 +1,5 @@
 import { Hono } from 'hono'
+import type { UpgradeWebSocket } from 'hono/ws'
 import type { ApprovalService } from './approvals/service.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
@@ -9,16 +10,25 @@ import type { PluginForwarder } from './plugins/forwarder.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
+import { registerChatRoute } from './routes/chat.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginRoutes } from './routes/plugins.js'
+import { registerSessionRoutes } from './routes/sessions.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
+import type { SessionManager } from './sessions/manager.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
-// direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
-// plugin registry routes (#297, routes/plugins.ts), and /mcp when `mcp` is
-// given (#251, mcp/http.ts).
+// direct streaming. /healthz, /api/v1/ai/status (below), the Claude credential
+// routes (#255, routes/credentials.ts), the approval routes (#258,
+// routes/approvals.ts), the plugin registry routes (#297, routes/plugins.ts),
+// the session routes and the assistant's chat socket (#300, #256,
+// routes/sessions.ts, routes/chat.ts), and /mcp when `mcp` is given (#251,
+// mcp/http.ts).
+//
+// Every response carries `X-ScadBuddy-Service: agent`, so a request through
+// the ingress shows which container answered it (spec §4.2: the agent's paths
+// must win over the backend's /api/v1/*; docs/ai/operating.md has the check).
 
 export type Probe = () => Promise<boolean>
 
@@ -56,16 +66,23 @@ export type AppDeps = {
    * credential routes, so there is one allowlist (src/http/origins.ts).
    */
   mcp?: McpEndpointDeps | undefined
+  /** Sessions (#300); the session routes and the chat socket answer 503 without it. */
+  sessions?: SessionManager | undefined
+  /** The runtime's WebSocket upgrade; without it there is no chat socket (and status says so). */
+  upgradeWebSocket?: UpgradeWebSocket | undefined
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
 
+/** The response header naming the service (see the module comment). */
+export const SERVICE_HEADER = 'X-ScadBuddy-Service'
+
 /**
  * `ai` is `enabled` only when every prerequisite holds; otherwise it names the
- * first one missing, in the order an operator has to fix them. Today only the
- * CI smoke test reads it (.github/workflows/ci.yml asserts the no-database
- * string); nothing in the backend or frontend does yet. Keep the strings stable
- * for that test and for the UI gate #261 plans to build on them.
+ * first one missing, in the order an operator has to fix them. The CI smoke
+ * test reads it (.github/workflows/ci.yml asserts the no-database string), and
+ * so does the UI's gate, through GET /api/v1/ai/status (`AiStatusView`;
+ * frontend src/agent/chat/availability.ts). Keep the strings stable for both.
  */
 export type AiStatus =
   | 'enabled'
@@ -133,12 +150,46 @@ async function aiStatus(deps: AppDeps, dbOk: boolean | undefined): Promise<Pick<
   return { ai: 'enabled', credential }
 }
 
+/**
+ * GET /api/v1/ai/status: whether the assistant can be offered, for the UI's
+ * gate (frontend src/agent/chat/availability.ts). `state` is the AiStatus
+ * prefix; `available` also needs the chat socket to exist; `reason` says why
+ * not, in words for Settings. It carries nothing /healthz does not.
+ */
+export type AiStatusView = {
+  available: boolean
+  state: 'enabled' | 'disabled' | 'unavailable'
+  ai: AiStatus
+  reason?: string
+}
+
+/** The words the UI shows for an AiStatus other than `enabled`. */
+export function statusReason(ai: AiStatus): string | undefined {
+  if (ai === 'enabled') return undefined
+  if (ai === 'disabled (no database)') return 'The agent service has no database (SCADBUDDY_DATABASE_URL is not set).'
+  if (ai === 'disabled (no Claude credential)') return 'No Claude credential is configured yet.'
+  if (ai.startsWith('disabled (no key-encryption key')) {
+    return `The agent service has no key-encryption key, so it cannot store a Claude credential (${ai.slice('disabled (no key-encryption key: '.length, -1)}).`
+  }
+  const inner = ai.replace(/^unavailable \((.*)\)$/, '$1')
+  return `The agent service is unavailable: ${inner}.`
+}
+
 /** The app, plus `close()` for graceful shutdown: it ends every open `/mcp` session and its sweep. */
 export type AgentApp = Hono & { close: () => Promise<void> }
 
 export function createApp(deps: AppDeps): AgentApp {
   const app = new Hono()
   let mcp: McpHandle | undefined
+
+  app.use('*', async (c, next) => {
+    await next()
+    try {
+      c.res.headers.set(SERVICE_HEADER, 'agent')
+    } catch {
+      // An immutable response (a WebSocket upgrade's): it goes without.
+    }
+  })
 
   // Liveness: always 200 while the process serves HTTP. A missing or
   // unreachable database or backend is REPORTED, not failed on, so a Postgres
@@ -157,6 +208,19 @@ export function createApp(deps: AppDeps): AgentApp {
       secret_key: deps.kek.ok ? 'ok' : 'not configured',
       credential,
     }
+    return c.json(body)
+  })
+
+  // Unguarded, like /healthz: it says only what /healthz says.
+  app.get('/api/v1/ai/status', async (c) => {
+    const dbOk = deps.database ? await deps.database.ping() : undefined
+    const { ai } = await aiStatus(deps, dbOk)
+    const chat = deps.sessions !== undefined && deps.upgradeWebSocket !== undefined
+    const state = ai === 'enabled' ? 'enabled' : ai.startsWith('disabled') ? 'disabled' : 'unavailable'
+    const reason =
+      statusReason(ai) ?? (chat ? undefined : 'The agent service was started without its chat socket.')
+    const body: AiStatusView = { available: ai === 'enabled' && chat, state, ai, ...(reason ? { reason } : {}) }
+    c.header('Cache-Control', 'no-store')
     return c.json(body)
   })
 
@@ -199,6 +263,21 @@ export function createApp(deps: AppDeps): AgentApp {
     ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
     remoteAddress: deps.remoteAddress,
     origins: deps.origins,
+  })
+
+  const ready = deps.database ? deps.database.ready : () => Promise.resolve(false)
+  registerSessionRoutes(app, {
+    sessions: deps.sessions,
+    ready,
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+  })
+  registerChatRoute(app, {
+    sessions: deps.sessions,
+    ready,
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+    upgradeWebSocket: deps.upgradeWebSocket,
   })
 
   if (deps.mcp) {

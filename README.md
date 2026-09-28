@@ -353,9 +353,8 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Streamable HTTP MCP servers named after the plugin, so their tools reach
   the model as `mcp__<name>__<tool>` (`main.ts` passes
   `forwardForRun(loadEnabledPlugins(…))` to the `SessionManager`; an outward
-  plugin tool parks for approval like any other, #258). Nothing starts a
-  session over HTTP yet, so for now the connection test is what reaches a
-  plugin. Rules (`agent/src/plugins/registry.ts`):
+  plugin tool parks for approval like any other, #258). Sessions start from
+  the assistant's chat socket and the session routes (next bullet). Rules (`agent/src/plugins/registry.ts`):
   - The URL must be `https://`; plain `http://` only when every address the
     host resolves to is loopback. Link-local and cloud metadata hosts are
     refused, including IPv6 forms that embed one (NAT64, 6to4, Teredo), as
@@ -428,6 +427,23 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   them; `recall` is the obvious candidate. Not yet verified against a running
   Hindsight: the tool names and annotations a real server lists, and whether
   `reflect` writes anything.
+- **Sessions and the assistant's chat** (#300, #256; `agent/src/routes/chat.ts`,
+  `agent/src/routes/sessions.ts`). The browser never holds a Claude credential:
+  every model call is the agent's own, and every route below acts as the browser
+  user behind the same guards as the credential routes.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/status` | unguarded, like `/healthz`: `{available, state, ai, reason?}`, what the UI's gate reads |
+  | `GET /api/v1/ai/chat` (WebSocket) | the assistant panel's protocol (`frontend/src/agent/chat/protocol.ts`) both ways: start or continue a chat, attach (replay then follow), approve or deny, interrupt, take over |
+  | `GET/POST /api/v1/ai/sessions`, `GET …/{id}` | list, start (`{prompt?, title?}`), one |
+  | `POST …/{id}/messages`, `…/interrupt`, `…/handoff` | send a turn (`{text}`; `409` while one runs), stop it, take the session over |
+  | `GET …/{id}/events` | Server-Sent Events: the session's panel events from `?after=` or `Last-Event-ID`, then live |
+
+  Approvals are decided on the socket or through `/api/v1/ai/approvals`. A chat
+  session's model gets the ScadBuddy tools in-process (`mcp__scadbuddy__*`, at
+  their tiers), plus enabled plugins. Every agent response carries
+  `X-ScadBuddy-Service: agent`.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it

@@ -1,8 +1,10 @@
-import { serve } from '@hono/node-server'
+import { serve, upgradeWebSocket } from '@hono/node-server'
+import { WebSocketServer } from 'ws'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { type Principal, tiersUpTo } from './auth/principal.js'
 import { FailClosedTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
@@ -16,10 +18,13 @@ import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
 import { loadKek } from './secrets.js'
 import { approvalHashKey } from './approvals/service.js'
+import { startHeartbeat } from './routes/chat.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
-import { ALL_TOOLS } from './tools/index.js'
+import { ALL_TOOLS, tierOf } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
+import { createHarnessServer, SERVER_NAME } from './tools/projections.js'
+import type { ToolServices } from './tools/registry.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -93,17 +98,42 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// What every tool call gets, in-process (sessions) and over /mcp alike.
+const toolServices: ToolServices = {
+  backend,
+  pending: new PendingActionStore(),
+  pollIntervalMs: 1000,
+  renderWaitMs: 10 * 60_000,
+  publicBaseUrl: config.publicUrl,
+}
 
-// Sessions (#300) and their approvals (#258). Nothing starts a session over
-// HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
-// expiry sweep are live so that approvals left pending by a restart can be
-// seen, decided or expired.
+/**
+ * The tool principal a session's in-process tools run as (spec §8.1): the
+ * browser user's own chats get every tier (outward calls still park for a
+ * human approval, harness/permissions.ts); any other owner reads only until
+ * its token's tiers reach sessions (#251).
+ */
+function sessionPrincipal(owner: { kind: string; id: string }): Principal {
+  return owner.kind === 'browser'
+    ? { id: owner.id, kind: 'browser', tiers: tiersUpTo('outward') }
+    : { id: `${owner.kind}:${owner.id}`, kind: 'anonymous', tiers: tiersUpTo('read') }
+}
+
+// Sessions (#300) and their approvals (#258): started from the assistant
+// panel's socket (routes/chat.ts) and the session routes (routes/sessions.ts).
+// The approval routes and the expiry sweep also serve approvals left pending
+// by a restart.
 const sessions =
   database && credentials
     ? new SessionManager({
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // The tool registry (#251), in-process as `mcp__scadbuddy__*`, at its tiers.
+        tierOf,
+        mcpServers: (session) => ({
+          [SERVER_NAME]: createHarnessServer(ALL_TOOLS, toolServices, sessionPrincipal(session.owner)),
+        }),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
@@ -139,7 +169,8 @@ const app = createApp({
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
   },
   origins: originPolicy(config.publicUrl, config.trustedProxies),
-  ...(sessions ? { approvals: sessions.approvals } : {}),
+  ...(sessions ? { approvals: sessions.approvals, sessions } : {}),
+  upgradeWebSocket,
   remoteAddress: (c) => {
     try {
       return getConnInfo(c).remote.address
@@ -149,13 +180,7 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
-    services: {
-      backend,
-      pending: new PendingActionStore(),
-      pollIntervalMs: 1000,
-      renderWaitMs: 10 * 60_000,
-      publicBaseUrl: config.publicUrl,
-    },
+    services: toolServices,
     // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
     // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
     // Until then `bearer` (the default) verifies no token, so /mcp answers
@@ -165,7 +190,12 @@ const app = createApp({
   },
 })
 
-const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (info) => {
+// The chat socket (routes/chat.ts). A frame is one panel message; 256 KiB
+// covers the largest (a 32k-character message plus its page context).
+const wss = new WebSocketServer({ noServer: true, maxPayload: 256 * 1024 })
+const stopHeartbeat = startHeartbeat(wss)
+
+const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT, websocket: { server: wss } }, (info) => {
   console.log(
     `scadbuddy-agent listening on :${info.port}; backend ${config.backendUrl}; ` +
       `database ${database ? 'configured' : 'not configured (AI disabled)'}; ` +
@@ -178,6 +208,9 @@ const server = serve({ fetch: app.fetch, hostname: '0.0.0.0', port: PORT }, (inf
 for (const signal of ['SIGTERM', 'SIGINT'] as const) {
   process.once(signal, () => {
     stopSweeper?.()
+    stopHeartbeat()
+    // 1001 "going away": the panel reconnects to another replica or after the restart.
+    for (const socket of wss.clients) socket.close(1001, 'the agent service is restarting')
     // Running turns stop; their pending approvals stay pending (approvals/service.ts).
     sessions?.abortAll()
     void shutdown({
