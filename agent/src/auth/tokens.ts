@@ -7,8 +7,8 @@ import { type Principal, type Tier, tiersUpTo } from './principal.js'
 //
 // TODO(#255, PR #354): a Postgres `TokenStore` over an `ai_mcp_tokens` table
 // (id uuid, name, tier, token_hash unique, created_at, expires_at, revoked_at,
-// last_used_at), appended as the next entry in #354's numbered migration list
-// (agent/src/db/migrations.ts) once that merges. Until then production runs
+// last_used_at), added as a new file in agent/src/db/migrations/ (see the rules
+// in agent/src/db/migrations.ts). Until then production runs
 // with `FailClosedTokenStore`, so `bearer` mode (the default) answers 401 to
 // everyone; `InMemoryTokenStore` is for tests.
 

@@ -140,13 +140,20 @@ async def test_a_new_project_needs_a_name(bambuddy: BambuddyClient) -> None:
 
 
 @respx.mock
-async def test_a_project_with_no_folder_falls_back_rather_than_failing(
+async def test_a_project_with_no_folder_gets_one_created_and_linked(
     bambuddy: BambuddyClient,
 ) -> None:
-    """``None`` means "use the folder from Settings", which is where every send went
-    before this issue."""
+    """Never a fallback to the Settings folder: that is the inbox, where the project's
+    copy would be superseded and deleted by the next inbox upload (#316)."""
     respx.get(f"{API}/library/folders/by-project/4").mock(return_value=httpx.Response(200, json=[]))
-    assert await folder_for(bambuddy, 4) is None
+    respx.get(f"{API}/projects/4").mock(
+        return_value=httpx.Response(200, json={"id": 4, "name": "Shelf", "status": "active"})
+    )
+    made = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 44, "name": "Shelf", "project_id": 4})
+    )
+    assert await folder_for(bambuddy, 4) == 44
+    assert json.loads(made.calls[0].request.content) == {"name": "Shelf", "project_id": 4}
 
 
 @respx.mock

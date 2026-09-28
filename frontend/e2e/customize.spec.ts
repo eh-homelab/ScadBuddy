@@ -67,6 +67,27 @@ test.describe('customizer', () => {
     await expect(page.getByTestId('bbox-readout')).toContainText('81.4', { timeout: 10_000 })
   })
 
+  test('follows a render over the realtime socket instead of polling it (#267)', async ({
+    page,
+  }) => {
+    const reads: string[] = []
+    page.on('request', (request) => {
+      const path = new URL(request.url()).pathname
+      if (request.method() === 'GET' && /^\/api\/v1\/jobs\/[0-9a-f]{32}$/.test(path)) {
+        reads.push(path)
+      }
+    })
+    await page.goto('/m/name-keychain')
+    await expect(page.getByTestId('bbox-readout')).toContainText('64.1')
+    // One read when the subscription is confirmed and one per state the job announced
+    // (running, done): at 400 ms polling a render would keep reading until it settled.
+    expect(reads.length).toBeLessThanOrEqual(3)
+    const settled = reads.length
+    await page.waitForTimeout(1_500)
+    expect(reads).toHaveLength(settled)
+    await expect(page.getByText('Live updates unavailable')).toBeHidden()
+  })
+
   test('shows the view full screen with the parameters in a flyout, and puts it back', async ({
     page,
   }) => {

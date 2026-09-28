@@ -30,6 +30,7 @@ import {
 } from '../lib/params'
 import { fitTargets, platesFitMessages, worstFit } from '../lib/plate'
 import { useDisplayUnit } from '../lib/units'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 import { useDebounced } from '../lib/useDebounced'
 import { useFullscreen } from '../lib/useFullscreen'
@@ -55,10 +56,12 @@ export function CustomizePage() {
 
   const schemaState = useAsync(() => api.getSchema(slug, version), [slug, version])
   const fontsState = useAsync(() => api.listFonts(), [])
-  const outputsState = useAsync(() => api.listOutputs(slug), [slug])
+  // #269 — live: an output saved from another tab, or by an agent, appears here.
+  const outputsState = useAsync(() => api.listOutputs(slug), [slug], [`model:${slug}`])
   // #184 — a built-in is read-only on the server; the write actions only show once
   // the record says the model is the user's, so a built-in never flashes them.
-  const modelState = useAsync(() => api.getModel(slug), [slug])
+  // #269 — live: details, pins and the upstream badge follow changes made elsewhere.
+  const modelState = useAsync(() => api.getModel(slug), [slug], [`model:${slug}`])
   const origin = modelState.data?.origin
   // Resolved through /edit, not the history list: that route falls back to the 3MF's
   // own provenance when the output record is gone. EditPage has usually resolved it
@@ -124,6 +127,34 @@ export function CustomizePage() {
   if (edits.of !== seed) setEdits({ of: seed, values: null })
   const values = edits.values ?? seed ?? NOTHING
 
+  // #269 — the source changed elsewhere (another tab, an agent). With no edits the
+  // parameters follow it at once; with edits they are the user's, so the page asks.
+  // An old revision (`version`) never changes, so it has nothing to follow.
+  // Held as the slug it is about, so it never follows the user to another model
+  // (Duplicate navigates here without remounting the page).
+  const [sourceChangedFor, setSourceChangedFor] = useState<string | null>(null)
+  const sourceChanged = sourceChangedFor === slug
+  const dirty = edits.values !== null
+  // Read when the answer lands: the user may have started editing while it was read.
+  const isDirty = useLatest(() => dirty)
+  useSubscription(version === undefined ? `model:${slug}` : undefined, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'source.changed') return
+    if (isDirty.current()) {
+      setSourceChangedFor(slug)
+      return
+    }
+    schemaState.refresh(() => {
+      if (!isDirty.current()) return true
+      setSourceChangedFor(slug)
+      return false
+    })
+  })
+  const reloadSchema = () => {
+    setSourceChangedFor(null)
+    setEdits({ of: seed, values: null })
+    schemaState.refresh()
+  }
+
   // One debounce over the pair, so the tag can never lag the values it labels.
   const debounced = useDebounced(values, RENDER_DEBOUNCE_MS)
   // True once the debounce has caught up with the values on screen. #90: the render
@@ -139,6 +170,7 @@ export function CustomizePage() {
     error: renderError,
     busy: renderBusy,
     settledFor,
+    stage: renderStage,
   } = useRenderJob(slug, settled ? debounced : undefined, version)
   // The job on screen is the render of the values on screen — not the previous one,
   // which is all `settled && !rendering` can promise for a frame after a change.
@@ -519,6 +551,20 @@ export function CustomizePage() {
 
       {/* The write actions wait on the record, so a failed fetch has to say so. */}
       <div>
+        {sourceChanged && (
+          <div
+            role="status"
+            className="flex items-center gap-3 border-b border-accent/40 bg-accent/8 px-3 py-2 text-[12px]"
+          >
+            <span>This model&apos;s source changed elsewhere. Reload its parameters? Your changes here are kept until you do.</span>
+            <Button size="sm" onClick={reloadSchema}>
+              Reload parameters
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setSourceChangedFor(null)}>
+              Keep mine
+            </Button>
+          </div>
+        )}
         {modelState.error && (
           <div
             role="alert"
@@ -588,6 +634,7 @@ export function CustomizePage() {
             <Preview
               job={job}
               rendering={rendering || !settled}
+              stage={renderStage}
               plate={plate}
               captureRef={captureRef}
               leading={

@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -25,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    AssetsDep,
     CatalogueDep,
     CheckoutsDep,
     ChecksDep,
@@ -34,13 +36,17 @@ from scadbuddy.api.deps import (
     HistoryDep,
     InstallsDep,
     LibrariesDep,
+    OutputsDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.params import require_valid_presets
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
@@ -73,6 +79,8 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -99,7 +107,7 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import RenderQueue, resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -820,17 +828,68 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
     return require_model(catalogue, slug)
 
 
-@router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(
-    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, events: EventsDep
+@router.patch(
+    "/models/{slug}",
+    response_model=ModelRecord,
+    summary="Edit model metadata",
+    description=(
+        "`presets` replaces the template's own presets (#326) whole. Each preset's values "
+        "are checked against the template's current schema as a saved preset's are (422), "
+        "a name a saved preset of the template already has is refused (409), "
+        "and every preset is written with its key as `id`, so reordering or renaming it "
+        "later keeps it the same preset."
+    ),
+)
+async def patch_model(
+    slug: SlugPath,
+    patch: ModelPatch,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+    events: EventsDep,
+    assets: AssetsDep,
+    presets: PresetsDep,
+    fetcher: FetcherDep,
 ) -> ModelRecord:
     require_mine(slug)
-    require_model(catalogue, slug)
+    # The record, not only existence: a model.json that no longer reads as metadata is
+    # refused (409) before anything is written into it. Off the loop: a `git log`.
+    await asyncio.to_thread(require_model, catalogue, slug)
+    if patch.presets is not None:
+        await require_valid_presets(
+            slug,
+            [preset.params for preset in patch.presets],
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+            fetcher=fetcher,
+        )
+        patch.presets = with_keys(patch.presets)
+    update = partial(catalogue.update, slug, patch)
     try:
-        record = catalogue.update(slug, patch)
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        if patch.presets is None:
+            record = await asyncio.to_thread(update)
+        else:
+            # A name is one preset's in the picker: saving refuses a template's name, so
+            # the template's list refuses a saved one's -- checked and written under the
+            # preset store's lock, as a save is.
+            names = [preset.name for preset in patch.presets]
+            record = await asyncio.to_thread(presets.with_names_free, slug, names, update)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except PresetExistsError as error:
+        (name,) = error.args
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} already has a saved preset named {name!r}",
+            name=name,
+        ) from None
+    except InvalidPresetsFileError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 
@@ -896,15 +955,37 @@ def duplicate_model(
         "they report their upstream as `gone`."
     ),
 )
-def delete_model(
+async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
     queue: QueueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
     events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    # Its outputs went with it; so do their Bambuddy upload records (#455). Bambuddy's
+    # own files are left alone, as a single output's delete leaves them unless asked.
+    # Best effort, like the rest of the cleanup after a delete: the model is gone.
+    if output_ids:
+        try:
+            await uploads.delete_outputs(output_ids)
+        except (DatabaseRequiredError, psycopg.Error):
+            logger.exception(
+                "could not forget a deleted model's upload records", extra={"slug": slug}
+            )
+    emit(events, ModelEvent(kind="model.deleted", slug=slug))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _delete_model(
+    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+) -> list[str]:
+    """The blocking part of :func:`delete_model`; returns the ids of the outputs it
+    removed, read before their directories go."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -923,13 +1004,13 @@ def delete_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
+    output_ids = outputs.ids_for(slug)
     try:
         catalogue.delete(slug)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.deleted", slug=slug))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return output_ids
 
 
 @router.get(
