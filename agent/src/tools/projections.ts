@@ -60,6 +60,9 @@ function signalFrom(extra: unknown): AbortSignal {
  * as `mcp__scadbuddy__<name>` (custom tools,
  * https://code.claude.com/docs/en/agent-sdk/custom-tools). The principal is the
  * session's own (the browser user, or a flow's declared permissions, spec §8.1).
+ * Only for a harness query, whose permission seam gates outward tools before
+ * they reach this server: given to anything else, an outward call would run
+ * unapproved.
  */
 export function createHarnessServer(
   tools: readonly Tool[],
@@ -88,12 +91,15 @@ export function createHarnessServer(
         // there until someone re-checks this (and drops it if fixed).
         z.object(t.shape) as unknown as typeof t.shape,
         (args, extra) =>
+          // `gate: 'harness'`: the query's permission seam has already parked
+          // an outward call for approval (registry.ts ToolContext.gate).
           runTool(t, args, {
             ...services,
             principal,
             progress: progressFrom(extra),
             signal: signalFrom(extra),
             lookup,
+            gate: 'harness',
           }),
         { annotations: t.annotations },
       ),
