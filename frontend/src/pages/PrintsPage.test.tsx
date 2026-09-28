@@ -292,6 +292,19 @@ describe('PrintsPage (#310): the global print history', () => {
     render()
     const gone = await item(38)
     expect(within(gone).queryByRole('button', { name: /^Open media of/ })).not.toBeInTheDocument()
+    expect(within(gone).getByTestId('print-cover')).toHaveTextContent('Archive deleted in Bambuddy')
+  })
+
+  it('says "No image" for a print Bambuddy still has but has no image of', async () => {
+    server.use(
+      http.get('/api/v1/prints', () =>
+        HttpResponse.json({ items: [{ ...summaryOf(36), cover: null }], next_cursor: null } satisfies PrintPage),
+      ),
+    )
+    render()
+    const bare = await item(36)
+    expect(within(bare).getByTestId('print-cover')).toHaveTextContent('No image')
+    expect(within(bare).queryByRole('button', { name: /^Open media of/ })).not.toBeInTheDocument()
   })
 
   it('shows where a print in progress is, from the progress read', async () => {

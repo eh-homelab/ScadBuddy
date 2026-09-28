@@ -1,11 +1,11 @@
-import { statusLabel } from './status'
+import { DELETED_STATUS, statusLabel } from './status'
 
 const TONE: Record<string, string> = {
   completed: 'border-ok/40 bg-ok/10 text-ok',
   failed: 'border-warn/40 bg-warn/10 text-warn',
   cancelled: 'border-line-strong text-muted',
   printing: 'border-accent/50 bg-accent/10 text-ink',
-  deleted_in_bambuddy: 'border-dashed border-line-strong text-faint',
+  [DELETED_STATUS]: 'border-dashed border-line-strong text-faint',
 }
 
 export function PrintStatus({ status }: { status: string }) {

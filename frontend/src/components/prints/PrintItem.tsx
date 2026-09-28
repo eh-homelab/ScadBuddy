@@ -6,6 +6,7 @@ import { useAsync } from '../../lib/useAsync'
 import type { PrintsView } from '../../lib/printsQuery'
 import { printerLabel, printLabel, printPath } from './prints'
 import { PrintStatus } from './PrintStatus'
+import { DELETED_STATUS } from './status'
 
 /** How many changed parameters an item lists before "+N more". */
 const PARAMS_SHOWN = 4
@@ -101,8 +102,11 @@ function Cover({
   const frame = 'relative block aspect-[4/3] w-full overflow-hidden rounded-[4px] bg-surface-2'
   if (!print.cover) {
     return (
-      <div className={`${className} ${frame} flex items-center justify-center p-2 text-center text-[11px] text-faint`}>
-        {print.status === 'deleted_in_bambuddy' ? 'Archive deleted in Bambuddy' : 'No image'}
+      <div
+        data-testid="print-cover"
+        className={`${className} ${frame} flex items-center justify-center p-2 text-center text-[11px] text-faint`}
+      >
+        {print.status === DELETED_STATUS ? 'Archive deleted in Bambuddy' : 'No image'}
         {badges}
       </div>
     )
