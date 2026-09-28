@@ -63,17 +63,6 @@ async def _require_valid(
             await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
         except ValueError as error:
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
-    # Stricter than a render, which takes any value of the right type: a preset is
-    # kept and replayed, so it holds only what the dropdown itself could pick.
-    by_name = {parameter.name: parameter for parameter in schema.parameters}
-    for name, value in params.items():
-        options = [option.value for option in by_name[name].options]
-        if options and value not in options:
-            raise ApiError(
-                status.HTTP_422_UNPROCESSABLE_CONTENT,
-                f"{value!r} is not one of the options of {name!r}",
-                parameters=[name],
-            )
 
 
 def _unreadable(error: InvalidPresetsFileError) -> ApiError:

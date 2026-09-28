@@ -310,6 +310,8 @@ function ends_with(f, suffix) =
 // "png_threshold" was "image_threshold" until #318 renamed it (it shared a name
 // with the numeric image_threshold parameter); saved presets and past outputs
 // still hold the old value, so both force the image reader.
+// ScadBuddy accepts the old value in a render or a preset save (#432):
+// retired overlay_type = "image_threshold"
 OVERLAY_IS_IMAGE = overlay_type == "png_threshold" || overlay_type == "image_threshold"
     || (overlay_type == "auto" && ends_with(lower(overlay_file), ".png"));
 

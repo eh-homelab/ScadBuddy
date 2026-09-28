@@ -2836,6 +2836,26 @@
             "title": "Options",
             "type": "array"
           },
+          "retired": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Retired",
+            "type": "array"
+          },
           "samples": {
             "items": {
               "type": "string"

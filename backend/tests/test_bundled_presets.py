@@ -13,6 +13,7 @@ from scadbuddy.library.presets import PresetStore
 from scadbuddy.render.runner import build_defines, export_schema
 
 MODELS = Path(__file__).resolve().parents[2] / "models"
+TEMPLATES = sorted(path.parent.name for path in MODELS.glob("*/model.scad"))
 SHIPPING = sorted(path.parent.name for path in MODELS.glob(f"*/{TEMPLATE_PRESETS_NAME}"))
 
 
@@ -43,12 +44,17 @@ def test_every_shipped_preset_is_read(tmp_path: Path, slug: str) -> None:
 async def test_every_shipped_preset_renders(tmp_path: Path, slug: str) -> None:
     config = Config(openscad=load_config().openscad, data_dir=tmp_path)
     schema = await export_schema(MODELS / slug / "model.scad", config=config)
-    by_name = {parameter.name: parameter for parameter in schema.parameters}
     for preset in _store(tmp_path, slug).template_presets(slug):
-        # Raises on an unknown parameter or a value of the wrong type.
+        # Raises on an unknown parameter, a value of the wrong type, one outside its
+        # customizer range, or a dropdown value that is not one of its options (#432).
         build_defines(schema, preset.params)
-        # Which a render does not check: a dropdown value has to be one of its options.
-        for name, value in preset.params.items():
-            options = [option.value for option in by_name[name].options]
-            if options:
-                assert value in options, f"{slug}: {preset.name!r} sets {name} = {value!r}"
+
+
+@pytest.mark.requires_openscad
+@pytest.mark.parametrize("slug", TEMPLATES)
+async def test_every_bundled_default_is_in_its_customizer_range(tmp_path: Path, slug: str) -> None:
+    """A render of the defaults sends them all: none may fall outside its own range (#432)."""
+    config = Config(openscad=load_config().openscad, data_dir=tmp_path)
+    schema = await export_schema(MODELS / slug / "model.scad", config=config)
+    defaults = {p.name: p.initial for p in schema.parameters if p.initial is not None}
+    build_defines(schema, defaults)

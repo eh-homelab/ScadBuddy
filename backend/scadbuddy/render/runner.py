@@ -75,6 +75,15 @@ class UnknownParameterError(ValueError):
     pass
 
 
+class ParameterValueError(ValueError):
+    """A value a parameter does not take: the wrong type, outside its customizer
+    range, or not one of its options (#432). Names the parameter, for the 422."""
+
+    def __init__(self, parameter: str, message: str) -> None:
+        super().__init__(message)
+        self.parameter = parameter
+
+
 @dataclass(frozen=True)
 class ProcessOutput:
     returncode: int
@@ -119,7 +128,52 @@ def _format_number(value: ParamValue) -> str:
     return repr(float(value))
 
 
+def _format_value(value: ParamValue) -> str:
+    return f'"{value}"' if isinstance(value, str) else f"{value:g}"
+
+
+def _require_in_range(parameter: Parameter, value: int | float) -> None:
+    """The customizer's ``[min:max]``, inclusive (#432). The step is not enforced: it
+    is the widget's increment, OpenSCAD renders any value, and a bundled default
+    (plant-label ``thickness = 2.5`` on ``[1.6:0.2:5]``) sits off its grid."""
+    low, high = parameter.min, parameter.max
+    if (low is not None and value < low) or (high is not None and value > high):
+        bounds = (
+            f"between {low:g} and {high:g}"
+            if low is not None and high is not None
+            else f"at least {low:g}"
+            if low is not None
+            else f"at most {high:g}"
+        )
+        raise ParameterValueError(
+            parameter.name, f"parameter {parameter.name!r} must be {bounds}, got {value:g}"
+        )
+
+
+def _require_option(parameter: Parameter, value: ParamValue) -> None:
+    """One of the select's options, or a value the template retired (#432)."""
+    allowed = [option.value for option in parameter.options]
+    if any(value == candidate for candidate in (*allowed, *parameter.retired)):
+        return
+    raise ParameterValueError(
+        parameter.name,
+        f"parameter {parameter.name!r} must be one of "
+        f"{', '.join(_format_value(candidate) for candidate in allowed)}, got {value!r}",
+    )
+
+
 def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
+    """``value`` as an OpenSCAD literal for ``-D``; raises `ParameterValueError`
+    unless ``parameter`` takes it."""
+    try:
+        return _format_checked(parameter, value)
+    except ParameterValueError:
+        raise
+    except ValueError as error:
+        raise ParameterValueError(parameter.name, str(error)) from None
+
+
+def _format_checked(parameter: Parameter, value: ParamValue) -> str:
     if parameter.type == "boolean":
         if not isinstance(value, bool):
             raise ValueError(f"parameter {parameter.name!r} expects a boolean, got {value!r}")
@@ -139,16 +193,20 @@ def format_scad_value(parameter: Parameter, value: ParamValue) -> str:
         if not isinstance(value, str):
             raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
         return quote_string(value)
-    if parameter.type == "integer":
-        if isinstance(value, bool) or not isinstance(value, int | float):
-            raise ValueError(f"parameter {parameter.name!r} expects a number, got {value!r}")
-        return str(int(value))
     if parameter.type == "select":
         if any(isinstance(option.value, str) for option in parameter.options):
             if not isinstance(value, str):
                 raise ValueError(f"parameter {parameter.name!r} expects a string, got {value!r}")
+            _require_option(parameter, value)
             return quote_string(value)
-        return _format_number(value)
+        formatted = _format_number(value)
+        _require_option(parameter, value)
+        return formatted
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise ValueError(f"parameter {parameter.name!r} expects a number, got {value!r}")
+    _require_in_range(parameter, value)
+    if parameter.type == "integer":
+        return str(int(value))
     return _format_number(value)
 
 

@@ -2509,6 +2509,8 @@ export interface components {
             name: string;
             /** Options */
             options?: components["schemas"]["Option"][];
+            /** Retired */
+            retired?: (boolean | number | string)[];
             /** Samples */
             samples?: string[];
             /** Step */

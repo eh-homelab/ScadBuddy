@@ -290,6 +290,9 @@ if (overlay_file != "" && !safe_file(overlay_file))
 // "png_threshold" was "image_threshold" until #318 renamed it (it shared a name
 // with the numeric image_threshold parameter); saved presets and past outputs
 // still hold the old value, so both force the image reader.
+// ScadBuddy accepts the old value in a render or a preset save (#432):
+// retired mask_type = "image_threshold"
+// retired overlay_type = "image_threshold"
 function lower(c) = let (o = ord(c)) (o >= 65 && o <= 90) ? chr(o + 32) : c;
 function ext_is(f, e) = len(f) > len(e)
     && [for (i = [0 : len(e) - 1]) lower(f[len(f) - len(e) + i])] == [for (i = [0 : len(e) - 1]) e[i]];
