@@ -38,7 +38,7 @@ from scadbuddy.library.libraries import (
 )
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
-from tests.conftest import PUBLIC_ADDRESS, make_library_upstream
+from tests.conftest import PUBLIC_ADDRESS, UNUSED_DATABASE_URL, make_library_upstream
 from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
@@ -87,7 +87,7 @@ def store(paths: DataPaths, upstream: tuple[str, dict[str, str]]) -> LibraryStor
 
 @pytest.fixture
 def catalogue(paths: DataPaths, history: ModelHistory) -> Catalogue:
-    return Catalogue(paths, history)
+    return Catalogue(paths, history, wrapper_prefix=WRAPPER_PREFIX)
 
 
 def _create(catalogue: Catalogue, slug: str = "widget") -> None:
@@ -476,7 +476,13 @@ def test_the_size_cap_comes_from_the_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.setenv("SCADBUDDY_LIBRARY_MAX_BYTES", "1234")
-    state = build_state(Settings(data_dir=tmp_path, frontend_dir=Path("/nonexistent")))
+    state = build_state(
+        Settings(
+            data_dir=tmp_path,
+            frontend_dir=Path("/nonexistent"),
+            database_url=UNUSED_DATABASE_URL,
+        )
+    )
 
     assert state.libraries.max_bytes == 1234
 

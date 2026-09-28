@@ -1,14 +1,15 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it } from 'vitest'
 import { emitRealtime } from '../mocks/realtime'
-import { getRealtime, resetRealtime, useLiveQuery } from './realtime'
+import { getRealtime, resetRealtime } from './realtime'
+import { useAsync } from './useAsync'
 
 // The real WebSocket, intercepted by msw: the same path the app takes in the mocked e2e run.
 
 afterEach(() => resetRealtime())
 
 function Count({ reads }: { reads: () => Promise<number> }) {
-  const { data } = useLiveQuery('count', reads, ['models'])
+  const { data } = useAsync(reads, [], ['models'])
   return <p>reads: {data ?? '…'}</p>
 }
 
