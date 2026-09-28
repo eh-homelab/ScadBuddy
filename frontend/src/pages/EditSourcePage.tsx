@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router'
 import { api } from '../api/client'
 import { DuplicateModelButton } from '../components/DuplicateModelButton'
@@ -7,6 +7,7 @@ import { Button } from '../components/ui/Button'
 import { Spinner } from '../components/ui/Spinner'
 import { modelPath } from '../lib/deeplink'
 import { countConflicts } from '../lib/upstream'
+import { useSubscription } from '../lib/realtime'
 import { useAsync } from '../lib/useAsync'
 
 /**
@@ -48,6 +49,35 @@ export function EditSourcePage() {
   useEffect(() => {
     if (initial !== undefined) setSource(initial)
   }, [initial])
+
+  // #269 — the source changed elsewhere (another tab, an agent). An untouched buffer
+  // follows it; an edited one is never overwritten: the page offers theirs. Saving mine
+  // replaces theirs (`PUT /source` carries no base revision), as the banner says.
+  const [theirs, setTheirs] = useState<string | null>(null)
+  /** The buffer as it is when a read answers, not as it was when the signal came. */
+  const buffer = useRef({ source, loaded: loaded.data })
+  useEffect(() => {
+    buffer.current = { source, loaded: loaded.data }
+  })
+  const untouched = () => buffer.current.source === null || buffer.current.source === buffer.current.loaded
+  useSubscription(merging || builtin ? undefined : `model:${slug}`, (signal) => {
+    if (signal === 'resync' || signal.kind !== 'source.changed') return
+    // Through the loader, whose sequence guard drops an older read still in flight
+    // (the first one, say). Decided as the answer lands, not as the signal came.
+    loaded.refresh((latest) => {
+      // Already what the buffer holds (typed the same, or this tab's own save): take it
+      // as loaded, so the buffer reads as untouched again.
+      if (latest === buffer.current.source || untouched()) return true
+      setTheirs(latest)
+      return false
+    })
+  })
+  const takeTheirs = () => {
+    if (theirs === null) return
+    loaded.setData(theirs)
+    setSource(theirs)
+    setTheirs(null)
+  }
 
   async function save(force: boolean) {
     if (merge) await api.resolveUpstreamMerge(slug, source ?? '', merge.base, force)
@@ -104,7 +134,26 @@ export function EditSourcePage() {
         </>
       }
       fields={
-        merging && (
+        <>
+        {theirs !== null && (
+          <div
+            data-testid="changed-elsewhere"
+            role="status"
+            className="flex items-center gap-3 border-t border-line bg-accent/8 px-3 py-1.5 text-[12px]"
+          >
+            <span>
+              This source was changed elsewhere since you opened it. Load that version (your
+              edits here are discarded), or keep editing and save over it.
+            </span>
+            <Button size="sm" onClick={takeTheirs}>
+              Load their version
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setTheirs(null)}>
+              Keep editing
+            </Button>
+          </div>
+        )}
+        {merging && (
           <p
             data-testid="merge-banner"
             role="status"
@@ -121,7 +170,8 @@ export function EditSourcePage() {
                 : // Taken or dismissed since: this is the source as it stands.
                   'There is no update to resolve any more; this is the source as it is.'}
           </p>
-        )
+        )}
+        </>
       }
       uri={`file:///models/${slug}/model.scad`}
       slug={slug}

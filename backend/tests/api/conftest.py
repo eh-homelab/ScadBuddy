@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import psycopg
 import pytest
 import trimesh
 from fastapi import FastAPI
@@ -129,12 +130,14 @@ def seed_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str) -> Settings:
+def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
+    """The app's settings, on a throwaway Postgres schema: it will not start without one."""
     return Settings(
         openscad=fake_openscad,
         data_dir=data_dir,
         seed_models_dir=seed_dir,
         frontend_dir=Path("/nonexistent"),
+        database_url=pg_conninfo,
         # Off, so no test renders a preview behind its back; `test_previews`
         # turns them on with a stub render.
         preview_renders=False,
@@ -240,6 +243,24 @@ def job_file(paths: DataPaths, job_id: str, name: str) -> Path:
     result = JobStore(paths).read(job_id).result
     assert result is not None, f"job {job_id} has no result"
     return paths.root / {"model.3mf": result.model_3mf, "preview.glb": result.preview_glb}[name]
+
+
+def read_stored(conninfo: str) -> dict[str, Any]:
+    """What the settings store persisted, read straight from its tables rather than
+    through the store: ``settings`` rows by name, plus the per-model choices and
+    per-printer plates under the names they have on ``StoredSettings``."""
+    with psycopg.connect(conninfo) as conn:
+        stored: dict[str, Any] = dict(conn.execute("SELECT name, value FROM settings").fetchall())
+        stored["model_print_choices"] = dict(
+            conn.execute("SELECT model_id, choices FROM model_print_choices").fetchall()
+        )
+        stored["printer_bed_types"] = {
+            str(printer_id): bed_type
+            for printer_id, bed_type in conn.execute(
+                "SELECT printer_id, bed_type FROM printer_bed_types"
+            ).fetchall()
+        }
+    return stored
 
 
 def wait_for_job(client: TestClient, job_id: str) -> dict[str, Any]:

@@ -964,6 +964,31 @@ async def test_a_failed_start_releases_the_store(paths: DataPaths) -> None:
     queue.close_thumbnails()
 
 
+async def test_a_failed_start_leaves_a_store_opened_by_open_store_to_its_caller(
+    paths: DataPaths,
+) -> None:
+    """The lifespan opens the store with `open_store` and closes it with
+    `close_store` when the boot fails: `start` must not close it as well."""
+    closed: list[bool] = []
+
+    class Failing(JobStore):
+        def abandon_orphans(self) -> list[Job]:
+            raise ConnectionError("the database went away mid-startup")
+
+        def close(self) -> None:
+            closed.append(True)
+
+    queue = RenderQueue(CONFIG, paths, store=Failing(paths), render=Gate())
+    await queue.open_store()
+    with pytest.raises(ConnectionError):
+        await queue.start()
+    assert closed == []
+
+    await queue.close_store()
+    assert closed == [True]
+    queue.close_thumbnails()
+
+
 # ── the background lane (default-render previews) ─────────────────────────────
 
 

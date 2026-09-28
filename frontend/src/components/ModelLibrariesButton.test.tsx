@@ -3,6 +3,7 @@ import { HttpResponse, http } from 'msw'
 import { describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
 import { MISSING_REF, models } from '../mocks/fixtures'
+import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { renderPage } from '../test/utils'
 import { ModelLibrariesButton } from './ModelLibrariesButton'
@@ -273,5 +274,22 @@ describe('ModelLibrariesButton', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(within(dialog).getByText(/None yet/)).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /^Libraries/ })).toHaveTextContent(/^Libraries$/)
+  })
+})
+
+describe('ModelLibrariesButton, live (#269)', () => {
+  it('shows a library pinned elsewhere while the dialog is open', async () => {
+    const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
+    const dialog = await openDialog(user)
+    await within(dialog).findByRole('list', { name: 'Catalogue' })
+    expect(within(dialog).queryByRole('list', { name: 'Pinned libraries' })).not.toBeInTheDocument()
+
+    await withBosl2()
+    emitRealtime('library.changed', ['libraries', 'model:name-keychain'], {
+      slug: 'name-keychain',
+      name: 'BOSL2',
+    })
+    const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
+    expect(within(pinned).getByRole('listitem', { name: 'BOSL2' })).toBeInTheDocument()
   })
 })

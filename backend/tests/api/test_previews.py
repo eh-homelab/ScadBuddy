@@ -4,6 +4,9 @@ no image of its own and no generated output.
 The render itself is stubbed -- `render_preview` is the render pipeline up to its
 plate image, which the render tests already cover -- so these pin when a preview is
 made, kept, replaced and dropped, and that it never touches the model's history.
+
+The app runs on Postgres (`requires_postgres`), where the previews are rows in
+``model_previews`` (#454); without a database there are none.
 """
 
 from __future__ import annotations
@@ -26,9 +29,10 @@ from scadbuddy.core.paths import BUILTIN_PREFIX, DataPaths
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
+from scadbuddy.render.previews import PreviewScheduler
 from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
-pytestmark = pytest.mark.requires_git
+pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
 SLUG = "widget"
 SOURCE = 'width = 10;\nlabel = "hi";\ncube(width);\n'
@@ -63,8 +67,8 @@ class StubRender:
 
 
 @pytest.fixture
-def settings(settings: Settings) -> Settings:
-    return settings.model_copy(update={"preview_renders": True})
+def settings(settings: Settings, pg_conninfo: str) -> Settings:
+    return settings.model_copy(update={"preview_renders": True, "database_url": pg_conninfo})
 
 
 @pytest.fixture
@@ -76,9 +80,9 @@ def state(app: FastAPI) -> AppState:
 @pytest.fixture
 def stub(state: AppState, paths: DataPaths) -> StubRender:
     render = StubRender(paths)
-    state.previews.render = render
-    state.previews.debounce = 0.0
-    state.previews.interval = 0.0
+    scheduler(state).render = render
+    scheduler(state).debounce = 0.0
+    scheduler(state).interval = 0.0
     return render
 
 
@@ -88,9 +92,14 @@ def client(app: FastAPI, stub: StubRender) -> Iterator[TestClient]:
         yield test_client
 
 
+def scheduler(state: AppState) -> PreviewScheduler:
+    assert state.previews is not None
+    return state.previews
+
+
 def settle(client: TestClient, state: AppState) -> None:
     """Wait until the scheduler has nothing due and nothing in flight."""
-    client.portal.call(state.previews.idle)  # type: ignore[union-attr]
+    client.portal.call(scheduler(state).idle)  # type: ignore[union-attr]
 
 
 def _create(
@@ -182,7 +191,7 @@ def test_a_duplicate_gets_a_preview_of_its_own(
 
     assert sorted(slug for slug, _ in stub.calls) == ["copy", SLUG]
     assert _model(client, "copy")["thumbnail_source"] == "preview"
-    assert paths.model_preview("copy").is_file()
+    assert scheduler(state).store.image("copy") is not None
 
 
 def test_a_model_can_be_deleted_while_its_preview_is_pending(
@@ -195,8 +204,7 @@ def test_a_model_can_be_deleted_while_its_preview_is_pending(
     assert client.delete(f"/api/v1/models/{SLUG}").status_code == 204
     stub.released.set()
     settle(client, state)
-    assert not paths.model_preview(SLUG).exists()
-    assert not paths.model_preview_record(SLUG).exists()
+    assert scheduler(state).store.record(SLUG) is None
 
 
 # ── precedence ────────────────────────────────────────────────────────────────
@@ -207,36 +215,19 @@ def test_its_own_thumbnail_replaces_the_preview_and_removing_it_brings_one_back(
 ) -> None:
     _create(client)
     settle(client, state)
-    assert paths.model_preview(SLUG).is_file()
+    assert scheduler(state).store.image(SLUG) is not None
 
     own = client.put(
         f"/api/v1/models/{SLUG}/thumbnail", files={"file": ("t.png", PNG_BYTES, "image/png")}
     )
     assert own.json()["thumbnail_source"] == "model"
     # Dropped with the write, not later: there is nothing left for it to stand in for.
-    assert not paths.model_preview(SLUG).exists()
+    assert scheduler(state).store.record(SLUG) is None
     settle(client, state)
     assert len(stub.calls) == 1
 
     assert client.delete(f"/api/v1/models/{SLUG}/thumbnail").status_code == 200
     settle(client, state)
-    assert len(stub.calls) == 2
-    assert _model(client)["thumbnail_source"] == "preview"
-
-
-def test_a_record_left_without_its_image_is_rendered_again(
-    client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
-) -> None:
-    """The torn state a drop racing a write could once leave: an ok record for the
-    current source with no image. It must not be trusted as current forever."""
-    _create(client)
-    settle(client, state)
-    paths.model_preview(SLUG).unlink()
-    assert _model(client)["thumbnail_source"] is None
-
-    state.previews.request(SLUG)
-    settle(client, state)
-
     assert len(stub.calls) == 2
     assert _model(client)["thumbnail_source"] == "preview"
 
@@ -254,13 +245,14 @@ def test_a_generated_output_outranks_the_preview_until_it_is_deleted(
     assert model["thumbnail_preview_id"] is None
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").content == PNG_BYTES + b"plate"
     # Nothing left for it to stand in for.
-    assert not paths.model_preview(SLUG).exists()
+    assert scheduler(state).store.record(SLUG) is None
 
     assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
     settle(client, state)
     assert _model(client)["thumbnail_source"] == "preview"
 
 
+@pytest.mark.requires_postgres
 def test_the_preview_is_never_listed_as_an_output(
     client: TestClient, state: AppState, stub: StubRender
 ) -> None:
@@ -330,7 +322,7 @@ def test_a_readme_or_metadata_edit_does_not_re_render(
 def test_a_burst_of_changes_renders_once(
     client: TestClient, state: AppState, stub: StubRender
 ) -> None:
-    state.previews.debounce = 0.3
+    scheduler(state).debounce = 0.3
     _create(client)
     for tags in ("a", "b", "c"):
         client.patch(f"/api/v1/models/{SLUG}", json={"tags": [tags]})
@@ -355,11 +347,11 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
 
     assert _model(client)["thumbnail_source"] is None
     assert client.get(f"/api/v1/models/{SLUG}/thumbnail").status_code == 404
-    assert not paths.model_preview(SLUG).exists()
+    assert scheduler(state).store.image(SLUG) is None
     assert "the default render for a preview failed" in caplog.text
 
     # Asked again with nothing changed: no second attempt.
-    state.previews.request(SLUG)
+    scheduler(state).request(SLUG)
     client.patch(f"/api/v1/models/{SLUG}", json={"name": "Still Broken"})
     settle(client, state)
     assert len(stub.calls) == 1
@@ -378,13 +370,13 @@ def test_a_failed_render_leaves_no_preview_and_is_not_retried_for_the_same_sourc
 def test_a_render_that_times_out_is_a_failure(
     client: TestClient, state: AppState, stub: StubRender, paths: DataPaths
 ) -> None:
-    state.previews.timeout = 0.05
+    scheduler(state).timeout = 0.05
     stub.delay = 1.0
     _create(client)
     settle(client, state)
 
     assert _model(client)["thumbnail_source"] is None
-    record = state.previews.store.record(SLUG)
+    record = scheduler(state).store.record(SLUG)
     assert record is not None
     assert (record.ok, record.error) == (False, "TimeoutError")
 
@@ -399,7 +391,7 @@ def test_a_preview_is_never_committed_or_left_in_the_model_directory(
     versions = client.get(f"/api/v1/models/{SLUG}/versions").json()
     settle(client, state)
 
-    assert paths.model_preview(SLUG).is_file()
+    assert scheduler(state).store.image(SLUG) is not None
     assert client.get(f"/api/v1/models/{SLUG}/versions").json() == versions
     assert sorted(entry.name for entry in paths.model_dir(SLUG).iterdir()) == [
         "model.json",
@@ -431,9 +423,10 @@ def _boot(settings: Settings, stub: StubRender) -> tuple[FastAPI, AppState]:
     """A fresh process on the same data volume, with the stub render."""
     app = create_app(settings)
     booted: AppState = getattr(app.state, STATE_ATTR)
-    booted.previews.render = stub
-    booted.previews.debounce = 0.0
-    booted.previews.interval = 0.0
+    if booted.previews is not None:
+        booted.previews.render = stub
+        booted.previews.debounce = 0.0
+        booted.previews.interval = 0.0
     return app, booted
 
 
@@ -478,17 +471,19 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     settings: Settings, paths: DataPaths
 ) -> None:
     """Off means no preview is served, not merely that none is made: one rendered
-    while previews were on stays on disk, but the catalogue no longer reads it."""
+    while previews were on stays stored, but the catalogue no longer reads it."""
     stub = StubRender(paths)
     app, booted = _boot(settings, stub)
     with TestClient(app) as client:
         _create(client)
         settle(client, booted)
         assert _model(client)["thumbnail_source"] == "preview"
-    assert paths.model_preview(SLUG).is_file()
 
-    app, _ = _boot(settings.model_copy(update={"preview_renders": False}), stub)
+    app, off = _boot(settings.model_copy(update={"preview_renders": False}), stub)
     with TestClient(app) as client:
+        assert off.previews is None
+        assert off.catalogue.previews is not None
+        assert off.catalogue.previews.image(SLUG) is not None
         model = _model(client)
         listed = client.get("/api/v1/models").json()
         served = client.get(f"/api/v1/models/{SLUG}/thumbnail")
@@ -498,6 +493,17 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     assert [entry["thumbnail_source"] for entry in listed if entry["slug"] == SLUG] == [None]
     assert served.status_code == 404
     assert len(stub.calls) == 1
+
+
+def test_without_a_database_there_are_no_previews(settings: Settings, paths: DataPaths) -> None:
+    """Postgres-only (#454): no database means no store, no scheduler and no preview,
+    and nothing written under the data directory in their place."""
+    app, booted = _boot(settings.model_copy(update={"database_url": None}), StubRender(paths))
+    with TestClient(app) as client:
+        _create(client)
+        assert _model(client)["thumbnail_source"] is None
+    assert booted.previews is None
+    assert booted.catalogue.previews is None
 
 
 # ── startup: the backfill never leaks the queue ───────────────────────────────
@@ -521,7 +527,7 @@ def _failing_backfill(
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []
-    for name, part in (("previews", booted.previews), ("queue", booted.queue)):
+    for name, part in (("previews", scheduler(booted)), ("queue", booted.queue)):
         aclose = part.aclose
 
         async def recording(name: str = name, aclose: Any = aclose) -> None:

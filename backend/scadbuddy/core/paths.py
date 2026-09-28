@@ -116,18 +116,10 @@ class DataPaths:
         return self.schema_cache / f"{slug}.json"
 
     @property
-    def previews(self) -> Path:
-        """Default-render previews: the catalogue thumbnail of a model with no image
-        of its own and no generated output (#179 follow-up). Derived, like the
-        schema cache, so under ``cache/`` and never in the models repository."""
-        return self.cache / "previews"
-
-    def model_preview(self, slug: str) -> Path:
-        return self.previews / f"{slug}.png"
-
-    def model_preview_record(self, slug: str) -> Path:
-        """What the preview was rendered from, or that rendering it failed."""
-        return self.previews / f"{slug}.json"
+    def preview_work(self) -> Path:
+        """Scratch space for a default-render preview (#179 follow-up) while it
+        renders. The previews themselves are kept by the preview store, not here."""
+        return self.cache / "preview-work"
 
     @property
     def tombstones(self) -> Path:

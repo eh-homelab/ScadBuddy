@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import logging
+import pkgutil
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from typing import Any
@@ -9,29 +11,11 @@ from typing import Any
 from fastapi import APIRouter, FastAPI
 from pydantic import BaseModel
 
+import scadbuddy.api
 from scadbuddy import __version__
-from scadbuddy.api import (
-    analyzers,
-    assets,
-    fonts,
-    health,
-    jobs,
-    libraries,
-    lsp,
-    metrics,
-    models,
-    outputs,
-    plates,
-    presets,
-    printing,
-    prints,
-    realtime,
-    settings,
-    upstream,
-    versions,
-)
+from scadbuddy.api import health, libraries, media, metrics, models
 from scadbuddy.api.deps import STATE_ATTR, AppState, build_state, probe_openscad_version
-from scadbuddy.api.limits import BODY_LIMITS, BodySizeGate
+from scadbuddy.api.limits import BODY_LIMITS, MEDIA_UPLOAD_PATH, BodySizeGate, RouteLimit
 from scadbuddy.api.static import SPAStaticFiles
 from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
@@ -53,24 +37,24 @@ logger = logging.getLogger(__name__)
 DESCRIPTION = "Self-hosted OpenSCAD customizer for Bambuddy."
 
 
+#: The `scadbuddy.api` modules whose router sits at the root rather than under
+#: :data:`API_PREFIX`.
+ROOT_ROUTE_MODULES = frozenset({"health", "metrics"})
+
+
 def _api_router() -> APIRouter:
+    """Every other module in `scadbuddy.api` that defines a ``router``, under
+    :data:`API_PREFIX`: a new route module is mounted without an edit here. The order
+    is by name and does not matter, because no two routes match the same request
+    (`tests/api/test_routes.py`)."""
     router = APIRouter(prefix=API_PREFIX)
-    router.include_router(models.router)
-    router.include_router(upstream.router)
-    router.include_router(versions.router)
-    router.include_router(presets.router)
-    router.include_router(jobs.router)
-    router.include_router(assets.router)
-    router.include_router(outputs.router)
-    router.include_router(printing.router)
-    router.include_router(analyzers.router)
-    router.include_router(prints.router)
-    router.include_router(settings.router)
-    router.include_router(fonts.router)
-    router.include_router(plates.router)
-    router.include_router(libraries.router)
-    router.include_router(lsp.router)
-    router.include_router(realtime.router)
+    for info in sorted(pkgutil.iter_modules(scadbuddy.api.__path__), key=lambda i: i.name):
+        if info.name in ROOT_ROUTE_MODULES:
+            continue
+        module = importlib.import_module(f"scadbuddy.api.{info.name}")
+        module_router = getattr(module, "router", None)
+        if isinstance(module_router, APIRouter):
+            router.include_router(module_router)
     return router
 
 
@@ -201,18 +185,8 @@ async def _asset_sweeper(state: AppState) -> None:
         await _sweep_duplicate_staging_logged(state)
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    state: AppState = getattr(app.state, STATE_ATTR)
-    state.paths.ensure()
-    # Before the built-in sync: an existing models directory becomes revision 1,
-    # so what a newer image changes in a built-in is a commit on top of it rather
-    # than an unversioned overwrite.
-    await asyncio.to_thread(state.history.ensure_repo)
-    # Before anything shells out to openscad or fc-list: it is what points
-    # fontconfig at the fonts on the data volume.
-    state.fonts.prepare()
-    state.openscad_version = await probe_openscad_version(state.config)
+async def _prepare_catalogue(state: AppState) -> None:
+    """The boot's passes over the catalogue, run before the render queue starts."""
     seed_dir = state.settings.resolve_seed_models_dir()
     if seed_dir is not None:
         await asyncio.to_thread(state.catalogue.sync_builtins, seed_dir)
@@ -231,6 +205,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
+    # And their previews, which are rows in the database rather than files.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_orphan_previews)
+    except Exception:
+        logger.exception("could not sweep orphaned previews")
     # A default render the process died in left its scratch directory, which the
     # orphan sweep never reads: no slug names it. Only one older than any render may
     # run goes, since another replica may be rendering into it. Whether or not
@@ -275,9 +254,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.assets.rebuild_usage)
     except OSError:
         logger.exception("could not recount the upload store")
-    # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
-    # spawns its workers, so a restart never leaves a job stuck "running".
-    await state.queue.start()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    state: AppState = getattr(app.state, STATE_ATTR)
+    # First: without its database ScadBuddy has no settings, so it does not start.
+    # It also brings the schema up to date, before the queue's store opens.
+    await asyncio.to_thread(state.settings_store.open)
+    state.paths.ensure()
+    # Before the built-in sync: an existing models directory becomes revision 1,
+    # so what a newer image changes in a built-in is a commit on top of it rather
+    # than an unversioned overwrite.
+    await asyncio.to_thread(state.history.ensure_repo)
+    # Before anything shells out to openscad or fc-list: it is what points
+    # fontconfig at the fonts on the data volume.
+    state.fonts.prepare()
+    state.openscad_version = await probe_openscad_version(state.config)
+    # Before the first catalogue listing: that reads the previews, which live in the
+    # database when there is one. Closed again if the boot fails before the queue
+    # has started and taken it over.
+    await state.queue.open_store()
+    try:
+        await _prepare_catalogue(state)
+        # RenderQueue.start() fails unfinished jobs and prunes expired ones before
+        # it spawns its workers, so a restart never leaves a job stuck "running".
+        await state.queue.start()
+    except BaseException:
+        await state.queue.close_store()
+        raise
     # After the queue, whose store migrated the database: the bus writes the event
     # log, and `start` refuses (EventLogMissingError) if it is not there yet. What
     # was published before now (the built-in sync's commits) waited.
@@ -297,11 +302,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
     try:
+        # Follows the prints a previous process was following (#268).
+        await state.print_watcher.start()
         # After the queue has opened its store: the jobs in it are references too.
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
             sweeper = asyncio.create_task(_asset_sweeper(state))
-        if state.settings.preview_renders:
+        if state.previews is not None:
             state.previews.start()
             # Every model without a thumbnail gets its default render, one at a time
             # and behind any render someone asks for; one already made from the
@@ -327,15 +334,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         )
         yield
     finally:
-        await state.previews.aclose()
+        if state.previews is not None:
+            await state.previews.aclose()
         if sweeper is not None:
             sweeper.cancel()
             with suppress(asyncio.CancelledError):
                 await sweeper
+        await state.print_watcher.aclose()
         await state.queue.aclose()
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)
         await state.events.aclose()
+        await asyncio.to_thread(state.settings_store.close)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -355,7 +365,19 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     models.install_model_handlers(app)
     # Outside everything that reads a body, so an oversized one is refused on its
     # headers rather than buffered.
-    app.add_middleware(BodySizeGate, limits=BODY_LIMITS)
+    app.add_middleware(
+        BodySizeGate,
+        limits=BODY_LIMITS,
+        routes=[
+            RouteLimit(
+                "POST",
+                MEDIA_UPLOAD_PATH,
+                app_settings.media_upload_max_bytes,
+                "a media upload",
+                "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
+            )
+        ],
+    )
     # Outermost of all (added last): the gate answers a 413 itself without calling
     # inward, so a counter inside it would never see the requests most worth
     # counting. It reads no body, so wrapping the gate costs the gate nothing.
@@ -364,7 +386,7 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(_api_router())
-    _name_in_openapi(app, models.PastedSource)
+    _name_in_openapi(app, models.PastedSource, media.MediaUpload)
 
     # Last, so every API route above wins the match; unknown paths fall back to index.html.
     frontend = app_settings.resolve_frontend_dir()
@@ -373,6 +395,3 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     else:
         logger.info("no frontend bundle found; serving the API only")
     return app
-
-
-app = create_app()

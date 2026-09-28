@@ -159,6 +159,7 @@ def test_a_patch_cannot_set_the_upstream(client: TestClient, model: str) -> None
     assert client.get(f"/api/v1/models/{model}").json()["upstream"] is None
 
 
+@pytest.mark.requires_postgres
 def test_derived_state_is_not_copied(client: TestClient, paths: DataPaths) -> None:
     assert client.get(f"/api/v1/models/{BUILTIN}/schema").status_code == 200
     assert paths.model_schema_cache(BUILTIN).is_file()
