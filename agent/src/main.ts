@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server'
 import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
-import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import { mcpAuthSettings } from './auth/authenticate.js'
 import { OidcProvider, SettingsOidcConfigRepo } from './auth/oidc.js'
 import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
@@ -26,8 +26,10 @@ import { ApprovalActions } from './approvals/mcp.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
 import { shutdown } from './shutdown.js'
+import { harnessTools } from './tools/harness.js'
 import { ALL_TOOLS } from './tools/index.js'
 import { PendingActionStore } from './tools/pending.js'
+import type { ToolServices } from './tools/registry.js'
 
 // Fixed rather than configurable: the listening port is part of the pod
 // contract with the ingress (spec §4.2), not something to tune per deploy, and
@@ -117,6 +119,16 @@ const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : un
 events?.start()
 const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// The registry's services (#251), shared by /mcp and every session's
+// in-process tools. `pending` is swapped for the ai_approvals store below once
+// the sessions (and so the approval service) exist.
+const toolServices: ToolServices = {
+  backend,
+  pending: new PendingActionStore(),
+  pollIntervalMs: 1000,
+  renderWaitMs: 10 * 60_000,
+  publicBaseUrl: config.publicUrl,
+}
 // Plugin packages (#297): the pin is in Postgres (`ai_plugin_packages`); the
 // files under <state dir>/plugins are a cache, rebuilt from the pin and
 // verified against its content hash before each load (plugins/packages/).
@@ -153,6 +165,12 @@ const sessions =
         sql: database.sql,
         paths,
         ...(settings ? { settings } : {}),
+        // ScadBuddy's tools and their tiers (tools/harness.ts). ScadBuddy's own
+        // plugin (plugins/scadbuddy) is not loaded: with `tools: []`
+        // (harness/options.ts) a query has no Skill or Agent tool to use its
+        // skills and subagents (test/harnessWiring.test.ts). The plugins
+        // below (remote, packages, the headless browser's vendored one) are.
+        ...harnessTools(toolServices),
         // Input hashes are HMACs under a key derived from the KEK, so they
         // compare across restarts (approvals/service.ts BINDING).
         ...(kek.ok ? { approvalHashKey: approvalHashKey(kek.kek) } : {}),
@@ -177,6 +195,9 @@ const sessions =
         },
       })
     : undefined
+// MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no database,
+// the in-memory store above, whose actions are never confirmed.
+if (sessions) toolServices.pending = new ApprovalActions(sessions.approvals)
 const stopSweeper = sessions?.approvals.startSweeper(APPROVAL_SWEEP_MS, {
   ...(database ? { ready: database.ready } : {}),
   onError: (err) => console.error('approval expiry sweep failed:', (err as Error).message),
@@ -209,26 +230,16 @@ const app = createApp({
   mcp: {
     tools: ALL_TOOLS,
     resources,
-    services: {
-      backend,
-      // MCP prepare/confirm on ai_approvals (approvals/mcp.ts); with no
-      // database, an in-memory store whose actions are never confirmed.
-      pending: sessions ? new ApprovalActions(sessions.approvals) : new PendingActionStore(),
-      pollIntervalMs: 1000,
-      renderWaitMs: 10 * 60_000,
-      publicBaseUrl: config.publicUrl,
-    },
+    services: toolServices,
     // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     tokens,
-    // Read per request: `oidc` while `ai_settings.mcp_oidc` is enabled (#262),
-    // `bearer` otherwise. A read that throws makes /mcp fail closed (mcp/http.ts).
-    // TODO(#251 follow-up): `disabled` and the anonymous cap from `ai_settings` too.
-    authSettings: async () => {
-      const oidc = await oidcRepo?.get()
-      return oidc?.enabled ? { ...DEFAULT_MCP_AUTH, mode: 'oidc', oidc } : DEFAULT_MCP_AUTH
-    },
+    // Read per request (auth/authenticate.ts `mcpAuthSettings`): `oidc` while
+    // `ai_settings.mcp_oidc` is enabled (#262), otherwise the `mcp_auth_mode`
+    // and `mcp_anonymous_cap` keys. A read that throws makes /mcp fail closed
+    // (mcp/http.ts).
+    authSettings: mcpAuthSettings(settings, (message) => console.warn(`mcp auth: ${message}`), oidcRepo),
     oidc: oidcProvider,
     publicUrl: config.publicUrl,
   },

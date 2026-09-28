@@ -20,6 +20,15 @@ export class DownloadBlockedError extends Error {
   }
 }
 
+/** The escape popup was closed before the file had loaded, so there is nowhere to save it. */
+export class DownloadWindowClosedError extends DownloadBlockedError {
+  constructor() {
+    super()
+    this.message = 'The download window was closed before the file was ready. Try again.'
+    this.name = 'DownloadWindowClosedError'
+  }
+}
+
 /**
  * `load` the file and save it as `filename`. Downloads have to survive the sandbox:
  * Bambuddy's frame has no `allow-downloads`, so Chromium silently drops a download
@@ -30,8 +39,9 @@ export class DownloadBlockedError extends Error {
  *
  * The popup is opened before `load` is awaited, while the click still allows one: a
  * large file can take longer to fetch than the browser keeps that permission. If it is
- * blocked, this rejects with `DownloadBlockedError` rather than fall back to the
- * frame's own anchor, which would fail without a word.
+ * blocked, this rejects with `DownloadBlockedError`, and if it is closed before the file
+ * has loaded, with `DownloadWindowClosedError`, rather than fall back to the frame's own
+ * anchor, which would fail without a word.
  */
 export async function downloadBlob(
   load: () => Promise<Blob>,
@@ -40,9 +50,14 @@ export async function downloadBlob(
 ): Promise<void> {
   const popup = embedded ? openDownloadWindow() : null
   if (embedded && !popup) throw new DownloadBlockedError()
+  let url: string | null = null
   try {
-    const url = URL.createObjectURL(await load())
-    const host = popup?.document ?? document
+    const blob = await load()
+    // Closed while the file loaded (a blank tab is easily closed): its `document` is
+    // null now, and the frame's own anchor would be dropped silently (#612).
+    if (popup && (popup.closed || !popup.document)) throw new DownloadWindowClosedError()
+    url = URL.createObjectURL(blob)
+    const host = popup ? popup.document : document
     const anchor = host.createElement('a')
     anchor.href = url
     anchor.download = filename
@@ -51,12 +66,17 @@ export async function downloadBlob(
     anchor.click()
     anchor.remove()
     // The anchor has been clicked; give the browser time to read the blob.
-    setTimeout(() => URL.revokeObjectURL(url), 60_000)
+    const clicked = url
+    setTimeout(() => URL.revokeObjectURL(clicked), 60_000)
+    url = null
     // The download has started; the blank window has nothing else to show.
     if (popup) setTimeout(() => popup.close(), 1000)
   } catch (cause) {
     popup?.close()
     throw cause
+  } finally {
+    // Anything that failed after the URL was made: nothing will read it.
+    if (url !== null) URL.revokeObjectURL(url)
   }
 }
 
