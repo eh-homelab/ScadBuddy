@@ -9,8 +9,13 @@ from typing import Any, cast
 import numpy as np
 import trimesh
 
-from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest, FilamentSlot
-from scadbuddy.bambuddy.pipelines import PipelineView
+from scadbuddy.analyzers.context import (
+    AnalysisContext,
+    AnalysisRequest,
+    FilamentSlot,
+    base_profile,
+)
+from scadbuddy.bambuddy.resolver import PrintChoices
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.geometry import GeometryAnalysis, analyze_geometry
 from scadbuddy.render.glb import BoundingBox
@@ -75,20 +80,15 @@ def output(
     )
 
 
-def pipeline(**extra: Any) -> PipelineView:
+def choices(size: str = "0.4", bed_type: str = "Textured PEI Plate", **extra: Any) -> PrintChoices:
+    """The print dialog's choices: one nozzle size on both sides, a tier and a plate."""
     body: dict[str, Any] = {
-        "id": 1,
-        "name": "Default",
-        "target_kind": "specific_printer",
-        "target_printer_id": 1,
-        "fanout_strategy": "max_parallel",
-        "bed_type": "Textured PEI Plate",
-        "process_preset_name": "0.20mm Standard @BBL H2C 0.4 nozzle",
-        "nozzle_diameter": "0.4",
-        "printer_ids": [1],
+        "nozzles": [{"size": size}, {"size": size}],
+        "tier": "standard",
+        "bed_type": bed_type,
     }
     body.update(extra)
-    return PipelineView.model_validate(body)
+    return PrintChoices.model_validate(body)
 
 
 def silk_slot(slot_id: int = 1) -> FilamentSlot:
@@ -101,7 +101,6 @@ def silk_slot(slot_id: int = 1) -> FilamentSlot:
         subtype="Tri Color",
         brand="Bambu",
         preset_name="Bambu PLA Silk",
-        origin="spool",
     )
 
 
@@ -113,7 +112,6 @@ def basic_slot(slot_id: int = 1) -> FilamentSlot:
         subtype="Basic",
         brand="Bambu",
         preset_name="Bambu PLA Basic",
-        origin="spool",
     )
 
 
@@ -122,4 +120,7 @@ def context(**fields: Any) -> AnalysisContext:
     fields.setdefault("params", {"width": 12})
     fields.setdefault("request", AnalysisRequest())
     fields.setdefault("plate", plate_for("H2C"))
-    return AnalysisContext(**fields)
+    built = AnalysisContext(**fields)
+    # As ``gather_context`` does last: the base the diffs are judged against.
+    built.base = base_profile(built.request, built.printer, built.filaments, built.plate)
+    return built

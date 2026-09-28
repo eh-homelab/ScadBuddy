@@ -1,76 +1,153 @@
-"""What an analyzer sees: the #84 print request and everything read to judge it.
+"""What an analyzer sees: the print dialog's request and everything read to judge it.
 
-The base is the request the print dialog already submits (print-flow spec §1): the
-pipeline and its presets, the printer, the per-slot filament plan, the plate and the
-options overlay. Every input is read with the calls ScadBuddy already makes; one that
-cannot be read is recorded in :attr:`AnalysisContext.unavailable` with the reason, and
-the analyzers that need it are skipped, saying why, rather than guessing.
+The base is the request ``POST /print/outputs/{id}/run`` takes since the spool-first
+flow (#335, spec 2026-09-27 §2/§4): the printer, one spool per plate slot, and the
+choices (nozzles, quality tier or process, plate type, per-slot preset overrides) the
+resolver derives every Bambu preset from. There is no pipeline any more. Every input
+is read with calls ScadBuddy already makes; one that cannot be read is recorded in
+:attr:`AnalysisContext.unavailable` with the reason, and the analyzers that need it
+are skipped, saying why, rather than guessing.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers.model import ScopeRef
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan
-from scadbuddy.bambuddy.models import EligibilityReport, Printer
+from scadbuddy.bambuddy.models import Printer
 from scadbuddy.bambuddy.options import PrintOptions
-from scadbuddy.bambuddy.pipelines import PipelineView
+from scadbuddy.bambuddy.resolver import TIERS, PrintChoices, printer_preset_name
 from scadbuddy.library.outputs import OutputMeta
 from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.plate import PlateGeometry
 from scadbuddy.render.schema import ParamValue
 
 #: The inputs an analyzer can declare it needs.
-InputName = Literal[
-    "output", "geometry", "plate", "pipeline", "printer", "filaments", "inventory", "eligibility"
-]
+InputName = Literal["output", "geometry", "plate", "printer", "choices", "filaments", "inventory"]
 INPUT_NAMES: tuple[InputName, ...] = (
     "output",
     "geometry",
     "plate",
-    "pipeline",
     "printer",
+    "choices",
     "filaments",
     "inventory",
-    "eligibility",
 )
 
 
 class AnalysisRequest(BaseModel):
-    """The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84).
+    """The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).
 
-    Every field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`;
-    ``pipeline_id`` omitted is the model's default, then the global one.
+    Every field means what it means on
+    :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
+    choices are optional here: an analysis can run before the dialog has them, and
+    the analyzers that need them say so.
     """
 
-    pipeline_id: int | None = None
     printer_id: int | None = None
     filament_plan: FilamentPlan | None = None
+    choices: PrintChoices | None = None
     plate_id: int = Field(default=1, ge=1)
-    bed_type: str | None = Field(default=None, max_length=64)
     copies: int | None = Field(default=None, ge=1, le=1000)
     options: PrintOptions = Field(default_factory=PrintOptions)
 
 
 class FilamentSlot(BaseModel):
-    """One plate slot's filament, as far as the plan and the pipeline name it."""
+    """One plate slot's spool, as the plan chose it and the inventory describes it."""
 
     slot_id: int
-    spool_id: int | None = None
+    spool_id: int
     material: str | None = None
     subtype: str | None = None
     brand: str | None = None
-    #: The slicer preset the spool names, or the pipeline's own preset for this slot.
+    #: The slicer preset the spool names (``slicer_filament_name``).
     preset_name: str | None = None
-    #: ``spool`` when the plan chose it, ``pipeline`` when only the pipeline names it.
-    origin: Literal["spool", "pipeline"]
+
+
+class BaseSlot(BaseModel):
+    slot_id: int
+    spool_id: int | None = None
+    #: What the resolver slices this slot with, as far as it can be named without the
+    #: catalogue: an Advanced override's ``source:id``, else the spool's own preset.
+    preset: str | None = None
+
+
+class BaseProfile(BaseModel):
+    """What the diffs are against: the presets the resolver derives from the choices.
+
+    Names follow the resolver's own derivation (``resolver.TIERS`` and
+    ``printer_preset_name``), so they are the presets a run would slice with.
+    """
+
+    printer_id: int | None = None
+    printer_model: str | None = None
+    nozzle_sizes: list[str] = Field(default_factory=list)
+    high_flow: bool = False
+    printer_preset_name: str | None = None
+    process_preset_name: str | None = None
+    bed_type: str | None = None
+    plate_id: int = 1
+    plate_model: str | None = None
+    slots: list[BaseSlot] = Field(default_factory=list)
+    copies: int = 1
+
+    def identity(self) -> dict[str, Any]:
+        """What a diff is judged against: moving any of it makes a preview stale."""
+        return {
+            "printer": self.printer_id,
+            "printer_preset": self.printer_preset_name,
+            "process_preset": self.process_preset_name,
+            "bed_type": self.bed_type,
+            "plate": self.plate_id,
+            "slots": [(slot.slot_id, slot.spool_id, slot.preset) for slot in self.slots],
+        }
+
+
+def base_profile(
+    request: AnalysisRequest,
+    printer: Printer | None,
+    filaments: list[FilamentSlot],
+    plate: PlateGeometry | None,
+) -> BaseProfile:
+    choices = request.choices
+    sizes: list[str] = [str(nozzle.size) for nozzle in choices.nozzles] if choices else []
+    process = None
+    if choices is not None:
+        process = choices.process_name or TIERS.get(sizes[0], {}).get(choices.tier or "standard")
+    overrides = choices.filament_overrides if choices else {}
+    slots = []
+    for slot in filaments:
+        ref = overrides.get(slot.slot_id)
+        slots.append(
+            BaseSlot(
+                slot_id=slot.slot_id,
+                spool_id=slot.spool_id,
+                preset=f"{ref.source}:{ref.id}" if ref is not None else slot.preset_name,
+            )
+        )
+    return BaseProfile(
+        printer_id=printer.id if printer else request.printer_id,
+        printer_model=printer.model if printer else None,
+        nozzle_sizes=sizes,
+        high_flow=any(nozzle.flow == "high_flow" for nozzle in choices.nozzles)
+        if choices
+        else False,
+        printer_preset_name=printer_preset_name(choices.nozzles) if choices else None,
+        process_preset_name=process,
+        bed_type=choices.bed_type if choices else None,
+        plate_id=request.plate_id,
+        plate_model=plate.model if plate else None,
+        slots=slots,
+        copies=request.copies or request.options.quantity or 1,
+    )
 
 
 @dataclass
@@ -83,42 +160,50 @@ class AnalysisContext:
     model_3mf: Path | None = None
     geometry: GeometryAnalysis | None = None
     plate: PlateGeometry | None = None
-    pipeline: PipelineView | None = None
     printer: Printer | None = None
     filaments: list[FilamentSlot] = field(default_factory=list)
     #: The filament step's own payload (inventory joined to assignments), when the
     #: output already has a Bambuddy library file to read the plate's slots from.
     filament_options: FilamentOptions | None = None
-    eligibility: EligibilityReport | None = None
     unavailable: dict[InputName, str] = field(default_factory=dict)
+    base: BaseProfile = field(default_factory=BaseProfile)
+
+    @property
+    def choices(self) -> PrintChoices | None:
+        return self.request.choices
 
     def has(self, name: InputName) -> bool:
         return name not in self.unavailable and getattr(self, _ATTRIBUTE[name]) not in (None, [])
 
     @property
     def bed_type(self) -> str | None:
-        """The plate type this print slices for: the request's, else the pipeline's."""
-        if self.request.bed_type:
-            return self.request.bed_type
-        return self.pipeline.bed_type if self.pipeline else None
+        return self.request.choices.bed_type if self.request.choices else None
 
     @property
     def copies(self) -> int:
-        return self.request.copies or self.request.options.quantity or 1
+        return self.base.copies
+
+    @property
+    def subject(self) -> str:
+        """What a decision or a preview is about: the output, else the configuration."""
+        return self.output.id if self.output else configuration_key(self.slug, self.params)
 
     def scopes(self) -> list[ScopeRef]:
-        """Every scope a decision about this print can be stored at, broadest first."""
+        """Every scope a decision about this print can be stored at, broadest first.
+
+        A material's own key ranks below its material/subtype key, so ``pla/silk``
+        beats ``pla``.
+        """
         found: list[ScopeRef] = [ScopeRef(kind="global")]
-        for key in material_keys(self.filaments):
+        bare = [key for slot in self.filaments for key in material_keys(slot)[:1]]
+        typed = [key for slot in self.filaments for key in material_keys(slot)[1:]]
+        for key in dict.fromkeys([*bare, *typed]):
             found.append(ScopeRef(kind="material", key=key))
-        printer_id = self.printer.id if self.printer else None
         model = self.printer.model if self.printer and self.printer.model else None
-        if model is None and self.pipeline is not None:
-            model = self.pipeline.target_model_class
         if model:
-            found.append(ScopeRef(kind="printer", key=f"model:{model}"))
-        if printer_id is not None:
-            found.append(ScopeRef(kind="printer", key=f"id:{printer_id}"))
+            found.append(ScopeRef(kind="printer", key=f"model:{scope_token(model)}"))
+        if self.printer is not None:
+            found.append(ScopeRef(kind="printer", key=f"id:{self.printer.id}"))
         found.append(ScopeRef(kind="template", key=self.slug))
         if self.output is not None and self.output.model_version:
             found.append(
@@ -129,16 +214,24 @@ class AnalysisContext:
             found.append(ScopeRef(kind="print", key=self.output.id))
         return found
 
+    def scopes_for(self, slots: list[int]) -> list[ScopeRef]:
+        """:meth:`scopes` for a finding about ``slots`` (every slot when empty): a
+        material scope applies only when one of those slots is that material."""
+        concerned = [slot for slot in self.filaments if not slots or slot.slot_id in slots]
+        allowed = {key for slot in concerned for key in material_keys(slot)}
+        return [
+            scope for scope in self.scopes() if scope.kind != "material" or scope.key in allowed
+        ]
+
 
 _ATTRIBUTE: dict[InputName, str] = {
     "output": "output",
     "geometry": "geometry",
     "plate": "plate",
-    "pipeline": "pipeline",
     "printer": "printer",
+    "choices": "choices",
     "filaments": "filaments",
     "inventory": "filament_options",
-    "eligibility": "eligibility",
 }
 
 
@@ -148,17 +241,19 @@ def configuration_key(slug: str, params: dict[str, ParamValue]) -> str:
     return f"{slug}#{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:16]}"
 
 
-def material_keys(filaments: list[FilamentSlot]) -> list[str]:
-    """``pla`` and ``pla/silk`` for each distinct material on the plate, in slot order."""
-    keys: list[str] = []
-    for slot in filaments:
-        if not slot.material:
-            continue
-        material = slot.material.strip().lower()
-        for key in (
-            material,
-            f"{material}/{slot.subtype.strip().lower()}" if slot.subtype else None,
-        ):
-            if key and key not in keys:
-                keys.append(key)
-    return keys
+_UNSAFE = re.compile(r"[^a-z0-9 +._-]+")
+
+
+def scope_token(raw: str) -> str:
+    """``raw`` spelled so a scope key accepts it: lower case, anything else a ``-``."""
+    token = _UNSAFE.sub("-", raw.strip().lower()).strip(" +._-")
+    return token or "unknown"
+
+
+def material_keys(slot: FilamentSlot) -> list[str]:
+    """``pla`` then ``pla/silk`` for a slot, in the form the material scope takes."""
+    if not slot.material:
+        return []
+    material = scope_token(slot.material)
+    subtype = scope_token(slot.subtype) if slot.subtype and slot.subtype.strip() else None
+    return [material, f"{material}/{subtype}"] if subtype else [material]

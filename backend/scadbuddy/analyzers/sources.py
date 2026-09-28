@@ -187,18 +187,6 @@ LOW_FILAMENT_RULE = Source(
     supports=["SB3002"],
 )
 
-ELIGIBILITY_RULE = Source(
-    url=f"{_PRINT_FLOW}#the-two-warnings",
-    title='ScadBuddy print-flow design §4, "The two warnings"',
-    quote=(
-        "Whether two filaments can share a plate, whether a printer can run the job, "
-        "whether a slot can reach the extruder it slices for — those are Bambuddy's "
-        "questions, and its eligibility report (#86) answers them in the same dialog."
-    ),
-    accessed=ACCESSED,
-    supports=["SB5001"],
-)
-
 ANALYZER_CRASH = Source(
     url="https://github.com/eh-homelab/ScadBuddy/issues/284",
     title="#284 Print analyzers & fixers",

@@ -17,11 +17,11 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.context import AnalysisContext
+from scadbuddy.analyzers.decisions import PostgresDecisionStore
 from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic, Fix, Source, change
 from scadbuddy.analyzers.sources import ACCESSED
 from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.events import Event, InProcessEventBus
-from tests.api.test_print import presets_routes
 from tests.api.test_send import BASE, configure, make_output
 from tests.bambuddy.conftest import recording
 
@@ -44,11 +44,8 @@ def _ok(response: httpx.Response, status: int = 200) -> Any:
 
 
 def bambuddy_routes(*, spools: httpx.Response | None = None) -> dict[str, respx.Route]:
-    presets_routes()
+    """Only what an analysis reads: printers and the spool inventory."""
     return {
-        "pipelines": respx.get(f"{API}/slicer-pipelines/").mock(
-            return_value=httpx.Response(200, json=recording("slicer-pipelines-configured.json"))
-        ),
         "printers": respx.get(f"{API}/printers/").mock(
             return_value=httpx.Response(200, json=recording("printers.json"))
         ),
@@ -58,10 +55,16 @@ def bambuddy_routes(*, spools: httpx.Response | None = None) -> dict[str, respx.
     }
 
 
+#: The spool-first dialog's request (#335): printer 1 (the recording's H2C), the silk
+#: spool in slot 1, 0.4 nozzles on both sides, and the SuperTack plate.
 SILK_REQUEST: dict[str, Any] = {
-    "pipeline_id": 1,
+    "printer_id": 1,
     "filament_plan": {"slots": [{"slot_id": 1, "spool_id": SILK_SPOOL}]},
-    "bed_type": "Supertack Plate",
+    "choices": {
+        "nozzles": [{"size": "0.4"}, {"size": "0.4"}],
+        "tier": "standard",
+        "bed_type": "Supertack Plate",
+    },
 }
 
 
@@ -96,13 +99,14 @@ def test_without_bambuddy_the_geometry_analyzers_run_and_the_rest_say_why(
     assert report["summary"]["headline"] == "Nothing to report"
     inputs = {row["name"]: row for row in report["inputs"]}
     assert inputs["geometry"]["available"] is True
-    assert inputs["pipeline"] == {
-        "name": "pipeline",
+    assert inputs["printer"] == {
+        "name": "printer",
         "available": False,
         "reason": "Bambuddy is not configured",
     }
+    assert inputs["choices"]["reason"] == "no nozzle, quality or plate was chosen"
     skipped = {row["id"] for row in report["skipped"]}
-    assert {"SB2001", "SB3002", "SB5001"} <= skipped
+    assert {"SB2001", "SB2002", "SB3002"} <= skipped
     assert "SB1001" not in skipped
     kinds = [scope["kind"] for scope in report["scopes"]]
     assert kinds == ["global", "template", "template_version", "configuration", "print"]
@@ -140,7 +144,7 @@ def test_unknown_subjects_are_404(client: TestClient) -> None:
 
 
 @respx.mock
-def test_silk_on_supertack_is_found_from_the_plan_and_the_pipeline(
+def test_silk_on_supertack_is_found_from_the_plan_and_the_choices(
     client: TestClient, model: str
 ) -> None:
     configure(client)
@@ -162,15 +166,17 @@ def test_silk_on_supertack_is_found_from_the_plan_and_the_pipeline(
     assert silk["evidence"] == [] and silk["why"] is None
     assert silk["fixes"][0]["id"] == "silk-gloss"
 
-    # The recording's pipeline slices for a 0.2 nozzle on printer 1, an H2C.
-    assert report["base"]["pipeline"]["nozzle_diameter"] == "0.2"
-    assert report["base"]["printer_model"] == "H2C"
-    assert report["base"]["bed_type"] == "Supertack Plate"
+    # The base is what the resolver derives from the choices, on printer 1 (an H2C).
+    base = report["base"]
+    assert base["printer_model"] == "H2C"
+    assert base["printer_preset_name"] == "Bambu Lab H2C 0.4 nozzle"
+    assert base["process_preset_name"] == "0.20mm Standard @BBL H2C"
+    assert base["bed_type"] == "Supertack Plate"
     scopes = [(scope["kind"], scope["key"]) for scope in report["scopes"]]
     assert ("material", "pla/tri color") in scopes and ("printer", "id:1") in scopes
-    # Not uploaded, so nothing asked Bambuddy's eligibility or plate slots.
+    # Not uploaded, so nothing asked Bambuddy for the plate's slots.
     inputs = {row["name"]: row for row in report["inputs"]}
-    assert inputs["eligibility"]["reason"] == "this output has not been uploaded to Bambuddy yet"
+    assert inputs["inventory"]["reason"] == "this output has not been uploaded to Bambuddy yet"
     assert routes["spools"].called
     assert not any(call.request.method == "POST" for call in respx.calls)
 
@@ -232,31 +238,13 @@ VERIFIED = Analyzer(
 
 
 @respx.mock
-def test_an_uploaded_output_is_judged_on_eligibility_and_inventory_too(
+def test_an_uploaded_output_is_judged_on_the_inventory_too(
     client: TestClient, model: str, app: FastAPI
 ) -> None:
     configure(client)
     bambuddy_routes()
     output_id = make_output(client, model)
     getattr(app.state, STATE_ATTR).outputs.record_send(output_id, library_file_id=41)
-    check = respx.post(f"{API}/slicer-pipelines/1/check-eligibility").mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                "ok": False,
-                "target_kind": "specific_printer",
-                "issues": [
-                    {
-                        "kind": "filament_type_mismatch",
-                        "slot_index": 1,
-                        "expected": "PETG",
-                        "actual": "PLA",
-                    }
-                ],
-                "printer_reports": [],
-            },
-        )
-    )
     respx.get(f"{API}/library/files/41/filament-requirements").mock(
         return_value=httpx.Response(
             200,
@@ -279,15 +267,12 @@ def test_an_uploaded_output_is_judged_on_eligibility_and_inventory_too(
     )
 
     report = _run(client, output_id, request=SILK_REQUEST, detail="advanced")
-    assert check.calls.last.request.read() == b'{"source_library_file_id":41,"force":false}'
     found = {row["key"]: row for row in report["diagnostics"]}
-    assert found["SB5001:1"]["severity"] == "error"
     low = found["SB3002:slot-1"]
+    assert low["slots"] == [1]
     assert {e["label"]: e["value"] for e in low["evidence"]}["needed per copy"] == 2000
-    assert report["summary"]["errors"] == 1
-    # Reads only: the eligibility check is the one POST, and it starts nothing.
-    posts = [call.request.url.path for call in respx.calls if call.request.method != "GET"]
-    assert posts == ["/api/v1/slicer-pipelines/1/check-eligibility"]
+    # Reads only: nothing is uploaded, sliced or queued.
+    assert all(call.request.method == "GET" for call in respx.calls)
 
 
 # --- without a database -------------------------------------------------------------
@@ -314,6 +299,7 @@ def test_without_a_database_nothing_is_recorded_and_nothing_is_written(
         "fingerprint": "0" * 64,
         "confirm": True,
     }
+    events.clear()
     for response in (
         client.post("/api/v1/analyzers/decisions", json=decision),
         client.get("/api/v1/analyzers/decisions"),
@@ -323,5 +309,33 @@ def test_without_a_database_nothing_is_recorded_and_nothing_is_written(
         problem = _ok(response, 503)
         assert problem["type"].endswith("/database-required")
         assert "SCADBUDDY_DATABASE_URL" in problem["detail"]
-    assert all(event.kind != "analyzer.decision" for event in events)
+    assert [event for event in events if event.kind == "analyzer.decision"] == []
     assert sorted(str(path) for path in data_dir.rglob("*") if "analyzer" in path.name) == before
+
+
+def test_a_database_that_cannot_be_reached_degrades_to_a_503(
+    client: TestClient, model: str, app: FastAPI, events: list[Event]
+) -> None:
+    # Nothing listens on port 1: every connect is refused, and the store gives up
+    # within its connect timeout instead of hanging the request.
+    state = getattr(app.state, STATE_ATTR)
+    state.decisions = PostgresDecisionStore(
+        "postgresql://nobody@127.0.0.1:1/none", connect_timeout=1.0
+    )
+    try:
+        output_id = make_output(client, model)
+        report = _run(client, output_id)
+        assert report["decisions_available"] is False
+        assert "cannot be reached" in report["decisions_reason"]
+        events.clear()
+        decision = {"diagnostic_id": "SB1003", "kind": "ignore", "scope": {"kind": "global"}}
+        for response in (
+            client.post("/api/v1/analyzers/decisions", json=decision),
+            client.get("/api/v1/analyzers/decisions"),
+        ):
+            problem = _ok(response, 503)
+            assert problem["type"].endswith("/database-unavailable")
+        assert [event for event in events if event.kind == "analyzer.decision"] == []
+    finally:
+        state.decisions.close()
+        state.decisions = None

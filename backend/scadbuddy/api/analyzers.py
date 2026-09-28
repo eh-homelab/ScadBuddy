@@ -4,24 +4,33 @@ Run the bundled analyzers over an output or a configuration, preview a fix, appl
 one, and record or remove a decision at a scope. Agent tools (#368) wrap these; the
 UI is a later story.
 
-**Applying is outward.** Every fix target lands in Bambuddy when the print is sent
-(AI spec §8.1), so applying is the two-step "prepare, then confirm" of §8.2: the
-preview returns the diff and a fingerprint of it, and the apply must carry that
-fingerprint back with ``confirm: true``. A diff that changed in between is refused
-rather than applied unseen. A target still on the AI spec's §3.2 "to verify" list
-cannot be applied at all; the problem names the item it waits on.
+**Applying records a decision; it sends nothing.** Apply stores an ``accept`` row in
+ScadBuddy's own database, which is the ``write`` tier (AI spec §8.1): reversible by
+deleting it. Nothing reads ``accepted_changes`` into a print yet. The send path that
+eventually does must put the diff through §8.2's outward approval (a pending action
+and a human approval in the UI); ``confirm`` here is not that approval. What apply
+does guarantee is that it lands exactly what was previewed: the preview returns a
+fingerprint of the diff, the scope it will be stored at, the subject (output or
+configuration) and the base it was judged against, and the apply must carry that
+fingerprint back. A target still on the AI spec's §3.2 "to verify" list cannot be
+applied at all; the problem names the item it waits on.
 """
 
 from __future__ import annotations
 
 import asyncio
+import logging
+from collections.abc import Callable
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import APIRouter, Path, Query, Response, status
-from pydantic import BaseModel, Field, model_validator
+from psycopg_pool import PoolTimeout
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
+from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.context import AnalysisContext, AnalysisRequest
-from scadbuddy.analyzers.decisions import new_decision_id, valid_scope
+from scadbuddy.analyzers.decisions import DecisionStore, new_decision_id, valid_scope
 from scadbuddy.analyzers.gather import gather_context
 from scadbuddy.analyzers.model import (
     SCOPE_ORDER,
@@ -30,6 +39,7 @@ from scadbuddy.analyzers.model import (
     Fix,
     ScopeKind,
     ScopeRef,
+    diff_digest,
     fingerprint,
 )
 from scadbuddy.analyzers.runner import (
@@ -58,6 +68,8 @@ from scadbuddy.library.settings_store import SettingsStore
 from scadbuddy.library.slugs import MAX_MODEL_ID_LENGTH, MODEL_ID_PATTERN
 from scadbuddy.render.schema import ParamValue
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/analyzers", tags=["analyzers"])
 
 #: Problem ``type`` URIs, as ``bambuddy/errors.py`` spells its own.
@@ -65,17 +77,24 @@ UNVERIFIED_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-unverified"
 STALE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-fix-stale"
 CONFIRMATION_PROBLEM = "https://scadbuddy.dev/problems/confirmation-required"
 SCOPE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-scope"
+UNKNOWN_RULE_PROBLEM = "https://scadbuddy.dev/problems/analyzer-unknown-rule"
+DATABASE_UNAVAILABLE_PROBLEM = "https://scadbuddy.dev/problems/database-unavailable"
 
 NO_DATABASE = (
     "decisions are stored in Postgres and SCADBUDDY_DATABASE_URL is not set, so none "
     "were applied and none can be recorded"
 )
 DIAGNOSTIC_ID_PATTERN = r"^SB[0-9]{4}$"
+#: Where an applied diff would land, and what applying does today.
 ROUTE_NOTE = (
-    "Accepting a settings diff sends this print by slicing and queueing rather than "
-    "running the pipeline, because a pipeline run carries no per-print settings "
-    "(AI spec §11, print-flow spec §2)."
+    "Applying records this diff as a decision at its scope; nothing sends it yet. A "
+    "print that uses it will have to slice and queue with the diff, since a pipeline "
+    "run carries no per-print settings (AI spec §11), and will go through the outward "
+    "approval of AI spec §8.2 before it does."
 )
+
+#: What a database that cannot be reached raises through the store.
+DATABASE_ERRORS = (psycopg.OperationalError, PoolTimeout)
 
 
 class AnalysisTarget(BaseModel):
@@ -85,6 +104,8 @@ class AnalysisTarget(BaseModel):
     parameters when there is one; without one, the analyzers that need a render are
     skipped and say so.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     output_id: str | None = Field(default=None, pattern=OUTPUT_ID_PATTERN)
     slug: str | None = Field(default=None, pattern=MODEL_ID_PATTERN, max_length=MAX_MODEL_ID_LENGTH)
@@ -100,26 +121,36 @@ class AnalysisTarget(BaseModel):
 
 
 class AnalysisRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target: AnalysisTarget
     request: AnalysisRequest = Field(default_factory=AnalysisRequest)
     detail: Detail = "simple"
 
 
 class FixRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     target: AnalysisTarget
     request: AnalysisRequest = Field(default_factory=AnalysisRequest)
     #: A diagnostic's ``key`` from the run (``SB2001``, ``SB3002:slot-2``).
     diagnostic_key: str = Field(max_length=100)
     fix_id: str = Field(max_length=100)
+    #: Where the acceptance would be stored: one of the diagnostic's scopes. Omitted
+    #: means the narrowest, this print (or this configuration, when it has no render
+    #: yet), which is simple mode's default in #284. It is part of the fingerprint.
+    scope: ScopeRef | None = None
 
 
 class FixPreview(BaseModel):
     diagnostic_id: str
     diagnostic_key: str
     fix: Fix
-    #: What an apply must carry back, so it lands exactly this diff.
+    #: The scope this preview was made for; the apply must name the same one.
+    scope: ScopeRef
+    #: Binds the diff, the scope, the subject and the base; the apply carries it back.
     fingerprint: str
-    #: The change reaches Bambuddy, so applying needs ``confirm: true``.
+    #: Some change would reach Bambuddy once a send consumes accepted diffs.
     outward: bool
     #: False while any change waits on an AI spec §3.2 item; ``blockers`` names them.
     applicable: bool
@@ -131,11 +162,8 @@ class FixPreview(BaseModel):
 
 class FixApply(FixRequest):
     fingerprint: str = Field(min_length=64, max_length=64)
-    confirm: bool = False
-    #: Where to remember the acceptance: one of the run's ``scopes``. Omitted means the
-    #: narrowest, this print (or this configuration, when it has no render yet), which
-    #: is simple mode's default in #284.
-    scope: ScopeRef | None = None
+    #: The caller confirms the previewed diff. Strict: only JSON ``true`` confirms.
+    confirm: StrictBool = False
     reason: str | None = Field(default=None, max_length=500)
 
 
@@ -143,18 +171,31 @@ class DecisionCreate(BaseModel):
     """Ignore or suppress a diagnostic at a scope. Accepting goes through a fix's
     apply, which is where its diff is confirmed."""
 
+    model_config = ConfigDict(extra="forbid")
+
     diagnostic_id: str = Field(pattern=DIAGNOSTIC_ID_PATTERN)
-    #: One instance (a diagnostic ``key``), or ``null`` for every instance of the rule.
-    instance: str | None = Field(default=None, max_length=100)
+    #: One instance (a diagnostic ``key``: the rule id, or the rule id, a colon and what
+    #: tells its findings apart), or ``null`` for every instance of the rule.
+    instance: str | None = Field(default=None, min_length=1, max_length=100)
     kind: Literal["ignore", "suppress"]
     scope: ScopeRef
     reason: str | None = Field(default=None, max_length=500)
-    enforced: bool = False
+    enforced: StrictBool = False
+    #: Needed to enforce a suppression of an ``error`` rule over every narrower scope.
+    confirm: StrictBool = False
 
     @model_validator(mode="after")
-    def _suppress_says_why(self) -> DecisionCreate:
+    def _well_formed(self) -> DecisionCreate:
         if self.kind == "suppress" and not (self.reason and self.reason.strip()):
             raise ValueError("a suppression needs a reason, as #pragma warning disable does")
+        if self.instance is not None and not (
+            self.instance == self.diagnostic_id
+            or self.instance.startswith(f"{self.diagnostic_id}:")
+        ):
+            raise ValueError(
+                f"an instance of {self.diagnostic_id} is {self.diagnostic_id!r} or starts "
+                f"with {self.diagnostic_id + ':'!r}"
+            )
         return self
 
 
@@ -165,6 +206,23 @@ def _require_scope(scope: ScopeRef) -> None:
             f"{scope.key!r} is not a {scope.kind} scope key",
             type_=SCOPE_PROBLEM,
         )
+
+
+def _unavailable(error: Exception) -> ApiError:
+    logger.warning("the analyzer decision store is unavailable", exc_info=error)
+    return ApiError(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        f"the analyzer decision store cannot be reached ({type(error).__name__})",
+        type_=DATABASE_UNAVAILABLE_PROBLEM,
+    )
+
+
+def _stored[T](call: Callable[[], T]) -> T:
+    """Run a store call, answering 503 rather than 500 when the database is down."""
+    try:
+        return call()
+    except DATABASE_ERRORS as error:
+        raise _unavailable(error) from None
 
 
 def _subject(
@@ -218,6 +276,35 @@ def _find_fix(context: AnalysisContext, body: FixRequest) -> tuple[AnalyzerDiagn
     return diagnostic, fix
 
 
+def _fix_scope(
+    context: AnalysisContext, diagnostic: AnalyzerDiagnostic, asked: ScopeRef | None
+) -> ScopeRef:
+    """The scope a fix is previewed and applied at: one this finding falls in."""
+    if asked is not None:
+        _require_scope(asked)
+    scopes = context.scopes_for(diagnostic.slots)
+    scope = asked or scopes[-1]
+    if scope not in scopes:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"{diagnostic.key} on this print is not in the {scope.kind} scope {scope.key!r}",
+            type_=SCOPE_PROBLEM,
+        )
+    return scope
+
+
+def _fingerprint(
+    context: AnalysisContext, diagnostic: AnalyzerDiagnostic, fix: Fix, scope: ScopeRef
+) -> str:
+    return fingerprint(
+        diagnostic.key,
+        fix,
+        scope=scope,
+        subject=context.subject,
+        base=context.base.identity(),
+    )
+
+
 def _describe_change(fix: Fix) -> str:
     lines = []
     for item in fix.changes:
@@ -241,6 +328,14 @@ def _publish(events: EventBus, decision: Decision, action: Literal["recorded", "
     )
 
 
+def _record(store: DecisionStore, events: EventBus, decision: Decision) -> None:
+    """Store ``decision``; the one it replaced is announced removed, then it recorded."""
+    replaced = _stored(lambda: store.put(decision))
+    if replaced is not None and replaced.id != decision.id:
+        _publish(events, replaced, "removed")
+    _publish(events, decision, "recorded")
+
+
 @router.get("", response_model=list[AnalyzerInfo], summary="Every analyzer, with its sources")
 def list_analyzers() -> list[AnalyzerInfo]:
     """The bundled analyzers: id, severity, category, the inputs each needs, the fixes
@@ -257,23 +352,36 @@ async def post_run(
     decisions: OptionalDecisionsDep,
 ) -> AnalysisReport:
     """Judge an output or a configuration against the print request it would go out
-    with (the #84 base: pipeline, printer, filament plan, plate, options).
+    with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
 
     Reads only: nothing is uploaded, sliced or queued. An input that cannot be read
-    (no Bambuddy, no pipeline, an output not uploaded yet, a missing API-key scope) is
-    listed in ``inputs`` with the reason, and the analyzers needing it in ``skipped``.
+    (no Bambuddy, no choices yet, an output not uploaded yet, a missing API-key scope)
+    is listed in ``inputs`` with the reason, and the analyzers needing it in
+    ``skipped``.
 
     ``detail=simple`` returns the headline and the open findings with their sources and
     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
     ignored and ``hidden`` findings with the decision behind each.
 
-    Without a database the analyzers still run; ``decisions_available`` is false and
-    ``decisions_reason`` says why, and the routes that record decisions answer 503.
+    Without a database, or with one that cannot be reached, the analyzers still run;
+    ``decisions_available`` is false and ``decisions_reason`` says why.
     """
     context = await _context(body.target, body.request, outputs, catalogue, store)
     if decisions is None:
         return build_report(context, [], detail=body.detail, decisions_unavailable=NO_DATABASE)
-    stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
+    try:
+        stored = await asyncio.to_thread(decisions.list, scopes=context.scopes())
+    except DATABASE_ERRORS as error:
+        logger.warning("could not read analyzer decisions", exc_info=error)
+        return build_report(
+            context,
+            [],
+            detail=body.detail,
+            decisions_unavailable=(
+                f"the decision store cannot be reached ({type(error).__name__}), so no "
+                "decisions were applied"
+            ),
+        )
     return build_report(context, stored, detail=body.detail)
 
 
@@ -284,16 +392,19 @@ async def post_preview(
     catalogue: CatalogueDep,
     store: SettingsStoreDep,
 ) -> FixPreview:
-    """The fix's whole diff, where each line lands, whether it can be applied yet, and
-    the fingerprint an apply confirms against. Changes nothing."""
+    """The fix's whole diff, where each line would land, whether it can be applied yet,
+    and the fingerprint an apply confirms against (diff, scope, subject and base).
+    Changes nothing."""
     context = await _context(body.target, body.request, outputs, catalogue, store)
     diagnostic, fix = _find_fix(context, body)
+    scope = _fix_scope(context, diagnostic, body.scope)
     blockers = fix.blockers
     return FixPreview(
         diagnostic_id=diagnostic.id,
         diagnostic_key=diagnostic.key,
         fix=fix,
-        fingerprint=fingerprint(diagnostic.key, fix),
+        scope=scope,
+        fingerprint=_fingerprint(context, diagnostic, fix, scope),
         outward=fix.outward,
         applicable=not blockers,
         blockers=blockers,
@@ -310,26 +421,26 @@ async def post_apply(
     decisions: DecisionsDep,
     events: EventsDep,
 ) -> Decision:
-    """Accept the fix at ``scope``: its diff joins this print's effective diff, and
-    every later print that falls in the same scope, until the diff changes.
+    """Record the fix as accepted at ``scope``: its diff joins the effective diff
+    (``accepted_changes``) of every later run in that scope while the diff is unchanged.
 
-    Refused, in this order: a diff that differs from the previewed ``fingerprint``
-    (409, ``analyzer-fix-stale``); a change whose target is still unverified (409,
-    ``analyzer-fix-unverified``, naming the §3.2 items in ``to_verify``); an outward
-    change without ``confirm: true`` (428, ``confirmation-required``); a scope this
-    print does not fall in (422).
+    Nothing is sent to Bambuddy: this is a ``write`` to ScadBuddy's own database,
+    removable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for
+    what a send that consumes it must do.
+
+    Refused, in this order: a scope this finding does not fall in (422); a fingerprint
+    that differs from the one this apply computes, because the diff, the scope, the
+    print or its base moved since the preview (409, ``analyzer-fix-stale``); a change
+    whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
+    items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
     """
-    if body.scope is not None:
-        _require_scope(body.scope)
     context = await _context(body.target, body.request, outputs, catalogue, store)
-    scopes = context.scopes()
-    scope = body.scope or scopes[-1]
     diagnostic, fix = _find_fix(context, body)
-    current = fingerprint(diagnostic.key, fix)
-    if current != body.fingerprint:
+    scope = _fix_scope(context, diagnostic, body.scope)
+    if _fingerprint(context, diagnostic, fix, scope) != body.fingerprint:
         raise ApiError(
             status.HTTP_409_CONFLICT,
-            "the fix's diff has changed since it was previewed; preview it again",
+            "the diff, its scope, the print or its base differ from the preview; preview it again",
             # No new fingerprint here: confirming means confirming a diff that was shown.
             type_=STALE_PROBLEM,
         )
@@ -341,19 +452,13 @@ async def post_apply(
             type_=UNVERIFIED_PROBLEM,
             to_verify=blockers,
         )
-    if fix.outward and not body.confirm:
+    if not body.confirm:
         raise ApiError(
             428,
-            "this fix changes what is sent to Bambuddy; confirm it to apply",
+            "confirm the previewed diff to record it",
             title="Precondition Required",
             type_=CONFIRMATION_PROBLEM,
             summary=_describe_change(fix),
-        )
-    if scope not in scopes:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"this print is not in the {scope.kind} scope {scope.key!r}",
-            type_=SCOPE_PROBLEM,
         )
     decision = Decision(
         id=new_decision_id(),
@@ -363,11 +468,11 @@ async def post_apply(
         scope=scope,
         reason=body.reason,
         fix_id=fix.id,
-        fingerprint=current,
+        fingerprint=body.fingerprint,
+        diff_digest=diff_digest(fix),
         changes=fix.changes,
     )
-    await asyncio.to_thread(decisions.put, decision)
-    _publish(events, decision, "recorded")
+    await asyncio.to_thread(_record, decisions, events, decision)
     return decision
 
 
@@ -386,7 +491,7 @@ def list_decisions(
         )
     found = [
         row
-        for row in decisions.list(diagnostic_id=diagnostic_id)
+        for row in _stored(lambda: decisions.list(diagnostic_id=diagnostic_id))
         if (scope is None or row.scope.kind == scope)
         and (scope_key is None or row.scope.key == scope_key)
     ]
@@ -400,12 +505,30 @@ def list_decisions(
     summary="Ignore or suppress a diagnostic at a scope",
 )
 def post_decision(body: DecisionCreate, decisions: DecisionsDep, events: EventsDep) -> Decision:
-    """Replaces an earlier decision about the same rule and instance at the same scope.
+    """Replaces an earlier decision about the same rule and instance at the same scope
+    (announced as ``removed``, then this one as ``recorded``).
 
-    ScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec
-    §8.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.
+    ScadBuddy's own state, reversible by deleting it (AI spec §8.1's ``write`` tier).
+    ``enforced`` makes a broad decision win over narrower ones; enforcing the
+    suppression of an ``error`` rule also needs ``confirm: true``, since it hides that
+    problem from every print in the scope.
     """
     _require_scope(body.scope)
+    rule = next((row for row in builtin.BUILTIN if row.id == body.diagnostic_id), None)
+    if rule is None:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"there is no analyzer {body.diagnostic_id}",
+            type_=UNKNOWN_RULE_PROBLEM,
+        )
+    if body.kind == "suppress" and body.enforced and rule.severity == "error" and not body.confirm:
+        raise ApiError(
+            428,
+            f"enforcing a suppression of {rule.id} ({rule.title}, an error) hides it from "
+            "every print in the scope; confirm it",
+            title="Precondition Required",
+            type_=CONFIRMATION_PROBLEM,
+        )
     decision = Decision(
         id=new_decision_id(),
         diagnostic_id=body.diagnostic_id,
@@ -415,8 +538,7 @@ def post_decision(body: DecisionCreate, decisions: DecisionsDep, events: EventsD
         reason=body.reason.strip() if body.reason else None,
         enforced=body.enforced,
     )
-    decisions.put(decision)
-    _publish(events, decision, "recorded")
+    _record(decisions, events, decision)
     return decision
 
 
@@ -430,7 +552,7 @@ def delete_decision(
     decisions: DecisionsDep,
     events: EventsDep,
 ) -> Response:
-    gone = decisions.remove(decision_id)
+    gone = _stored(lambda: decisions.remove(decision_id))
     if gone is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no decision with id {decision_id!r}")
     _publish(events, gone, "removed")

@@ -13,7 +13,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -23,7 +23,10 @@ from scadbuddy.render.glb import BoundingBox
 if TYPE_CHECKING:
     from scadbuddy.analyzers.context import AnalysisContext, InputName
 
-#: ``error`` blocks the print in the UI, ``hidden`` is reported only in advanced detail.
+#: How a finding is shown. ``error`` is shown as a problem, but like every analyzer
+#: finding it is advisory: nothing here disables printing (print-flow spec §4, "All
+#: three are advisory and none disables Run"). ``hidden`` is reported only in advanced
+#: detail.
 Severity = Literal["error", "warning", "info", "hidden"]
 Category = Literal["geometry", "material", "profile", "plate", "ams", "history", "analyzer"]
 
@@ -50,7 +53,7 @@ SettingValue = str | int | float | bool | None
 #: Where an accepted change lands (AI spec §11): filament-level settings in the queue
 #: item's ``filament_overrides``, process-level settings in a derived local preset,
 #: queue-level options in the #88 ``PrintOptions`` overlay, and the print request's
-#: own fields (``bed_type``). ``project_settings_3mf`` is listed so a fixer can name it,
+#: own choices (``choices.bed_type``). ``project_settings_3mf`` is listed so a fixer can name it,
 #: and is never verified until §3.2 is.
 FixTarget = Literal[
     "print_options",
@@ -68,17 +71,21 @@ UNVERIFIED_TARGETS: dict[FixTarget, str] = {
     ),
     "derived_process_preset": (
         "Whether Bambuddy's /local-presets/ can create a process preset that inherits "
-        "from a base preset plus a diff — AI spec §3.2, verified by #284"
+        "from a base preset plus a diff, and slice with it (AI spec §3.2). Spool-first "
+        "spec §5 measured every local *printer* preset refused with 400; process presets "
+        "are untested"
     ),
     "project_settings_3mf": (
         "Whether a 3MF that claims Application: BambuStudio-… has its "
-        "project_settings.config override the pipeline's process preset — AI spec §3.2, "
+        "project_settings.config override the resolved process preset — AI spec §3.2, "
         "verified by #284"
     ),
 }
 
-#: Targets whose change reaches Bambuddy when the print is sent. Accepting one is an
-#: outward action (AI spec §8.1), so it needs an explicit confirmation.
+#: Targets whose change would reach Bambuddy once a send consumes accepted diffs.
+#: Nothing does yet: accepting only records a decision in ScadBuddy (``write`` tier).
+#: The send path that consumes them must put them through AI spec §8.2's outward
+#: approval (a pending action and a UI approval), not through this flag.
 OUTWARD_TARGETS: frozenset[FixTarget] = frozenset(
     {
         "print_options",
@@ -108,14 +115,14 @@ class Evidence(BaseModel):
     label: str
     value: SettingValue
     unit: str | None = None
-    #: Where the figure came from: ``geometry``, ``bambuddy:<route>``, ``pipeline`` …
+    #: Where the figure came from: ``geometry``, ``bambuddy:<route>``, ``choices`` …
     origin: str
 
 
 class DiagnosticLocation(BaseModel):
     """Where the problem is, as precisely as the input allows."""
 
-    kind: Literal["mesh", "plate", "filament_slot", "pipeline", "profile_setting", "analyzer"]
+    kind: Literal["mesh", "plate", "filament_slot", "choices", "profile_setting", "analyzer"]
     #: 1-based extruder index of the part, as in ``OutputMeta.parts``.
     part: int | None = None
     colour: str | None = None
@@ -145,7 +152,7 @@ class SettingChange(BaseModel):
     #: False while the target is on the AI spec's §3.2 "to verify" list.
     verified: bool
     to_verify: str | None = None
-    #: Reaches Bambuddy when the print is sent (AI spec §8.1).
+    #: Would reach Bambuddy once a send consumes accepted diffs (see OUTWARD_TARGETS).
     outward: bool
 
 
@@ -232,9 +239,12 @@ class Decision(BaseModel):
     reason: str | None = None
     #: Wins over narrower scopes, like Roslyn's global config forcing a severity.
     enforced: bool = False
-    #: ``accept`` only: the fix accepted, its fingerprint at the time, and its diff.
+    #: ``accept`` only: the fix accepted, the preview fingerprint that was confirmed,
+    #: the digest of its diff (what later runs compare, to tell a stale acceptance),
+    #: and the diff itself.
     fix_id: str | None = None
     fingerprint: str | None = None
+    diff_digest: str | None = None
     changes: list[SettingChange] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
@@ -265,33 +275,61 @@ class AnalyzerDiagnostic(BaseModel):
     evidence: list[Evidence] = Field(default_factory=list)
     sources: list[Source]
     fixes: list[Fix] = Field(default_factory=list)
+    #: The plate slots the finding is about; empty means the whole print. A material
+    #: decision applies only when one of these slots is that material.
+    slots: list[int] = Field(default_factory=list)
     status: DiagnosticStatus = "open"
     decision: AppliedDecision | None = None
 
 
-def fingerprint(diagnostic_key: str, fix: Fix) -> str:
-    """What a preview is confirmed against: the diagnostic, the fix and its whole diff.
+def _changes(fix: Fix) -> list[dict[str, Any]]:
+    return [
+        {
+            "target": item.target,
+            "setting": item.setting,
+            "base": item.base,
+            "proposed": item.proposed,
+            "slot_id": item.slot_id,
+        }
+        for item in fix.changes
+    ]
 
-    A confirmation carries it back, so an apply can only land the diff that was shown.
+
+def _digest(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def diff_digest(fix: Fix) -> str:
+    """The fix and its whole diff: what an accepted decision is still checked against
+    on later runs, which may be of other outputs in the same scope."""
+    return _digest({"fix": fix.id, "changes": _changes(fix)})
+
+
+def fingerprint(
+    diagnostic_key: str,
+    fix: Fix,
+    *,
+    scope: ScopeRef,
+    subject: str,
+    base: dict[str, Any],
+) -> str:
+    """What a preview is confirmed against: the diagnostic, the fix and its whole diff,
+    the scope it will be stored at, what it is about (an output or a configuration),
+    and the base it was judged against.
+
+    An apply must carry it back, so it can only land the diff that was shown, at the
+    scope that was shown, for the same print and base; any of them moving is a 409.
     """
-    payload = json.dumps(
+    return _digest(
         {
             "diagnostic": diagnostic_key,
             "fix": fix.id,
-            "changes": [
-                {
-                    "target": item.target,
-                    "setting": item.setting,
-                    "base": item.base,
-                    "proposed": item.proposed,
-                    "slot_id": item.slot_id,
-                }
-                for item in fix.changes
-            ],
-        },
-        sort_keys=True,
+            "changes": _changes(fix),
+            "scope": [scope.kind, scope.key],
+            "subject": subject,
+            "base": base,
+        }
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 Check = Callable[["AnalysisContext", "Analyzer"], list[AnalyzerDiagnostic]]
@@ -327,6 +365,7 @@ class Analyzer:
         evidence: Sequence[Evidence] = (),
         sources: Sequence[Source] | None = None,
         fixes: Sequence[Fix] = (),
+        slots: Sequence[int] = (),
     ) -> AnalyzerDiagnostic:
         return AnalyzerDiagnostic(
             id=self.id,
@@ -340,4 +379,5 @@ class Analyzer:
             evidence=list(evidence),
             sources=list(sources if sources is not None else self.sources),
             fixes=list(fixes),
+            slots=sorted(set(slots)),
         )

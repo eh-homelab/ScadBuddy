@@ -184,6 +184,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - Consequences in `frontend/src/lib/embed.ts`: downloads are fetched as a blob and
   opened with `target=_blank`; deep links to Bambuddy use `window.open(..., '_blank')`
   when embedded.
+- Full screen (`frontend/src/lib/useFullscreen.ts`): a cross-origin iframe gets the
+  Fullscreen API only with `allow="fullscreen"`, which Bambuddy is not known to set;
+  where it is refused (`document.fullscreenEnabled` is false, or the request is
+  rejected) the full-screen view covers the frame instead.
 - The API key never reaches the browser; every Bambuddy call is server-side. Each
   client call declares its scope (`bambuddy/errors.py` `Scope`) so a 401/403 names it.
 

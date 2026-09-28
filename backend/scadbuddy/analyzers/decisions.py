@@ -72,8 +72,9 @@ class DecisionStore(Protocol):
 
     def get(self, decision_id: str) -> Decision | None: ...
 
-    def put(self, decision: Decision) -> Decision:
-        """Store ``decision``, replacing any other for the same rule, instance and scope."""
+    def put(self, decision: Decision) -> Decision | None:
+        """Store ``decision``, replacing any other for the same rule, instance and scope;
+        returns the one it replaced, if any."""
         ...
 
     def remove(self, decision_id: str) -> Decision | None: ...
@@ -81,37 +82,64 @@ class DecisionStore(Protocol):
     def close(self) -> None: ...
 
 
+#: The first key of ``pg_advisory_xact_lock(int, int)`` that serialises writes to one
+#: decision target ("SBAD"); the second is a hash of the target.
+DECISION_LOCK_CLASS = 0x5342_4144
+
+#: How long a request waits for a database connection before it is told the store is
+#: unavailable. Short on purpose: a route answers 503 rather than hanging.
+CONNECT_TIMEOUT = 5.0
+
+
 class PostgresDecisionStore:
-    """``analyzer_decisions`` on the #241 database (migration 3 in ``pg_store``).
+    """``analyzer_decisions`` on the #241 database, a backend migration in
+    ``render/pg_store.py``.
 
     Connects on first use, not at construction, so building the app state stays
     offline, and applies the backend's migrations itself (idempotent, under their
     advisory lock) so it does not depend on the render queue having opened first.
+    A database that cannot be reached raises ``psycopg.OperationalError`` or
+    ``psycopg_pool.PoolTimeout`` within about :data:`CONNECT_TIMEOUT`; callers map both
+    to "unavailable".
     """
 
     backend = "postgres"
 
-    def __init__(self, conninfo: str, *, pool_size: int = 4, connect_timeout: float = 30.0):
+    def __init__(
+        self, conninfo: str, *, pool_size: int = 4, connect_timeout: float = CONNECT_TIMEOUT
+    ) -> None:
         self.connect_timeout = connect_timeout
         self._pool: ConnectionPool[Connection[DictRow]] = ConnectionPool(
             conninfo,
             min_size=1,
             max_size=pool_size,
             open=False,
+            timeout=connect_timeout,
             connection_class=Connection[DictRow],
-            kwargs={"autocommit": True, "row_factory": dict_row},
+            kwargs={
+                "autocommit": True,
+                "row_factory": dict_row,
+                "connect_timeout": max(1, int(connect_timeout)),
+            },
             name="scadbuddy-analyzer-decisions",
         )
-        self._opened = False
+        self._pool_open = False
+        self._migrated = False
         self._open_lock = threading.Lock()
 
     def _ready(self) -> ConnectionPool[Connection[DictRow]]:
+        # Only the non-blocking open is under the lock. Waiting for a connection (up to
+        # the timeout) happens outside it, so one slow connect does not queue every
+        # other request behind the lock; the migration is idempotent and takes its own
+        # advisory lock, so two requests running it at once is harmless.
         with self._open_lock:
-            if not self._opened:
-                self._pool.open(wait=True, timeout=self.connect_timeout)
-                with self._pool.connection() as conn:
-                    migrate(conn)
-                self._opened = True
+            if not self._pool_open:
+                self._pool.open(wait=False)
+                self._pool_open = True
+        if not self._migrated:
+            with self._pool.connection() as conn:
+                migrate(conn)
+            self._migrated = True
         return self._pool
 
     @staticmethod
@@ -152,22 +180,36 @@ class PostgresDecisionStore:
             ).fetchone()
         return self._decision(row) if row is not None else None
 
-    def put(self, decision: Decision) -> Decision:
+    def put(self, decision: Decision) -> Decision | None:
+        """An upsert on the target's unique index, so concurrent puts never collide.
+
+        The advisory lock on the target makes reading the row being replaced and
+        replacing it one step, so the caller learns exactly which decision it replaced
+        (and can announce it removed) even when two puts race.
+        """
+        target = (
+            decision.scope.kind,
+            decision.scope.key,
+            decision.diagnostic_id,
+            decision.instance or "",
+        )
         with self._ready().connection() as conn, conn.transaction():
             conn.execute(
-                "DELETE FROM analyzer_decisions WHERE scope_kind = %s AND scope_key = %s"
-                " AND diagnostic_id = %s AND instance = %s",
-                (
-                    decision.scope.kind,
-                    decision.scope.key,
-                    decision.diagnostic_id,
-                    decision.instance or "",
-                ),
+                "SELECT pg_advisory_xact_lock(%s, hashtext(%s))",
+                (DECISION_LOCK_CLASS, "\x1f".join(target)),
             )
+            old = conn.execute(
+                "SELECT body FROM analyzer_decisions WHERE scope_kind = %s AND scope_key = %s"
+                " AND diagnostic_id = %s AND instance = %s",
+                target,
+            ).fetchone()
             conn.execute(
                 "INSERT INTO analyzer_decisions"
                 " (id, diagnostic_id, instance, scope_kind, scope_key, kind, body, created_at)"
-                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
+                " ON CONFLICT (scope_kind, scope_key, diagnostic_id, instance) DO UPDATE SET"
+                " id = EXCLUDED.id, kind = EXCLUDED.kind, body = EXCLUDED.body,"
+                " created_at = EXCLUDED.created_at",
                 (
                     decision.id,
                     decision.diagnostic_id,
@@ -179,7 +221,7 @@ class PostgresDecisionStore:
                     decision.created_at,
                 ),
             )
-        return decision
+        return self._decision(old) if old is not None else None
 
     def remove(self, decision_id: str) -> Decision | None:
         with self._ready().connection() as conn:
@@ -190,9 +232,9 @@ class PostgresDecisionStore:
 
     def close(self) -> None:
         with self._open_lock:
-            if self._opened:
+            if self._pool_open:
                 self._pool.close()
-                self._opened = False
+                self._pool_open = False
 
 
 def resolve(

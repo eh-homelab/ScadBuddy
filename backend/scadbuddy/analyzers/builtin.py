@@ -6,7 +6,7 @@ against a citable threshold (thinnest wall, smallest feature, height-to-base rat
 are deliberately absent; see the module list in the PR that added this.
 
 IDs follow #284: ``SB0xxx`` the framework, ``SB1xxx`` geometry, ``SB2xxx`` material,
-``SB3xxx`` inventory and history, ``SB4xxx`` plate, ``SB5xxx`` Bambuddy's own checks.
+``SB3xxx`` inventory and history, ``SB4xxx`` plate.
 """
 
 from __future__ import annotations
@@ -19,12 +19,11 @@ from scadbuddy.analyzers.model import (
     DiagnosticLocation,
     Evidence,
     Fix,
-    Severity,
     change,
 )
 from scadbuddy.bambuddy.filaments import check as check_filaments
 from scadbuddy.render.bambu3mf import plates_of, replate_3mf
-from scadbuddy.render.geometry import MeshEdge
+from scadbuddy.render.geometry import OVERHANG_ANGLES, MeshEdge
 from scadbuddy.render.plate import PlateFitError, fit_problem, overshoots
 
 #: Located edges a mesh diagnostic carries per part; the counts are always complete.
@@ -145,6 +144,8 @@ OPEN_EDGES = Analyzer(
 #: or less.
 SUPPORT_THRESHOLD_DEG = 30
 _OVERHANG_BUCKET = 90 - SUPPORT_THRESHOLD_DEG
+# The geometry analysis must measure that bucket, or SB1003 would silently find nothing.
+assert _OVERHANG_BUCKET in OVERHANG_ANGLES, (_OVERHANG_BUCKET, OVERHANG_ANGLES)
 
 ENABLE_SUPPORT_FIX = "enable-support"
 
@@ -161,7 +162,7 @@ def _overhangs(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
         id=ENABLE_SUPPORT_FIX,
         title="Turn on supports",
         description=(
-            "Slice with a process preset derived from the pipeline's, with supports on. "
+            "Slice with a process preset derived from the resolved one, with supports on. "
             "The threshold angle is left at the base preset's."
         ),
         changes=[
@@ -188,7 +189,7 @@ def _overhangs(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
                 "Bambu's process presets generate support below a 30\u00b0 slope and leave "
                 "supports off. The area is an upper bound: the geometry analysis cannot "
                 "tell a bridge between two pillars from an unsupported ceiling, and "
-                "ScadBuddy cannot read whether the pipeline's own preset turns supports on."
+                "ScadBuddy cannot read whether the resolved process preset turns supports on."
             ),
             location=DiagnosticLocation(kind="mesh", bbox=bucket.bbox),
             evidence=[
@@ -233,7 +234,8 @@ SILK_NOZZLE_TEMPERATURE = 235
 SILK_FIX = "silk-gloss"
 #: Nozzles the silk guide says are not recommended, in millimetres.
 SILK_UNRECOMMENDED_NOZZLES = (0.6, 0.8)
-SUPERTACK = "Supertack Plate"
+#: Both spellings of the Cool Plate SuperTack the resolver's ``BED_TYPES`` offers.
+SUPERTACK = frozenset({"Supertack Plate", "Cool Plate (SuperTack)"})
 
 
 def _is_silk(slot: FilamentSlot) -> bool:
@@ -260,7 +262,7 @@ def _slot_evidence(slots: list[FilamentSlot]) -> list[Evidence]:
             label=f"slot {slot.slot_id}",
             value=" ".join(part for part in (slot.brand, slot.material, slot.subtype) if part)
             or slot.preset_name,
-            origin="bambuddy:/inventory/spools" if slot.origin == "spool" else "pipeline",
+            origin="bambuddy:/inventory/spools",
         )
         for slot in slots
     ]
@@ -323,56 +325,53 @@ def _silk_gloss(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDi
             evidence=_slot_evidence(slots),
             sources=[src.SILK_OUTER_WALL, src.SILK_TEMPERATURE, src.SILK_TEMPERATURE_RANGE],
             fixes=[fix],
+            slots=[slot.slot_id for slot in slots],
         )
     ]
 
 
 def _silk_nozzle(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
     slots = _silk_slots(context)
-    pipeline = context.pipeline
-    assert pipeline is not None
-    try:
-        diameter = float(pipeline.nozzle_diameter) if pipeline.nozzle_diameter else None
-    except ValueError:
-        diameter = None
-    if not slots or diameter not in SILK_UNRECOMMENDED_NOZZLES:
+    sizes = context.base.nozzle_sizes
+
+    def millimetres(size: str) -> float | None:
+        try:
+            return float(size)
+        except ValueError:
+            return None
+
+    wide = sorted({size for size in sizes if millimetres(size) in SILK_UNRECOMMENDED_NOZZLES})
+    if not slots or not wide:
         return []
     return [
         analyzer.diagnose(
             message=(
-                f"Pipeline {pipeline.name!r} slices for a {pipeline.nozzle_diameter} mm "
-                "nozzle, which Bambu does not recommend for silk PLA."
+                f"This slices for a {' and '.join(wide)} mm nozzle, which Bambu does not "
+                "recommend for silk PLA."
             ),
-            location=DiagnosticLocation(kind="pipeline", setting="process_preset"),
+            location=DiagnosticLocation(kind="choices", setting="nozzles"),
             evidence=[
-                Evidence(
-                    label="nozzle",
-                    value=pipeline.nozzle_diameter,
-                    unit="mm",
-                    origin="pipeline process preset name",
-                ),
-                *_slot_evidence(slots),
-            ],
+                Evidence(label="nozzle", value=size, unit="mm", origin="choices") for size in wide
+            ]
+            + _slot_evidence(slots),
+            slots=[slot.slot_id for slot in slots],
         )
     ]
 
 
 def _silk_plate(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
     slots = _silk_slots(context)
-    if not slots or context.bed_type != SUPERTACK:
+    if not slots or context.bed_type not in SUPERTACK:
         return []
     return [
         analyzer.diagnose(
             message="Bambu does not recommend the Cool Plate SuperTack for silk PLA.",
             location=DiagnosticLocation(kind="plate", setting="bed_type"),
             evidence=[
-                Evidence(
-                    label="bed type",
-                    value=context.bed_type,
-                    origin="request" if context.request.bed_type else "pipeline",
-                ),
+                Evidence(label="bed type", value=context.bed_type, origin="choices"),
                 *_slot_evidence(slots),
             ],
+            slots=[slot.slot_id for slot in slots],
         )
     ]
 
@@ -385,7 +384,7 @@ SILK_GLOSS = Analyzer(
     category="material",
     description=(
         "Silk PLA on the plate: Bambu's silk guide values for outer wall speed and "
-        "nozzle temperature, as a diff against the pipeline's presets."
+        "nozzle temperature, as a diff against the resolved presets."
     ),
     sources=(src.SILK_OUTER_WALL, src.SILK_TEMPERATURE, src.SILK_TEMPERATURE_RANGE),
     check=_silk_gloss,
@@ -402,7 +401,7 @@ SILK_NOZZLE = Analyzer(
     description="Silk PLA sliced for a 0.6 or 0.8 mm nozzle.",
     sources=(src.SILK_NOZZLE,),
     check=_silk_nozzle,
-    needs=frozenset({"filaments", "pipeline"}),
+    needs=frozenset({"filaments", "choices"}),
 )
 
 SILK_PLATE = Analyzer(
@@ -414,7 +413,7 @@ SILK_PLATE = Analyzer(
     description="Silk PLA on the Cool Plate SuperTack.",
     sources=(src.SILK_PLATE,),
     check=_silk_plate,
-    needs=frozenset({"filaments"}),
+    needs=frozenset({"filaments", "choices"}),
 )
 
 
@@ -458,6 +457,7 @@ def _low_filament(context: AnalysisContext, analyzer: Analyzer) -> list[Analyzer
                     ),
                     Evidence(label="copies", value=copies, origin="request"),
                 ],
+                slots=[warning.slot_id],
             )
         )
     return found
@@ -564,74 +564,6 @@ PLATE_FIT = Analyzer(
 )
 
 
-# --- SB5001: Bambuddy's eligibility report ------------------------------------------
-
-
-def _eligibility(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
-    report = context.eligibility
-    pipeline = context.pipeline
-    assert report is not None and pipeline is not None
-    found: list[AnalyzerDiagnostic] = []
-    rows = [(None, issue) for issue in report.issues] + [
-        (printer, issue) for printer in report.printer_reports for issue in printer.issues
-    ]
-    for index, (printer, issue) in enumerate(rows, start=1):
-        # Blocking when the pipeline as a whole would refuse; one printer of a class
-        # failing while another passes is a warning, which is what `ok` means there.
-        severity: Severity = "error" if not report.ok else "warning"
-        where = f" on {printer.printer_name}" if printer is not None else ""
-        detail = ", ".join(
-            f"{name} {value!r}"
-            for name, value in (("expected", issue.expected), ("actual", issue.actual))
-            if value is not None
-        )
-        found.append(
-            analyzer.diagnose(
-                key=f"{index}",
-                severity=severity,
-                message=(
-                    f"Bambuddy reports {issue.kind}{where}"
-                    + (f" for slot {issue.slot_index}" if issue.slot_index is not None else "")
-                    + (f" ({detail})" if detail else "")
-                    + "."
-                ),
-                location=DiagnosticLocation(
-                    kind="filament_slot" if issue.slot_index is not None else "pipeline",
-                    slot_id=issue.slot_index,
-                ),
-                evidence=[
-                    Evidence(
-                        label="kind",
-                        value=issue.kind,
-                        origin=f"bambuddy:/slicer-pipelines/{pipeline.id}/check-eligibility",
-                    ),
-                    *(
-                        [Evidence(label="printer", value=printer.printer_name, origin="bambuddy")]
-                        if printer is not None
-                        else []
-                    ),
-                ],
-            )
-        )
-    return found
-
-
-ELIGIBILITY = Analyzer(
-    id="SB5001",
-    name="pipeline-eligibility",
-    title="Bambuddy eligibility",
-    severity="error",
-    category="profile",
-    description=(
-        "Bambuddy's own check-eligibility report for the pipeline, one diagnostic per "
-        "issue, verbatim. ScadBuddy adds no judgement of its own."
-    ),
-    sources=(src.ELIGIBILITY_RULE,),
-    check=_eligibility,
-    needs=frozenset({"eligibility", "pipeline"}),
-)
-
-
 #: Every bundled analyzer, in id order. SB0001 is reported by the runner, not run.
 BUILTIN: tuple[Analyzer, ...] = (
     CRASHED,
@@ -643,5 +575,4 @@ BUILTIN: tuple[Analyzer, ...] = (
     SILK_PLATE,
     LOW_FILAMENT,
     PLATE_FIT,
-    ELIGIBILITY,
 )

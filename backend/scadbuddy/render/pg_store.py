@@ -99,10 +99,12 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
         WHERE state IN ('done', 'failed');
     """,
-    # 3: print-analyzer decisions (#284; `scadbuddy.analyzers.decisions`). One row per
+    # Print-analyzer decisions (#284; `scadbuddy.analyzers.decisions`). One row per
     # rule, instance ('' for every instance) and scope; `body` is the whole decision.
+    # It takes whichever number is next when #284 merges (#374 and #430 also add
+    # one); IF NOT EXISTS keeps it safe wherever it lands.
     """
-    CREATE TABLE analyzer_decisions (
+    CREATE TABLE IF NOT EXISTS analyzer_decisions (
         id            text PRIMARY KEY,
         diagnostic_id text NOT NULL,
         instance      text NOT NULL DEFAULT '',
@@ -112,7 +114,7 @@ MIGRATIONS: tuple[str, ...] = (
         body          jsonb NOT NULL,
         created_at    timestamptz NOT NULL
     );
-    CREATE UNIQUE INDEX analyzer_decisions_target
+    CREATE UNIQUE INDEX IF NOT EXISTS analyzer_decisions_target
         ON analyzer_decisions (scope_kind, scope_key, diagnostic_id, instance);
     """,
 )

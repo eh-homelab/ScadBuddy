@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from scadbuddy.analyzers import builtin
 from scadbuddy.analyzers.builtin import CRASHED
-from scadbuddy.analyzers.context import INPUT_NAMES, AnalysisContext, InputName
+from scadbuddy.analyzers.context import INPUT_NAMES, AnalysisContext, BaseProfile, InputName
 from scadbuddy.analyzers.decisions import resolve
 from scadbuddy.analyzers.model import (
     Analyzer,
@@ -24,10 +24,8 @@ from scadbuddy.analyzers.model import (
     SettingChange,
     Severity,
     Source,
-    fingerprint,
+    diff_digest,
 )
-from scadbuddy.bambuddy.filaments import FilamentPlan
-from scadbuddy.bambuddy.pipelines import PipelineView
 
 logger = logging.getLogger(__name__)
 
@@ -68,19 +66,6 @@ class AnalysisSummary(BaseModel):
     suggestions: int
 
 
-class BaseProfile(BaseModel):
-    """What the diffs are against: the pipeline's presets, bed type and plan (#84)."""
-
-    pipeline: PipelineView | None = None
-    printer_id: int | None = None
-    printer_model: str | None = None
-    bed_type: str | None = None
-    plate_id: int
-    plate_model: str | None = None
-    filament_plan: FilamentPlan | None = None
-    copies: int
-
-
 class AnalysisReport(BaseModel):
     output_id: str | None
     slug: str
@@ -96,6 +81,7 @@ class AnalysisReport(BaseModel):
     #: decision was applied and ``decisions_reason`` says why.
     decisions_available: bool = True
     decisions_reason: str | None = None
+    #: The presets the resolver would derive from the request's choices.
     base: BaseProfile
 
 
@@ -181,12 +167,19 @@ def run_checks(
 
 
 def apply_decisions(
-    diagnostics: list[AnalyzerDiagnostic], decisions: Sequence[Decision], scopes: Sequence[ScopeRef]
+    diagnostics: list[AnalyzerDiagnostic],
+    decisions: Sequence[Decision],
+    context: AnalysisContext,
 ) -> list[AcceptedChange]:
     """Set each diagnostic's status from the decision that applies; return the
-    effective diff. An accepted fix whose diff has changed is stale and open again."""
+    effective diff. An accepted fix whose diff has changed is stale and open again.
+
+    Each diagnostic is resolved at its own scopes: a material decision applies only
+    to a finding about a slot of that material (:meth:`AnalysisContext.scopes_for`).
+    """
     accepted: list[AcceptedChange] = []
     for diagnostic in diagnostics:
+        scopes = context.scopes_for(diagnostic.slots)
         decision = resolve(diagnostic.id, diagnostic.key, decisions, scopes)
         if decision is None:
             continue
@@ -199,8 +192,8 @@ def apply_decisions(
             diagnostic.decision = AppliedDecision(decision=decision)
             continue
         fix = next((row for row in diagnostic.fixes if row.id == decision.fix_id), None)
-        current = fingerprint(diagnostic.key, fix) if fix is not None else None
-        if current is None or current != decision.fingerprint:
+        current = diff_digest(fix) if fix is not None else None
+        if current is None or current != decision.diff_digest:
             diagnostic.decision = AppliedDecision(decision=decision, stale=True)
             continue
         assert fix is not None
@@ -255,12 +248,11 @@ def build_report(
 ) -> AnalysisReport:
     scopes = context.scopes()
     diagnostics, skipped = run_checks(context, analyzers)
-    accepted = apply_decisions(diagnostics, decisions, scopes)
+    accepted = apply_decisions(diagnostics, decisions, context)
     diagnostics.sort(key=lambda row: (_SEVERITY_ORDER[row.severity], row.key))
     summary = summarise(diagnostics)
     if detail == "simple":
         diagnostics = [shown for row in diagnostics if (shown := _simple(row)) is not None]
-    printer = context.printer
     return AnalysisReport(
         output_id=context.output.id if context.output else None,
         slug=context.slug,
@@ -280,14 +272,5 @@ def build_report(
         scopes=scopes,
         decisions_available=decisions_unavailable is None,
         decisions_reason=decisions_unavailable,
-        base=BaseProfile(
-            pipeline=context.pipeline,
-            printer_id=printer.id if printer else None,
-            printer_model=printer.model if printer else None,
-            bed_type=context.bed_type,
-            plate_id=context.request.plate_id,
-            plate_model=context.plate.model if context.plate else None,
-            filament_plan=context.request.filament_plan,
-            copies=context.copies,
-        ),
+        base=context.base,
     )
