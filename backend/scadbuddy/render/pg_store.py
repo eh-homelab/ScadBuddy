@@ -25,7 +25,10 @@ Schema changes are files in ``backend/scadbuddy/migrations/`` (`MIGRATIONS_DIR`)
 per migration, named by UTC timestamp and slug (``20260928T0612Z_settings.sql``). Add a
 new file; never edit, rename or remove a merged one. They are applied at `open`, in
 timestamp order and each once by file id, under an advisory lock so two starting pods
-cannot race each other.
+cannot race each other. They include the tables of the
+stores that share this pool through `PostgresJobStore.connection` -- the
+default-render previews' ``model_previews``
+(``20260928T0721Z_model_previews.sql``).
 """
 
 from __future__ import annotations
@@ -34,6 +37,7 @@ import logging
 import re
 import shutil
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, NamedTuple, Protocol
@@ -285,6 +289,11 @@ class PostgresJobStore:
 
     def close(self) -> None:
         self._pool.close()
+
+    def connection(self) -> AbstractContextManager[Connection[DictRow]]:
+        """A pooled connection (autocommit, dict rows) for the other stores that keep
+        their tables in this database. Usable once `open` has migrated it."""
+        return self._pool.connection()
 
     @property
     def pool(self) -> ConnectionPool[Connection[DictRow]]:

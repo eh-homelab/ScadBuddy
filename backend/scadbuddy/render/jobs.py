@@ -826,6 +826,9 @@ class RenderQueue:
         self.listener: Listener | None = None
         self._listening = False
         self._listened_before = False
+        #: Whether `open_store` opened the store, making its caller the one that
+        #: closes it if the boot fails (`close_store`) rather than `start`.
+        self._store_opened_by_caller = False
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
@@ -838,6 +841,20 @@ class RenderQueue:
         """The cover rasteriser's pool, for background work that draws plate images."""
         return self._thumbnails
 
+    async def open_store(self) -> None:
+        """Open -- and migrate -- the store ahead of `start`, for boot steps that read
+        what other stores keep in its database. `start` opens it too, harmlessly.
+
+        The caller then owns the store until `start` succeeds: a failed `start`
+        leaves it open for the caller's `close_store`, so it is closed once."""
+        await asyncio.to_thread(self.store.open)
+        self._store_opened_by_caller = True
+
+    async def close_store(self) -> None:
+        """Undo `open_store` when the boot fails before `start` has succeeded."""
+        self._store_opened_by_caller = False
+        await asyncio.to_thread(self.store.close)
+
     async def start(self) -> None:
         self.paths.ensure()
         await asyncio.to_thread(self.store.open)
@@ -845,12 +862,15 @@ class RenderQueue:
         # connections and threads). If the rest of startup fails, release them
         # here: the caller's `aclose` is typically in a `finally` that a failed
         # start never reaches, and a process that builds many apps -- the test
-        # suite -- would otherwise leak a pool per failure.
+        # suite -- would otherwise leak a pool per failure. Not a store the caller
+        # opened with `open_store`, though: that caller closes it, and closing it
+        # here too would close it twice.
         try:
             abandoned = await asyncio.to_thread(self.store.abandon_orphans)
             await self._prune()
         except BaseException:
-            await asyncio.to_thread(self.store.close)
+            if not self._store_opened_by_caller:
+                await asyncio.to_thread(self.store.close)
             raise
         for job in abandoned:
             self._announce(job, "job.failed")
