@@ -130,7 +130,7 @@
         "type": "object"
       },
       "AnalysisRequest": {
-        "description": "The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).\n\nEvery field means what it means on\n:class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the\nchoices are optional here: an analysis can run before the dialog has them, and\nthe analyzers that need them say so.",
+        "description": "The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84, #335).\n\nEvery field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`.\n``printer_id`` omitted is the model's remembered printer, then the configured one,\nthen the first active one, as the dialog's choices route picks it. ``choices``\nomitted is what the dialog reopens with: the model's remembered nozzles, tier and\nprocess, on the plate type remembered for that printer.",
         "properties": {
           "choices": {
             "anyOf": [
@@ -190,7 +190,6 @@
         "type": "object"
       },
       "AnalysisRun": {
-        "additionalProperties": false,
         "properties": {
           "detail": {
             "default": "simple",
@@ -244,7 +243,6 @@
         "type": "object"
       },
       "AnalysisTarget": {
-        "additionalProperties": false,
         "description": "An output, or a configuration: a template and one parameter set.\n\nA configuration is judged on the newest output rendered with exactly those\nparameters when there is one; without one, the analyzers that need a render are\nskipped and say so.",
         "properties": {
           "output_id": {
@@ -290,7 +288,7 @@
             "anyOf": [
               {
                 "maxLength": 108,
-                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
                 "type": "string"
               },
               {
@@ -373,13 +371,6 @@
             ],
             "title": "Severity",
             "type": "string"
-          },
-          "slots": {
-            "items": {
-              "type": "integer"
-            },
-            "title": "Slots",
-            "type": "array"
           },
           "sources": {
             "items": {
@@ -468,8 +459,8 @@
                 "output",
                 "geometry",
                 "plate",
-                "printer",
                 "choices",
+                "printer",
                 "filaments",
                 "inventory"
               ],
@@ -677,7 +668,7 @@
         "type": "object"
       },
       "BaseProfile": {
-        "description": "What the diffs are against: the presets the resolver derives from the choices.\n\nNames follow the resolver's own derivation (``resolver.TIERS`` and\n``printer_preset_name``), so they are the presets a run would slice with.",
+        "description": "What the diffs are against: the print's choices and the presets they resolve\nto by name (spool-first spec \u00a74.1-4.2), the printer, plate and plan (#84).",
         "properties": {
           "bed_type": {
             "anyOf": [
@@ -690,25 +681,31 @@
             ],
             "title": "Bed Type"
           },
+          "choices": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrintChoices"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "copies": {
-            "default": 1,
             "title": "Copies",
             "type": "integer"
           },
-          "high_flow": {
-            "default": false,
-            "title": "High Flow",
-            "type": "boolean"
-          },
-          "nozzle_sizes": {
-            "items": {
-              "type": "string"
-            },
-            "title": "Nozzle Sizes",
-            "type": "array"
+          "filament_plan": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FilamentPlan"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "plate_id": {
-            "default": 1,
             "title": "Plate Id",
             "type": "integer"
           },
@@ -756,7 +753,7 @@
             ],
             "title": "Printer Preset Name"
           },
-          "process_preset_name": {
+          "process_name": {
             "anyOf": [
               {
                 "type": "string"
@@ -765,52 +762,14 @@
                 "type": "null"
               }
             ],
-            "title": "Process Preset Name"
-          },
-          "slots": {
-            "items": {
-              "$ref": "#/components/schemas/BaseSlot"
-            },
-            "title": "Slots",
-            "type": "array"
-          }
-        },
-        "title": "BaseProfile",
-        "type": "object"
-      },
-      "BaseSlot": {
-        "properties": {
-          "preset": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Preset"
-          },
-          "slot_id": {
-            "title": "Slot Id",
-            "type": "integer"
-          },
-          "spool_id": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Spool Id"
+            "title": "Process Name"
           }
         },
         "required": [
-          "slot_id"
+          "plate_id",
+          "copies"
         ],
-        "title": "BaseSlot",
+        "title": "BaseProfile",
         "type": "object"
       },
       "Body_create_model_api_v1_models_post": {
@@ -1108,7 +1067,7 @@
             "anyOf": [
               {
                 "maxLength": 108,
-                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+                "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
                 "type": "string"
               },
               {
@@ -1421,17 +1380,6 @@
             "title": "Diagnostic Id",
             "type": "string"
           },
-          "diff_digest": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Diff Digest"
-          },
           "enforced": {
             "default": false,
             "title": "Enforced",
@@ -1508,14 +1456,8 @@
         "type": "object"
       },
       "DecisionCreate": {
-        "additionalProperties": false,
         "description": "Ignore or suppress a diagnostic at a scope. Accepting goes through a fix's\napply, which is where its diff is confirmed.",
         "properties": {
-          "confirm": {
-            "default": false,
-            "title": "Confirm",
-            "type": "boolean"
-          },
           "diagnostic_id": {
             "pattern": "^SB[0-9]{4}$",
             "title": "Diagnostic Id",
@@ -1530,7 +1472,6 @@
             "anyOf": [
               {
                 "maxLength": 100,
-                "minLength": 1,
                 "type": "string"
               },
               {
@@ -1658,7 +1599,7 @@
               "mesh",
               "plate",
               "filament_slot",
-              "choices",
+              "print_choices",
               "profile_setting",
               "analyzer"
             ],
@@ -2055,7 +1996,6 @@
         "type": "object"
       },
       "FixApply": {
-        "additionalProperties": false,
         "properties": {
           "confirm": {
             "default": false,
@@ -2149,12 +2089,9 @@
             "type": "boolean"
           },
           "route_note": {
-            "default": "Applying records this diff as a decision at its scope; nothing sends it yet. A print that uses it will have to slice and queue with the diff, since a pipeline run carries no per-print settings (AI spec \u00a711), and will go through the outward approval of AI spec \u00a78.2 before it does.",
+            "default": "An accepted settings diff lands on this print's slice and queue item: the print dialog always slices then queues (spool-first print spec \u00a77). The send bar's pipeline run carries no per-print settings, so it does not apply one (AI spec \u00a711).",
             "title": "Route Note",
             "type": "string"
-          },
-          "scope": {
-            "$ref": "#/components/schemas/ScopeRef"
           },
           "summary": {
             "title": "Summary",
@@ -2165,7 +2102,6 @@
           "diagnostic_id",
           "diagnostic_key",
           "fix",
-          "scope",
           "fingerprint",
           "outward",
           "applicable",
@@ -2176,7 +2112,6 @@
         "type": "object"
       },
       "FixRequest": {
-        "additionalProperties": false,
         "properties": {
           "diagnostic_key": {
             "maxLength": 100,
@@ -2190,16 +2125,6 @@
           },
           "request": {
             "$ref": "#/components/schemas/AnalysisRequest"
-          },
-          "scope": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/ScopeRef"
-              },
-              {
-                "type": "null"
-              }
-            ]
           },
           "target": {
             "$ref": "#/components/schemas/AnalysisTarget"
@@ -2552,8 +2477,8 @@
               "output",
               "geometry",
               "plate",
-              "printer",
               "choices",
+              "printer",
               "filaments",
               "inventory"
             ],
@@ -7030,7 +6955,7 @@
         ]
       },
       "post": {
-        "description": "Replaces an earlier decision about the same rule and instance at the same scope\n(announced as ``removed``, then this one as ``recorded``).\n\nScadBuddy's own state, reversible by deleting it (AI spec \u00a78.1's ``write`` tier).\n``enforced`` makes a broad decision win over narrower ones; enforcing the\nsuppression of an ``error`` rule also needs ``confirm: true``, since it hides that\nproblem from every print in the scope.",
+        "description": "Replaces an earlier decision about the same rule and instance at the same scope.\n\nScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec\n\u00a78.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.",
         "operationId": "post_decision_api_v1_analyzers_decisions_post",
         "requestBody": {
           "content": {
@@ -7108,7 +7033,7 @@
     },
     "/api/v1/analyzers/fixes/apply": {
       "post": {
-        "description": "Record the fix as accepted at ``scope``: its diff joins the effective diff\n(``accepted_changes``) of every later run in that scope while the diff is unchanged.\n\nNothing is sent to Bambuddy: this is a ``write`` to ScadBuddy's own database,\nremovable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for\nwhat a send that consumes it must do.\n\nRefused, in this order: a scope this finding does not fall in (422); a fingerprint\nthat differs from the one this apply computes, because the diff, the scope, the\nprint or its base moved since the preview (409, ``analyzer-fix-stale``); a change\nwhose target is still unverified (409, ``analyzer-fix-unverified``, naming the \u00a73.2\nitems in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).",
+        "description": "Accept the fix at ``scope``: its diff joins this print's effective diff, and\nevery later print that falls in the same scope, until the diff changes.\n\nRefused, in this order: a diff that differs from the previewed ``fingerprint``\n(409, ``analyzer-fix-stale``); a change whose target is still unverified (409,\n``analyzer-fix-unverified``, naming the \u00a73.2 items in ``to_verify``); an outward\nchange without ``confirm: true`` (428, ``confirmation-required``); a scope this\nprint does not fall in (422).",
         "operationId": "post_apply_api_v1_analyzers_fixes_apply_post",
         "requestBody": {
           "content": {
@@ -7150,7 +7075,7 @@
     },
     "/api/v1/analyzers/fixes/preview": {
       "post": {
-        "description": "The fix's whole diff, where each line would land, whether it can be applied yet,\nand the fingerprint an apply confirms against (diff, scope, subject and base).\nChanges nothing.",
+        "description": "The fix's whole diff, where each line lands, whether it can be applied yet, and\nthe fingerprint an apply confirms against. Changes nothing.",
         "operationId": "post_preview_api_v1_analyzers_fixes_preview_post",
         "requestBody": {
           "content": {
@@ -7192,7 +7117,7 @@
     },
     "/api/v1/analyzers/run": {
       "post": {
-        "description": "Judge an output or a configuration against the print request it would go out\nwith (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).\n\nReads only: nothing is uploaded, sliced or queued. An input that cannot be read\n(no Bambuddy, no choices yet, an output not uploaded yet, a missing API-key scope)\nis listed in ``inputs`` with the reason, and the analyzers needing it in\n``skipped``.\n\n``detail=simple`` returns the headline and the open findings with their sources and\nfixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,\nignored and ``hidden`` findings with the decision behind each.\n\nWithout a database, or with one that cannot be reached, the analyzers still run;\n``decisions_available`` is false and ``decisions_reason`` says why.",
+        "description": "Judge an output or a configuration against the print request it would go out\nwith (the #84 base: printer, spool plan, nozzles, quality, plate type and options).\n\nReads only: nothing is uploaded, sliced or queued. An input that cannot be read\n(no Bambuddy, no nozzle or quality chosen, an output not uploaded yet, a missing\nAPI-key scope) is listed in ``inputs`` with the reason, and the analyzers needing it\nin ``skipped``.\n\n``detail=simple`` returns the headline and the open findings with their sources and\nfixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,\nignored and ``hidden`` findings with the decision behind each.\n\nWithout a database the analyzers still run; ``decisions_available`` is false and\n``decisions_reason`` says why, and the routes that record decisions answer 503.",
         "operationId": "post_run_api_v1_analyzers_run_post",
         "requestBody": {
           "content": {
@@ -7595,7 +7520,7 @@
     },
     "/api/v1/libraries/{name}": {
       "delete": {
-        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.",
+        "description": "Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout clones it again at that commit, and is a 409 only when that fails.",
         "operationId": "remove_library_api_v1_libraries__name__delete",
         "parameters": [
           {
@@ -7852,7 +7777,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7899,7 +7824,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7941,7 +7866,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -7996,7 +7921,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8050,7 +7975,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8104,7 +8029,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8156,7 +8081,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8201,7 +8126,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8256,7 +8181,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8311,7 +8236,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8376,7 +8301,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8443,7 +8368,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8489,7 +8414,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8544,7 +8469,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8591,7 +8516,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8646,7 +8571,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8692,7 +8617,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8757,7 +8682,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8822,7 +8747,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8864,7 +8789,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8907,7 +8832,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -8961,7 +8886,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9019,7 +8944,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9087,7 +9012,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9131,7 +9056,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9170,7 +9095,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9256,7 +9181,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9299,7 +9224,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9357,7 +9282,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9412,7 +9337,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9457,7 +9382,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9502,7 +9427,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9547,7 +9472,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9594,7 +9519,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9654,7 +9579,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9725,7 +9650,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9779,7 +9704,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -9833,7 +9758,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -10580,7 +10505,7 @@
             "required": true,
             "schema": {
               "maxLength": 108,
-              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]*$",
+              "pattern": "^(builtin:)?[a-z0-9][a-z0-9-]{0,99}$",
               "title": "Slug",
               "type": "string"
             }
@@ -11037,6 +10962,314 @@
         "summary": "Create or link a project",
         "tags": [
           "print"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/files/sliced": {
+      "get": {
+        "operationId": "get_sliced_file_api_v1_prints__archive_id__files_sliced_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The sliced file that was printed",
+        "tags": [
+          "prints"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/files/source": {
+      "get": {
+        "operationId": "get_source_file_api_v1_prints__archive_id__files_source_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The slicer project 3MF, when there is one",
+        "tags": [
+          "prints"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/photos/{filename}": {
+      "get": {
+        "operationId": "get_photo_api_v1_prints__archive_id__photos__filename__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "pattern": "^[A-Za-z0-9_-]+\\.(jpg|jpeg|png|webp)$",
+              "title": "Filename",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "A photo of the print",
+        "tags": [
+          "prints"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/plates/{index}/thumbnail": {
+      "get": {
+        "operationId": "get_plate_thumbnail_api_v1_prints__archive_id__plates__index__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "One plate's image from the slicer",
+        "tags": [
+          "prints"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/thumbnail": {
+      "get": {
+        "operationId": "get_thumbnail_api_v1_prints__archive_id__thumbnail_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The print's thumbnail",
+        "tags": [
+          "prints"
+        ]
+      }
+    },
+    "/api/v1/prints/{archive_id}/timelapse": {
+      "get": {
+        "operationId": "get_timelapse_api_v1_prints__archive_id__timelapse_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "archive_id",
+            "required": true,
+            "schema": {
+              "minimum": 1,
+              "title": "Archive Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The file"
+          },
+          "206": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "The requested range"
+          },
+          "416": {
+            "description": "The range is past the end; `Content-Range` gives the length"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "The print's timelapse video (Range supported)",
+        "tags": [
+          "prints"
         ]
       }
     },

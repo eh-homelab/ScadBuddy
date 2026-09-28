@@ -18,6 +18,7 @@ import psycopg
 import pytest
 from psycopg.conninfo import make_conninfo
 
+from scadbuddy.core import settings as settings_module
 from scadbuddy.core.config import load_config
 from scadbuddy.library import url_import
 from scadbuddy.library.history import GIT, git_env
@@ -131,6 +132,14 @@ def pg_conninfo() -> Iterator[str]:
     finally:
         with psycopg.connect(url, autocommit=True) as conn:
             conn.execute(f'DROP SCHEMA "{schema}" CASCADE'.encode())
+
+
+@pytest.fixture(autouse=True)
+def _no_image_library_seed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Inside the test image, /app/libraries holds the baked-in BOSL2; an app a test
+    starts must not copy it into every temporary data directory. A test of the
+    seed passes ``seed_libraries_dir`` explicitly."""
+    monkeypatch.setattr(settings_module, "CONTAINER_SEED_LIBRARIES_DIR", tmp_path / "no-seed")
 
 
 @pytest.fixture(autouse=True)

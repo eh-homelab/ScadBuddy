@@ -41,13 +41,10 @@ export interface paths {
         put?: never;
         /**
          * Ignore or suppress a diagnostic at a scope
-         * @description Replaces an earlier decision about the same rule and instance at the same scope
-         *     (announced as ``removed``, then this one as ``recorded``).
+         * @description Replaces an earlier decision about the same rule and instance at the same scope.
          *
-         *     ScadBuddy's own state, reversible by deleting it (AI spec §8.1's ``write`` tier).
-         *     ``enforced`` makes a broad decision win over narrower ones; enforcing the
-         *     suppression of an ``error`` rule also needs ``confirm: true``, since it hides that
-         *     problem from every print in the scope.
+         *     ScadBuddy's own state, reversible by deleting it, so no confirmation (AI spec
+         *     §8.1's ``write`` tier). ``enforced`` makes a broad decision win over narrower ones.
          */
         post: operations["post_decision_api_v1_analyzers_decisions_post"];
         delete?: never;
@@ -84,18 +81,14 @@ export interface paths {
         put?: never;
         /**
          * Apply a previewed fix
-         * @description Record the fix as accepted at ``scope``: its diff joins the effective diff
-         *     (``accepted_changes``) of every later run in that scope while the diff is unchanged.
+         * @description Accept the fix at ``scope``: its diff joins this print's effective diff, and
+         *     every later print that falls in the same scope, until the diff changes.
          *
-         *     Nothing is sent to Bambuddy: this is a ``write`` to ScadBuddy's own database,
-         *     removable with ``DELETE /analyzers/decisions/{id}``. See the module docstring for
-         *     what a send that consumes it must do.
-         *
-         *     Refused, in this order: a scope this finding does not fall in (422); a fingerprint
-         *     that differs from the one this apply computes, because the diff, the scope, the
-         *     print or its base moved since the preview (409, ``analyzer-fix-stale``); a change
-         *     whose target is still unverified (409, ``analyzer-fix-unverified``, naming the §3.2
-         *     items in ``to_verify``); no ``confirm: true`` (428, ``confirmation-required``).
+         *     Refused, in this order: a diff that differs from the previewed ``fingerprint``
+         *     (409, ``analyzer-fix-stale``); a change whose target is still unverified (409,
+         *     ``analyzer-fix-unverified``, naming the §3.2 items in ``to_verify``); an outward
+         *     change without ``confirm: true`` (428, ``confirmation-required``); a scope this
+         *     print does not fall in (422).
          */
         post: operations["post_apply_api_v1_analyzers_fixes_apply_post"];
         delete?: never;
@@ -115,9 +108,8 @@ export interface paths {
         put?: never;
         /**
          * Preview a fix
-         * @description The fix's whole diff, where each line would land, whether it can be applied yet,
-         *     and the fingerprint an apply confirms against (diff, scope, subject and base).
-         *     Changes nothing.
+         * @description The fix's whole diff, where each line lands, whether it can be applied yet, and
+         *     the fingerprint an apply confirms against. Changes nothing.
          */
         post: operations["post_preview_api_v1_analyzers_fixes_preview_post"];
         delete?: never;
@@ -138,19 +130,19 @@ export interface paths {
         /**
          * Run the analyzers
          * @description Judge an output or a configuration against the print request it would go out
-         *     with (the spool-first base, #335: printer, filament plan, nozzles, quality, plate).
+         *     with (the #84 base: printer, spool plan, nozzles, quality, plate type and options).
          *
          *     Reads only: nothing is uploaded, sliced or queued. An input that cannot be read
-         *     (no Bambuddy, no choices yet, an output not uploaded yet, a missing API-key scope)
-         *     is listed in ``inputs`` with the reason, and the analyzers needing it in
-         *     ``skipped``.
+         *     (no Bambuddy, no nozzle or quality chosen, an output not uploaded yet, a missing
+         *     API-key scope) is listed in ``inputs`` with the reason, and the analyzers needing it
+         *     in ``skipped``.
          *
          *     ``detail=simple`` returns the headline and the open findings with their sources and
          *     fixes; ``advanced`` adds evidence, locations, explanations, and the suppressed,
          *     ignored and ``hidden`` findings with the decision behind each.
          *
-         *     Without a database, or with one that cannot be reached, the analyzers still run;
-         *     ``decisions_available`` is false and ``decisions_reason`` says why.
+         *     Without a database the analyzers still run; ``decisions_available`` is false and
+         *     ``decisions_reason`` says why, and the routes that record decisions answer 503.
          */
         post: operations["post_run_api_v1_analyzers_run_post"];
         delete?: never;
@@ -336,7 +328,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a library's checkouts from the volume
-         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout clones it again at that commit, and is a 409 only when that fails.
          */
         delete: operations["remove_library_api_v1_libraries__name__delete"];
         options?: never;
@@ -1390,6 +1382,108 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/prints/{archive_id}/files/sliced": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The sliced file that was printed */
+        get: operations["get_sliced_file_api_v1_prints__archive_id__files_sliced_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/files/source": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The slicer project 3MF, when there is one */
+        get: operations["get_source_file_api_v1_prints__archive_id__files_source_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/photos/{filename}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** A photo of the print */
+        get: operations["get_photo_api_v1_prints__archive_id__photos__filename__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/plates/{index}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One plate's image from the slicer */
+        get: operations["get_plate_thumbnail_api_v1_prints__archive_id__plates__index__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/thumbnail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The print's thumbnail */
+        get: operations["get_thumbnail_api_v1_prints__archive_id__thumbnail_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/prints/{archive_id}/timelapse": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The print's timelapse video (Range supported) */
+        get: operations["get_timelapse_api_v1_prints__archive_id__timelapse_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/settings": {
         parameters: {
             query?: never;
@@ -1562,12 +1656,13 @@ export interface components {
         };
         /**
          * AnalysisRequest
-         * @description The base print request, as ``POST /print/outputs/{id}/run`` takes it (#335).
+         * @description The base print request, as ``POST /print/outputs/{id}/run`` takes it (#84, #335).
          *
-         *     Every field means what it means on
-         *     :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`, but the plan and the
-         *     choices are optional here: an analysis can run before the dialog has them, and
-         *     the analyzers that need them say so.
+         *     Every field means what it means on :class:`~scadbuddy.bambuddy.pipelines.PrintRunRequest`.
+         *     ``printer_id`` omitted is the model's remembered printer, then the configured one,
+         *     then the first active one, as the dialog's choices route picks it. ``choices``
+         *     omitted is what the dialog reopens with: the model's remembered nozzles, tier and
+         *     process, on the plate type remembered for that printer.
          */
         AnalysisRequest: {
             choices?: components["schemas"]["PrintChoices"] | null;
@@ -1651,8 +1746,6 @@ export interface components {
              * @enum {string}
              */
             severity: "error" | "warning" | "info" | "hidden";
-            /** Slots */
-            slots?: number[];
             /** Sources */
             sources: components["schemas"]["Source"][];
             /**
@@ -1685,7 +1778,7 @@ export interface components {
             /** Name */
             name: string;
             /** Needs */
-            needs: ("output" | "geometry" | "plate" | "printer" | "choices" | "filaments" | "inventory")[];
+            needs: ("output" | "geometry" | "plate" | "choices" | "printer" | "filaments" | "inventory")[];
             /** Scope */
             scope: string;
             /**
@@ -1768,30 +1861,17 @@ export interface components {
         };
         /**
          * BaseProfile
-         * @description What the diffs are against: the presets the resolver derives from the choices.
-         *
-         *     Names follow the resolver's own derivation (``resolver.TIERS`` and
-         *     ``printer_preset_name``), so they are the presets a run would slice with.
+         * @description What the diffs are against: the print's choices and the presets they resolve
+         *     to by name (spool-first spec §4.1-4.2), the printer, plate and plan (#84).
          */
         BaseProfile: {
             /** Bed Type */
             bed_type?: string | null;
-            /**
-             * Copies
-             * @default 1
-             */
+            choices?: components["schemas"]["PrintChoices"] | null;
+            /** Copies */
             copies: number;
-            /**
-             * High Flow
-             * @default false
-             */
-            high_flow: boolean;
-            /** Nozzle Sizes */
-            nozzle_sizes?: string[];
-            /**
-             * Plate Id
-             * @default 1
-             */
+            filament_plan?: components["schemas"]["FilamentPlan"] | null;
+            /** Plate Id */
             plate_id: number;
             /** Plate Model */
             plate_model?: string | null;
@@ -1801,19 +1881,8 @@ export interface components {
             printer_model?: string | null;
             /** Printer Preset Name */
             printer_preset_name?: string | null;
-            /** Process Preset Name */
-            process_preset_name?: string | null;
-            /** Slots */
-            slots?: components["schemas"]["BaseSlot"][];
-        };
-        /** BaseSlot */
-        BaseSlot: {
-            /** Preset */
-            preset?: string | null;
-            /** Slot Id */
-            slot_id: number;
-            /** Spool Id */
-            spool_id?: number | null;
+            /** Process Name */
+            process_name?: string | null;
         };
         /** Body_create_model_api_v1_models_post */
         Body_create_model_api_v1_models_post: {
@@ -2051,8 +2120,6 @@ export interface components {
             created_at?: string;
             /** Diagnostic Id */
             diagnostic_id: string;
-            /** Diff Digest */
-            diff_digest?: string | null;
             /**
              * Enforced
              * @default false
@@ -2081,11 +2148,6 @@ export interface components {
          *     apply, which is where its diff is confirmed.
          */
         DecisionCreate: {
-            /**
-             * Confirm
-             * @default false
-             */
-            confirm: boolean;
             /** Diagnostic Id */
             diagnostic_id: string;
             /**
@@ -2140,7 +2202,7 @@ export interface components {
              * Kind
              * @enum {string}
              */
-            kind: "mesh" | "plate" | "filament_slot" | "choices" | "profile_setting" | "analyzer";
+            kind: "mesh" | "plate" | "filament_slot" | "print_choices" | "profile_setting" | "analyzer";
             /** Part */
             part?: number | null;
             /** Setting */
@@ -2320,10 +2382,9 @@ export interface components {
             outward: boolean;
             /**
              * Route Note
-             * @default Applying records this diff as a decision at its scope; nothing sends it yet. A print that uses it will have to slice and queue with the diff, since a pipeline run carries no per-print settings (AI spec §11), and will go through the outward approval of AI spec §8.2 before it does.
+             * @default An accepted settings diff lands on this print's slice and queue item: the print dialog always slices then queues (spool-first print spec §7). The send bar's pipeline run carries no per-print settings, so it does not apply one (AI spec §11).
              */
             route_note: string;
-            scope: components["schemas"]["ScopeRef"];
             /** Summary */
             summary: string;
         };
@@ -2334,7 +2395,6 @@ export interface components {
             /** Fix Id */
             fix_id: string;
             request?: components["schemas"]["AnalysisRequest"];
-            scope?: components["schemas"]["ScopeRef"] | null;
             target: components["schemas"]["AnalysisTarget"];
         };
         /**
@@ -2483,7 +2543,7 @@ export interface components {
              * Name
              * @enum {string}
              */
-            name: "output" | "geometry" | "plate" | "printer" | "choices" | "filaments" | "inventory";
+            name: "output" | "geometry" | "plate" | "choices" | "printer" | "filaments" | "inventory";
             /** Reason */
             reason?: string | null;
         };
@@ -6679,6 +6739,290 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["ProjectView"];
                 };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_sliced_file_api_v1_prints__archive_id__files_sliced_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_source_file_api_v1_prints__archive_id__files_source_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_photo_api_v1_prints__archive_id__photos__filename__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+                filename: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_plate_thumbnail_api_v1_prints__archive_id__plates__index__thumbnail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+                index: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_thumbnail_api_v1_prints__archive_id__thumbnail_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_timelapse_api_v1_prints__archive_id__timelapse_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                archive_id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The requested range */
+            206: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/octet-stream": unknown;
+                };
+            };
+            /** @description The range is past the end; `Content-Range` gives the length */
+            416: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Validation Error */
             422: {
