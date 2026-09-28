@@ -1,12 +1,64 @@
 import { z } from 'zod'
 import { binary } from './binary.js'
-import { blob, defineTool, image, ToolError, type Tool } from './registry.js'
+import { ok } from './call.js'
+import { slug } from './common.js'
+import { blob, defineTool, image, json, ToolError, type Tool } from './registry.js'
+
+// Print history (issue #308): ScadBuddy's own prints, each a Bambuddy archive linked
+// to the output that printed it. Routes: backend/scadbuddy/api/print_history.py.
+
+const archiveId = z.number().int().min(1).describe("A Bambuddy print archive's id, as list_prints returns it")
+const day = z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'must be a day, YYYY-MM-DD')
+
+export const printHistoryTools: Tool[] = [
+  defineTool({
+    name: 'list_prints',
+    description:
+      "ScadBuddy's print history, newest first: each print's status, printer, times, filament, cover image and the " +
+      'parameters that differ from the template defaults. Filter by template (`slug`), Bambuddy `status` ' +
+      '(completed, failed, printing, … or deleted_in_bambuddy), `printer_id`, start day (`from`/`to`, inclusive) and ' +
+      'text `q` (output or print name, parameter values). Pass `next_cursor` back as `cursor` for the next page.',
+    input: z.object({
+      slug: slug.optional(),
+      status: z.string().min(1).max(64).optional(),
+      printer_id: z.number().int().optional(),
+      from: day.optional(),
+      to: day.optional(),
+      q: z.string().min(1).max(200).optional(),
+      limit: z.number().int().min(1).max(100).optional(),
+      cursor: z.string().regex(/^[1-9][0-9]{0,17}$/, 'must be a next_cursor from list_prints').optional(),
+    }),
+    risk: 'read',
+    routes: ['GET /api/v1/prints'],
+    handler: async (query, { backend }) =>
+      json(await ok(backend.GET('/api/v1/prints', { params: { query } }), 'list prints')),
+  }),
+
+  defineTool({
+    name: 'get_print',
+    description:
+      'One print: the output it came from (template, revision, exact parameters), its files, photos, timelapse, ' +
+      'outcome (status, failure reason, times, filament, cost) and runs. `printer_media: true` also lists the ' +
+      "recordings on the printer, which asks the printer.",
+    input: z.object({ archive_id: archiveId, printer_media: z.boolean().optional() }),
+    risk: 'read',
+    routes: ['GET /api/v1/prints/{archive_id}'],
+    handler: async ({ archive_id, printer_media }, { backend }) =>
+      json(
+        await ok(
+          backend.GET('/api/v1/prints/{archive_id}', {
+            params: { path: { archive_id }, query: printer_media === undefined ? {} : { printer_media } },
+          }),
+          `get print ${archive_id}`,
+        ),
+      ),
+  }),
+]
 
 // Print media (issue #307): a Bambuddy archive's images, timelapse and files,
 // through ScadBuddy's proxy so the API key stays server-side. Routes:
 // backend/scadbuddy/api/prints.py.
 
-const archiveId = z.number().int().min(1).describe("A Bambuddy print archive's id")
 /** backend/scadbuddy/api/prints.py `PHOTO_NAME`. */
 const photoName = z
   .string()
