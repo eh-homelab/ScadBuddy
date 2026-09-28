@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 from typing import Annotated, Any
 
+import psycopg
 from fastapi import (
     APIRouter,
     FastAPI,
@@ -35,14 +36,17 @@ from scadbuddy.api.deps import (
     HistoryDep,
     InstallsDep,
     LibrariesDep,
+    OutputsDep,
     PathsDep,
     PresetsDep,
     QueueDep,
     SlugPath,
+    UploadsDep,
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
 from scadbuddy.api.params import require_valid_presets
+from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
@@ -75,6 +79,7 @@ from scadbuddy.library.libraries import (
     resolve_search_path,
     search_path,
 )
+from scadbuddy.library.outputs import OutputStore
 from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
@@ -102,7 +107,7 @@ from scadbuddy.library.url_import import (
     ImportRefusedError,
     fetch_model,
 )
-from scadbuddy.render.jobs import resolve_source
+from scadbuddy.render.jobs import RenderQueue, resolve_source
 from scadbuddy.render.runner import OpenSCADError, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, store_cached_schema
 
@@ -950,15 +955,37 @@ def duplicate_model(
         "they report their upstream as `gone`."
     ),
 )
-def delete_model(
+async def delete_model(
     slug: SlugPath,
     catalogue: CatalogueDep,
     queue: QueueDep,
+    outputs: OutputsDep,
+    uploads: UploadsDep,
     events: EventsDep,
     force: Annotated[
         bool, Query(description="Delete even when duplicates track this template")
     ] = False,
 ) -> Response:
+    output_ids = await asyncio.to_thread(_delete_model, slug, catalogue, queue, outputs, force)
+    # Its outputs went with it; so do their Bambuddy upload records (#455). Bambuddy's
+    # own files are left alone, as a single output's delete leaves them unless asked.
+    # Best effort, like the rest of the cleanup after a delete: the model is gone.
+    if output_ids:
+        try:
+            await uploads.delete_outputs(output_ids)
+        except (DatabaseRequiredError, psycopg.Error):
+            logger.exception(
+                "could not forget a deleted model's upload records", extra={"slug": slug}
+            )
+    emit(events, ModelEvent(kind="model.deleted", slug=slug))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _delete_model(
+    slug: str, catalogue: Catalogue, queue: RenderQueue, outputs: OutputStore, force: bool
+) -> list[str]:
+    """The blocking part of :func:`delete_model`; returns the ids of the outputs it
+    removed, read before their directories go."""
     require_mine(slug)
     require_model_exists(catalogue, slug)
     if not force:
@@ -977,13 +1004,13 @@ def delete_model(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"{slug!r} has a render in progress; try again when it ends"
         )
+    output_ids = outputs.ids_for(slug)
     try:
         catalogue.delete(slug)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    emit(events, ModelEvent(kind="model.deleted", slug=slug))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
+    return output_ids
 
 
 @router.get(
@@ -1147,14 +1174,15 @@ def _etag_matches(if_none_match: str | None, etag: str) -> bool:
     "/models/{slug}/thumbnail",
     response_class=Response,
     responses={
-        200: {"content": {"image/png": {}}},
+        200: {"content": {"image/png": {}, "image/jpeg": {}, "image/webp": {}}},
         304: {"description": "The copy named by `If-None-Match` is still current"},
     },
     summary="Model thumbnail",
     description=(
-        "The thumbnail set on the model or, when it has none, the plate image of its "
-        "first generated output, or else its default-render preview. 404 when there is "
-        "none of the three. Carries a strong `ETag` "
+        "The model's cover -- its first media image, or the poster of its first "
+        "video -- or, when it has none, the plate image of its first generated "
+        "output, or else its default-render preview. 404 when there is none of the "
+        "three. Carries a strong `ETag` "
         "over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is "
         "answered 304 with no body."
     ),
@@ -1166,18 +1194,19 @@ def get_thumbnail(
 ) -> Response:
     require_model_exists(catalogue, slug)
     try:
-        png = catalogue.thumbnail(slug)
+        cover = catalogue.thumbnail(slug)
     except ModelNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
-    if png is None:
+    if cover is None:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"{slug!r} has no thumbnail")
+    image, content_type = cover
     # Over the bytes themselves, so it changes exactly when the image does, from
     # whichever source -- a set, a removal, or the fallback moving to another output.
-    etag = f'"{hashlib.sha256(png).hexdigest()}"'
+    etag = f'"{hashlib.sha256(image).hexdigest()}"'
     headers = {"ETag": etag, "Cache-Control": THUMBNAIL_CACHE_CONTROL}
     if _etag_matches(if_none_match, etag):
         return Response(status_code=status.HTTP_304_NOT_MODIFIED, headers=headers)
-    return Response(png, media_type="image/png", headers=headers)
+    return Response(image, media_type=content_type, headers=headers)
 
 
 @router.put(

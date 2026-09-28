@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import shutil
 import threading
 import uuid
@@ -74,14 +75,11 @@ class OutputMeta(BaseModel):
     colors: list[str] = Field(default_factory=list)
     parts: list[PartInfo] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
-    # Bambuddy ids, filled in by POST /outputs/{id}/send. Integers, matching
-    # Bambuddy's own OpenAPI.
-    library_file_id: int | None = None
-    #: Which plate ``library_file_id`` was laid out for (:attr:`PlateGeometry.key`).
-    #: The 3MF on disk is placed for the fallback plate, and the send re-places it
-    #: for the printer in play, so a cached id is only reusable while the target
-    #: has not changed. ``None`` on records written before #105.
-    library_file_plate: str | None = None
+    # The output's uploads to Bambuddy's file library are in Postgres
+    # (`bambuddy.uploads`, #455), not here. The keys an older record carries for them
+    # (``library_file_id``, ``library_file_plate``, ``library_files``) are ignored, as
+    # pydantic ignores any unknown key, so such an output simply has no recorded copy
+    # and its next send uploads afresh.
     pipeline_run_id: int | None = None
     queue_item_id: int | None = None
     #: Which of Bambuddy's two routes the last print took (#87). Without it an output
@@ -173,6 +171,18 @@ class OutputStore:
         ]
         return sorted(metas, key=lambda meta: meta.created_at, reverse=True)
 
+    def ids_for(self, slug: str) -> list[str]:
+        """The id of every output directory of ``slug``, readable record or not."""
+        try:
+            entries = list((self.paths.outputs / slug).iterdir())
+        except OSError:
+            return []
+        return [
+            entry.name
+            for entry in entries
+            if entry.is_dir() and re.fullmatch(OUTPUT_ID_PATTERN, entry.name)
+        ]
+
     def create(
         self, job: Job, *, name: str | None = None, public_url: str | None = None
     ) -> OutputMeta:
@@ -225,8 +235,6 @@ class OutputStore:
         self,
         output_id: str,
         *,
-        library_file_id: int | None = None,
-        library_file_plate: str | None = None,
         pipeline_run_id: int | None = None,
         queue_item_id: int | None = None,
         print_route: PrintRoute | None = None,
@@ -247,8 +255,6 @@ class OutputStore:
             update={
                 key: value
                 for key, value in (
-                    ("library_file_id", library_file_id),
-                    ("library_file_plate", library_file_plate),
                     ("pipeline_run_id", pipeline_run_id),
                     ("queue_item_id", queue_item_id),
                     ("print_route", print_route),
@@ -258,25 +264,6 @@ class OutputStore:
                 )
                 if value is not None
             }
-        )
-        self._write_meta(directory, updated)
-        return updated
-
-    def forget_library_file(self, output_id: str) -> OutputMeta:
-        """Drop the recorded library file id, once the file has actually gone.
-
-        ``record_send`` leaves omitted ids alone by design, so it cannot clear one.
-
-        Call this *after* the delete has come back — committed or 404 — never
-        before it. Clearing first looks safer and is not: a delete that fails for
-        any other reason (a 500, a timeout) leaves the file in Bambuddy with
-        nothing pointing at it, so the next send cannot replace it and uploads a
-        duplicate instead. ``upload_output`` is the only caller and orders it that
-        way; ``test_a_failed_delete_keeps_the_recorded_library_file_id`` pins it.
-        """
-        directory = self._find_dir(output_id)
-        updated = self.get(output_id).model_copy(
-            update={"library_file_id": None, "library_file_plate": None}
         )
         self._write_meta(directory, updated)
         return updated

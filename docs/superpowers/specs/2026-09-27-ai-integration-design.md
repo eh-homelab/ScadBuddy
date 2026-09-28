@@ -96,6 +96,45 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
+- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
+  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+  the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
+  argv (`sdk.mjs`), so a header value written there would be on the command line; a
+  header written as `${VAR}` with the value in the query's `env` is expanded by Claude
+  Code and reaches the server, and the argv holds only the reference. A configured
+  `{ type: 'http' }` server named `my-memory` gives tools `mcp__my-memory__<tool>` and
+  reports `{ name, status: 'connected', source: 'dynamic' }` in the init message;
+  `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
+  `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
+  server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
+  tools in the first turn. The permission seam applies to them as to in-process tools: a
+  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
+  server.
+- Read and measured in the #464 review, on the bundled Claude Code 2.1.283:
+  - **Tool-name normalisation.** Claude Code names an MCP tool
+    `mcp__${vn(server)}__${vn(tool)}`, where `vn(s) = s.replace(/[^a-zA-Z0-9_-]/g, "_")`
+    (read in the CLI bundle's `Pa()`/`vn()`; confirmed by a probe). `files.list` and
+    `files_list` therefore collide on one name, and a name with a space or a dot cannot be
+    matched literally. The registry now tiers only names in that alphabet, maps disabled
+    names through `vn`, and hides colliding tools (`agent/src/plugins/registry.ts`
+    `harnessToolName`, `agent/src/plugins/forwarder.ts`). This is measured end to end in
+    `agent/test/plugins.e2e.test.ts`: `files.delete` is disabled as
+    `mcp__my-memory__files_delete`, the colliding pair is never offered, and a call to
+    the colliding name never reaches the server.
+  - **Redirects and OAuth discovery.** Claude Code's own MCP client follows 30x redirects
+    and a `WWW-Authenticate` `resource_metadata` URL, and sends the configured header
+    there too. The probe showed a 307 to another origin receiving every request with the
+    header, and `resource_metadata="http://169.254.169.254/…"` receiving a GET with it.
+    Claude Code is therefore never given a plugin's URL or secret. A loopback forwarder
+    in the agent (`agent/src/plugins/forwarder.ts`):
+    - connects to the egress-checked address;
+    - refuses redirects;
+    - turns a 401 into a 502;
+    - adds the header itself.
+
+    The e2e test measures that a redirecting plugin is not `connected` and that the
+    redirect target and metadata URL are never contacted. That supersedes the `${VAR}`
+    header mechanism above.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -186,6 +225,17 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
   `render_poll_interval`.
 - TLS is terminated in front of the app (`README.md` checks
   `https://scadbuddy.internal.nullreference.io/healthz`).
+- *Read 2026-09-28, for #268.* Bambuddy 1.2.5.5 has a push socket, `WS /api/v1/ws`. It
+  takes a token minted by `POST /api/v1/auth/ws-token`, and an API key with
+  `can_read_status` may mint one (bambuddy `v1.2.5.5`
+  `backend/app/api/routes/websocket.py`, `backend/app/api/routes/auth.py`
+  `mint_websocket_token`). It cannot stand in for reading a print's progress:
+  - nothing is broadcast for slice jobs;
+  - completion arrives as `print_complete` per *printer*, not per queue item;
+  - `pipeline_run_updated` goes through `broadcast_to_user(run.created_by)`
+    (`backend/app/core/websocket.py` `send_*`, `backend/app/api/routes/pipeline_runs.py`).
+
+  So the print watcher polls with back-off (§7).
 
 ### 3.2 To verify (each item names who verifies it)
 
@@ -442,8 +492,16 @@ UI socket does not replay: on every (re)subscribe the server confirms with
 `subscribed` only once it is listening, and the client re-reads then, so a reconnect
 cannot leave a gap.
 
-Print progress comes from **one server-side watcher per active print** (#268), not from
-one poll per open dialog. #270 moves #241's render workers from interval polling to the
+Print progress comes from **one server-side watcher per active print** (#268,
+`backend/scadbuddy/bambuddy/watcher.py`), not from one poll per open dialog. It reads with
+back-off (2 s while the print moves, up to 30 s while it doesn't), because Bambuddy's push
+socket can't replace the read (§3.1). When each print started is kept in Postgres
+(`print_watches`, `backend/scadbuddy/migrations/20260928T0718Z_print_watches.sql`; nothing on disk), so the watcher resumes recent
+prints after a restart; a settled print is forgotten. A session advisory lock per print
+means one replica follows each print. Reading a print's progress re-arms its watcher,
+and an open dialog reads at least every 30 s while the socket is up, so it never waits
+on a watcher that is not there. With Postgres, `print.*` events cross replicas on the
+event bus. #270 moves #241's render workers from interval polling to the
 same `NOTIFY`, with a long fallback poll.
 
 **The database is required** (decided while building #266; tracked in #401). The
