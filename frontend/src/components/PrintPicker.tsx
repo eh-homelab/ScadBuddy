@@ -52,15 +52,18 @@ interface Props {
   open: boolean
   /** #313 — an output ScadBuddy rendered, or a file in Bambuddy's library. */
   source: PrintSource | undefined
-  /** The model, for its print-options scope; a library file has none. */
-  slug?: string
   onClose: () => void
   onRan: (result: PrintRunResult) => void
   /** #81 — the model of the printer in view, so the preview can draw its plate. */
   onPrinterModel?: (model: string | null) => void
 }
 
-export function PrintPicker({ open, source, slug, onClose, onRan, onPrinterModel }: Props) {
+export function PrintPicker({ open, source, onClose, onRan, onPrinterModel }: Props) {
+  /**
+   * The model, for its print-options scope — the same slug its choices are remembered
+   * under (`sourceApi`). A library file has none.
+   */
+  const slug = source?.kind === 'output' ? source.output.slug : undefined
   // A library run polls nothing and attaches nothing: its progress is Bambuddy's queue (#313).
   const outputId = source?.kind === 'output' ? source.output.id : undefined
   const picker = usePrintChoices(open, source)
