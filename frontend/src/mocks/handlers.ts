@@ -966,16 +966,6 @@ export const handlers = [
   ...features.flatMap((feature) => feature.handlers),
   ...mcpOidcHandlers,
 
-  // The agent sidecar's status (agent `src/app.ts` `AiStatusView`), which the UI's
-  // assistant gate reads (`src/agent/chat/availability.ts`). The mocked build's agent
-  // is the scripted one in `./agent.ts`, and it is always there.
-  http.get(`${base}/ai/status`, () =>
-    HttpResponse.json(
-      { available: true, state: 'enabled', ai: 'enabled' },
-      { headers: { 'X-ScadBuddy-Service': 'agent' } },
-    ),
-  ),
-
   http.get(`${base}/models`, () => {
     landPreviews()
     return HttpResponse.json(state.models.map(view))
