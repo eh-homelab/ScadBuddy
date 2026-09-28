@@ -12,6 +12,7 @@ from starlette.requests import HTTPConnection
 
 from scadbuddy.analyzers.decisions import DecisionStore, PostgresDecisionStore
 from scadbuddy.bambuddy.client import client_for
+from scadbuddy.bambuddy.print_links import PrintLinkStore
 from scadbuddy.bambuddy.progress import PrintProgress, ProgressObserver, progress_for
 from scadbuddy.bambuddy.uploads import BambuddyUploadStore
 from scadbuddy.bambuddy.watcher import PgPrintLog, PgWatchLock, PrintWatcher
@@ -53,6 +54,11 @@ JOB_ID_PATTERN = r"^[0-9a-f]{32}$"
 
 
 INSTALL_CONCURRENCY = 2
+#: URL imports fetching at once per replica (#178): an in-process cap, because what it
+#: protects -- the resolver's threads -- is per process too, so N replicas fetch up to
+#: N x this. As many as the resolver has threads. Library installs share those
+#: threads; an import that finds none free is the same retryable 503.
+IMPORT_CONCURRENCY = 2
 
 
 @dataclass
@@ -66,6 +72,8 @@ class AppState:
     #: An output's uploads to Bambuddy's file library (#455), on the render queue's
     #: Postgres pool. Without a database every use raises (#401).
     uploads: BambuddyUploadStore
+    #: Which Bambuddy archives an output's prints produced (#306), on the same pool.
+    print_links: PrintLinkStore
     presets: PresetStore
     settings_store: SettingsStore
     fonts: FontService
@@ -102,6 +110,13 @@ class AppState:
     #: the loop, not in a thread.
     installs: asyncio.Semaphore = field(
         default_factory=lambda: asyncio.Semaphore(INSTALL_CONCURRENCY)
+    )
+    #: At most IMPORT_CONCURRENCY `POST /models/import` fetches at once on this
+    #: replica. Held for the fetch only -- the parse check after it takes `checks`
+    #: like any create -- and an import that finds it full is refused at once, not
+    #: queued.
+    imports: asyncio.Semaphore = field(
+        default_factory=lambda: asyncio.Semaphore(IMPORT_CONCURRENCY)
     )
     #: Pins and renders share it; deleting a checkout takes it alone (#253). The
     #: render queue holds the same one.
@@ -176,14 +191,17 @@ def build_state(settings: Settings) -> AppState:
         PostgresDecisionStore(settings.database_url) if settings.database_url else None
     )
     outputs = OutputStore(paths)
-    uploads = BambuddyUploadStore(store.pool if isinstance(store, PostgresJobStore) else None)
+    pool = store.pool if isinstance(store, PostgresJobStore) else None
+    uploads = BambuddyUploadStore(pool)
     checkouts = CheckoutGate()
     installs = asyncio.Semaphore(INSTALL_CONCURRENCY)
     libraries = LibraryStore(paths, max_bytes=config.library_max_bytes)
     # The render queue's: a route builds its own over its `LibrariesDep`.
     fetcher = CheckoutFetcher(libraries, installs, checkouts)
+    # The bytes on the volume, the rest on the render queue's pool (#591).
     assets = AssetStore(
         paths.assets,
+        pool,
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
@@ -243,10 +261,17 @@ def build_state(settings: Settings) -> AppState:
     # Nothing connects here either: the lifespan opens it first thing.
     settings_store = SettingsStore(settings, events=events)
     print_progress = ProgressObserver(events)
+    print_links = PrintLinkStore(pool)
 
     async def read_progress(meta: OutputMeta) -> PrintProgress | None:
+        # The watcher links archives too (#306), so a print nobody watches is found.
         async with client_for(settings_store.load()) as client:
-            return await progress_for(client, meta)
+            return await progress_for(
+                client,
+                meta,
+                uploads=uploads if pool is not None else None,
+                links=print_links if print_links.available else None,
+            )
 
     return AppState(
         settings=settings,
@@ -256,6 +281,7 @@ def build_state(settings: Settings) -> AppState:
         catalogue=catalogue,
         outputs=outputs,
         uploads=uploads,
+        print_links=print_links,
         presets=presets,
         settings_store=settings_store,
         fonts=FontService(
@@ -341,6 +367,10 @@ def get_uploads(state: StateDep) -> BambuddyUploadStore:
     return state.uploads
 
 
+def get_print_links(state: StateDep) -> PrintLinkStore:
+    return state.print_links
+
+
 def get_presets(state: StateDep) -> PresetStore:
     return state.presets
 
@@ -404,6 +434,10 @@ def get_installs(state: StateDep) -> asyncio.Semaphore:
     return state.installs
 
 
+def get_imports(state: StateDep) -> asyncio.Semaphore:
+    return state.imports
+
+
 def get_checkouts(state: StateDep) -> CheckoutGate:
     return state.checkouts
 
@@ -414,6 +448,7 @@ CatalogueDep = Annotated[Catalogue, Depends(get_catalogue)]
 HistoryDep = Annotated[ModelHistory, Depends(get_history)]
 OutputsDep = Annotated[OutputStore, Depends(get_outputs)]
 UploadsDep = Annotated[BambuddyUploadStore, Depends(get_uploads)]
+PrintLinksDep = Annotated[PrintLinkStore, Depends(get_print_links)]
 PresetsDep = Annotated[PresetStore, Depends(get_presets)]
 SettingsStoreDep = Annotated[SettingsStore, Depends(get_settings_store)]
 FontsDep = Annotated[FontService, Depends(get_fonts)]
@@ -427,6 +462,7 @@ OptionalDecisionsDep = Annotated[DecisionStore | None, Depends(get_decisions)]
 DecisionsDep = Annotated[DecisionStore, Depends(require_decisions)]
 ChecksDep = Annotated[asyncio.Semaphore, Depends(get_checks)]
 InstallsDep = Annotated[asyncio.Semaphore, Depends(get_installs)]
+ImportsDep = Annotated[asyncio.Semaphore, Depends(get_imports)]
 CheckoutsDep = Annotated[CheckoutGate, Depends(get_checkouts)]
 
 

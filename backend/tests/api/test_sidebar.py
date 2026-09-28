@@ -159,9 +159,6 @@ def test_targets_feed_the_settings_pickers(client: TestClient) -> None:
     respx.get(f"{API}/library/folders").mock(
         return_value=httpx.Response(200, json=recording("library-folders.json"))
     )
-    respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(200, json=recording("slicer-pipelines.json"))
-    )
     respx.get(f"{API}/printers/").mock(
         return_value=httpx.Response(200, json=recording("printers.json"))
     )
@@ -169,7 +166,7 @@ def test_targets_feed_the_settings_pickers(client: TestClient) -> None:
     body = client.get("/api/v1/settings/targets").json()
 
     assert [folder["id"] for folder in body["folders"]] == [1, 2]
-    assert body["pipelines"] == []
+    assert set(body) == {"folders", "printers"}
     assert body["printers"][0]["name"] == "3DP-31B-598"
 
 

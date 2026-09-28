@@ -33,7 +33,7 @@ multi-colour rules, connecting Bambuddy and each feature.
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
   plate cover images and a layout sized for the target printer's plate.
-- **Send to Bambuddy**: upload to a library folder, or slice and queue it.
+- **Send to Bambuddy**: upload to a library folder; printing is the print picker's job.
 - **Print picker**: spool-first — pick spools, nozzle size, a quality tier and a plate,
   and ScadBuddy derives the printer, process and filament presets and slices and queues
   through Bambuddy. No slicer pipeline to pick or maintain; Advanced mode adds per-side
@@ -98,6 +98,8 @@ for the project picker).
   `SCADBUDDY_SOLID_CONCURRENCY` (0 = derived; see below),
   `SCADBUDDY_CHECK_CONCURRENCY` (1), `SCADBUDDY_LSP_SESSIONS` (4);
   `SCADBUDDY_REALTIME_SOCKETS` (256, the most open realtime sockets, one per tab);
+  `SCADBUDDY_ALLOWED_ORIGINS` (comma-separated origins the UI is also served
+  under, see "Realtime" below);
   `SCADBUDDY_PREVIEW_RENDERS` (default `true`: a model with no thumbnail and no
   generated output is rendered at its default settings in the background, one at
   a time and behind any render someone asked for, and that plate image is its
@@ -213,9 +215,18 @@ for the project picker).
 
 **Realtime.** The UI follows changes over `WS /api/v1/ws`, served by the
 backend (spec §4.2, #266). A browser's `Origin` must be the stored public URL's
-origin (Settings, seeded from `SCADBUDDY_PUBLIC_URL`) or a loopback origin;
-anything else is refused, which stops DNS rebinding. If the socket can't
-connect, the header shows "Live updates unavailable" and views poll instead.
+origin (Settings, seeded from `SCADBUDDY_PUBLIC_URL`), one of
+`SCADBUDDY_ALLOWED_ORIGINS`, or a loopback origin; anything else is refused,
+which stops DNS rebinding. If the socket can't connect, the header shows "Live
+updates unavailable" and views poll instead. A deployment reached under more
+than one hostname (a LAN host and an SSO proxy, say) lists every hostname that
+is not the public URL in `SCADBUDDY_ALLOWED_ORIGINS`
+(`https://scadbuddy.internal.example,https://scadbuddy.sso.example`); otherwise
+the pages on the other hostname show "Live updates unavailable" while the same
+pages on the public URL work, and the backend log says
+`refused a realtime socket from origin ...`. REST calls carry no `Origin`, so
+they are not affected; only the socket is. The agent reads the same variable
+for its own origin check (below).
 
 ## Deploying
 
@@ -304,8 +315,9 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - It reads only infrastructure variables (`agent/src/config.ts`; spec §9):
   `SCADBUDDY_DATABASE_URL`, `SCADBUDDY_BACKEND_URL` (default
   `http://127.0.0.1:8080`), `SCADBUDDY_SECRET_KEY_FILE`,
-  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL` and
-  `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each described below. With no database
+  `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`, `SCADBUDDY_PUBLIC_URL`,
+  `SCADBUDDY_ALLOWED_ORIGINS` and `SCADBUDDY_AGENT_TRUSTED_PROXIES`, each
+  described below. With no database
   URL it still runs and `/healthz` reports `"ai": "disabled (no database)"`.
 - **`SCADBUDDY_SECRET_KEY_FILE`** is the key-encryption key for the Claude
   credential, which is stored encrypted in the database (envelope encryption,
@@ -357,13 +369,16 @@ the backend on `http://127.0.0.1:8080` (§4.3).
     `X-Forwarded-*` from any other peer is ignored; unset, it is ignored from
     everyone.
   - The UI's origin: `Origin` and the request's host (`X-Forwarded-Host` from a
-    trusted proxy, else `Host`) must both be the origin of
-    **`SCADBUDDY_PUBLIC_URL`**, the same variable the backend reads for
-    Bambuddy's sidebar link (set it to the `https://` URL users open). Default
-    ports are normalised. Unset, only `localhost`/`127.0.0.1`/`[::1]` with the
-    matching Origin, from a loopback peer, is accepted. This is what stops DNS
-    rebinding: an attacker's page re-pointed at the agent sends its own name
-    in both `Host` and `Origin`, which is not on the list.
+    trusted proxy, else `Host`) must both be the same origin from the list:
+    the origin of **`SCADBUDDY_PUBLIC_URL`**, the same variable the backend
+    reads for Bambuddy's sidebar link (set it to the `https://` URL users
+    open), plus any in **`SCADBUDDY_ALLOWED_ORIGINS`** (comma-separated; the
+    other hostnames the same deployment answers on, which the backend also
+    reads for its realtime socket). Default ports are normalised. Unset, only
+    `localhost`/`127.0.0.1`/`[::1]` with the matching Origin, from a loopback
+    peer, is accepted. This is what stops DNS rebinding: an attacker's page
+    re-pointed at the agent sends its own name in both `Host` and `Origin`,
+    which is not on the list.
 
   That is not authentication, and the human approval spec §8.2 asks for comes
   with #258.
@@ -379,7 +394,19 @@ the backend on `http://127.0.0.1:8080` (§4.3).
 - Plugins handed to the harness must not start processes of their own: command
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
-  credential's environment.
+  credential's environment. The one exception is the headless browser (#349,
+  [`docs/ai/headless-browser.md`](docs/ai/headless-browser.md)): the harness
+  writes that plugin itself and starts its server under `env -i`. It is off
+  until switched on in Settings ("AI headless browser", stored through
+  `PUT /api/v1/ai/settings/headless-browser`, guarded like the credential
+  writes), and the image carries its Chromium (about 600 MB of the image). The
+  backend refuses its outward requests unless a human approved that exact one
+  (`backend/scadbuddy/api/agent_actor.py`). A guard on every page refuses
+  any redirect off `SCADBUDDY_BACKEND_URL`'s origin, a proxy's included.
+  Chromium keeps its sandbox only where the pod's seccomp profile allows user
+  namespaces (not `RuntimeDefault`); otherwise the agent warns at the first
+  browser turn and runs it with `--no-sandbox`
+  ([`docs/ai/headless-browser.md`](docs/ai/headless-browser.md), "Sandbox").
 - **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
   harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
   no files) and managed through `/api/v1/ai/plugins` (below). The session
@@ -463,9 +490,10 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   Hindsight: the tool names and annotations a real server lists, and whether
   `reflect` writes anything.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
-  (mount an `emptyDir` there), so the root filesystem can be read-only
+  (mount an `emptyDir` there) and `/tmp` (another `emptyDir`; Claude Code and
+  Chromium use it), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
-  recreates `claude/` and `work/` in that volume, and it exits 1 with a
+  recreates `claude/`, `work/` and `plugins/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
 - Nothing deploys it yet. The clusters manifest, and the ingress routes for
   `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories

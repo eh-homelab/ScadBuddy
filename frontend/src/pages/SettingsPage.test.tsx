@@ -27,6 +27,15 @@ describe('SettingsPage', () => {
     expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
   })
 
+  it('offers the AI headless browser switch, off by default (#349)', async () => {
+    renderPage(<SettingsPage />)
+    expect(
+      await screen.findByRole('checkbox', {
+        name: 'Let AI sessions use ScadBuddy in a headless browser',
+      }),
+    ).not.toBeChecked()
+  })
+
   it('says when no key is stored yet', async () => {
     server.use(
       http.get('/api/v1/settings', () =>
@@ -62,17 +71,26 @@ describe('SettingsPage', () => {
     expect(await screen.findByRole('status')).toHaveTextContent("'Read Status' scope")
   })
 
-  it('offers the folders and pipelines Bambuddy reports', async () => {
+  it('offers the folders and printers Bambuddy reports, and no slicer pipeline', async () => {
     renderPage(<SettingsPage />)
     await seeded()
     expect(await screen.findByRole('option', { name: 'ScadBuddy' })).toBeInTheDocument()
     // Bambuddy's ids are integers, so the <select> values are their decimal strings.
     expect(screen.getByLabelText('Library folder')).toHaveValue('2')
-    expect(screen.getByLabelText('Slicer pipeline')).toHaveValue('1')
     expect(screen.getByLabelText('Printer')).toHaveValue('1')
-    expect(
-      screen.getByRole('option', { name: 'Textured PEI · 0.20 mm · AMS' }),
-    ).toBeInTheDocument()
+    // #312: printing is the Print dialog's, which derives its own presets.
+    expect(screen.queryByLabelText('Slicer pipeline')).not.toBeInTheDocument()
+  })
+
+  it('never sends a pipeline', async () => {
+    const put = vi.spyOn(api, 'putSettings')
+    const { user } = renderPage(<SettingsPage />)
+    await seeded()
+
+    await user.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() => expect(put).toHaveBeenCalled())
+    expect(put.mock.calls[0]?.[0]).not.toHaveProperty('pipeline_id')
+    put.mockRestore()
   })
 
   it('sends the key only when one was typed', async () => {
@@ -219,5 +237,22 @@ describe('SettingsPage, live (#269)', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
     expect(field).toHaveValue('https://tested.test')
+  })
+
+  it('shows the assistant plugin sections only while AI is available', async () => {
+    const hidden = renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
+    hidden.unmount()
+
+    vi.stubEnv('VITE_MOCK_API', '1')
+    try {
+      renderPage(<SettingsPage />)
+      expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+      expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })

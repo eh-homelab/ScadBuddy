@@ -37,8 +37,9 @@ changes what a reading means:
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -519,11 +520,55 @@ async def gather_options(
     printer_id: int | None = None,
     plate_id: int | None = None,
     fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
 ) -> FilamentOptions:
-    """Read Bambuddy once for everything the filament step needs."""
+    """Read Bambuddy once for everything the filament step needs.
+
+    ``own_colours`` replace the colors the file reports, slot by slot: the file was
+    recolored for a run's spools (#457), and the step shows the model's.
+    """
+    (options,) = await gather_plate_options(
+        client,
+        library_file_id=library_file_id,
+        printer_id=printer_id,
+        plate_ids=[plate_id],
+        fallback_colours=fallback_colours,
+        own_colours=own_colours,
+    )
+    return options
+
+
+async def gather_plate_options(
+    client: BambuddyClient,
+    *,
+    library_file_id: int,
+    printer_id: int | None = None,
+    plate_ids: Sequence[int | None],
+    fallback_colours: list[str] | None = None,
+    own_colours: list[str] | None = None,
+) -> list[FilamentOptions]:
+    """:func:`gather_options` for several plates of one file, in ``plate_ids`` order.
+
+    The spools, assignments and printer are the same for every plate, so they are read
+    once (#480); only each plate's slots are read per plate, concurrently. The reads
+    keep the single-plate order, spools, assignments, the plates, then the printer and
+    its inventory-remain, so the same failure surfaces either way: a plate's error beats
+    the printer's, and among plates the first failing one in ``plate_ids`` order wins."""
     spools = await client.spools()
     assignments = await client.spool_assignments()
-    requirements = await _requirements(client, library_file_id, plate_id, fallback_colours)
+
+    answers = await asyncio.gather(
+        *(
+            _requirements(client, library_file_id, plate, fallback_colours, own_colours)
+            for plate in plate_ids
+        ),
+        return_exceptions=True,
+    )
+    per_plate: list[list[SlotNeed]] = []
+    for answer in answers:
+        if isinstance(answer, BaseException):
+            raise answer
+        per_plate.append(answer)
 
     printer = None
     slot_materials: list[SlotMaterial] = []
@@ -531,14 +576,17 @@ async def gather_options(
         printer = await client.printer(printer_id)
         slot_materials = (await client.inventory_remain(printer_id)).slot_materials
 
-    return build_options(
-        library_file_id=library_file_id,
-        spools=spools,
-        assignments=assignments,
-        requirements=requirements,
-        printer=printer,
-        slot_materials=slot_materials,
-    )
+    return [
+        build_options(
+            library_file_id=library_file_id,
+            spools=spools,
+            assignments=assignments,
+            requirements=requirements,
+            printer=printer,
+            slot_materials=slot_materials,
+        )
+        for requirements in per_plate
+    ]
 
 
 async def _requirements(
@@ -546,6 +594,7 @@ async def _requirements(
     library_file_id: int,
     plate_id: int | None,
     fallback_colours: list[str] | None,
+    own_colours: list[str] | None = None,
 ) -> list[SlotNeed]:
     """The plate's slots, from Bambuddy, falling back to the output's own colours.
 
@@ -558,7 +607,11 @@ async def _requirements(
         SlotNeed(
             slot_id=filament.slot_id,
             material=filament.type or None,
-            colour=normalise_colour(filament.color),
+            colour=normalise_colour(
+                own_colours[filament.slot_id - 1]
+                if own_colours and 0 < filament.slot_id <= len(own_colours)
+                else filament.color
+            ),
             # 0 g is what an unsliced plate reports for every slot; it is unknown, and
             # saying so is what keeps the "enough filament left" warning honest.
             used_grams=filament.used_grams or None,

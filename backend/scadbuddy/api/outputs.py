@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -15,8 +17,7 @@ from scadbuddy.api.deps import (
     EventsDep,
     OutputIdPath,
     OutputsDep,
-    PrintProgressDep,
-    PrintWatcherDep,
+    PrintLinksDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
@@ -27,7 +28,7 @@ from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
@@ -43,6 +44,8 @@ from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["outputs"])
 
@@ -218,6 +221,7 @@ async def delete_output(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     events: EventsDep,
     store: SettingsStoreDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
@@ -237,7 +241,18 @@ async def delete_output(
             await remove_inbox_copies(client, uploads, meta, settings)
     outputs.delete(output_id)
     # After the files: a failed delete keeps the output, and so must keep its records.
-    await uploads.delete_outputs([output_id])
+    # Best effort once the files are gone, as for a deleted model: the output is. Each
+    # on its own, so a failed upload cleanup cannot leave links serving its archives.
+    try:
+        await uploads.delete_outputs([output_id])
+    except (DatabaseRequiredError, psycopg.Error):
+        logger.exception(
+            "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
+        )
+    try:
+        await links.delete_outputs([output_id])
+    except (DatabaseRequiredError, psycopg.Error):
+        logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -391,7 +406,7 @@ async def put_output_thumbnail(
 @router.post(
     "/outputs/{output_id}/send",
     response_model=SendResult,
-    summary="Send the 3MF to Bambuddy",
+    summary="Upload the 3MF to the Bambuddy library",
 )
 async def send_output_to_bambuddy(
     output_id: OutputIdPath,
@@ -399,22 +414,19 @@ async def send_output_to_bambuddy(
     outputs: OutputsDep,
     uploads: UploadsDep,
     store: SettingsStoreDep,
-    observer: PrintProgressDep,
-    watcher: PrintWatcherDep,
 ) -> SendResult:
-    """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
-    slice and queue it.
+    """Upload ``model.3mf`` to the configured library folder, laid out for the printer
+    set in Settings, and note the "Edit in ScadBuddy" link on it.
+
+    Nothing is sliced or queued (#312): printing is ``POST /print/outputs/{id}/run``.
+    ``mode`` accepts only ``"library"``.
 
     The file is read from the PVC and pushed by the server, so the API key never
     reaches the browser. A re-send reuses the copy already in the inbox while it was
     laid out for the same printer, and replaces it otherwise (#316).
     """
+    del body  # validated for its ``mode`` alone
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        result = await send_output(client, outputs, uploads, meta, settings, body)
-    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
-    if result.pipeline_run_id is not None or result.queue_item_id is not None:
-        observer.started(meta)
-        await watcher.started(meta.id)
-    return result
+        return await send_output(client, outputs, uploads, meta, settings)
