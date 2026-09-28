@@ -76,3 +76,44 @@ describe('PreToolUse hook', () => {
     }
   })
 })
+
+describe('with an approval gate (#258)', () => {
+  const opts = (id: string) => ({ signal, toolUseID: id, requestId: `r-${id}` })
+
+  it('canUseTool parks outward calls on the gate and runs the approved input', async () => {
+    const asked: string[] = []
+    const canUseTool = makeCanUseTool(tierOf, undefined, (request) => {
+      asked.push(`${request.toolName}:${request.toolUseId}:${request.tier}`)
+      return Promise.resolve({ approved: true, input: { job: 'approved' } })
+    })
+    expect(await canUseTool('mcp__scadbuddy__send_to_printer', { job: 'asked' }, opts('t1'))).toEqual({
+      behavior: 'allow',
+      updatedInput: { job: 'approved' },
+    })
+    // Read and write never reach the gate.
+    expect(await canUseTool('mcp__scadbuddy__list_models', {}, opts('t2'))).toMatchObject({ behavior: 'allow' })
+    expect(asked).toEqual(['mcp__scadbuddy__send_to_printer:t1:outward'])
+  })
+
+  it('a refusal or a failing gate is a deny', async () => {
+    const refused = makeCanUseTool(tierOf, undefined, () => Promise.resolve({ approved: false, message: 'The user denied it.' }))
+    expect(await refused('mcp__scadbuddy__send_to_printer', {}, opts('t3'))).toEqual({
+      behavior: 'deny',
+      message: 'The user denied it.',
+    })
+    const broken = makeCanUseTool(tierOf, undefined, () => Promise.reject(new Error('database down')))
+    expect(await broken('mcp__scadbuddy__send_to_printer', {}, opts('t4'))).toEqual({
+      behavior: 'deny',
+      message: expect.stringMatching(/could not complete \(database down\)/),
+    })
+  })
+
+  it('the hook forces the prompt (ask) for outward calls instead of denying them', async () => {
+    const hook = makePreToolUseHook(tierOf, undefined, () => Promise.resolve({ approved: false, message: 'no' }))
+    const run = (name: string) => hook.hooks[0]!(preToolUse(name), 'toolu_1', { signal })
+    expect(await run('mcp__scadbuddy__list_models')).toEqual({})
+    expect(await run('mcp__scadbuddy__send_to_printer')).toMatchObject({
+      hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'ask' },
+    })
+  })
+})

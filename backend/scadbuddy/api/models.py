@@ -26,6 +26,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    AssetsDep,
     CatalogueDep,
     CheckoutsDep,
     ChecksDep,
@@ -44,6 +45,7 @@ from scadbuddy.api.deps import (
 )
 from scadbuddy.api.library_pins import pinned_at_create, require_library_names
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
+from scadbuddy.api.params import require_valid_presets
 from scadbuddy.bambuddy.uploads import DatabaseRequiredError
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
@@ -78,6 +80,7 @@ from scadbuddy.library.libraries import (
     search_path,
 )
 from scadbuddy.library.outputs import OutputStore
+from scadbuddy.library.presets import InvalidPresetsFileError, PresetExistsError, with_keys
 from scadbuddy.library.scad import (
     CheckedSource,
     NotOpenSCADError,
@@ -825,17 +828,68 @@ def get_model(slug: SlugPath, catalogue: CatalogueDep) -> ModelRecord:
     return require_model(catalogue, slug)
 
 
-@router.patch("/models/{slug}", response_model=ModelRecord, summary="Edit model metadata")
-def patch_model(
-    slug: SlugPath, patch: ModelPatch, catalogue: CatalogueDep, events: EventsDep
+@router.patch(
+    "/models/{slug}",
+    response_model=ModelRecord,
+    summary="Edit model metadata",
+    description=(
+        "`presets` replaces the template's own presets (#326) whole. Each preset's values "
+        "are checked against the template's current schema as a saved preset's are (422), "
+        "a name a saved preset of the template already has is refused (409), "
+        "and every preset is written with its key as `id`, so reordering or renaming it "
+        "later keeps it the same preset."
+    ),
+)
+async def patch_model(
+    slug: SlugPath,
+    patch: ModelPatch,
+    catalogue: CatalogueDep,
+    paths: PathsDep,
+    history: HistoryDep,
+    config: ConfigDep,
+    events: EventsDep,
+    assets: AssetsDep,
+    presets: PresetsDep,
+    fetcher: FetcherDep,
 ) -> ModelRecord:
     require_mine(slug)
-    require_model(catalogue, slug)
+    # The record, not only existence: a model.json that no longer reads as metadata is
+    # refused (409) before anything is written into it. Off the loop: a `git log`.
+    await asyncio.to_thread(require_model, catalogue, slug)
+    if patch.presets is not None:
+        await require_valid_presets(
+            slug,
+            [preset.params for preset in patch.presets],
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+            fetcher=fetcher,
+        )
+        patch.presets = with_keys(patch.presets)
+    update = partial(catalogue.update, slug, patch)
     try:
-        record = catalogue.update(slug, patch)
+        # `to_thread`: a git commit, from an `async def` handler. See `_create`.
+        if patch.presets is None:
+            record = await asyncio.to_thread(update)
+        else:
+            # A name is one preset's in the picker: saving refuses a template's name, so
+            # the template's list refuses a saved one's -- checked and written under the
+            # preset store's lock, as a save is.
+            names = [preset.name for preset in patch.presets]
+            record = await asyncio.to_thread(presets.with_names_free, slug, names, update)
     except ModelNotFoundError:
         # A concurrent delete of the same slug got there first.
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no model named {slug!r}") from None
+    except PresetExistsError as error:
+        (name,) = error.args
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r} already has a saved preset named {name!r}",
+            name=name,
+        ) from None
+    except InvalidPresetsFileError as error:
+        raise ApiError(status.HTTP_409_CONFLICT, str(error)) from None
     emit(events, ModelEvent(kind="model.updated", slug=slug))
     return record
 

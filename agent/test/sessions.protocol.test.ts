@@ -147,6 +147,9 @@ describe('the agent’s protocol mirror', () => {
     event({ type: 'assistant.text.done', sessionId: S, messageId: 'm:0' }),
     event({ type: 'tool.call', sessionId: S, id: 't1', name: 'n', input: {}, risk: 'write' }),
     event({ type: 'tool.result', sessionId: S, id: 't1', ok: true, summary: '' }),
+    event({ type: 'approval.required', sessionId: S, id: 'a1', tool: 't1', summary: 'print box.3mf', risk: 'outward' }),
+    event({ type: 'approval.resolved', sessionId: S, id: 'a1', approved: true, by: { kind: 'browser', id: 'browser', label: 'You' } }),
+    event({ type: 'approval.resolved', sessionId: S, id: 'a2', approved: false }),
     event({ type: 'session.status', sessionId: S, status: 'waiting_approval' }),
     event({ type: 'session.result', sessionId: S, costUsd: 0.5, turns: 3 }),
     event({ type: 'error', sessionId: S, code: 'interrupted', message: 'the turn was interrupted' }),
@@ -159,15 +162,12 @@ describe('the agent’s protocol mirror', () => {
     expect(parse({ v: 1, type: 'session.status', sessionId: S, status: 'paused' }).ok).toBe(false)
   })
 
-  it('covers every server event type the panel declares, except the approval ones (#258)', async () => {
+  it('covers every server event type the panel declares', async () => {
     const here = path.dirname(fileURLToPath(import.meta.url))
     const source = await readFile(path.resolve(here, '../../frontend/src/agent/chat/protocol.ts'), 'utf8')
     const serverPart = source.slice(source.indexOf('ServerEventSchema'), source.indexOf('ClientMessageSchema'))
     const declared = [...serverPart.matchAll(/type: z\.literal\('([^']+)'\)/g)].map((m) => m[1])
     const mirrored: ServerEventType[] = sample.map((e) => e.type)
-    expect(declared.filter((t) => !mirrored.includes(t as ServerEventType)).sort()).toEqual([
-      'approval.required',
-      'approval.resolved',
-    ])
+    expect(declared.filter((t) => !mirrored.includes(t as ServerEventType))).toEqual([])
   })
 })
