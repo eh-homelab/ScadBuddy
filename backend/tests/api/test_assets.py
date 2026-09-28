@@ -423,3 +423,22 @@ def test_the_boot_sweeps_unless_the_sweep_is_off(
     with TestClient(create_app(booted)) as second:
         found = second.get(f"/api/v1/models/{MODEL_SLUG}/assets/{asset_id}").status_code
     assert found == (404 if swept else 200)
+
+
+def test_the_boot_recounts_the_upload_store(
+    app: FastAPI, paths: DataPaths, file_model: str
+) -> None:
+    """A ledger left stale by files changed while the process was down (#390)."""
+    state = getattr(app.state, STATE_ATTR)
+    state.assets.ledger_path.write_text(
+        json.dumps({"count": 42, "bytes": 4242, "dirty": False}), encoding="utf-8"
+    )
+    with TestClient(app) as test_client:
+        usage = test_client.get("/api/v1/assets/usage").json()
+    assert (usage["count"], usage["bytes"]) == (0, 0)
+
+
+def test_the_render_workers_use_the_apps_upload_store(app: FastAPI) -> None:
+    """One store for the routes and the renders, caps and all (#390)."""
+    state = getattr(app.state, STATE_ATTR)
+    assert state.queue.assets is state.assets

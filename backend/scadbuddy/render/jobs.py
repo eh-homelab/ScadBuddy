@@ -569,6 +569,7 @@ async def render_job(
     *,
     config: Config,
     paths: DataPaths,
+    assets: AssetStore,
     history: ModelHistory | None = None,
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
@@ -603,7 +604,7 @@ async def render_job(
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
 
-        with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
+        with staged_assets(schema, job.params, scad.parent, assets) as params:
             with stage("render"):
                 output = await render_3mf(
                     scad, schema, params, work / RAW_RENDER_NAME, config=config
@@ -729,9 +730,14 @@ class RenderQueue:
         metrics: Metrics | None = None,
         events: EventBus | None = None,
         checkouts: CheckoutGate | None = None,
+        assets: AssetStore | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
+        #: The upload store the renders stage `file` parameters from: the app's own
+        #: (`AppState.assets`), so one instance serves the routes and the workers.
+        #: Built from ``paths`` only when none is given, for tests that render.
+        self.assets = assets if assets is not None else AssetStore(paths.assets)
         self.history = history
         #: Told of every state a job enters (`job.*`), whichever path moved it.
         self.events = events
@@ -753,6 +759,7 @@ class RenderQueue:
                 job,
                 config=config,
                 paths=paths,
+                assets=self.assets,
                 history=history,
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,

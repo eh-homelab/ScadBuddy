@@ -131,6 +131,11 @@ def build_state(settings: Settings) -> AppState:
     )
     outputs = OutputStore(paths)
     checkouts = CheckoutGate()
+    assets = AssetStore(
+        paths.assets,
+        max_total_bytes=config.asset_max_total_bytes,
+        max_count=config.asset_max_count,
+    )
     # The outputs feed the catalogue's fallback thumbnail (#179).
     catalogue = Catalogue(paths, history, outputs)
     history.on_commit = announce_commits(events, catalogue)
@@ -149,11 +154,7 @@ def build_state(settings: Settings) -> AppState:
             catalogue_ttl=config.fonts_catalogue_ttl,
         ),
         libraries=LibraryStore(paths, max_bytes=config.library_max_bytes),
-        assets=AssetStore(
-            paths.assets,
-            max_total_bytes=config.asset_max_total_bytes,
-            max_count=config.asset_max_count,
-        ),
+        assets=assets,
         queue=RenderQueue(
             config,
             paths,
@@ -162,6 +163,7 @@ def build_state(settings: Settings) -> AppState:
             metrics=metrics,
             events=events,
             checkouts=checkouts,
+            assets=assets,
         ),
         metrics=metrics,
         events=events,

@@ -227,6 +227,7 @@ cache/revisions/<id>/<commit>/    an old model revision exported out of git, der
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
 assets/<sha256>.json              its original name, kind and size; swept once unreferenced
 .assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
+.assets.usage.json                the upload store's running count and bytes (§5.5, "Usage")
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -533,7 +534,15 @@ string.
     never refused, so re-uploading what an output uses keeps working at the cap.
     The check and the write happen under one lock, so two uploads cannot both take
     the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
-  - *Usage.* `GET /assets/usage` answers the same four numbers; Settings shows
+  - *Usage.* A running total, not a directory scan (#390): `.assets.usage.json`
+    beside the store holds `{count, bytes, dirty}`, read and rewritten under the
+    store's flock by every upload that adds a blob and every sweep removal, so the
+    quota check is O(1) and replicas sharing the volume see the same numbers. A
+    change marks it dirty before touching a file and clean once counted; a dirty,
+    missing or unreadable ledger is recounted from the directory on the next read,
+    so a crash mid-change costs one scan, never a wrong total. The boot recounts
+    it unconditionally, for files added or removed while nothing was running.
+    `GET /assets/usage` answers the same four numbers; Settings shows
     them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
     `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
     `scadbuddy_assets_max_bytes` (read per scrape), `scadbuddy_assets_rejected_total`
@@ -682,6 +691,12 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   other echo — `echo("NOTE:", x)`, debug output — and OpenSCAD's own `WARNING:`
   lines stay in the log only. OpenSCAD prints the string raw, embedded quotes
   unescaped (measured on 2026.09.23).
+- **Job warnings (#383).** ScadBuddy's own `warnings` on a job (a file
+  parameter's asset OpenSCAD could not open, uncoloured geometry, a skipped plate
+  thumbnail) show beside the template notes under a "From ScadBuddy" heading, in
+  the warn colour, so they do not read as the template's. A failed render shows
+  them above its log when the job carries any; today it carries none, since
+  `warnings` lives on the result and a failed job has no result.
 
 ### 6.2 Bambu-style 3MF writer
 

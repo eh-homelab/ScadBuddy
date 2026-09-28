@@ -54,9 +54,18 @@ interface Props {
 
 export function Preview({ job, rendering, plate, captureRef }: Props) {
   // The last finished render stays on screen while the next one is in flight (spec §5.3).
-  // Its notes travel with it: they explain the model on screen, not the one rendering.
+  // Its notes and warnings travel with it: they explain the model on screen, not the
+  // one rendering.
   const [shown, setShown] = useState<
-    { url: string; bbox?: BoundingBox; colors: string[]; notes: string[]; plates: number } | undefined
+    | {
+        url: string
+        bbox?: BoundingBox
+        colors: string[]
+        notes: string[]
+        warnings: string[]
+        plates: number
+      }
+    | undefined
   >()
 
   useEffect(() => {
@@ -66,6 +75,7 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
         bbox: job.bbox_mm ?? undefined,
         colors: job.colors ?? [],
         notes: job.notes ?? [],
+        warnings: job.warnings ?? [],
         plates: Math.max(job.plates?.length ?? 0, 1),
       })
     }
@@ -128,13 +138,14 @@ export function Preview({ job, rendering, plate, captureRef }: Props) {
 
         {!failed && (
           <div className="flex flex-col items-start gap-2">
+            {shown && shown.warnings.length > 0 && <RenderWarnings warnings={shown.warnings} />}
             {shown && shown.notes.length > 0 && <RenderNotes notes={shown.notes} />}
             {shown?.bbox && <Dimensions bbox={shown.bbox} plates={shown.plates} />}
           </div>
         )}
       </div>
 
-      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} />}
+      {failed && <RenderError log={(job.log_tail ?? []).join('\n')} warnings={job.warnings ?? []} />}
 
       {!shown && !failed && !rendering && (
         <p className="absolute inset-0 flex items-center justify-center text-[13px] text-faint">
@@ -191,20 +202,48 @@ export function RenderNotes({ notes }: { notes: string[] }) {
     >
       <h3 className="text-[10px] tracking-wide text-faint">From the template</h3>
       <ul className="mt-0.5 space-y-0.5 text-[12px] leading-snug text-muted">
-        {notes.map((note) => (
-          <li key={note}>{note}</li>
+        {/* An index key: a display-only list, and its text need not be unique. */}
+        {notes.map((note, index) => (
+          <li key={index}>{note}</li>
         ))}
       </ul>
     </section>
   )
 }
 
-function RenderError({ log }: { log?: string }) {
+/**
+ * #383 — ScadBuddy's own warnings about a render, say a file parameter's asset
+ * OpenSCAD could not open. Warn-coloured and titled for ScadBuddy, so it reads as
+ * distinct from what the template itself said (`RenderNotes`).
+ */
+export function RenderWarnings({ warnings, inline = false }: { warnings: string[]; inline?: boolean }) {
+  return (
+    <section
+      data-testid="render-warnings"
+      aria-label="Render warnings"
+      className={
+        inline
+          ? 'max-h-28 overflow-auto border-b border-warn/25 px-3 py-2'
+          : 'pointer-events-auto max-h-28 w-fit max-w-[min(32rem,100%)] overflow-auto rounded-[6px] border border-warn/45 bg-surface/90 px-2.5 py-1.5 backdrop-blur-sm'
+      }
+    >
+      <h3 className="text-[10px] tracking-wide text-warn">From ScadBuddy</h3>
+      <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-[12px] leading-snug text-warn">
+        {warnings.map((warning, index) => (
+          <li key={index}>{warning}</li>
+        ))}
+      </ul>
+    </section>
+  )
+}
+
+function RenderError({ log, warnings }: { log?: string; warnings: string[] }) {
   return (
     <div className="absolute inset-x-3 bottom-3 rounded-[6px] border border-warn/45 bg-surface/95 backdrop-blur-sm">
       <p className="border-b border-warn/25 px-3 py-2 text-[13px] text-warn">
         OpenSCAD could not render these parameters.
       </p>
+      {warnings.length > 0 && <RenderWarnings warnings={warnings} inline />}
       <pre
         data-testid="render-log"
         className="sb-num max-h-40 overflow-auto px-3 py-2 text-[11.5px] leading-relaxed whitespace-pre-wrap text-muted"
