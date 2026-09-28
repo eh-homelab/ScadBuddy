@@ -3,13 +3,15 @@ render route, the preset routes and the metadata route that edits a template's p
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import asyncio
+from collections.abc import Iterable, Mapping
 
 from fastapi import status
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
+from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
 from scadbuddy.render.jobs import ModelSource, resolve_source
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
@@ -82,3 +84,31 @@ def require_valid_preset_params(schema: CustomizerSchema, params: Mapping[str, P
                 f"{value!r} is not one of the options of {name!r}",
                 parameters=[name],
             )
+
+
+async def require_valid_presets(
+    slug: str,
+    presets: Iterable[Mapping[str, ParamValue]],
+    *,
+    paths: DataPaths,
+    history: ModelHistory,
+    config: Config,
+    assets: AssetStore,
+) -> None:
+    """422 unless every one of ``presets`` would render the template as it is now:
+    the values a render takes, a dropdown value among its options, and a `file` value
+    that names an upload or a sample (#204). Checking a file value marks the upload
+    used, so the sweep cannot take it from under the preset being saved (#296).
+
+    The one check for a preset's values, whether it is saved on its own or defined
+    in the template's `model.json` (#326), so the two can never drift apart.
+    """
+    source, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
+    has_files = any(parameter.type == "file" for parameter in schema.parameters)
+    for params in presets:
+        require_valid_preset_params(schema, params)
+        if has_files:
+            try:
+                await asyncio.to_thread(file_assets, schema, params, assets, source.scad.parent)
+            except ValueError as error:
+                raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None

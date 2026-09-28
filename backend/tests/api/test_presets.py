@@ -5,13 +5,14 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import scadbuddy.api.presets as presets_api
+import scadbuddy.api.params as params_api
 from scadbuddy.core.paths import LEGACY_PRESETS_NAME, MODEL_META_NAME, DataPaths
 from scadbuddy.library.catalogue import ModelMeta
 from scadbuddy.library.presets import (
@@ -115,7 +116,7 @@ def test_a_dropdown_value_has_to_be_one_of_its_options(
     async def with_a_dropdown(*args: Any, **kwargs: Any) -> tuple[None, CustomizerSchema]:
         return None, schema
 
-    monkeypatch.setattr(presets_api, "schema_of", with_a_dropdown)
+    monkeypatch.setattr(params_api, "schema_of", with_a_dropdown)
     refused = client.post(_url(model), json={"name": "X", "params": {"style": "zigzag"}})
     assert refused.status_code == 422
     assert refused.json()["parameters"] == ["style"]
@@ -465,3 +466,27 @@ def test_a_malformed_preset_list_is_refused_before_the_route_runs(
     unknown = [{"name": "X", "params": {"nope": 1}}]
     assert _patch_presets(client, "no-such-model", unknown).status_code == 404
     assert _patch_presets(client, BUILTIN, unknown).status_code == 403
+
+
+def test_a_template_preset_file_value_is_checked_as_a_saved_one(
+    client: TestClient, model: str, paths: DataPaths, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A `file` value in a template's own preset has to name an upload or a sample,
+    as a saved preset's does (#204): the same check, not a looser one."""
+    schema = CustomizerSchema(
+        parameters=[Parameter(name="overlay", type="file", initial="", accept=["svg"])]
+    )
+    source = SimpleNamespace(scad=paths.model_source(model))
+
+    async def with_a_file(*args: Any, **kwargs: Any) -> tuple[Any, CustomizerSchema]:
+        return source, schema
+
+    monkeypatch.setattr(params_api, "schema_of", with_a_file)
+    bogus = [{"name": "X", "params": {"overlay": "f" * 32}}]
+    assert _patch_presets(client, model, bogus).status_code == 422
+    assert (
+        client.post(_url(model), json={"name": "X", "params": {"overlay": "f" * 32}}).status_code
+        == 422
+    )
+    empty = [{"name": "X", "params": {"overlay": ""}}]
+    assert _patch_presets(client, model, empty).status_code == 200

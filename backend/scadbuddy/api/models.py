@@ -24,6 +24,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from scadbuddy.api.deps import (
+    AssetsDep,
     CatalogueDep,
     ChecksDep,
     ConfigDep,
@@ -35,7 +36,7 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.limits import MAX_TEXT_BODY_BYTES, ClientGoneError, unless_the_client_leaves
-from scadbuddy.api.params import require_valid_preset_params, schema_of
+from scadbuddy.api.params import require_valid_presets
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, ModelEvent, SourceChanged, emit
 from scadbuddy.core.paths import is_builtin
@@ -759,15 +760,21 @@ async def patch_model(
     history: HistoryDep,
     config: ConfigDep,
     events: EventsDep,
+    assets: AssetsDep,
 ) -> ModelRecord:
     require_mine(slug)
     # The record, not only existence: a model.json that no longer reads as metadata is
     # refused (409) before anything is written into it. Off the loop: a `git log`.
     await asyncio.to_thread(require_model, catalogue, slug)
     if patch.presets is not None:
-        _, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
-        for preset in patch.presets:
-            require_valid_preset_params(schema, preset.params)
+        await require_valid_presets(
+            slug,
+            [preset.params for preset in patch.presets],
+            paths=paths,
+            history=history,
+            config=config,
+            assets=assets,
+        )
         patch.presets = with_keys(patch.presets)
     try:
         # `to_thread`: a git commit, from an `async def` handler. See `_create`.
