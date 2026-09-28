@@ -7,6 +7,8 @@ import { useAgentHandlers, useLatest } from '../agent/useAgentHandlers'
 import { setWebMcpEnabled, useWebMcpEnabled } from '../agent/webmcpPreference'
 import { api, ApiError } from '../api/client'
 import type { ConnectionTest, SettingsUpdate, SidebarLink } from '../api/types'
+import type { McpAuthMode } from '../api/mcpTokens'
+import { McpAuthSection } from '../components/McpAuthSection'
 import { McpOidcSettings } from '../components/McpOidcSettings'
 import { HeadlessBrowserSetting } from '../components/HeadlessBrowserSetting'
 import { PluginPackagesPanel } from '../components/settings/PluginPackages'
@@ -69,6 +71,7 @@ export function SettingsPage() {
 
   const settings = settingsState.data
   const webMcp = useWebMcpEnabled()
+  const [mcpAuthMode, setMcpAuthMode] = useState<McpAuthMode | undefined>(undefined)
   const connected = Boolean(settings?.bambuddy_url)
   // #81 — needs no Bambuddy: the plates are ScadBuddy's own table.
   const platesState = useAsync(() => api.listPlates(), [])
@@ -544,7 +547,12 @@ export function SettingsPage() {
         {/* Applied at once, not part of the saved form (#251). The agent service serves
             these routes, so the section shows only where the assistant would: hidden in
             a production build until the service is deployed and routed. */}
-        {ai.available && <McpTokensSection />}
+        {ai.available && (
+          <>
+            <McpAuthSection onSaved={(setting) => setMcpAuthMode(setting.mode)} />
+            <McpTokensSection authMode={mcpAuthMode} />
+          </>
+        )}
 
         {ai.available && (
           <section className="mt-4 rounded-[6px] border border-line bg-surface">

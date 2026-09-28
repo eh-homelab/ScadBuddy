@@ -528,8 +528,24 @@ over `"disabled"`. A stored `"oidc"` without an enabled configuration reads as `
 
 A value outside those lists fails closed: `bearer`, or a `read` cap. While the mode is
 `disabled`, the agent logs `mcp auth: MCP auth is DISABLED ...` with the cap. It logs
-this once, and again after any change to either key. Settings has no route or UI for
-these keys yet (#255), so set them in the database for now. Each value is a JSON
+this once, and again after any change to either key.
+
+Change them in Settings → **MCP authentication** (shown where AI is available, beside
+the access tokens), which calls `GET`/`PUT /api/v1/ai/mcp/auth`
+([`agent/src/routes/mcpAuthMode.ts`](../../agent/src/routes/mcpAuthMode.ts)). The
+choice is "Require an access token" (`bearer`) or "Allow calls without a token"
+(`disabled`), plus the access an anonymous caller gets. Allowing calls without a token,
+or raising the anonymous access while they are allowed, asks for a confirmation first.
+While OIDC is enabled the section says so: OIDC applies whatever is stored here, and the
+stored choice (still confirmed) applies once OIDC is turned off.
+That confirmation is in the UI only; the route does not require it (a server-side
+approval for settings writes is #258). `PUT` writes both keys in one transaction, only if
+they still hold what the page showed (otherwise `409`, and the page reloads them), logs
+`mcp auth: mcp_auth_mode set to … (was …; from <client> via <ingress>)` as soon as it
+commits, and is guarded like the other Settings
+writes (the UI's origin through the HTTPS ingress). It does not set `oidc`, which is
+switched on with its own configuration once the discovery check passes (#262). The
+database still works when the UI does not, e.g. to recover. Each value is a JSON
 string:
 
 ```sql
