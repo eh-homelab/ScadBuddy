@@ -37,7 +37,7 @@ from scadbuddy.library.settings_store import StoredSettings
 from scadbuddy.render.bambu3mf import replate_3mf
 from scadbuddy.render.plate import DEFAULT_PLATE as FALLBACK_PLATE
 from scadbuddy.render.plate import PlateFitError, PlateGeometry, nozzle_diameter_of, plate_for
-from scadbuddy.render.recolour import pin_extruders_3mf, recolour_3mf
+from scadbuddy.render.recolour import recolour_3mf
 
 logger = logging.getLogger(__name__)
 
@@ -119,9 +119,6 @@ class Target:
     #: One colour per filament, from the spools the run chose (#476). ``None`` — the
     #: send bar, which chooses no spools — keeps the model's own colours.
     colours: tuple[str, ...] | None = None
-    #: One physical extruder per filament (0 right, 1 left), from the AMS each chosen
-    #: spool is loaded in (#469). ``None`` leaves the choice to the slicer.
-    extruders: tuple[int, ...] | None = None
 
     @property
     def key(self) -> str:
@@ -136,9 +133,6 @@ class Target:
         if self.colours is not None:
             # A file recoloured for other spools must not be reused for these.
             key = f"{key}~{','.join(self.colours)}"
-        if self.extruders is not None:
-            # Pinned to other extruders, the same file slices for other nozzles.
-            key = f"{key}>{','.join(str(extruder) for extruder in self.extruders)}"
         return key
 
 
@@ -221,7 +215,6 @@ async def target_for(
     printer_id: int | None = None,
     nozzle_diameter: str | None = None,
     colours: Sequence[str] | None = None,
-    extruders: Sequence[int] | None = None,
 ) -> Target:
     """The plate and nozzle the 3MF is laid out for.
 
@@ -229,7 +222,7 @@ async def target_for(
     has chosen both (spec 2026-09-27 §4) — no pipeline is read: the model comes from the
     printer list and the nozzle is the one chosen. Otherwise, as the send bar and the
     eligibility check need, from the pipeline in play. ``colours`` are the chosen spools'
-    (#476), and only the spool-first run has any; so are ``extruders`` (#469).
+    (#476), and only the spool-first run has any.
     """
     if printer_id is not None and nozzle_diameter is not None:
         printer = next((row for row in await client.printers() if row.id == printer_id), None)
@@ -238,7 +231,6 @@ async def target_for(
             _plate_for_model(model),
             nozzle_diameter,
             tuple(colours) if colours is not None else None,
-            tuple(extruders) if extruders is not None else None,
         )
     model, printer_preset = await _target_model_and_preset(
         client, settings, slug, pipeline_id=pipeline_id
@@ -268,18 +260,7 @@ def _laid_out_for(payload: bytes, target: Target) -> bytes:
     except PlateFitError as error:
         raise ApiError(status.HTTP_409_CONFLICT, str(error), type_=PLATE_FIT_PROBLEM) from error
     # In the spools' colours, so the plate thumbnail Bambuddy shows is the print (#476).
-    if target.colours is not None:
-        payload = recolour_3mf(payload, target.colours)
-    # On the extruders the spools feed, so no filament is sliced for the other nozzle (#469).
-    if target.extruders is None:
-        return payload
-    try:
-        return pin_extruders_3mf(payload, target.extruders)
-    except ValueError as error:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"ScadBuddy can't pin this 3MF's filaments to their extruders: {error}.",
-        ) from error
+    return recolour_3mf(payload, target.colours) if target.colours is not None else payload
 
 
 def is_inbox(folder_id: int | None, settings: StoredSettings) -> bool:

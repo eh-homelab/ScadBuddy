@@ -4,9 +4,6 @@ A 3MF is written at render time in the model's own colours, before anyone has pi
 a spool. Bambuddy's slicer takes the filament colours of the presets it is handed, but
 it keeps the cover images the file carries — so without this, the queue shows a plate
 thumbnail in the model's colours while the printer lays down the spools'.
-
-:func:`pin_extruders_3mf` is the same rewrite's other half (#469): the extruder each
-filament is sliced for, which the spools' AMS wiring fixes.
 """
 
 from __future__ import annotations
@@ -84,52 +81,3 @@ def recolour_3mf(payload: bytes, colours: Sequence[str]) -> bytes:
                 zip(cover, (drawn.plate, drawn.plate_small, drawn.top, drawn.pick), strict=True)
             )
     return _archive([(name, covers.get(name, data)) for name, data in entries])
-
-
-#: The H2C printer preset's ``physical_extruder_map``: logical extruder 1 is physical 1
-#: (the left one) and logical 2 is physical 0 (the right). ScadBuddy's written file
-#: carries no map of its own — the slicer takes it from the printer preset — so this
-#: is what applies unless the file states one.
-H2C_PHYSICAL_EXTRUDER_MAP: tuple[str, ...] = ("1", "0")
-
-
-def pin_extruders_3mf(payload: bytes, extruders: Sequence[int]) -> bytes:
-    """Return ``payload`` with each filament pinned to a physical extruder (#469).
-
-    ``extruders`` is one per filament, in filament order: 0 the right extruder, 1 the
-    left, as the printer numbers them. They are written as BambuStudio's
-    ``filament_map_mode: "Manual"`` and ``filament_map``, which holds each filament's
-    1-based *logical* extruder, translated through ``physical_extruder_map``. Left at
-    the default ``"Auto For Flush"``, the slicer spreads the filaments over both
-    extruders whatever the AMS they are loaded in is wired to.
-
-    Only ``project_settings.config`` changes; the covers are untouched, so this composes
-    with :func:`recolour_3mf` in either order. A different count raises
-    :class:`ValueError`, as there.
-    """
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        entries = [(info.filename, archive.read(info.filename)) for info in archive.infolist()]
-    settings = json.loads(dict(entries)[PROJECT_SETTINGS_NAME])
-    count = len(settings.get("filament_colour") or [])
-    if len(extruders) != count:
-        raise ValueError(
-            f"the 3MF has {count} filaments, but {len(extruders)} extruders were given"
-        )
-    physical = [
-        str(value) for value in settings.get("physical_extruder_map") or H2C_PHYSICAL_EXTRUDER_MAP
-    ]
-    settings["filament_map_mode"] = "Manual"
-    missing = sorted({str(extruder) for extruder in extruders} - set(physical))
-    if missing:
-        raise ValueError(
-            f"the 3MF's physical_extruder_map {physical} has no extruder {', '.join(missing)}"
-        )
-    settings["filament_map"] = [str(physical.index(str(extruder)) + 1) for extruder in extruders]
-    return _archive(
-        [
-            (name, (json.dumps(settings, indent=4) + "\n").encode("utf-8"))
-            if name == PROJECT_SETTINGS_NAME
-            else (name, data)
-            for name, data in entries
-        ]
-    )

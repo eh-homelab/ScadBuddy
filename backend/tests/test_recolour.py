@@ -4,19 +4,17 @@ import io
 import json
 import zipfile
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 import pytest
 import trimesh
 
-from scadbuddy.bambuddy.extruders import LEFT, RIGHT
 from scadbuddy.render.bambu3mf import (
     PLATE_THUMBNAIL,
     PROJECT_SETTINGS_NAME,
     write_bambu_3mf,
 )
-from scadbuddy.render.recolour import pin_extruders_3mf, recolour_3mf
+from scadbuddy.render.recolour import recolour_3mf
 from scadbuddy.render.split import ColourPart
 from scadbuddy.render.thumbnail import render_plate_thumbnails
 from tests.conftest import read_png
@@ -85,65 +83,3 @@ def test_a_file_without_covers_gets_none(tmp_path: Path) -> None:
 def test_a_colour_list_of_the_wrong_length_is_refused(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="2 filament"):
         recolour_3mf(_written(tmp_path), ["#00C000"])
-
-
-# --- #469: pinning each filament to the extruder its spool feeds ------------------------
-
-
-def _settings(payload: bytes) -> dict[str, Any]:
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        settings: dict[str, Any] = json.loads(archive.read(PROJECT_SETTINGS_NAME))
-    return settings
-
-
-def _with_settings(payload: bytes, **changes: Any) -> bytes:
-    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
-        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
-    settings = json.loads(entries[PROJECT_SETTINGS_NAME])
-    settings.update(changes)
-    entries[PROJECT_SETTINGS_NAME] = json.dumps(settings).encode()
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as out:
-        for name, data in entries.items():
-            out.writestr(name, data)
-    return buffer.getvalue()
-
-
-def test_each_filament_is_pinned_to_its_spools_extruder(tmp_path: Path) -> None:
-    """The H2C's ``physical_extruder_map`` is ``["1","0"]``: logical extruder 1 is the
-    left (physical 1) and logical 2 the right (physical 0), so a filament on the right
-    is ``"2"`` in ``filament_map``."""
-    pinned = pin_extruders_3mf(_written(tmp_path), [RIGHT, LEFT])
-    settings = _settings(pinned)
-    assert settings["filament_map_mode"] == "Manual"
-    assert settings["filament_map"] == ["2", "1"]
-    assert settings["filament_colour"] == ["#1F6FEB", "#FF6AC1"]
-
-
-def test_both_filaments_on_one_side_share_its_extruder(tmp_path: Path) -> None:
-    assert _settings(pin_extruders_3mf(_written(tmp_path), [RIGHT, RIGHT]))["filament_map"] == [
-        "2",
-        "2",
-    ]
-
-
-def test_the_files_own_physical_extruder_map_wins(tmp_path: Path) -> None:
-    payload = _with_settings(_written(tmp_path), physical_extruder_map=["0", "1"])
-    assert _settings(pin_extruders_3mf(payload, [RIGHT, LEFT]))["filament_map"] == ["1", "2"]
-
-
-def test_pinning_leaves_the_covers_alone(tmp_path: Path) -> None:
-    payload = _written(tmp_path)
-    assert _cover(pin_extruders_3mf(payload, [RIGHT, LEFT])).tobytes() == _cover(payload).tobytes()
-
-
-def test_an_extruder_list_of_the_wrong_length_is_refused(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="2 filament"):
-        pin_extruders_3mf(_written(tmp_path), [RIGHT])
-
-
-def test_a_file_map_without_the_extruder_is_a_clear_error(tmp_path: Path) -> None:
-    """Review #4: a bare ``list.index`` ValueError surfaced as an unhandled 500."""
-    payload = _with_settings(_written(tmp_path), physical_extruder_map=["0"])
-    with pytest.raises(ValueError, match="has no extruder 1"):
-        pin_extruders_3mf(payload, [RIGHT, LEFT])

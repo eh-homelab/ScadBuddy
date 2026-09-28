@@ -1,21 +1,23 @@
-"""Which extruder each filament is sliced for, and whether the print can run (#469).
+"""Which extruder each spool feeds, and whether the print can run (#469).
 
 Left to itself (``filament_map_mode: "Auto For Flush"``) the slicer spreads the
 filaments across both extruders and slices each for the chosen nozzle size. When the
 other side has a different nozzle fitted, the printer pauses at the first layer (HMS
-05FE8053, "the left nozzle is not matched with slicing file"). So the run pins every
-filament to an extruder whose fitted nozzle is the chosen size, and refuses before
-upload when it can't.
+05FE8053, "the left nozzle is not matched with slicing file").
 
-What decides a filament's extruder depends on the printer:
+ScadBuddy can't hold a filament to one extruder. Bambu Studio ignores a Manual
+``filament_map`` in ``project_settings.config``, and one at plate level in
+``model_settings.config`` crashes it (measured 2026-09-28 through Bambuddy's slicer).
+So the run refuses, before upload, what would pause the printer:
 
-* **With the Filament Track Switch** (``fila_switch.installed``) the switch routes any
-  AMS to either nozzle, so where a spool is loaded constrains nothing; its inlet is only
-  where it rests between prints. Every filament goes to the side with the chosen size;
-  when both sides have it, the dialog may pick a side per filament (``extruders``),
-  and with none picked the slicer chooses.
-* **Without it**, each AMS is wired to one side, and a spool on the side with another
-  nozzle fitted cannot print.
+* a size neither mounted nozzle has;
+* more than one filament when only one side has the chosen size, since the slicer
+  would spread them onto the other;
+* without the Filament Track Switch, a spool whose AMS is wired to the side with
+  another size.
+
+With the switch (``fila_switch.installed``) any AMS reaches either nozzle, so a
+spool's side is only where it rests between prints.
 
 Extruder numbers are the printer's **physical** ones: 0 is the right (main) extruder,
 1 the left (deputy), and ``PrinterStatus.nozzles`` is indexed the same way. A spool's
@@ -32,7 +34,7 @@ Anything else is ``None``, "unknown" — never quietly the right-hand side.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -142,12 +144,6 @@ def _where(side: SlotSide) -> str:
     return f"AMS {side.ams_id}"
 
 
-def _unknown_reason(side: SlotSide) -> str:
-    if side.unknown == "not-loaded":
-        return f"Slot {side.slot_id}'s spool isn't loaded in this printer"
-    return f"The printer doesn't say which extruder {_where(side)} feeds (slot {side.slot_id})"
-
-
 def _spool_errors(sides: Sequence[SlotSide], size: str, status: PrinterStatus | None) -> list[str]:
     """Without the switch: each spool whose side has another nozzle size fitted."""
     errors: list[str] = []
@@ -172,20 +168,10 @@ def _spool_errors(sides: Sequence[SlotSide], size: str, status: PrinterStatus | 
 
 @dataclass(frozen=True)
 class ExtruderPlan:
-    """What the run does about extruders: the pin (``None`` leaves the slicer to
-    choose), the refusals, and the advisories."""
+    """The refusals and the advisories the nozzles and spool sides make."""
 
-    extruders: tuple[int, ...] | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[FilamentWarning] = field(default_factory=list)
-
-
-def _filled(by_slot: Mapping[int, int], filament_count: int) -> tuple[int, ...]:
-    """One extruder per filament. A filament no slot chose a spool for follows the first
-    pinned one: no plate prints it (the resolver refuses a used slot with no spool),
-    but the list needs an entry for it."""
-    first = by_slot[min(by_slot)]
-    return tuple(by_slot.get(index + 1, first) for index in range(filament_count))
 
 
 def plan_extruders(
@@ -194,124 +180,71 @@ def plan_extruders(
     *,
     size: str,
     filament_count: int,
-    chosen: Mapping[int, int] | None = None,
 ) -> ExtruderPlan:
-    """Pin every filament to an extruder whose fitted nozzle is ``size``, or say why not.
+    """Refuse a print the nozzles can't take, or say what nobody could check.
 
-    ``chosen`` is the dialog's per-slot extruder, where it picked one; each must name a
-    side with ``size`` fitted (and, without the switch, the side the spool feeds).
-
-    * Neither side has ``size``: refused. Nozzles the printer doesn't report: no pin,
-      and a warning, since nothing can be checked.
-    * One side has it: every filament goes there, whatever the spools' sides — never
-      Auto, which is what paused queue item 108. Without the switch a spool on the
-      other side is refused, and one of unknown side is pinned there with a warning.
-    * Both have it: with the switch, the chosen sides, else Auto (either nozzle
-      prints any filament). Without it, each spool's own side; one unknown side leaves
-      the file on Auto with a warning, which is safe because both nozzles match.
+    * Neither side has ``size``: refused. Nozzles the printer doesn't report: a
+      warning, since nothing can be checked.
+    * Without the switch, a spool on the side with another size: refused.
+    * One side has ``size``: more than one filament is refused, because the slicer
+      spreads them across both extruders — what paused queue item 108. One filament
+      prints with a warning, since the slicer, not ScadBuddy, picks its extruder.
+    * Both have it: either extruder prints any filament.
     """
-    picks = {slot: extruder for slot, extruder in (chosen or {}).items() if slot <= filament_count}
     own = [side for side in sides if side.slot_id <= filament_count]
-    by_slot = {side.slot_id: side for side in own}
-    switch = track_switch(status)
     fitted = {extruder: fitted_size(status, extruder) for extruder in (RIGHT, LEFT)}
     matching = [extruder for extruder in (RIGHT, LEFT) if fitted[extruder] == size]
-
-    errors: list[str] = []
-    for slot, extruder in sorted(picks.items()):
-        if extruder not in matching:
-            there = fitted.get(extruder)
-            errors.append(
-                f"Slot {slot} can't print on the {_side_word(extruder)}: "
-                + (
-                    f"its nozzle is {there} mm and this print is sliced for {size} mm."
-                    if there
-                    else "the printer doesn't report the nozzle fitted there."
-                )
-            )
-            continue
-        side = by_slot.get(slot)
-        wired = side.extruder if side is not None and not switch else None
-        if side is not None and wired is not None and wired != extruder:
-            errors.append(
-                f"Slot {slot}'s spool ({_where(side)}) feeds the {_side_word(wired)} "
-                f"extruder, so it can't print on the {_side_word(extruder)}."
-            )
+    right, left = fitted[RIGHT], fitted[LEFT]
 
     if not matching:
-        right, left = fitted[RIGHT], fitted[LEFT]
         if right is not None and left is not None:
             sizes = " or ".join(dict.fromkeys((right, left)))
-            errors.append(
-                f"Neither nozzle is {size} mm: the right has {right} mm and the left "
-                f"{left} mm. Choose {sizes}, or fit a {size} mm nozzle."
+            return ExtruderPlan(
+                errors=[
+                    f"Neither nozzle is {size} mm: the right has {right} mm and the left "
+                    f"{left} mm. Choose {sizes}, or fit a {size} mm nozzle."
+                ]
             )
-            return ExtruderPlan(errors=errors)
-        if errors:
-            return ExtruderPlan(errors=errors)
         return ExtruderPlan(
             warnings=[
                 FilamentWarning(
                     kind="side-unknown",
                     message=(
-                        "ScadBuddy couldn't read which nozzles the printer has fitted, so the "
-                        "slicer chooses the extruder for every color."
+                        "ScadBuddy couldn't read which nozzles the printer has fitted, so "
+                        "nothing checks that the slicer's extruders match them."
                     ),
                 )
             ]
         )
 
-    if not switch:
-        errors += _spool_errors(own, size, status)
-    if errors:
+    errors = [] if track_switch(status) else _spool_errors(own, size, status)
+    if errors or len(matching) == 2:
         return ExtruderPlan(errors=errors)
 
-    if len(matching) == 1:
-        only = matching[0]
-        warnings = (
-            []
-            if switch
-            else [
-                FilamentWarning(
-                    kind="side-unknown",
-                    slot_id=side.slot_id,
-                    message=(
-                        f"{_unknown_reason(side)}, so it's sliced for the {_side_word(only)} "
-                        f"extruder, the one with the {size} mm nozzle. Load it where it feeds "
-                        f"the {_side_word(only)}."
-                    ),
-                )
-                for side in own
-                if side.extruder is None and side.slot_id not in picks
-            ]
-        )
-        return ExtruderPlan(extruders=(only,) * filament_count, warnings=warnings)
-
-    if switch:
-        if not picks:
-            return ExtruderPlan()
-        # A filament left on Auto beside a picked one rests where its inlet does, else
-        # follows the first pick: both nozzles are the chosen size, so either prints it.
-        pinned = {side.slot_id: side.extruder for side in own if side.extruder is not None} | picks
-        return ExtruderPlan(extruders=_filled(pinned, filament_count))
-
-    unknown = [side for side in own if side.extruder is None and side.slot_id not in picks]
-    if unknown or not own:
+    only = matching[0]
+    other = LEFT if only == RIGHT else RIGHT
+    if filament_count > 1:
         return ExtruderPlan(
-            warnings=[
-                FilamentWarning(
-                    kind="side-unknown",
-                    slot_id=side.slot_id,
-                    message=(
-                        f"{_unknown_reason(side)}. Both nozzles are {size} mm, so the slicer "
-                        "chooses the extruder for every color."
-                    ),
-                )
-                for side in unknown
+            errors=[
+                f"This printer has a {right} mm nozzle on the right and {left} mm on the "
+                f"left. The slicer spreads a multi-color print across both, and ScadBuddy "
+                f"can't keep it on the {_side_word(only)}, so the {fitted[other]} mm side "
+                f"would pause it at the first layer. Fit a {size} mm nozzle on both sides, "
+                f"or print in one color."
             ]
         )
-    pinned = {side.slot_id: side.extruder for side in own if side.extruder is not None} | picks
-    return ExtruderPlan(extruders=_filled(pinned, filament_count))
+    return ExtruderPlan(
+        warnings=[
+            FilamentWarning(
+                kind="side-unknown",
+                message=(
+                    f"Only the {_side_word(only)} nozzle is {size} mm, and the slicer picks "
+                    f"the extruder. If it picks the {_side_word(other)}, the printer pauses "
+                    f"at the first layer."
+                ),
+            )
+        ]
+    )
 
 
 def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> FilamentOptions:

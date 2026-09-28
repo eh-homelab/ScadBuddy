@@ -129,8 +129,6 @@ function SideBadge({
   )
 }
 
-const SIDE_LETTER = { 0: 'R', 1: 'L' } as const
-
 function grams(value: number): string {
   return `${value < 10 ? value.toFixed(1) : value.toFixed(0)} g`
 }
@@ -162,9 +160,6 @@ interface Props {
   copies: number
   /** The nozzle size the print is sliced for; a spool whose side has another is ruled out (#469). */
   nozzleSize?: string
-  /** The extruder picked per slot id, where one was (#469); absent is Auto. */
-  extruders?: Record<string, 0 | 1>
-  onExtruderChange?: (slotId: number, extruder: 0 | 1 | null) => void
 }
 
 export function FilamentPicker({
@@ -173,8 +168,6 @@ export function FilamentPicker({
   onChange,
   copies,
   nozzleSize,
-  extruders = {},
-  onExtruderChange,
 }: Props) {
   const [filters, setFilters] = useState<SpoolFilters>(NO_FILTERS)
 
@@ -225,6 +218,13 @@ export function FilamentPicker({
         <p className="mt-1 text-[12px] text-warn" data-testid="no-fitting-nozzle">
           Neither nozzle is {nozzleSize} mm: the right has {mounted[0]?.nozzle_diameter} mm and the
           left {mounted[1]?.nozzle_diameter} mm.
+        </p>
+      )}
+      {nozzleSize && fits.length === 1 && slots.length > 1 && (
+        <p className="mt-1 text-[12px] text-warn" data-testid="one-fitting-nozzle">
+          Only the {fits[0] === 1 ? 'left' : 'right'} nozzle is {nozzleSize} mm, and the slicer
+          spreads a multi-color print across both, so this can&apos;t print. Fit a {nozzleSize} mm
+          nozzle on both sides, or print in one color.
         </p>
       )}
       {nozzles.length > 0 && (
@@ -364,34 +364,6 @@ export function FilamentPicker({
                   </span>
                 )}
               </legend>
-              {/* The extruder this color is sliced for (#469): the only side with the
-                  chosen size, or a choice when the switch lets both sides print it. */}
-              {fits.length === 1 && (
-                <p className="mt-1 text-[12px] text-muted" data-testid={`slot-extruder-${slot.slot_id}`}>
-                  → {SIDE_LETTER[fits[0]!]} ({nozzleSize})
-                </p>
-              )}
-              {fits.length === 2 && resting && (
-                <label className="mt-1 flex items-center gap-2 text-[12px] text-muted">
-                  Extruder
-                  <select
-                    aria-label={`Slot ${slot.slot_id} extruder`}
-                    value={extruders[String(slot.slot_id)] ?? ''}
-                    onChange={(event) =>
-                      onExtruderChange?.(
-                        slot.slot_id,
-                        event.target.value === '' ? null : (Number(event.target.value) as 0 | 1),
-                      )
-                    }
-                    className="sb-field cursor-pointer py-0.5 text-[12px]"
-                    data-testid={`slot-extruder-${slot.slot_id}`}
-                  >
-                    <option value="">Auto</option>
-                    <option value="1">L ({nozzleSize})</option>
-                    <option value="0">R ({nozzleSize})</option>
-                  </select>
-                </label>
-              )}
               {chosenSpool && chosenFitted && (
                 <p className="mt-1 text-[12px] text-warn" data-testid={`slot-mismatch-${slot.slot_id}`}>
                   This spool feeds the {chosenSpool.side === 'L' ? 'left' : 'right'} extruder, where

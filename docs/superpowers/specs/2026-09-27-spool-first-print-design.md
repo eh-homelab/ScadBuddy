@@ -194,39 +194,34 @@ checks the slicer uses them.
 **Extruder per filament (#469).** Left at the 3MF's default `filament_map_mode: "Auto
 For Flush"` the slicer spread filaments over both extruders and sliced both for the
 chosen size, which paused queue item 108 with HMS 05FE8053 ("the left nozzle is not
-matched"). So the run pins every filament to an extruder whose fitted nozzle is the
-chosen size, or refuses before upload. Extruders are physical: 0 is the right (main), 1
+matched"). ScadBuddy can't pin a filament to an extruder: measured through Bambuddy's
+slicer on 2026-09-28, a Manual `filament_map` in `project_settings.config` is ignored
+(`slice_info` still reads `2 1`), and one at plate level in `model_settings.config`
+crashes the slicer (SIGSEGV) whatever its values. So the run refuses, before upload, the
+prints the mounted nozzles would pause. Extruders are physical: 0 is the right (main), 1
 the left, and `status.nozzles` is indexed the same way.
 
+- **Neither side fitted with the size** is a 422 ("Neither nozzle is 0.6 mm: …").
+- **One side fitted with it** (the nozzles differ): more than one filament is a 422,
+  since the slicer spreads them across both. One filament prints, with a warning that
+  the slicer, not ScadBuddy, picks its extruder.
+- **Both fitted with it:** any filament prints on either.
 - **With the Filament Track Switch** (`fila_switch.installed`; printer 1 has one), the
-  switch routes any AMS to either nozzle (user ruling, 2026-09-28), so where a spool is
-  loaded constrains nothing. Its side, from `ams_switch_inlet` (inlet A left, B right,
-  as upstream `fts_routing.py`), is shown only as "rests on L/R". Every filament goes to
-  the side with the chosen size. When both sides have it, the dialog offers Auto / L / R
-  per color (`PrintChoices.extruders`), and Auto, the default, leaves the slicer to
-  choose.
+  switch routes any AMS to either nozzle (user ruling, 2026-09-28). A spool's side, from
+  `ams_switch_inlet` (inlet A left, B right, as upstream `fts_routing.py`), is shown
+  only as "rests on L/R".
 - **Without the switch**, each AMS is wired to one side: the external holder's tray
   (assignment `ams_id` 255, tray 0 left, tray 1 right), else `ams_extruder_map`, where
   anything but 0 or 1 is unknown. A spool on the side with another nozzle size fitted is
   a 422 ("Slot 2's spool (AMS 2, left) is on the 0.4 mm nozzle; this print is sliced for
   0.2 mm. Pick a spool on the right, or choose 0.4."), and the dialog grays it out and
   never pre-selects it.
-- **Either way:** one side fitted with the size pins every filament there, even a spool
-  of unknown side, which gets a warning saying why its side is unknown. Neither side
-  fitted is a 422 ("Neither nozzle is 0.6 mm: …"). A picked side without the size fitted
-  is a 422. Nozzles the printer doesn't report leave the file on Auto with a warning.
-  Both fitted and not switched: each spool's side, or Auto with a warning if one is
-  unknown (safe, as both nozzles match).
+- Nozzles the printer doesn't report refuse nothing and warn.
 - `extruders.plan_extruders` decides all of it, from one status read per run, right
-  after #472's `choice_errors` in `run_for_output`. `pin_extruders_3mf` writes
-  `filament_map_mode: "Manual"` and `filament_map` (each filament's 1-based *logical*
-  extruder, through `physical_extruder_map`: the file's, else the H2C preset's
-  `["1","0"]`) beside #476's recolor, and `Target.key` includes the pin.
-- Only the nozzle **diameter** is compared, not its flow type (HS vs HH).
-
-`filament_map_mode` and `filament_map` are project options in Bambu Studio, not part of
-any printer or process preset, so the CLI's `--load-settings` should not overwrite them.
-This is read from the source and is to be confirmed with a real slice.
+  after #472's `choice_errors` in `run_for_output`. Only the nozzle **diameter** is
+  compared, not its flow type (HS vs HH).
+- A per-color extruder choice is possible only once Bambuddy's slicer honors a filament
+  map; the upstream report is drafted, not filed.
 
 ### 4.4 Plate
 

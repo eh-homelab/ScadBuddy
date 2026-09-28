@@ -260,11 +260,12 @@ Top to bottom, the dialog is:
   marked with printer and AMS slot and listed first; an unloaded spool is still allowed,
   with a warning to load it first. Advanced adds a preset dropdown per slot, listing the
   presets Bambuddy has for the chosen nozzle size — "The spool's own preset" is always
-  the first option. Every color is sliced for an extruder whose nozzle is
-  the chosen size. With the Filament Track Switch fitted, any spool can reach either
-  nozzle: a loaded spool's badge only says where it rests ("rests on L"), each color
-  shows the extruder it will print on ("→ R (0.2)"), and when both nozzles are the
-  chosen size you can pick L or R per color, or leave it on Auto. Without the switch,
+  the first option. The slicer picks each color's extruder, and
+  ScadBuddy can't steer it. So when only one nozzle is the chosen size, a multi-color
+  print is refused before upload (the slicer would put a color on the other nozzle and
+  the printer would pause at the first layer), and a one-color print warns you. With the
+  Filament Track Switch fitted, any spool can reach either nozzle, and a loaded spool's
+  badge only says where it rests ("rests on L"). Without the switch,
   each AMS feeds one side: a spool on a side whose nozzle is another size is grayed out
   with the reason (for example "L · 0.4 fitted"), and the dialog never opens on one.
   If neither nozzle is the chosen size, the print is refused before upload.
@@ -294,7 +295,8 @@ Top to bottom, the dialog is:
 
 **Errors that keep the dialog open.** A combination ScadBuddy cannot turn into presets —
 a filament slot with no resolvable preset, mixed nozzle sizes, no nozzle of the chosen
-size, or a spool wired to the side whose nozzle doesn't match — comes back as an
+size, a multi-color print when only one nozzle is that size, or a spool wired to the
+side whose nozzle doesn't match — comes back as an
 error shown above Print and disables the button until something changes. Any other
 failure (Bambuddy unreachable, a timeout) shows the same way but leaves Print enabled to
 retry as it stands.

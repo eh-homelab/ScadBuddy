@@ -19,22 +19,12 @@ function Harness({
   onChange?: (plan: SlotChoice[]) => void
 }) {
   const [plan, setPlan] = useState<SlotChoice[]>(options.suggested ?? [])
-  const [extruders, setExtruders] = useState<Record<string, 0 | 1>>({})
   return (
     <FilamentPicker
       options={options}
       plan={plan}
       copies={copies}
       nozzleSize={nozzleSize}
-      extruders={extruders}
-      onExtruderChange={(slotId, extruder) =>
-        setExtruders((current) => {
-          const next = { ...current }
-          if (extruder === null) delete next[String(slotId)]
-          else next[String(slotId)] = extruder
-          return next
-        })
-      }
       onChange={(next) => {
         setPlan(next)
         onChange?.(next)
@@ -112,31 +102,18 @@ describe('FilamentPicker', () => {
     expect(screen.queryByTestId('slot-mismatch-1')).toBeNull()
   })
 
-  it('names the one extruder every color prints on when only one side fits', () => {
+  it('says up front that a multi-color print can not run when only one side fits', () => {
     open(switched, 1, '0.4')
-    expect(screen.getByTestId('slot-extruder-1')).toHaveTextContent('→ L (0.4)')
-    expect(screen.getByTestId('slot-extruder-2')).toHaveTextContent('→ L (0.4)')
+    expect(screen.getByTestId('one-fitting-nozzle')).toHaveTextContent(
+      "Only the left nozzle is 0.4 mm, and the slicer spreads a multi-color print across both, so this can't print.",
+    )
     expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
   })
 
-  it('offers a side per color, Auto by default, when both sides fit with the switch', async () => {
-    const { user } = open(bothAt02, 1, '0.2')
-    const choice = screen.getByRole('combobox', { name: 'Slot 1 extruder' })
-    expect(choice).toHaveValue('')
-    expect(within(choice).getAllByRole('option').map((option) => option.textContent)).toEqual([
-      'Auto',
-      'L (0.2)',
-      'R (0.2)',
-    ])
-
-    await user.selectOptions(choice, '1')
-    expect(choice).toHaveValue('1')
-  })
-
-  it('offers no side choice without the switch, where the AMS decides it', () => {
-    open({ ...bothAt02, track_switch: false }, 1, '0.2')
-    expect(screen.queryByTestId('slot-extruder-1')).toBeNull()
-    expect(screen.queryByRole('combobox', { name: 'Slot 1 extruder' })).toBeNull()
+  it('says nothing about sides when both nozzles fit', () => {
+    open(bothAt02, 1, '0.2')
+    expect(screen.queryByTestId('one-fitting-nozzle')).toBeNull()
+    expect(screen.queryByTestId('no-fitting-nozzle')).toBeNull()
   })
 
   it('says so up front when neither nozzle is the chosen size', () => {

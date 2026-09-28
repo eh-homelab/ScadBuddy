@@ -284,9 +284,8 @@ async def run_for_output(
         raise ApiError(
             status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(error.message for error in refused)
         )
-    # Before anything is uploaded (#469): every filament is pinned to an extruder with
-    # the chosen nozzle size, or the run is refused — a filament sliced for the other
-    # nozzle pauses the printer at the first layer.
+    # Before anything is uploaded (#469): a filament the slicer could put on a nozzle of
+    # another size pauses the printer at the first layer, so such a run is refused.
     printer_status = await _read_status(client, printer_id)
     sides = await _spool_sides(client, meta, request.filament_plan, printer_id, printer_status)
     extruders = plan_extruders(
@@ -294,7 +293,6 @@ async def run_for_output(
         printer_status,
         size=choices.nozzles[0].size,
         filament_count=len(meta.colors),
-        chosen=choices.extruders,
     )
     if extruders.errors:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, " ".join(extruders.errors))
@@ -306,7 +304,6 @@ async def run_for_output(
         printer_id=printer_id,
         nozzle_diameter=choices.nozzles[0].size,
         colours=await _spool_colours(client, meta, request.filament_plan),
-        extruders=extruders.extruders,
     )
     # A project's folder replaces the one from Settings for this send, which is what
     # puts the 3MF on Bambuddy's project page (#79). Resolved before the upload, because

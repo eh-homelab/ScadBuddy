@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import json
 import zipfile
-from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 
@@ -15,11 +14,8 @@ import respx
 import trimesh
 from fastapi.testclient import TestClient
 
-from scadbuddy.bambuddy.send import Target, _laid_out_for
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.core.problems import ApiError
 from scadbuddy.render.bambu3mf import write_bambu_3mf
-from scadbuddy.render.plate import DEFAULT_PLATE as GEOMETRY
 from scadbuddy.render.split import ColourPart
 from tests.api.conftest import wait_for_job
 from tests.bambuddy.conftest import recording
@@ -932,34 +928,3 @@ def test_a_note_someone_typed_in_bambuddy_is_not_overwritten(
             f"PLA only — the black spool\nEdit in ScadBuddy: https://scad.test/edit/{output_id}"
         )
     }
-
-
-def test_a_target_pinned_to_another_side_has_another_key() -> None:
-    """#469: the same plate, nozzle and colours sliced on the other extruder is another
-    file, so the upload must not be reused."""
-    right = Target(GEOMETRY, "0.2", ("#688197",), extruders=(0,))
-    left = Target(GEOMETRY, "0.2", ("#688197",), extruders=(1,))
-    unpinned = Target(GEOMETRY, "0.2", ("#688197",))
-    assert len({right.key, left.key, unpinned.key}) == 3
-    assert unpinned.key == Target(GEOMETRY, "0.2", ("#688197",)).key
-
-
-def test_a_pin_the_file_cannot_take_is_a_422_not_a_500(tmp_path: Path) -> None:
-    """Review #4: nothing in ScadBuddy writes such a file, but if one arrives the send
-    refuses it rather than failing inside the layout."""
-    parts = [ColourPart(1, "Color 1", "#1F6FEB", trimesh.creation.box(extents=(10, 10, 4)))]
-    out = tmp_path / "model.3mf"
-    write_bambu_3mf(parts, out, thumbnails=None, model_name="box")
-    with zipfile.ZipFile(out) as archive:
-        entries = {info.filename: archive.read(info.filename) for info in archive.infolist()}
-    settings = json.loads(entries["Metadata/project_settings.config"])
-    settings["physical_extruder_map"] = ["0"]
-    entries["Metadata/project_settings.config"] = json.dumps(settings).encode()
-    buffer = io.BytesIO()
-    with zipfile.ZipFile(buffer, "w") as archive:
-        for name, data in entries.items():
-            archive.writestr(name, data)
-
-    with pytest.raises(ApiError) as raised:
-        _laid_out_for(buffer.getvalue(), Target(GEOMETRY, "0.2", extruders=(1,)))
-    assert raised.value.status == 422

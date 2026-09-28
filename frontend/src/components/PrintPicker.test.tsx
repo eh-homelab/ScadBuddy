@@ -128,39 +128,6 @@ describe('PrintPicker', () => {
     await waitFor(() => expect(within(two).getByTestId('spool-27')).toBeChecked())
   })
 
-  it('sends the extruder picked per color when both sides fit, and forgets it on a size change (#469)', async () => {
-    const run = vi.spyOn(api, 'runPrint').mockResolvedValue(queuedResult)
-    server.use(
-      http.get('/api/v1/print/outputs/:id/choices', () =>
-        HttpResponse.json({
-          ...choicesView,
-          filaments: {
-            ...choicesView.filaments,
-            nozzles: [
-              { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
-              { nozzle_type: 'HS00', nozzle_diameter: '0.2' },
-            ],
-          },
-        }),
-      ),
-    )
-    const { user } = renderPicker()
-    await user.click(await screen.findByRole('radio', { name: /0\.2 mm/i }))
-    const choice = () => screen.getByRole('combobox', { name: 'Slot 1 extruder' })
-    await user.selectOptions(choice(), '1')
-    // A pick made for one size says nothing about another.
-    await user.click(screen.getByRole('radio', { name: /0\.4 mm/i }))
-    await user.click(screen.getByRole('radio', { name: /0\.2 mm/i }))
-    expect(choice()).toHaveValue('')
-
-    await user.selectOptions(choice(), '1')
-    await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(run).toHaveBeenCalled())
-    expect(run.mock.calls[0]![1].choices.extruders).toEqual({ '1': 1 })
-
-    await screen.findByTestId('queued-items')
-  })
-
   it('disables Print and names the slot when a spool has no preset for the size', async () => {
     vi.spyOn(api, 'runPrint').mockRejectedValue(
       new ApiError(422, 'Generic TPU has no slicer preset for a 0.2 mm nozzle. Pick one under Advanced.'),
@@ -211,7 +178,6 @@ describe('PrintPicker', () => {
         process_name: null,
         bed_type: 'Textured PEI Plate',
         filament_overrides: {},
-        extruders: {},
       },
       plate_id: 1,
       all_plates: false,
