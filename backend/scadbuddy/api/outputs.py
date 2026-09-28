@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from typing import Annotated, Literal
 
+import psycopg
 from fastapi import APIRouter, File, Query, Response, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -17,6 +18,7 @@ from scadbuddy.api.deps import (
     EventsDep,
     OutputIdPath,
     OutputsDep,
+    PrintLinksDep,
     PrintProgressDep,
     PrintWatcherDep,
     QueueDep,
@@ -35,7 +37,7 @@ from scadbuddy.bambuddy.project_file import (
 )
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
 from scadbuddy.bambuddy.send import delete_inbox_copies as remove_inbox_copies
-from scadbuddy.bambuddy.uploads import BambuddyUploadStore, LibraryCopy
+from scadbuddy.bambuddy.uploads import BambuddyUploadStore, DatabaseRequiredError, LibraryCopy
 from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
@@ -230,6 +232,7 @@ async def delete_output(
     output_id: OutputIdPath,
     outputs: OutputsDep,
     uploads: UploadsDep,
+    links: PrintLinksDep,
     events: EventsDep,
     store: SettingsStoreDep,
     delete_inbox_copies: Annotated[bool, Query()] = False,
@@ -249,7 +252,18 @@ async def delete_output(
             await remove_inbox_copies(client, uploads, meta, settings)
     outputs.delete(output_id)
     # After the files: a failed delete keeps the output, and so must keep its records.
-    await uploads.delete_outputs([output_id])
+    # Best effort once the files are gone, as for a deleted model: the output is. Each
+    # on its own, so a failed upload cleanup cannot leave links serving its archives.
+    try:
+        await uploads.delete_outputs([output_id])
+    except (DatabaseRequiredError, psycopg.Error):
+        logger.exception(
+            "could not forget a deleted output's Bambuddy uploads", extra={"id": output_id}
+        )
+    try:
+        await links.delete_outputs([output_id])
+    except (DatabaseRequiredError, psycopg.Error):
+        logger.exception("could not forget a deleted output's print links", extra={"id": output_id})
     emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

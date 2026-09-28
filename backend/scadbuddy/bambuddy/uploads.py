@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Iterable
+from datetime import datetime
 
 from psycopg import Connection
 from psycopg.rows import DictRow
@@ -44,6 +45,9 @@ class SlicedCopy(BaseModel):
     #: plate and plate type on the slice-and-queue route (``SliceRequest.preset_key``).
     #: ``None`` when the route did not say.
     preset_key: str | None = None
+    #: Bambuddy's SHA-256 of the sliced file, read once (#306). An archive of a print of
+    #: it has the same ``content_hash``: the link once the queue item is gone.
+    file_hash: str | None = None
 
 
 class LibraryCopy(BaseModel):
@@ -124,6 +128,21 @@ class BambuddyUploadStore:
         """
         await asyncio.to_thread(self._record_sliced, output_id, library_file_id, sliced)
 
+    async def record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
+        """Keep the hash Bambuddy reports for one of the output's sliced files (#306)."""
+        await asyncio.to_thread(self._record_slice_hash, output_id, sliced_id, file_hash)
+
+    async def sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        """When the output's first recorded copy was uploaded and its last slice was
+        recorded, or ``None`` with no slice (#306).
+
+        A print of one of its slices started no earlier than the first and, unless it
+        waited in Bambuddy's queue, not long after the last. A copy is uploaded before
+        it is sliced, and a slice is recorded at the send (or, on a pipeline run, by
+        the first progress read after it), so neither moves the window past a print.
+        """
+        return await asyncio.to_thread(self._sent_between, output_id)
+
     async def delete_outputs(self, output_ids: Iterable[str]) -> None:
         """Forget every copy and slice of deleted outputs. Bambuddy is not touched."""
         await asyncio.to_thread(self._delete_outputs, list(output_ids))
@@ -170,7 +189,8 @@ class BambuddyUploadStore:
                 (ids,),
             ).fetchall()
             slices = conn.execute(
-                "SELECT output_id, source_library_file_id, sliced_library_file_id, preset_key"
+                "SELECT output_id, source_library_file_id, sliced_library_file_id, preset_key,"
+                " file_hash"
                 " FROM output_bambuddy_slices WHERE output_id = ANY(%s)"
                 " ORDER BY created_at, sliced_library_file_id",
                 (ids,),
@@ -178,7 +198,11 @@ class BambuddyUploadStore:
         sliced: dict[tuple[str, int], list[SlicedCopy]] = {}
         for row in slices:
             sliced.setdefault((row["output_id"], row["source_library_file_id"]), []).append(
-                SlicedCopy(id=row["sliced_library_file_id"], preset_key=row["preset_key"])
+                SlicedCopy(
+                    id=row["sliced_library_file_id"],
+                    preset_key=row["preset_key"],
+                    file_hash=row["file_hash"],
+                )
             )
         for row in copies:
             found[row["output_id"]].append(
@@ -224,6 +248,27 @@ class BambuddyUploadStore:
                     "preset": sliced.preset_key,
                 },
             )
+
+    def _record_slice_hash(self, output_id: str, sliced_id: int, file_hash: str) -> None:
+        with self._require().connection() as conn:
+            conn.execute(
+                "UPDATE output_bambuddy_slices SET file_hash = %s"
+                " WHERE output_id = %s AND sliced_library_file_id = %s",
+                (file_hash, output_id, sliced_id),
+            )
+
+    def _sent_between(self, output_id: str) -> tuple[datetime, datetime] | None:
+        with self._require().connection() as conn:
+            row = conn.execute(
+                "SELECT (SELECT min(created_at) FROM output_bambuddy_uploads"
+                "  WHERE output_id = %(output)s) AS first_upload,"
+                " (SELECT max(created_at) FROM output_bambuddy_slices"
+                "  WHERE output_id = %(output)s) AS last_slice",
+                {"output": output_id},
+            ).fetchone()
+        if row is None or row["first_upload"] is None or row["last_slice"] is None:
+            return None
+        return row["first_upload"], row["last_slice"]
 
     def _delete_outputs(self, ids: list[str]) -> None:
         with self._require().connection() as conn:

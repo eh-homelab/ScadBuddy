@@ -181,3 +181,11 @@ export interface Problem {
   bambuddy_body?: unknown
   [extension: string]: unknown
 }
+
+/**
+ * The agent service's headless-browser setting (#349,
+ * `GET/PUT /api/v1/ai/settings/headless-browser`). Off by default.
+ */
+export interface HeadlessBrowserSetting {
+  enabled: boolean
+}

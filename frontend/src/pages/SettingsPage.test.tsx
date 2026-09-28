@@ -27,6 +27,15 @@ describe('SettingsPage', () => {
     expect(key).toHaveAttribute('placeholder', expect.stringContaining('A key is stored'))
   })
 
+  it('offers the AI headless browser switch, off by default (#349)', async () => {
+    renderPage(<SettingsPage />)
+    expect(
+      await screen.findByRole('checkbox', {
+        name: 'Let AI sessions use ScadBuddy in a headless browser',
+      }),
+    ).not.toBeChecked()
+  })
+
   it('says when no key is stored yet', async () => {
     server.use(
       http.get('/api/v1/settings', () =>
@@ -219,5 +228,22 @@ describe('SettingsPage, live (#269)', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(screen.queryByText(/Settings were changed elsewhere/)).not.toBeInTheDocument()
     expect(field).toHaveValue('https://tested.test')
+  })
+
+  it('shows the assistant plugin sections only while AI is available', async () => {
+    const hidden = renderPage(<SettingsPage />)
+    await seeded()
+    expect(screen.queryByRole('heading', { name: 'Plugin packages' })).not.toBeInTheDocument()
+    hidden.unmount()
+
+    vi.stubEnv('VITE_MOCK_API', '1')
+    try {
+      renderPage(<SettingsPage />)
+      expect(await screen.findByRole('heading', { name: 'Plugin packages' })).toBeInTheDocument()
+      expect(screen.getByRole('heading', { name: 'Plugin endpoints' })).toBeInTheDocument()
+      expect(await screen.findByRole('listitem', { name: 'Plugin endpoint hindsight' })).toBeInTheDocument()
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 })
