@@ -247,10 +247,21 @@ are written back into this section with the date.
 
 ### Acceptance (after deploy)
 
-Task 10 §4 of the implementation plan (print `name-keychain`, 0.2 + Fine, two Bambu PLA
-Basic spools, manual start; confirm the queue item shows the 0.2 printer preset,
-`0.08mm High Quality`, and both spools' colors) has **not run**. It runs once this work
-merges and ArgoCD rolls the deployed build, and its result gets recorded in this table.
+This ran against the deployed build `sha-54d56ea`, which includes #335. The scripted check
+is `name-keychain`, 0.2 + Fine, two Bambu PLA Basic spools, and manual start. It passed.
+The follow-up real prints failed at the printer because of #469.
+
+| Check | Result | Measured value | Date |
+|---|---|---|---|
+| 0.2 printer preset on the queue item | **Pass** | Queue item 104's sliced file: printer `Bambu Lab H2C 0.2 nozzle` | 2026-09-28 |
+| Fine tier resolves to `0.08mm High Quality` | **Pass** | Process `0.08mm High Quality @BBL H2C 0.2 nozzle`, layer height 0.08 | 2026-09-28 |
+| Both spools' colors | **Pass** | Slots 1/2 = `#9D432C` / `#00B1B7`, both on `Bambu PLA Basic @BBL H2C 0.2 nozzle` | 2026-09-28 |
+| Manual start honored | **Pass** | `manual_start: true`, status `pending`, `started_at: null` | 2026-09-28 |
+| A real print starts (queue item 108, silk, 0.2 standard, auto start) | **Fail → #469** | The printer paused at layer 0 with HMS `05FE8053`: "The left nozzle is not matched with slicing file." The slice sets both extruders to the chosen size. This H2C has 0.2 on the right and 0.4 on the left. | 2026-09-28 |
+
+Also found:
+- #470: the run POST can outlive the 60 s ingress timeout. The client gets a 504 while the item is still queued, so a retry double-queues.
+- #476: the sliced plate thumbnail shows the model's authored colors, not the chosen spools'. The sliced `filament_colour` is correct.
 
 ## 6. What Bambuddy decides, and ScadBuddy does not
 
