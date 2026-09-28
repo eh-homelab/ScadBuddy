@@ -16,6 +16,7 @@ import type {
   Job,
   CatalogueLibrary,
   LibraryPinRequest,
+  MediaView,
   ModelPatch,
   ModelPrintChoices,
   ModelSummary,
@@ -141,6 +142,21 @@ async function readProblem(response: Response): Promise<Problem> {
     }
   } catch {
     return { title: response.statusText || 'Request failed', status: response.status }
+  }
+}
+
+/** `readProblem` for an `XMLHttpRequest` that has finished. */
+function xhrProblem(xhr: XMLHttpRequest): Problem {
+  try {
+    const body = JSON.parse(xhr.responseText) as Partial<Problem>
+    return {
+      ...body,
+      title: body.title ?? xhr.statusText,
+      status: body.status ?? xhr.status,
+      detail: body.detail,
+    }
+  } catch {
+    return { title: xhr.statusText || 'Request failed', status: xhr.status }
   }
 }
 
@@ -319,6 +335,66 @@ export const api = {
       .join('.')
     return `${API_BASE}/models/${seg(model.slug)}/thumbnail${key === '...' ? '' : `?v=${seg(key)}`}`
   },
+
+  /** #274 — one image or video of a template. Its id never changes its contents. */
+  mediaUrl: (slug: string, item: Pick<MediaView, 'id'>) =>
+    `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}`,
+
+  /** #274 — a video's poster image, or undefined when the item has none. */
+  mediaPosterUrl: (slug: string, item: Pick<MediaView, 'id' | 'poster'>) =>
+    item.poster ? `${API_BASE}/models/${seg(slug)}/media/${seg(item.id)}/poster` : undefined,
+
+  /**
+   * #274 — adds an image or video as the template's last item. XHR rather than
+   * `fetch`, which reports no upload progress; a video runs to a gigabyte.
+   * `onProgress` gets the fraction sent, 0 to 1.
+   */
+  uploadMedia: (
+    slug: string,
+    file: File,
+    options: { caption?: string; poster?: File } = {},
+    onProgress?: (fraction: number) => void,
+  ) =>
+    new Promise<ModelSummary>((resolve, reject) => {
+      const body = new FormData()
+      body.append('file', file)
+      if (options.caption) body.append('caption', options.caption)
+      if (options.poster) body.append('poster', options.poster)
+      const xhr = new XMLHttpRequest()
+      xhr.open('POST', `${API_BASE}/models/${seg(slug)}/media`)
+      xhr.setRequestHeader('Accept', 'application/json')
+      xhr.upload.addEventListener('progress', (event) => {
+        if (event.lengthComputable && event.total > 0) onProgress?.(event.loaded / event.total)
+      })
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(JSON.parse(xhr.responseText) as ModelSummary)
+          return
+        }
+        reject(new ApiError(xhrProblem(xhr)))
+      }
+      xhr.onerror = () =>
+        reject(new ApiError({ title: 'The upload failed', status: 0, detail: 'The upload failed' }))
+      xhr.onabort = () =>
+        reject(new ApiError({ title: 'The upload was cancelled', status: 0 }))
+      xhr.send(body)
+    }),
+
+  patchMedia: (slug: string, id: string, caption: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ caption }),
+    }),
+
+  /** `ids` names every item once, in the new order; the first is the cover. */
+  reorderMedia: (slug: string, ids: string[]) =>
+    request<ModelSummary>(`/models/${seg(slug)}/media/order`, {
+      method: 'PUT',
+      body: JSON.stringify({ ids }),
+    }),
+
+  deleteMedia: (slug: string, id: string) =>
+    request<ModelSummary>(`/models/${seg(slug)}/media/${seg(id)}`, { method: 'DELETE' }),
 
   /**
    * #204 — stores an SVG or PNG for a `// file` parameter. The answer's `id` (the

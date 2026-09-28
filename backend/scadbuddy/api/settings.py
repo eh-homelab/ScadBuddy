@@ -6,7 +6,7 @@ from typing import Annotated, Self
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field, model_validator
 
-from scadbuddy.api.deps import SettingsStoreDep
+from scadbuddy.api.deps import SettingsStoreDep, StateDep
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.models import Folder, Pipeline, PresetRef, Printer
 from scadbuddy.bambuddy.options import BAMBUDDY_DEFAULTS, OptionScope, PrintOptions
@@ -34,6 +34,10 @@ class SettingsView(BaseModel):
     bed_type: str | None = None
     default_plate: str | None = None
     display_unit: DisplayUnit = "mm"
+    #: The largest media upload (#274), in bytes. Read-only: it is
+    #: ``SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES``, reported so the UI can refuse a file
+    #: before sending it.
+    media_upload_max_bytes: int
 
 
 class PrintOptionsView(BaseModel):
@@ -100,7 +104,7 @@ class BambuddyTargets(BaseModel):
     printers: list[Printer] = Field(default_factory=list)
 
 
-def _view(settings: StoredSettings) -> SettingsView:
+def _view(settings: StoredSettings, media_upload_max_bytes: int) -> SettingsView:
     return SettingsView(
         bambuddy_url=settings.bambuddy_url,
         has_api_key=bool(settings.bambuddy_api_key),
@@ -114,17 +118,18 @@ def _view(settings: StoredSettings) -> SettingsView:
         bed_type=settings.bed_type,
         default_plate=settings.default_plate,
         display_unit=settings.display_unit,
+        media_upload_max_bytes=media_upload_max_bytes,
     )
 
 
 @router.get("/settings", response_model=SettingsView, summary="Bambuddy connection")
-def get_settings(store: SettingsStoreDep) -> SettingsView:
-    return _view(store.load())
+def get_settings(store: SettingsStoreDep, state: StateDep) -> SettingsView:
+    return _view(store.load(), state.settings.media_upload_max_bytes)
 
 
 @router.put("/settings", response_model=SettingsView, summary="Update the connection")
-def put_settings(patch: SettingsPatch, store: SettingsStoreDep) -> SettingsView:
-    return _view(store.save(patch))
+def put_settings(patch: SettingsPatch, store: SettingsStoreDep, state: StateDep) -> SettingsView:
+    return _view(store.save(patch), state.settings.media_upload_max_bytes)
 
 
 def _options_view(settings: StoredSettings) -> PrintOptionsView:

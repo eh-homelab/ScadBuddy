@@ -26,6 +26,8 @@ export type Asset = Schemas['AssetMeta']
 export type AssetUsage = Schemas['AssetUsage']
 
 export type ModelSummary = Schemas['ModelRecord']
+/** #274 — one image or video of a template, in its order; the first is the cover. */
+export type MediaView = Schemas['MediaView']
 export type SourceCheck = Schemas['SourceCheck']
 export type Diagnostic = Schemas['Diagnostic']
 
