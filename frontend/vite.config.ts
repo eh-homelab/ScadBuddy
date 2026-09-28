@@ -17,14 +17,19 @@ const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
  * The agent entries keep the browser's `Host` (no `changeOrigin`): the agent's origin
  * check (agent/src/http/origins.ts) accepts a loopback `Origin` only when `Host` names
  * the same loopback origin, as it does through the real ingress for the public URL.
- * `ws: true` carries the assistant's socket (`/api/v1/ai/chat`).
+ * `ws: true` carries the assistant's socket (`/api/v1/ai/chat`) and the backend's
+ * `/api/v1/ws`. The backend's entry needs it too, not only for live updates. Vite
+ * leaves an upgrade it does not proxy hanging, and a browser keeps at most one
+ * WebSocket to a host in the CONNECTING state (RFC 6455 §4.1). A stuck `/api/v1/ws`
+ * handshake therefore held the assistant's socket back, as observed with Chromium
+ * through `pnpm preview`.
  *
  * The mocked build (`VITE_MOCK_API=1`) proxies nothing: msw answers every route.
  */
 const proxy: Record<string, ProxyOptions> = {
   '^/api/v1/ai(?:[/?]|$)': { target: agent, ws: true },
   '^/mcp(?:[/?]|$)': { target: agent },
-  '/api': { target: backend, changeOrigin: true },
+  '/api': { target: backend, changeOrigin: true, ws: true },
 }
 
 export default defineConfig({
