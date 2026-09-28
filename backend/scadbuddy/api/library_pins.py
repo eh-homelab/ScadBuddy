@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Iterable, Sequence
 
 from fastapi import status
 
@@ -55,6 +55,22 @@ async def resolve_pin(
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
 
+def require_library_names(names: Iterable[str]) -> None:
+    """A 422 naming each of ``names`` that is not a usable library name.
+
+    The one refusal for a malformed name, whichever body carried it (#437): the
+    multipart form's fields are checked here as given, and the JSON body's pattern
+    mismatches are routed here from its validation error.
+    """
+    malformed = [name for name in dict.fromkeys(names) if not re.fullmatch(NAME_PATTERN, name)]
+    if malformed:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            f"not a usable library name: {', '.join(repr(name) for name in malformed)}",
+            libraries=malformed,
+        )
+
+
 @contextlib.asynccontextmanager
 async def pinned_at_create(
     names: Sequence[str],
@@ -75,14 +91,7 @@ async def pinned_at_create(
     wanted = [
         name for name in dict.fromkeys(names) if all(pin.name != name for pin in meta.libraries)
     ]
-    # The pattern the JSON body's field holds each name to, for the multipart form's.
-    malformed = [name for name in wanted if not re.fullmatch(NAME_PATTERN, name)]
-    if malformed:
-        raise ApiError(
-            status.HTTP_422_UNPROCESSABLE_CONTENT,
-            f"not a usable library name: {', '.join(repr(name) for name in malformed)}",
-            libraries=malformed,
-        )
+    require_library_names(wanted)
     if not wanted:
         yield meta
         return
