@@ -416,6 +416,7 @@ def test_a_legacy_read_reports_the_claim_count(
     finally:
         store.close()
 
+
 # ── flipping SCADBUDDY_TEMPORAL_ADDRESS across a restart (final review I4) ──────
 
 
