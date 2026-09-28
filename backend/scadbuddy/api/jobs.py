@@ -105,6 +105,8 @@ class JobStatus(BaseModel):
     preview_url: str | None = None
     bbox_mm: BoundingBox | None = None
     colors: list[str] | None = None
+    #: ScadBuddy's own warnings: a done job's result's, or what a failed one could
+    #: still say (#408), say a file parameter's asset OpenSCAD could not open.
     warnings: list[str] | None = None
     #: What the template echoed as `NOTE:`/`WARNING:` on a successful render (#285).
     notes: list[str] | None = None
@@ -150,7 +152,7 @@ def _job_status(job: Job, preview_url: str | None) -> JobStatus:
         preview_url=preview_url if result is not None else None,
         bbox_mm=result.bbox_mm if result else None,
         colors=result.colors if result else None,
-        warnings=result.warnings if result else None,
+        warnings=result.warnings if result else job.warnings or None,
         notes=result.notes if result else None,
         parts=result.parts if result else None,
         plates=result.plates if result else None,
