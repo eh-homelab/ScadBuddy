@@ -220,26 +220,11 @@ def build_state(settings: Settings) -> AppState:
         fetcher=fetcher,
         assets=assets,
     )
-    previews: PreviewScheduler | None = None
-    if settings.preview_renders and preview_store is not None:
-        previews = PreviewScheduler(
-            catalogue,
-            preview_store,
-            queue,
-            lambda slug: render_preview(
-                slug,
-                config=config,
-                paths=paths,
-                history=history,
-                assets=assets,
-                executor=queue.thumbnail_executor,
-                checkouts=checkouts,
-            ),
-            timeout=config.render_timeout * TIMEOUT_FACTOR,
-        )
-        # Everything that can change whether a model needs a preview, or which one.
-        catalogue.on_change = previews.request
-        outputs.on_change = previews.request
+    previews = (
+        build_previews(catalogue, outputs, queue, paths, history, assets, checkouts)
+        if settings.preview_renders
+        else None
+    )
     # Nothing connects here either: the lifespan opens it first thing.
     settings_store = SettingsStore(settings, events=events)
     print_progress = ProgressObserver(events)
@@ -306,6 +291,61 @@ async def probe_openscad_version(config: Config) -> str | None:
         return None
     first = stdout.decode("utf-8", "replace").strip().splitlines()
     return first[0].strip() if first else None
+
+
+def build_previews(
+    catalogue: Catalogue,
+    outputs: OutputStore,
+    queue: RenderQueue,
+    paths: DataPaths,
+    history: ModelHistory,
+    assets: AssetStore,
+    checkouts: CheckoutGate,
+) -> PreviewScheduler | None:
+    """The preview scheduler, hooked to every change that can call for a new preview;
+    ``None`` without a database, where there is nowhere to keep one."""
+    if catalogue.previews is None:
+        return None
+    previews = PreviewScheduler(
+        catalogue,
+        catalogue.previews,
+        queue,
+        lambda slug: render_preview(
+            slug,
+            # The queue's, read per render, so a live settings change reaches it.
+            config=queue.config,
+            paths=paths,
+            history=history,
+            assets=assets,
+            executor=queue.thumbnail_executor,
+            checkouts=checkouts,
+        ),
+        timeout=queue.config.render_timeout * TIMEOUT_FACTOR,
+    )
+    # Everything that can change whether a model needs a preview, or which one.
+    catalogue.on_change = previews.request
+    outputs.on_change = previews.request
+    return previews
+
+
+def set_previews(state: AppState, enabled: bool) -> None:
+    """Turn the default-render previews on or off before the boot starts them (#322:
+    ``preview_renders`` saved in Settings applies at the next start)."""
+    state.catalogue.serve_previews = enabled
+    if enabled and state.previews is None:
+        state.previews = build_previews(
+            state.catalogue,
+            state.outputs,
+            state.queue,
+            state.paths,
+            state.history,
+            state.assets,
+            state.checkouts,
+        )
+    elif not enabled and state.previews is not None:
+        state.previews = None
+        state.catalogue.on_change = None
+        state.outputs.on_change = None
 
 
 def get_state(connection: HTTPConnection) -> AppState:

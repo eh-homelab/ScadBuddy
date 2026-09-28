@@ -185,6 +185,7 @@ SettingsSection = Literal[
     "model_choices",
     "printer_bed_type",
     "last_project",
+    "remembered",
 ]
 
 
@@ -381,6 +382,10 @@ class EventBus(Protocol):
 
     async def aclose(self) -> None:
         """Close every subscription, ending each consumer's iteration."""
+        ...
+
+    def add_listener(self, listener: Callable[[Event], None]) -> Callable[[], None]:
+        """Call ``listener`` on the publishing thread for every event; returns its remover."""
         ...
 
 

@@ -810,7 +810,8 @@ class RenderQueue:
         self._render: RenderCallable = render or (
             lambda job: render_job(
                 job,
-                config=config,
+                # Read per job, so a live settings change (#322) reaches the next one.
+                config=self.config,
                 paths=paths,
                 assets=self.assets,
                 history=history,
@@ -840,6 +841,27 @@ class RenderQueue:
         #: Background work waiting for a worker with no render to claim. Each entry's
         #: work returns its own type; only its caller's future carries it.
         self._background: deque[_Background[Any]] = deque()
+
+    def reconfigure(self, config: Config) -> None:
+        """Run with ``config`` from here on (#322): every job, poll and admission check
+        reads ``self.config``, and the SLO gauges are re-exported.
+
+        The worker count and the thumbnail pool are sized at :meth:`start`, so before it
+        (the boot applying the stored settings) ``render_concurrency`` resizes them;
+        after it, a changed one waits for the next start.
+        """
+        if not self._tasks and config.render_concurrency != self.config.render_concurrency:
+            self._thumbnails.shutdown(wait=False)
+            self._thumbnails = ThreadPoolExecutor(
+                max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
+            )
+            self.metrics.workers.set(config.render_concurrency)
+        elif self._tasks:
+            config = replace(config, render_concurrency=self.config.render_concurrency)
+        self.config = config
+        self.metrics.queue_depth_slo.set(config.render_queue_depth_slo)
+        self.metrics.queue_max.set(config.render_queue_max)
+        self.metrics.latency_slo.set(config.render_latency_slo)
 
     @property
     def thumbnail_executor(self) -> Executor:
