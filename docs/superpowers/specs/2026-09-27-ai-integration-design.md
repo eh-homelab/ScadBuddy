@@ -95,6 +95,20 @@ dependency of `agent/`.
   the last transcript entries (`last-prompt`, `cost-state`) are appended after the
   `result` message and before the iterator ends; a resumed query's `total_cost_usd`
   includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
+- Read and measured in #297 on SDK 0.3.283 (`agent/test/plugins.e2e.test.ts`, the real
+  bundled CLI against a local `@modelcontextprotocol/sdk` 1.30.1 Streamable HTTP server):
+  the SDK passes every non-SDK MCP server to Claude Code as `--mcp-config <json>` on its
+  argv (`sdk.mjs`), so a header value written there would be on the command line; a
+  header written as `${VAR}` with the value in the query's `env` is expanded by Claude
+  Code and reaches the server, and the argv holds only the reference. A configured
+  `{ type: 'http' }` server named `my-memory` gives tools `mcp__my-memory__<tool>` and
+  reports `{ name, status: 'connected', source: 'dynamic' }` in the init message;
+  `disallowedTools: ['mcp__my-memory__forget']` removes that tool from the request;
+  `alwaysLoad: true` ("never deferred behind tool search ... blocks startup until the
+  server is connected (capped at the standard 5s connect timeout)", `sdk.d.ts`) puts the
+  tools in the first turn. The permission seam applies to them as to in-process tools: a
+  `read` tool runs, an unlisted one is denied as needing approval and never reaches the
+  server.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]

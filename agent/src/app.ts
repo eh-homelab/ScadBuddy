@@ -3,13 +3,17 @@ import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
+import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
+import { type PluginTest, testPlugin } from './plugins/testConnection.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
+import { registerPluginRoutes } from './routes/plugins.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming, which the later /mcp and /api/v1/ai/* routes need.
-// /healthz, and the Claude credential routes (#255, routes/credentials.ts).
+// /healthz, the Claude credential routes (#255, routes/credentials.ts) and the
+// plugin registry routes (#297, routes/plugins.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -21,6 +25,10 @@ export type AppDeps = {
   kek: KekStatus
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
+  /** The plugin registry (#297); undefined when there is no database. */
+  plugins?: PluginRepo | undefined
+  /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
+  testPlugin?: (plugin: RemotePlugin) => Promise<PluginTest>
   testConnection: (credential: Credential) => Promise<ConnectionTest>
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
@@ -142,6 +150,16 @@ export function createApp(deps: AppDeps): Hono {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+  })
+
+  registerPluginRoutes(app, {
+    plugins: deps.plugins,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    kek: deps.kek,
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
+    testPlugin: deps.testPlugin ?? ((plugin) => testPlugin(plugin)),
+    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
   })
 
   return app

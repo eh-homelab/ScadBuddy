@@ -134,6 +134,11 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   - Plugins given to the harness are vetted by `src/harness/plugins.ts`: anything that
     starts a process (command hooks, stdio MCP servers, LSP servers, monitors) is
     refused, because it would inherit the credential env.
+  - Remote MCP plugins (#297) live in `ai_plugins` (`src/plugins/registry.ts`, routes
+    `src/routes/plugins.ts` under `/api/v1/ai/plugins`). The harness gets each enabled
+    one as `{ type: 'http' }` (`run.ts` `remotePluginOptions`); its header value goes in
+    the query `env` and the config says `${SCADBUDDY_PLUGIN_<i>_HEADER}`, because the
+    SDK puts MCP config on Claude Code's argv. Unlisted plugin tools are `outward`.
   - Tests never call Anthropic: `test/support/fakeAnthropic.ts` is a local Messages API
     (streaming SSE) that the real SDK and bundled CLI are pointed at as a gateway
     (`test/run.test.ts`). Postgres tests (`test/pg.test.ts`) skip unless

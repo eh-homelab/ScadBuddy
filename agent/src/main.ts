@@ -10,6 +10,7 @@ import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
+import { PluginStore } from './plugins/registry.js'
 import { loadKek } from './secrets.js'
 import { shutdown } from './shutdown.js'
 
@@ -62,6 +63,13 @@ const database = config.databaseUrl
               (failed ? `; ${failed} could not be opened with the previous key and were left as they are` : ''),
           )
         }
+        const plugins = await new PluginStore(sql).rewrapFrom(previousKek.kek, kek.kek)
+        if (plugins.rewrapped || plugins.failed) {
+          console.log(
+            `secret key rotation: re-wrapped ${plugins.rewrapped} plugin secret(s)` +
+              (plugins.failed ? `; ${plugins.failed} could not be opened with the previous key` : ''),
+          )
+        }
       },
     })
   : undefined
@@ -70,6 +78,7 @@ const database = config.databaseUrl
 void database?.ready()
 const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
+const plugins = database ? new PluginStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
 
@@ -78,6 +87,7 @@ const app = createApp({
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  plugins,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })

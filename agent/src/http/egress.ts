@@ -61,10 +61,24 @@ function blockedAddress(address: string): boolean {
 
 /** Throws EgressError when `baseUrl`'s host is, or resolves to, a refused address. */
 export async function assertGatewayHostAllowed(baseUrl: string, resolve: Resolver = systemResolver): Promise<void> {
-  const hostname = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, '')
+  await assertHostAllowed(baseUrl, resolve, 'base_url', 'a model gateway')
+}
+
+/**
+ * The same check for any URL a secret is sent to: the gateway base URL above,
+ * or a plugin's MCP endpoint (#297, src/plugins/registry.ts). `field` names the
+ * setting in the error; `purpose` says what the host was meant to be.
+ */
+export async function assertHostAllowed(
+  url: string,
+  resolve: Resolver = systemResolver,
+  field = 'url',
+  purpose = 'an allowed host',
+): Promise<void> {
+  const hostname = new URL(url).hostname.toLowerCase().replace(/\.$/, '')
   const bare = hostname.startsWith('[') ? hostname.slice(1, -1) : hostname
   if (BLOCKED_NAMES.has(bare)) {
-    throw new EgressError(`base_url host ${bare} is a cloud metadata service, not a model gateway`)
+    throw new EgressError(`${field} host ${bare} is a cloud metadata service, not ${purpose}`)
   }
   let addresses: string[]
   if (isIP(bare) !== 0) {
@@ -73,14 +87,14 @@ export async function assertGatewayHostAllowed(baseUrl: string, resolve: Resolve
     try {
       addresses = await resolve(bare)
     } catch {
-      throw new EgressError(`base_url host ${bare} cannot be resolved from the agent service`)
+      throw new EgressError(`${field} host ${bare} cannot be resolved from the agent service`)
     }
-    if (addresses.length === 0) throw new EgressError(`base_url host ${bare} resolves to no address`)
+    if (addresses.length === 0) throw new EgressError(`${field} host ${bare} resolves to no address`)
   }
   const refused = addresses.find(blockedAddress)
   if (refused !== undefined) {
     throw new EgressError(
-      `base_url host ${bare} resolves to ${refused}, a link-local or cloud metadata address; ` +
+      `${field} host ${bare} resolves to ${refused}, a link-local or cloud metadata address; ` +
         'loopback and private addresses are allowed, those are not',
     )
   }

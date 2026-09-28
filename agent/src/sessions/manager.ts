@@ -10,7 +10,14 @@ import type { Credential } from '../credentials.js'
 import { redact } from '../secrets.js'
 import type { HarnessPaths } from '../harness/options.js'
 import type { TierResolver } from '../harness/permissions.js'
-import { DEFAULT_MAX_BUDGET_USD, DEFAULT_MAX_TURNS, type HarnessRun, runHarness } from '../harness/run.js'
+import {
+  DEFAULT_MAX_BUDGET_USD,
+  DEFAULT_MAX_TURNS,
+  harnessTierOf,
+  type HarnessRun,
+  runHarness,
+} from '../harness/run.js'
+import type { LoadedPlugins } from '../plugins/registry.js'
 import { ensureSessionDir, isUuid, sessionWorkDir } from '../harness/stateDirs.js'
 import { EventLog, type LoggedEvent } from './eventLog.js'
 import { event, type Origin, type Owner, sameOwner, type ServerEvent, type SessionStatus } from './protocol.js'
@@ -152,6 +159,12 @@ export type SessionManagerDeps = {
   /** #251's registry: the in-process MCP servers a session's queries get. */
   mcpServers?: (session: SessionRecord) => Record<string, McpSdkServerConfigWithInstance>
   pluginPaths?: string[]
+  /**
+   * The registered, enabled remote MCP plugins for a turn (#297):
+   * `loadEnabledPlugins` over the PluginStore in production. Read once per
+   * turn, so enabling or changing a plugin applies from the next turn on.
+   */
+  remotePlugins?: () => Promise<LoadedPlugins>
   run?: QueryRunner
   leaseMs?: number
   renewMs?: number
@@ -465,7 +478,10 @@ export class SessionManager {
     const id = session.id
     const sql = this.deps.sql
     const tierOf = this.deps.tierOf ?? (() => undefined)
-    const mapper = new SdkEventMapper(id, tierOf)
+    // Widened with the plugins' tiers once they are loaded below, so the
+    // panel shows a plugin tool at the tier the permission seam applies.
+    let eventTierOf: TierResolver = tierOf
+    const mapper = new SdkEventMapper(id, (name) => eventTierOf(name))
     let lost = false
 
     // Lease renewal, and the interrupt flag from other replicas.
@@ -497,6 +513,12 @@ export class SessionManager {
       // after this point is redacted before it reaches the event log.
       const credential = await this.deps.credential()
       secrets = [credential.secret]
+      const loaded = this.deps.remotePlugins ? await this.deps.remotePlugins() : undefined
+      const remotePlugins = loaded?.plugins ?? []
+      // Plugin header values are redacted from the event log like the credential.
+      for (const plugin of remotePlugins) if (plugin.header) secrets.push(plugin.header.value)
+      for (const problem of loaded?.problems ?? []) this.deps.stderr?.(`${problem}\n`)
+      eventTierOf = harnessTierOf({ remotePlugins, tierOf })
       const [cwd, resume, model] = await Promise.all([
         ensureSessionDir(this.deps.paths, id),
         this.store.exists(id),
@@ -518,6 +540,7 @@ export class SessionManager {
         ...(typeof model === 'string' && model ? { model } : {}),
         ...(this.deps.mcpServers ? { mcpServers: this.deps.mcpServers(session) } : {}),
         ...(this.deps.pluginPaths ? { pluginPaths: this.deps.pluginPaths } : {}),
+        ...(remotePlugins.length ? { remotePlugins } : {}),
         ...(this.deps.stderr ? { stderr: this.deps.stderr } : {}),
       }
       for await (const message of this.run(run)) {

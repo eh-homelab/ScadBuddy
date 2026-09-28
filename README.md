@@ -313,6 +313,64 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   hooks, stdio MCP servers, LSP servers and monitors are refused
   (`agent/src/harness/plugins.ts`, spec §8.6), since they would inherit the
   credential's environment.
+- **Plugin endpoints (#297)**: "provide an endpoint and we'll add it to the
+  harness". A plugin is a remote MCP server, stored in Postgres (`ai_plugins`,
+  no files) and managed through `/api/v1/ai/plugins` (below). Each enabled
+  plugin is given to every harness run as a Streamable HTTP MCP server named
+  after the plugin, so its tools reach the model as `mcp__<name>__<tool>`.
+  Rules (`agent/src/plugins/registry.ts`):
+  - The URL must be `https://`; plain `http://` only when every address the
+    host resolves to is loopback. Link-local and cloud metadata hosts are
+    refused, as for gateway base URLs. It is checked at save, at test, and
+    again each time a run loads the plugin. No query string, no credentials in
+    the URL, no `$`.
+  - An optional auth header (name in the clear, value sealed with the same
+    key-encryption key as the Claude credential and bound to the plugin's
+    name, URL and header name). Changing the URL or the header name needs the
+    value again. No route returns it; views show the header name and the last
+    four characters.
+  - **Every tool is `outward`, so it needs approval, until you set its tier.**
+    `tool_tiers` sets tools to `read` or `write` (or `outward` explicitly).
+    `disabled_tools` removes tools from the model's view entirely. MCP
+    annotations such as `readOnlyHint` are only shown as a suggestion by the
+    test; they never change a tier.
+  - New plugins start disabled. Run the test, review the tools, then enable.
+
+  | Route | |
+  |---|---|
+  | `GET /api/v1/ai/plugins`, `GET …/{name}` | list, one |
+  | `POST /api/v1/ai/plugins` | register: `name`, `url`, optional `auth_header` (default `Authorization`), `secret`, `enabled`, `tool_tiers`, `disabled_tools` |
+  | `PATCH /api/v1/ai/plugins/{name}` | change any of those but `name`; `secret: null` removes the header |
+  | `DELETE /api/v1/ai/plugins/{name}` | remove |
+  | `POST /api/v1/ai/plugins/{name}/test` | connect, one `tools/list` (10 s timeout, no redirects), and report each tool with its tier |
+
+  Writes and the test go through the same guard as credential writes (next
+  bullet). A generic example against a loopback peer (a shell in the pod, or
+  `kubectl port-forward … 8081`; the `Origin` must match the address used):
+
+  ```bash
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"name": "memory", "url": "https://memory.internal.example/mcp/",
+         "secret": "Bearer <token>"}'
+  curl -sS -X POST http://127.0.0.1:8081/api/v1/ai/plugins/memory/test \
+    -H 'Origin: http://127.0.0.1:8081'
+  curl -sS -X PATCH http://127.0.0.1:8081/api/v1/ai/plugins/memory \
+    -H 'Origin: http://127.0.0.1:8081' -H 'Content-Type: application/json' \
+    -d '{"tool_tiers": {"search": "read"}, "enabled": true}'
+  ```
+
+  **Hindsight** (the motivating example, #297). Its docs give a per-bank MCP
+  endpoint at `…/mcp/<bank_id>/`, transport `http`, an optional
+  `Authorization: Bearer <api key>` header for Hindsight Cloud (none for a
+  local Docker deployment), and the tools `retain`, `recall` and `reflect`
+  among others ([MCP memory server](https://hindsight.vectorize.io/blog/2026/03/04/mcp-agent-memory)).
+  Registered as a plugin that is `{"name": "hindsight", "url":
+  "https://<hindsight host>/mcp/<bank_id>/", "secret": "Bearer <api key>"}`.
+  Which of its tools to lower to `read` is your call after the test lists
+  them; `recall` is the obvious candidate. Not yet verified against a running
+  Hindsight: the tool names and annotations a real server lists, and whether
+  `reflect` writes anything.
 - It runs as uid 10001 and writes only under `/var/lib/scadbuddy-agent`
   (mount an `emptyDir` there), so the root filesystem can be read-only
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it

@@ -40,27 +40,43 @@ export function requestFacts(c: Context, remoteAddress: RemoteAddress): RequestF
   return { peer: remoteAddress(c), header: (name) => c.req.header(name) }
 }
 
+export type GuardOptions = {
+  /** What is being changed, for the refusal message ("credential changes" by default). */
+  subject?: string
+  /**
+   * Methods whose body must be `application/json` (check 3 above). PUT by
+   * default; the plugin routes (#297) add POST and PATCH, whose bodies they read.
+   */
+  jsonMethods?: readonly string[]
+}
+
 /** Returns why the request is refused, or undefined when it may proceed. */
-export function uiRequestProblem(c: Context, policy: OriginPolicy, remoteAddress: RemoteAddress): string | undefined {
+export function uiRequestProblem(
+  c: Context,
+  policy: OriginPolicy,
+  remoteAddress: RemoteAddress,
+  options: GuardOptions = {},
+): string | undefined {
+  const subject = options.subject ?? 'credential changes'
   const facts = requestFacts(c, remoteAddress)
   if (!isSecureTransport(facts, policy)) {
-    return 'credential changes must come through the HTTPS ingress'
+    return `${subject} must come through the HTTPS ingress`
   }
   const verdict = checkOrigin(facts, policy)
   if (!verdict.ok) {
     switch (verdict.reason) {
       case 'no-origin':
-        return 'credential changes must come from the ScadBuddy UI (no Origin header)'
+        return `${subject} must come from the ScadBuddy UI (no Origin header)`
       case 'malformed-origin':
-        return 'credential changes must come from the ScadBuddy UI (malformed Origin header)'
+        return `${subject} must come from the ScadBuddy UI (malformed Origin header)`
       case 'not-allowed':
         return (
-          'credential changes must come from the ScadBuddy UI at its public URL ' +
+          `${subject} must come from the ScadBuddy UI at its public URL ` +
           '(SCADBUDDY_PUBLIC_URL; Origin or Host is not on the allowlist)'
         )
     }
   }
-  if (c.req.method === 'PUT') {
+  if ((options.jsonMethods ?? ['PUT']).includes(c.req.method)) {
     const type = c.req.header('content-type')?.split(';')[0]?.trim().toLowerCase()
     if (type !== 'application/json') return 'request body must be application/json'
   }
