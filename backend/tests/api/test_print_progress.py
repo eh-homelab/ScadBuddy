@@ -173,6 +173,7 @@ def test_the_slice_and_queue_route_reports_through_the_same_shape(
     assert body["copies_detail"][0]["waiting_reason"] == "No active H2C printers are idle"
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_send_starts_the_print_watcher(client: TestClient, model: str) -> None:
     configure(client, pipeline_id=1)
@@ -190,6 +191,7 @@ def test_a_send_starts_the_print_watcher(client: TestClient, model: str) -> None
     assert output_id in state.print_watcher.watching
 
 
+@pytest.mark.requires_postgres
 @respx.mock
 def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     """#268: the backend follows the print itself from the moment it starts."""
@@ -203,5 +205,4 @@ def test_a_run_starts_the_print_watcher(client: TestClient, model: str) -> None:
     assert ran.status_code == 200, ran.text
 
     state = getattr(client.app.state, STATE_ATTR)  # type: ignore[attr-defined]
-    # No database here, so nothing is recorded; the watcher follows it all the same.
     assert output_id in state.print_watcher.watching
