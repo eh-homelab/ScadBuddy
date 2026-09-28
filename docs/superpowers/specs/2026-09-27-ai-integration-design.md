@@ -36,7 +36,7 @@ gains an event bus (§7) and a few endpoints the tools need (#252, #253, #284).
 | D1 | **Harness: Claude Agent SDK, TypeScript** | Loads Claude plugins natively; has sessions with resume/fork and a pluggable `SessionStore`, in-process custom tools, permission callbacks and hooks (§3.1) | Vercel AI SDK loop and Mastra: both multi-provider, neither loads Claude plugins |
 | D2 | **Claude only, to start** | The harness supports nothing else (§3.1). Credentials: an Anthropic API key, or a gateway base URL plus credential | claude.ai subscription login (not allowed, §3.1); non-Claude models through a gateway (not supported, §3.1) |
 | D3 | **One tool registry, two projections** | A tool is defined once and served in-process to the harness and over `/mcp` to external agents, so the surfaces cannot drift | Deriving tools mechanically from `openapi.json` (route-shaped rather than task-shaped; no risk tiers) |
-| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (three infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
+| D4 | **All AI state in the #241 Postgres database; configured only in Settings** | One durable store shared by replicas; no AI-*configuration* env vars (infrastructure bootstrap variables still reach the agent container, §9) | Env-var configuration; `data/settings.json` (not shareable, no transactions) |
 | D5 | **MCP: Streamable HTTP only, over HTTPS** | One endpoint, streaming progress and resource notifications, resumable | stdio and legacy HTTP+SSE |
 | D6 | **MCP auth modes `bearer` (default), `disabled`, later `oidc`** | Bearer now, OIDC per the MCP authorization spec later (#262), and an explicit off switch for trusted LANs | Hard-requiring auth; forking the code path per mode |
 | D7 | **Least privilege: `tools: []`** | The harness sees only ScadBuddy tools and allowlisted plugin tools. No shell, no file access, no web | Leaving Claude Code's built-in tools available |
@@ -81,6 +81,20 @@ dependency of `agent/`.
   the image build asserts `CLAUDE_CODE_VERSION` the way the Dockerfile asserts
   `OPENSCAD_VERSION`. In that SDK's `sdk.d.ts`, `settingSources: []` means "disable
   filesystem settings (SDK isolation mode)", so it loads nothing from the host (§4.4).
+- Read and measured in #300 on SDK 0.3.283 (`sdk.d.ts`, `export declare type
+  SessionStore`, marked `@alpha`): `append(key, entries)` and `load(key)` are required;
+  `listSessions?(projectKey)`, `listSessionSummaries?(projectKey)`, `delete?(key)` and
+  `listSubkeys?({projectKey, sessionId})` are optional. `SessionKey` is
+  `{ projectKey, sessionId, subpath? }` (projectKey "Default: sanitized cwd"; no option
+  sets it). `append` "SHOULD treat `uuid` as an idempotency key"; `load` returns `null`
+  for a key "never written", and entries must be "deep-equal to what was appended". The
+  `forkSession()` function and `getSessionMessages()` take the same `sessionStore`. The
+  query option `sessionId` gives a new session a caller-chosen UUID. Measured against the
+  local fake endpoint (`agent/test/sessions.e2e.test.ts`): a session resumes on a fresh
+  `CLAUDE_CONFIG_DIR` with a different `cwd` when the store's lookups ignore projectKey;
+  the last transcript entries (`last-prompt`, `cost-state`) are appended after the
+  `result` message and before the iterator ends; a resumed query's `total_cost_usd`
+  includes the earlier turns. The adapter is `agent/src/sessions/store.ts`.
 - "Unless previously approved, Anthropic does not allow third party developers to
   offer claude.ai login or rate limits for their products, including agents built on
   the Claude Agent SDK." The SDK "runs the Claude Code binary". [Overview][sdk-overview]
@@ -156,7 +170,6 @@ which is byte-identical to `README.md` on `main` of microsoft/playwright-mcp):
 
 | Item | Where it matters | Verified by |
 |---|---|---|
-| The exact `SessionStore` adapter interface in the pinned TypeScript SDK version (the `cwd` keying is in §3.1) | §6 | #300 |
 | Whether `canUseTool` can pause for an asynchronous human decision without holding the query open indefinitely (or whether a `PreToolUse` hook must deny, and the session resume after approval) | §8 | #255, #258 |
 | Bambuddy 1.2.5.5 routes for the print archive (with outcome fields) and any stats endpoint, read off its `openapi.json` with respx recordings | #284, #264 | #251 |
 | Whether the #241 Postgres (CloudNativePG in eh-homelab/clusters) needs anything for `LISTEN/NOTIFY` across replicas | §7 | #264 |
@@ -350,7 +363,7 @@ tools.
 
 ## 6. Sessions (#300)
 
-- **Storage.** A Postgres `SessionStore` adapter (§3.2) mirrors SDK transcripts, so any
+- **Storage.** A Postgres `SessionStore` adapter (§3.1) mirrors SDK transcripts, so any
   replica can resume a session. A metadata table `ai_sessions` holds the id, owner
   principal, origin (`chat` / `mcp` / `analyzer` / `hook`), scope (model, output, job),
   status (`running` / `waiting_input` / `waiting_approval` / `idle` / `done` /
@@ -359,6 +372,14 @@ tools.
   running gets a clear error. Watchers are unlimited.
 - **Handoff.** Ownership moves between principals explicitly. The browser user can see
   every session, with a "controlled by …" badge.
+- **Event log redaction.** Each session's panel events are stored in `ai_session_events`
+  and replayed to every watcher, so tool payloads are scrubbed before they are stored
+  (`agent/src/sessions/sdkEvents.ts` `scrubForLog`): the turn's credential is redacted
+  from every string, arguments named like secrets are blanked, `tool.call` inputs are
+  cut to a preview above 4 KB, and `tool.result` summaries are capped at 500 characters.
+  Full payloads stay only in the SDK transcript, which watchers never receive. Before
+  #251 and #258 wire in real outward tools, the registry must let a tool declare
+  secret-bearing arguments under other names, and the scrubber must honour them.
 - **Agent-to-agent.** Over `/mcp`: `sessions.list/start/send/get/fork/interrupt/approve/deny/handoff`.
   Approvals of outward actions by another agent are off by default and need a per-token
   grant.
@@ -495,7 +516,12 @@ There are **no AI-*configuration* env vars**: providers, credentials, auth mode,
 tokens and plugins are all configured in Settings. Three **infrastructure bootstrap**
 variables still reach the agent container, because Settings itself needs them to exist:
 `SCADBUDDY_DATABASE_URL` (shared with #241), the backend URL (`SCADBUDDY_BACKEND_URL`,
-named in PR #319), and the key-encryption key file below.
+named in PR #319), and the key-encryption key file below. The post-merge hardening of
+#255 adds three more of the same kind, which Settings cannot hold because they decide
+who may write to Settings or open its secrets: `SCADBUDDY_PUBLIC_URL` (shared with the
+backend; the origin allowlist of §8.4), `SCADBUDDY_AGENT_TRUSTED_PROXIES` (the peers
+whose `X-Forwarded-*` are believed, §8.4), and `SCADBUDDY_SECRET_KEY_PREVIOUS_FILE`
+(the old key during a rotation).
 
 **Encryption at rest (recommended):** envelope encryption.
 

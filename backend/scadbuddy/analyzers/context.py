@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field
@@ -78,6 +79,8 @@ class AnalysisContext:
     params: dict[str, ParamValue]
     request: AnalysisRequest
     output: OutputMeta | None = None
+    #: The output's ``model.3mf`` on disk, for checks that read the file itself.
+    model_3mf: Path | None = None
     geometry: GeometryAnalysis | None = None
     plate: PlateGeometry | None = None
     pipeline: PipelineView | None = None

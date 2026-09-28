@@ -145,4 +145,33 @@ describe('SettingsPage', () => {
     // Bambuddy renders the link in a sandboxed iframe at /external/{id}.
     expect(await screen.findByRole('status')).toHaveTextContent('/external/3')
   })
+
+  it('shows how much the upload store holds against its caps (#296)', async () => {
+    server.use(
+      http.get('/api/v1/assets/usage', () =>
+        HttpResponse.json({
+          count: 12,
+          bytes: 3_450_000,
+          max_count: 10_000,
+          max_total_bytes: 1_000_000_000,
+        }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    const usage = await screen.findByTestId('asset-usage')
+    expect(usage).toHaveTextContent('12 of 10000')
+    expect(usage).toHaveTextContent('3.5 MB of 1.0 GB')
+  })
+
+  it('says a cap of zero is no limit', async () => {
+    server.use(
+      http.get('/api/v1/assets/usage', () =>
+        HttpResponse.json({ count: 2, bytes: 640, max_count: 0, max_total_bytes: 0 }),
+      ),
+    )
+    renderPage(<SettingsPage />)
+    const usage = await screen.findByTestId('asset-usage')
+    expect(usage).toHaveTextContent('2 (no limit)')
+    expect(usage).toHaveTextContent('640 B (no limit)')
+  })
 })

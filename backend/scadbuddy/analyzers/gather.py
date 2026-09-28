@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import zipfile
+from pathlib import Path
 
 from scadbuddy.analyzers.context import (
     AnalysisContext,
@@ -27,8 +28,9 @@ from scadbuddy.bambuddy.filaments import gather_options
 from scadbuddy.bambuddy.models import EligibilityRequest, Printer, Spool
 from scadbuddy.bambuddy.pipelines import pipeline_view
 from scadbuddy.core.problems import ApiError
-from scadbuddy.library.outputs import OutputMeta, OutputStore
+from scadbuddy.library.outputs import MODEL_NAME, OutputMeta, OutputStore
 from scadbuddy.library.settings_store import StoredSettings
+from scadbuddy.render.geometry import NoSuchPlateError
 from scadbuddy.render.plate import plate_for
 from scadbuddy.render.schema import ParamValue
 
@@ -58,6 +60,7 @@ async def gather_context(
         context.unavailable["output"] = "this configuration has not been rendered yet"
         context.unavailable["geometry"] = "this configuration has not been rendered yet"
     else:
+        context.model_3mf = await asyncio.to_thread(_model_path, outputs, meta)
         await _read_geometry(context, outputs, meta)
 
     if not settings.bambuddy_url:
@@ -76,9 +79,19 @@ async def gather_context(
     return context
 
 
+def _model_path(outputs: OutputStore, meta: OutputMeta) -> Path | None:
+    path = outputs.directory(meta.id) / MODEL_NAME
+    return path if path.is_file() else None
+
+
 async def _read_geometry(context: AnalysisContext, outputs: OutputStore, meta: OutputMeta) -> None:
+    # The plate this print sends (#289): each plate of a multi-plate output is
+    # measured on its own, as ``GET /outputs/{id}/geometry?plate=`` does.
+    plate = context.request.plate_id
     try:
-        context.geometry = await asyncio.to_thread(outputs.geometry, meta.id)
+        context.geometry = await asyncio.to_thread(outputs.geometry, meta.id, plate)
+    except NoSuchPlateError as error:
+        context.unavailable["geometry"] = str(error)
     except FileNotFoundError:
         context.unavailable["geometry"] = "this output has no 3MF to analyse"
     except (ValueError, zipfile.BadZipFile) as error:

@@ -1,5 +1,5 @@
 import postgres, { type Sql } from 'postgres'
-import { migrate } from './db/migrations.js'
+import { type MigrateOptions, migrate, MIGRATIONS } from './db/migrations.js'
 
 // The database is optional. With SCADBUDDY_DATABASE_URL unset the service still
 // starts and answers /healthz, but reports AI as disabled (spec §9, "No
@@ -68,6 +68,13 @@ export type ConnectOptions = {
   searchPath?: string
   /** Where to report a failed migration (the error, never the URL). */
   onMigrationError?: (err: unknown) => void
+  /** lock_timeout / statement_timeout for migrations (db/migrations.ts). */
+  migrate?: MigrateOptions
+  /**
+   * Runs after migrations succeed, as part of the same `ready()` attempt: key
+   * rotation (main.ts). A throw fails the attempt and the next `ready()` retries.
+   */
+  afterMigrate?: (sql: Sql) => Promise<void>
 }
 
 /** Memoises the first success of `attempt`; concurrent callers share one attempt. */
@@ -110,7 +117,10 @@ export function connectDatabase(url: string, options: ConnectOptions = {}): Data
   return {
     sql,
     ping,
-    ready: makeReady(() => migrate(sql), options.onMigrationError),
+    ready: makeReady(async () => {
+      await migrate(sql, MIGRATIONS, options.migrate)
+      await options.afterMigrate?.(sql)
+    }, options.onMigrationError),
     async close() {
       await sql.end({ timeout: 5 })
     },

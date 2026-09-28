@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import shutil
-import subprocess
 import threading
 import time
 from pathlib import Path
@@ -23,7 +22,6 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.library.catalogue import Catalogue, LibraryNotDeclaredError, ModelMeta
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
-    KILL_WAIT,
     LOCKFILE_NAME,
     STAGING_PREFIX,
     CatalogueLibrary,
@@ -48,6 +46,7 @@ from scadbuddy.library.libraries import (
 from scadbuddy.render.jobs import resolve_source
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from tests.conftest import PUBLIC_ADDRESS, make_library_upstream
+from tests.test_library_processes import _age, _running
 
 pytestmark = pytest.mark.requires_git
 
@@ -416,39 +415,10 @@ def test_a_git_that_times_out_is_killed_with_its_helpers(
         pytest.fail("the timed-out git's child is still running")
 
 
-def test_a_killed_git_that_is_never_reaped_does_not_hold_up_the_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    waits: list[float | None] = []
-
-    class Unreapable:
-        pid = 0
-        args = ("git",)
-
-        def communicate(self, timeout: float | None = None) -> tuple[str, str]:
-            waits.append(timeout)
-            raise subprocess.TimeoutExpired("git", timeout or 0)
-
-    monkeypatch.setattr("scadbuddy.library.libraries.os.killpg", lambda pid, sig: None)
-
-    LibraryStore._kill(Unreapable())  # type: ignore[arg-type]
-
-    assert waits == [KILL_WAIT]
-
-
-def _running(pid: int) -> bool:
-    """A killed orphan whose new parent never reaps it (pytest as PID 1 in the test
-    image) stays a zombie: dead, but still answering `kill(pid, 0)`."""
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except OSError:  # gone, or going: ENOENT or ESRCH mid-read
-        return False
-    return stat.rsplit(")", 1)[1].split()[0] != "Z"
-
-
 def test_sweep_staging_leaves_the_checkouts(store: LibraryStore, paths: DataPaths) -> None:
     store.resolve("BOSL2")
     (paths.libraries / f"{STAGING_PREFIX}dead" / "BOSL2").mkdir(parents=True)
+    _age(paths.libraries / f"{STAGING_PREFIX}dead")
 
     assert store.sweep_staging() == [f"{STAGING_PREFIX}dead"]
     assert [entry.name for entry in paths.libraries.iterdir()] == ["BOSL2"]
@@ -463,6 +433,7 @@ def test_sweep_staging_goes_on_past_one_it_cannot_remove(
     stuck, gone = (paths.libraries / f"{STAGING_PREFIX}{tag}" for tag in ("a", "b"))
     for staging in (stuck, gone):
         (staging / "BOSL2").mkdir(parents=True)
+        _age(staging)
     real_rmtree = shutil.rmtree
 
     def rmtree(path: Path, *args: Any, **kwargs: Any) -> None:
@@ -499,40 +470,6 @@ def test_a_clone_over_the_size_cap_is_refused_and_leaves_nothing_behind(
         store.resolve("BOSL2")
 
     assert list(paths.libraries.iterdir()) == []
-
-
-def test_a_clone_is_killed_while_it_runs_once_it_goes_over_the_size_cap(
-    paths: DataPaths, tmp_path: Path
-) -> None:
-    """The cap stops the clone mid-transfer: an oversized repository never gets to
-    write its whole tree to the volume before it is refused."""
-    child_pid = tmp_path / "child.pid"
-    fake_git = tmp_path / "git"
-    # A clone that never finishes: a child keeps appending to the checkout.
-    fake_git.write_text(
-        "#!/bin/sh\n"
-        'for last; do :; done\nmkdir -p "$last"\n'
-        '(while :; do head -c 65536 /dev/zero >> "$last/blob"; sleep 0.01; done) &\n'
-        f"echo $! > {child_pid}\nwait\n",
-        encoding="utf-8",
-    )
-    fake_git.chmod(0o755)
-    store = LibraryStore(paths, catalogue=(), git=str(fake_git), timeout=60, max_bytes=1_000_000)
-
-    started = time.monotonic()
-    with pytest.raises(LibraryTooLargeError, match=r"reached \d+ MB, over the 1 MB"):
-        store._clone("Big", "https://git.example/o/big.git", "main")
-
-    assert time.monotonic() - started < 30
-    assert list(paths.libraries.iterdir()) == []
-    pid = int(child_pid.read_text())
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        if not _running(pid):
-            break
-        time.sleep(0.05)
-    else:
-        pytest.fail("the oversized clone's writer is still running")
 
 
 def test_a_clone_within_the_size_cap_is_fetched(store: LibraryStore, paths: DataPaths) -> None:

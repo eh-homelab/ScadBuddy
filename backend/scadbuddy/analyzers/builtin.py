@@ -23,8 +23,9 @@ from scadbuddy.analyzers.model import (
     change,
 )
 from scadbuddy.bambuddy.filaments import check as check_filaments
+from scadbuddy.render.bambu3mf import plates_of, replate_3mf
 from scadbuddy.render.geometry import MeshEdge
-from scadbuddy.render.plate import fit_problem, overshoots
+from scadbuddy.render.plate import PlateFitError, fit_problem, overshoots
 
 #: Located edges a mesh diagnostic carries per part; the counts are always complete.
 MAX_EDGES_PER_DIAGNOSTIC = 100
@@ -481,16 +482,42 @@ LOW_FILAMENT = Analyzer(
 # --- SB4001: plate fit --------------------------------------------------------------
 
 
+def _multi_plate_problem(context: AnalysisContext) -> tuple[int, str | None] | None:
+    """``(plates, problem)`` from the send's own check, or ``None`` without a 3MF.
+
+    :func:`~scadbuddy.render.bambu3mf.replate_3mf` is what the send runs before an
+    upload, and it checks every plate of a multi-plate output (#289) with its own box
+    and colours; the output's ``bbox_mm`` spans every plate and would misjudge them.
+    """
+    path = context.model_3mf
+    plate = context.plate
+    if path is None or plate is None or not path.is_file():
+        return None
+    count = len(plates_of(path))
+    try:
+        replate_3mf(path.read_bytes(), plate)
+    except PlateFitError as error:
+        return count, str(error)
+    return count, None
+
+
 def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDiagnostic]:
     plate = context.plate
     output = context.output
     assert plate is not None and output is not None
-    size = output.bbox_mm.size
-    over = overshoots(size, plate)
-    problem = None if over else fit_problem(size, plate, tower=len(output.colors) > 1)
+    name = plate.model or "the default plate"
+    checked = _multi_plate_problem(context)
+    plates = checked[0] if checked is not None else 1
+    if plates > 1:
+        assert checked is not None
+        problem = checked[1]
+        over: list[tuple[str, float, float]] = []
+    else:
+        size = output.bbox_mm.size
+        over = list(overshoots(size, plate))
+        problem = None if over else fit_problem(size, plate, tower=len(output.colors) > 1)
     if not over and problem is None:
         return []
-    name = plate.model or "the default plate"
     evidence = [
         Evidence(label=f"model {axis}", value=round(want, 1), unit="mm", origin="output")
         for axis, want, _ in over
@@ -500,6 +527,8 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
     ]
     if problem is not None:
         evidence.append(Evidence(label="placement", value=problem, origin="plate"))
+    if plates > 1:
+        evidence.append(Evidence(label="plates", value=plates, origin="3mf"))
     message = (
         f"This does not fit {name}: "
         + ", ".join(f"{axis} {want:.1f} mm > {have:.1f} mm" for axis, want, have in over)
@@ -513,9 +542,10 @@ def _plate_fit(context: AnalysisContext, analyzer: Analyzer) -> list[AnalyzerDia
             why=(
                 "X and Y are checked against the area every extruder reaches, Z against "
                 "the printer's printable height, and a multi-colour print also needs "
-                "room for its prime tower. The send refuses the same plates."
+                "room for its prime tower; a multi-plate output is checked plate by "
+                "plate. The send refuses the same plates."
             ),
-            location=DiagnosticLocation(kind="plate", bbox=output.bbox_mm),
+            location=DiagnosticLocation(kind="plate", bbox=output.bbox_mm if plates == 1 else None),
             evidence=evidence,
         )
     ]

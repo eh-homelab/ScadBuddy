@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest'
 import { type AppDeps, createApp, type Health } from '../src/app.js'
 import type { Credential } from '../src/credentials.js'
 import type { ConnectionTest } from '../src/harness/testConnection.js'
-import { kekFromBase64, type KekStatus } from '../src/secrets.js'
+import { originPolicy } from '../src/http/origins.js'
+import { kekFromBase64, type KekStatus, loadKek } from '../src/secrets.js'
 import { MemoryCredentials } from './support/memoryCredentials.js'
 
 const up = () => Promise.resolve(true)
@@ -21,7 +22,11 @@ function deps(overrides: Partial<AppDeps> = {}): AppDeps {
     kek: withKek,
     credentials: new MemoryCredentials(),
     testConnection: () => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }),
+    // The ingress: a trusted proxy in front of https://scadbuddy.example.
     remoteAddress: () => '10.0.0.7',
+    origins: originPolicy('https://scadbuddy.example', '10.0.0.0/8'),
+    resolveHost: () => Promise.resolve(['203.0.113.10']),
+    testCooldownMs: 0,
     ...overrides,
   }
 }
@@ -273,5 +278,220 @@ describe('/api/v1/ai/credentials', () => {
       expect(res.status).toBe(409)
       expect(await res.text()).not.toContain(SECRET)
     })
+  })
+})
+
+describe('/healthz is bounded (review of #354, finding 3)', () => {
+  const never = () => new Promise<boolean>(() => {})
+
+  it('reports a hung migration step as unavailable instead of hanging', async () => {
+    const started = Date.now()
+    const { status, body } = await health(createApp(deps({ database: { ping: up, ready: never }, healthTimeoutMs: 50 })))
+    expect(status).toBe(200)
+    expect(body).toMatchObject({ ai: 'unavailable (database timed out)', credential: 'unknown' })
+    expect(Date.now() - started).toBeLessThan(1500)
+  })
+
+  it('reports a hung credential read as unavailable instead of hanging', async () => {
+    const credentials = new MemoryCredentials()
+    credentials.hang = new Promise(() => {})
+    const { body } = await health(createApp(deps({ credentials, healthTimeoutMs: 50 })))
+    expect(body.ai).toBe('unavailable (database timed out)')
+  })
+})
+
+describe('health and settings name the key problem, not the key file (finding 9)', () => {
+  it('gives a generic reason in /healthz and cannot_save_reason; the path and errno stay in the log detail', async () => {
+    const missing = await loadKek('/run/secrets/some/where/scadbuddy.key')
+    expect(missing.ok).toBe(false)
+    if (missing.ok) return
+    expect(missing.detail).toMatch(/some\/where.*ENOENT/)
+    const app = createApp(deps({ kek: missing }))
+    const healthText = JSON.stringify((await health(app)).body)
+    const getText = await (await app.request('/api/v1/ai/credentials')).text()
+    for (const text of [healthText, getText]) {
+      expect(text).toContain('SCADBUDDY_SECRET_KEY_FILE cannot be read')
+      expect(text).not.toContain('some/where')
+      expect(text).not.toContain('ENOENT')
+    }
+  })
+})
+
+describe('a credential in #354 format (finding 2, clean break)', () => {
+  it('is reported as outdated and refused by the connection test', async () => {
+    const credentials = new MemoryCredentials()
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    // What #354 wrote: version byte 0x01.
+    credentials.row!.envelope.secretSealed[0] = 0x01
+    const app = createApp(deps({ credentials }))
+    expect((await health(app)).body.ai).toBe('unavailable (stored credential is in an outdated format; save it again)')
+    expect(await (await app.request('/api/v1/ai/credentials')).json()).toMatchObject({ usable: false })
+    const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
+    expect(res.status).toBe(409)
+    expect(await res.json()).toEqual({ detail: expect.stringMatching(/older format.*save it again/) })
+    // A PUT without the secret cannot keep it either.
+    expect((await put(app, { kind: 'anthropic_api_key' })).status).toBe(409)
+  })
+})
+
+describe('origin allowlist and DNS rebinding (finding 1)', () => {
+  const body = { kind: 'anthropic_api_key', secret: SECRET }
+  /** What a rebinding page sends: its own name in Host and Origin, HTTPS claimed, JSON set by page JS. */
+  const REBOUND = { host: 'evil.test:8081', origin: 'http://evil.test:8081', 'x-forwarded-proto': 'https' }
+
+  async function status(overrides: Partial<AppDeps>, headers: Record<string, string>): Promise<number> {
+    const credentials = new MemoryCredentials()
+    const res = await put(createApp(deps({ credentials, ...overrides })), body, headers)
+    if (res.status !== 200) expect(credentials.row).toBeUndefined()
+    return res.status
+  }
+
+  it.each([
+    ['a LAN peer', '192.168.1.50'],
+    ['loopback', '127.0.0.1'],
+    ['the trusted proxy', '10.0.0.7'],
+  ])('refuses a rebound request from %s', async (_name, peer) => {
+    expect(await status({ remoteAddress: () => peer }, REBOUND)).toBe(403)
+  })
+
+  it('refuses a rebound request when no public URL is configured (loopback only)', async () => {
+    const origins = originPolicy(undefined, undefined)
+    expect(await status({ origins, remoteAddress: () => '127.0.0.1' }, REBOUND)).toBe(403)
+    expect(await status({ origins, remoteAddress: () => '192.168.1.50' }, REBOUND)).toBe(403)
+  })
+
+  it('refuses an allowed Origin sent to a Host that is not on the list', async () => {
+    expect(await status({}, { ...UI, host: 'evil.test' })).toBe(403)
+    expect(await status({}, { ...UI, host: 'scadbuddy-agent:8081', 'x-forwarded-host': 'evil.test' })).toBe(403)
+  })
+
+  it('accepts the UI through the trusted proxy', async () => {
+    expect(await status({}, UI)).toBe(200)
+  })
+
+  it('ignores forwarded headers from a peer that is not a trusted proxy', async () => {
+    // The UI's exact headers, but from a LAN peer: X-Forwarded-Proto is not believed.
+    expect(await status({ remoteAddress: () => '192.168.1.50' }, UI)).toBe(403)
+    // From loopback, X-Forwarded-Host is not believed either: Host is localhost.
+    expect(
+      await status(
+        { remoteAddress: () => '127.0.0.1' },
+        { ...UI, host: 'localhost:8081', 'x-forwarded-host': 'scadbuddy.example' },
+      ),
+    ).toBe(403)
+    // With no trusted proxies configured, the ingress's own address is just a peer.
+    expect(await status({ origins: originPolicy('https://scadbuddy.example', undefined) }, UI)).toBe(403)
+  })
+
+  it('uses the last X-Forwarded-Proto value, the one the proxy appended', async () => {
+    expect(await status({}, { ...UI, 'x-forwarded-proto': 'https, http' })).toBe(403)
+    expect(await status({}, { ...UI, 'x-forwarded-proto': 'http, https' })).toBe(200)
+  })
+
+  it('normalises default ports on both sides', async () => {
+    expect(await status({}, { ...UI, host: 'scadbuddy.example:443' })).toBe(200)
+    expect(await status({}, { ...UI, origin: 'https://scadbuddy.example:443' })).toBe(200)
+    expect(
+      await status({ origins: originPolicy('https://SCADBUDDY.example:443/some/path', '10.0.0.0/8') }, UI),
+    ).toBe(200)
+    expect(await status({}, { ...UI, host: 'scadbuddy.example:8443' })).toBe(403)
+  })
+
+  it('accepts the loopback pair, including IPv6, only from a loopback peer', async () => {
+    const origins = originPolicy(undefined, undefined)
+    const v6 = { host: '[::1]:8081', origin: 'http://[::1]:8081' }
+    expect(await status({ origins, remoteAddress: () => '::1' }, v6)).toBe(200)
+    const local = { host: 'localhost:8081', origin: 'http://localhost:8081' }
+    expect(await status({ origins, remoteAddress: () => '::ffff:127.0.0.1' }, local)).toBe(200)
+    expect(await status({ origins, remoteAddress: () => '192.168.1.50' }, local)).toBe(403)
+    // Another local app's page (a different port) is a different origin.
+    expect(
+      await status({ origins, remoteAddress: () => '127.0.0.1' }, { ...local, origin: 'http://localhost:3000' }),
+    ).toBe(403)
+  })
+})
+
+describe('gateway base_url egress check (finding 6)', () => {
+  async function save(baseUrl: string, resolved: string[] | Error = ['203.0.113.10']) {
+    const credentials = new MemoryCredentials()
+    const resolveHost = () => (resolved instanceof Error ? Promise.reject(resolved) : Promise.resolve(resolved))
+    const res = await put(createApp(deps({ credentials, resolveHost })), {
+      kind: 'gateway',
+      base_url: baseUrl,
+      secret: GATEWAY_TOKEN,
+    })
+    return { status: res.status, detail: ((await res.json()) as { detail?: string }).detail, credentials }
+  }
+
+  it.each([
+    ['the metadata address', 'http://169.254.169.254/latest'],
+    ['another link-local address', 'https://169.254.10.1'],
+    ['IPv6 link-local', 'http://[fe80::1]:4000'],
+    ['an IPv4-mapped link-local', 'http://[::ffff:169.254.169.254]'],
+    ["AWS's IPv6 metadata", 'http://[fd00:ec2::254]'],
+    ["GCP's metadata name", 'http://metadata.google.internal/computeMetadata'],
+    ["Alibaba's metadata", 'http://100.100.100.200'],
+  ])('refuses %s', async (_name, url) => {
+    const { status, credentials } = await save(url)
+    expect(status).toBe(400)
+    expect(credentials.row).toBeUndefined()
+  })
+
+  it('checks what the name resolves to, not only the literal', async () => {
+    const { status, detail } = await save('https://llm.example', ['203.0.113.10', '169.254.169.254'])
+    expect(status).toBe(400)
+    expect(detail).toMatch(/resolves to 169\.254\.169\.254/)
+    expect((await save('https://llm.example', new Error('ENOTFOUND'))).status).toBe(400)
+  })
+
+  it.each([
+    ['a private LAN gateway', 'http://10.1.2.3:4000', ['10.1.2.3']],
+    ['a loopback gateway', 'http://localhost:4000', ['127.0.0.1', '::1']],
+    ['a cluster-local name', 'http://litellm.ai.svc.cluster.local:4000', ['10.96.0.12']],
+    ['a public gateway', 'https://llm.example/anthropic', ['203.0.113.10']],
+  ])('allows %s', async (_name, url, resolved) => {
+    expect((await save(url, resolved)).status).toBe(200)
+  })
+
+  it('checks again when the connection test runs', async () => {
+    const credentials = new MemoryCredentials()
+    await credentials.put({ kind: 'gateway', base_url: 'https://llm.example', secret: GATEWAY_TOKEN }, kek)
+    const testConnection = vi.fn(() => Promise.resolve({ ok: true, detail: 'connected', duration_ms: 1, model: 'm' }))
+    const app = createApp(deps({ credentials, testConnection, resolveHost: () => Promise.resolve(['169.254.169.254']) }))
+    const res = await app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
+    expect(res.status).toBe(400)
+    expect(testConnection).not.toHaveBeenCalled()
+  })
+})
+
+describe('POST /test is single-flight with a cooldown (finding 7)', () => {
+  it('refuses a second test while one runs, and within the cooldown after it', async () => {
+    const credentials = new MemoryCredentials()
+    await credentials.put({ kind: 'anthropic_api_key', secret: SECRET }, kek)
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => (release = resolve))
+    const testConnection = vi.fn(async (): Promise<ConnectionTest> => {
+      await gate
+      return { ok: true, detail: 'connected', duration_ms: 1, model: 'm' }
+    })
+    let clock = 1_000_000
+    const app = createApp(deps({ credentials, testConnection, testCooldownMs: 10_000, now: () => clock }))
+    const test = () => app.request('/api/v1/ai/credentials/test', { method: 'POST', headers: UI })
+
+    const first = test()
+    await vi.waitFor(() => expect(testConnection).toHaveBeenCalledTimes(1))
+    const concurrent = await test()
+    expect(concurrent.status).toBe(429)
+    expect(concurrent.headers.get('retry-after')).toBe('10')
+    release()
+    expect((await first).status).toBe(200)
+
+    clock += 4_000
+    const soon = await test()
+    expect(soon.status).toBe(429)
+    expect(soon.headers.get('retry-after')).toBe('6')
+    clock += 6_000
+    expect((await test()).status).toBe(200)
+    expect(testConnection).toHaveBeenCalledTimes(2)
   })
 })

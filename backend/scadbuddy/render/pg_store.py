@@ -90,7 +90,16 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX render_jobs_settled ON render_jobs (finished_at)
         WHERE state IN ('done', 'failed');
     """,
-    # 2: print-analyzer decisions (#284; `scadbuddy.analyzers.decisions`). One row per
+    # 2: what OpenSCAD reported, parsed (#252). On the row rather than only inside
+    # `result`, because a failed render has no result and is when they matter most.
+    """
+    ALTER TABLE render_jobs
+        ADD COLUMN diagnostics jsonb NOT NULL DEFAULT '[]'::jsonb,
+        ADD COLUMN diagnostics_dropped integer NOT NULL DEFAULT 0;
+    CREATE INDEX render_jobs_settled_slug ON render_jobs (slug, finished_at DESC)
+        WHERE state IN ('done', 'failed');
+    """,
+    # 3: print-analyzer decisions (#284; `scadbuddy.analyzers.decisions`). One row per
     # rule, instance ('' for every instance) and scope; `body` is the whole decision.
     """
     CREATE TABLE analyzer_decisions (
@@ -120,6 +129,8 @@ JOB_COLUMNS = (
     "log_tail",
     "error",
     "result",
+    "diagnostics",
+    "diagnostics_dropped",
 )
 
 TWIN_QUEUED_ERROR = "interrupted when its worker stopped responding; an identical render is queued"
@@ -238,7 +249,8 @@ class PostgresJobStore:
                         with conn.transaction():
                             back = conn.execute(
                                 "UPDATE render_jobs SET state = 'pending', started_at = NULL,"
-                                " heartbeat_at = NULL WHERE id = %s RETURNING *",
+                                " heartbeat_at = NULL, diagnostics = '[]'::jsonb,"
+                                " diagnostics_dropped = 0 WHERE id = %s RETURNING *",
                                 (row["id"],),
                             ).fetchone()
                     except UniqueViolation:
@@ -355,7 +367,8 @@ class PostgresJobStore:
         with self._pool.connection() as conn:
             cursor = conn.execute(
                 "UPDATE render_jobs SET state = %s, started_at = %s, finished_at = %s,"
-                " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL"
+                " log_tail = %s, error = %s, result = %s, heartbeat_at = NULL,"
+                " diagnostics = %s, diagnostics_dropped = %s"
                 " WHERE id = %s AND state = 'running' AND attempts = %s",
                 (
                     job.state,
@@ -364,6 +377,8 @@ class PostgresJobStore:
                     Jsonb(job.log_tail),
                     job.error,
                     Jsonb(job.result.model_dump(mode="json")) if job.result is not None else None,
+                    Jsonb([diagnostic.model_dump(mode="json") for diagnostic in job.diagnostics]),
+                    job.diagnostics_dropped,
                     job.id,
                     job.attempt,
                 ),
@@ -390,6 +405,15 @@ class PostgresJobStore:
                 (slug,),
             ).fetchone()
         return bool(row and row["unfinished"])
+
+    def latest_finished(self, slug: str) -> Job | None:
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM render_jobs WHERE slug = %s AND state IN ('done', 'failed')"
+                " AND finished_at IS NOT NULL ORDER BY finished_at DESC, id DESC LIMIT 1",
+                (slug,),
+            ).fetchone()
+        return _job(row) if row is not None else None
 
     def counts(self) -> QueueCounts:
         with self._pool.connection() as conn:

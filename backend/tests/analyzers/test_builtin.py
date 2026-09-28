@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from scadbuddy.analyzers import builtin
@@ -21,6 +23,8 @@ from scadbuddy.analyzers.model import Analyzer, AnalyzerDiagnostic
 from scadbuddy.analyzers.runner import run_checks
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, SlotNeed, SpoolOption
 from scadbuddy.bambuddy.models import EligibilityReport, SlotChoice
+from scadbuddy.render.bambu3mf import PlateParts, write_plates_3mf
+from scadbuddy.render.plate import plate_for
 from tests.analyzers.conftest import (
     basic_slot,
     context,
@@ -28,6 +32,7 @@ from tests.analyzers.conftest import (
     geometry_of,
     open_box,
     output,
+    part,
     pipeline,
     silk_slot,
     tee,
@@ -208,6 +213,30 @@ def test_room_for_the_prime_tower_is_checked_for_multi_colour() -> None:
     size = (300, 300, 10)
     assert _run(PLATE_FIT, output=output(size=size, colours=["#FF0000"])) == []
     [found] = _run(PLATE_FIT, output=output(size=size, colours=["#FF0000", "#00FF00"]))
+    assert any(e.label == "placement" for e in found.evidence)
+
+
+def _two_plates(path: Path, lid: float) -> Path:
+    """Plate 1 a 10 mm cube, plate 2 a ``lid`` mm one: the model's box spans both."""
+    write_plates_3mf(
+        [PlateParts((part(cube()),), (1,)), PlateParts((part(cube(lid)),), (1,))],
+        ["#FF0000"],
+        path,
+        thumbnails=None,
+    )
+    return path
+
+
+def test_a_multi_plate_output_is_checked_plate_by_plate(tmp_path: Path) -> None:
+    # Both plates fit an A1 mini even though the whole output's box would not.
+    fits = _two_plates(tmp_path / "fits.3mf", lid=150)
+    wide = output(size=(400, 150, 150))
+    mini = plate_for("A1 mini")
+    assert _run(PLATE_FIT, output=wide, model_3mf=fits, plate=mini) == []
+
+    too_big = _two_plates(tmp_path / "big.3mf", lid=200)
+    [found] = _run(PLATE_FIT, output=wide, model_3mf=too_big, plate=mini)
+    assert {e.label: e.value for e in found.evidence}["plates"] == 2
     assert any(e.label == "placement" for e in found.evidence)
 
 

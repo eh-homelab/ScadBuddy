@@ -71,7 +71,8 @@ class DataPaths:
     def assets(self) -> Path:
         """Files attached to `// file` parameters (#204), content-addressed. Not
         under ``models/`` (they belong to renders, not to a template's history)
-        and not under ``cache/`` (an output's parameters name them for good)."""
+        and not under ``cache/`` (an output's parameters name them for as long as the
+        output exists; the sweep removes only what nothing names, #296)."""
         return self.root / "assets"
 
     @property
