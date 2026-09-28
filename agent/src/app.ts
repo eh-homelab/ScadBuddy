@@ -1,16 +1,19 @@
 import { Hono } from 'hono'
+import type { ApprovalService } from './approvals/service.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
+import { registerApprovalRoutes } from './routes/approvals.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), and
+// /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -34,6 +37,8 @@ export type AppDeps = {
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
+  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+  approvals?: ApprovalService
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
@@ -154,6 +159,13 @@ export function createApp(deps: AppDeps): AgentApp {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+  })
+
+  registerApprovalRoutes(app, {
+    approvals: deps.approvals,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   if (deps.mcp) {

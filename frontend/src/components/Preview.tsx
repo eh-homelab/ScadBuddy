@@ -7,6 +7,16 @@ import type { BoundingBox, Job, Plate } from '../api/types'
 import { formatBbox } from '../lib/format'
 import { plateSize, useDisplayUnit } from '../lib/units'
 import { Spinner } from './ui/Spinner'
+import type { RenderStage } from '../lib/useRenderJob'
+
+const STAGE_LABELS: Record<RenderStage, string> = {
+  source: 'reading the model',
+  render: 'running OpenSCAD',
+  split: 'colouring the preview',
+  solids: 'building each colour',
+  thumbnail: 'drawing the covers',
+  write: 'writing the 3MF',
+}
 
 interface ViewerTheme {
   bg: string
@@ -47,6 +57,8 @@ export interface PreviewCapture {
 interface Props {
   job: Job | undefined
   rendering: boolean
+  /** #267 — what the render is doing, when known. */
+  stage?: RenderStage | undefined
   /** #81 — the chosen printer's plate, or the configured default. Undrawn until known. */
   plate?: Plate
   captureRef?: React.RefObject<PreviewCapture | null>
@@ -65,6 +77,7 @@ interface Props {
 export function Preview({
   job,
   rendering,
+  stage,
   plate,
   captureRef,
   leading,
@@ -165,6 +178,7 @@ export function Preview({
             {rendering && (
               <span className="flex items-center gap-2 rounded-[6px] border border-line bg-surface/90 px-2.5 py-1 text-[12px] text-muted backdrop-blur-sm">
                 <Spinner /> Rendering
+                {stage && <span data-testid="render-stage">· {STAGE_LABELS[stage]}</span>}
               </span>
             )}
             {controls}
