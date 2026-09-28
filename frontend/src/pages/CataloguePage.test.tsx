@@ -1,9 +1,11 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation } from 'react-router'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { api } from '../api/client'
-import { BUILTIN_SLUG, models } from '../mocks/fixtures'
+import { toSlides } from '../components/media/slides'
+import { CATALOGUE_VIEW_KEY, resetStoredView } from '../lib/catalogueView'
+import { BUILTIN_SLUG, GALLERY_SLUG, media, models } from '../mocks/fixtures'
 import { emitRealtime } from '../mocks/realtime'
 import { server } from '../mocks/server'
 import { COPY, UPSTREAM, duplicateWithUpdate } from '../test/upstream'
@@ -444,5 +446,165 @@ describe('CataloguePage, live (#269)', () => {
     await waitFor(() =>
       expect(screen.queryByRole('heading', { name: 'Made By An Agent' })).not.toBeInTheDocument(),
     )
+  })
+})
+
+describe('CataloguePage list mode (#278)', () => {
+  afterEach(() => {
+    vi.restoreAllMocks()
+    window.localStorage.clear()
+    resetStoredView()
+  })
+
+  function rows(): HTMLElement[] {
+    return [...document.querySelectorAll<HTMLElement>('[data-model-row]')]
+  }
+
+  function rowOf(name: string): HTMLElement {
+    return screen.getByRole('heading', { name }).closest('[data-model-row]') as HTMLElement
+  }
+
+  it('shows cards by default, with Cards pressed', async () => {
+    renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    const view = screen.getByRole('group', { name: 'View' })
+    expect(within(view).getByRole('button', { name: 'Cards' })).toHaveAttribute('aria-pressed', 'true')
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('switches to List, puts it in the URL and remembers it per browser', async () => {
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+    expect(rows()).toHaveLength(4)
+    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('list')
+
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(screen.getByTestId('search')).toHaveTextContent(/^$/)
+    expect(rows()).toHaveLength(0)
+    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('cards')
+  })
+
+  it('restores the remembered view only when the URL has none', async () => {
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
+    renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(4)
+    expect(screen.getByRole('button', { name: 'List' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('switches back to Cards from a remembered List, though the URL stays the same', async () => {
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(rows()).toHaveLength(0)
+    expect(window.localStorage.getItem(CATALOGUE_VIEW_KEY)).toBe('cards')
+  })
+
+  it('lets a view in the URL win over the remembered one', async () => {
+    window.localStorage.setItem(CATALOGUE_VIEW_KEY, 'list')
+    renderCatalogue('/?view=cards')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('works when storage throws, as a sandboxed iframe may', async () => {
+    vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    })
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('blocked', 'SecurityError')
+    })
+    const { user } = renderCatalogue()
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    expect(rows()).toHaveLength(0)
+
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(rows()).toHaveLength(4)
+    await user.click(screen.getByRole('button', { name: 'Cards' }))
+    expect(rows()).toHaveLength(0)
+  })
+
+  it('keeps the filters and sort when the view changes', async () => {
+    const { user } = renderCatalogue('/?tag=keychain&sort=name')
+    await screen.findByRole('heading', { name: 'Keychain Template' })
+    await user.click(screen.getByRole('button', { name: 'List' }))
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=keychain&sort=name&view=list')
+    expect(names()).toEqual(['Keychain Template', 'Name Keychain'])
+  })
+
+  it('gives each row its name link, built-in badge, description, tags, time and Duplicate', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+
+    const coaster = rowOf('Crème Coaster')
+    expect(within(coaster).getByRole('link', { name: 'Crème Coaster' })).toHaveAttribute(
+      'href',
+      `/m/${GALLERY_SLUG}`,
+    )
+    expect(within(coaster).getByText('A drinks coaster with a raised rim.')).toBeInTheDocument()
+    expect(within(coaster).getByRole('button', { name: 'Filter by Tea & Coffee' })).toBeInTheDocument()
+    expect(within(coaster).getByText(/^Updated /)).toBeInTheDocument()
+    expect(within(coaster).getByRole('button', { name: /Duplicate/ })).toBeInTheDocument()
+    expect(within(coaster).queryByTestId('builtin-badge')).not.toBeInTheDocument()
+
+    expect(within(rowOf('Keychain Template')).getByTestId('builtin-badge')).toBeInTheDocument()
+  })
+
+  it('adds a row tag to the filter', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    await user.click(
+      within(rowOf('Crème Coaster')).getByRole('button', { name: 'Filter by Tea & Coffee' }),
+    )
+    expect(screen.getByTestId('search')).toHaveTextContent('?tag=Tea+%26+Coffee&view=list')
+    expect(names()).toEqual(['Crème Coaster'])
+  })
+
+  it('badges the media count and opens the lightbox at the cover from the thumbnail', async () => {
+    const { user } = renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Crème Coaster' })
+    const coaster = rowOf('Crème Coaster')
+
+    const thumbnail = within(coaster).getByRole('button', { name: 'View media of Crème Coaster (4)' })
+    expect(within(thumbnail).getByTestId('media-count')).toHaveTextContent('4')
+    await user.click(thumbnail)
+
+    const dialog = await screen.findByRole('dialog', {}, { timeout: 3000 })
+    const slides = toSlides(GALLERY_SLUG, media[GALLERY_SLUG]!)
+    await waitFor(() =>
+      expect(document.querySelector('.yarl__slide_current img')).toHaveAttribute(
+        'src',
+        slides[0]!.src,
+      ),
+    )
+    expect(dialog).toHaveTextContent('Printed in blue and orange')
+    // Opening the media is not a navigation.
+    expect(screen.getByTestId('search')).toHaveTextContent('?view=list')
+  })
+
+  it('gives a single cover no count badge', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Name Keychain' })
+    const thumbnail = within(rowOf('Name Keychain')).getByRole('button', {
+      name: 'View media of Name Keychain',
+    })
+    expect(within(thumbnail).queryByTestId('media-count')).not.toBeInTheDocument()
+  })
+
+  it('shows a template with no media by its placeholder, with nothing to open', async () => {
+    renderCatalogue('/?view=list')
+    await screen.findByRole('heading', { name: 'Gridfinity Bin' })
+    const bin = rowOf('Gridfinity Bin')
+    expect(within(bin).getByRole('img', { name: 'Gridfinity Bin — not generated yet' })).toBeInTheDocument()
+    expect(within(bin).queryByRole('button', { name: /^View media/ })).not.toBeInTheDocument()
+
+    // The built-in has no media either; its default-render preview stands in, unopenable.
+    const builtin = rowOf('Keychain Template')
+    expect(within(builtin).getByRole('img', { name: 'Keychain Template' })).toBeInTheDocument()
+    expect(within(builtin).queryByRole('button', { name: /^View media/ })).not.toBeInTheDocument()
   })
 })

@@ -8,6 +8,9 @@ import type { ModelSummary } from '../api/types'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { CatalogueFilters } from '../components/CatalogueFilters'
 import { ImportDialog } from '../components/ImportDialog'
+import { MediaLightbox } from '../components/media/MediaLightbox'
+import { type Slide, toSlides } from '../components/media/slides'
+import { ModelRow } from '../components/ModelRow'
 import { ModelThumbnail } from '../components/ModelThumbnail'
 import { UploadDialog } from '../components/UploadDialog'
 import { UpstreamBadge } from '../components/UpstreamUpdate'
@@ -22,6 +25,7 @@ import {
   tagCounts,
   toParams,
 } from '../lib/catalogueQuery'
+import { readStoredView, storeView } from '../lib/catalogueView'
 import { modelPath } from '../lib/deeplink'
 import { timeAgo } from '../lib/format'
 import { safeHttpUrl } from '../lib/safeUrl'
@@ -34,12 +38,22 @@ export function CataloguePage() {
   const [importOpen, setImportOpen] = useState(false)
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
-  const query = useMemo(() => parseQuery(params), [params])
+  // #278 — with no `view` in the URL, the one this browser last chose.
+  const [storedView, setStoredView] = useState(readStoredView)
+  const query = useMemo(() => {
+    const parsed = parseQuery(params)
+    return params.has('view') ? parsed : { ...parsed, view: storedView ?? parsed.view }
+  }, [params, storedView])
+  const [lightbox, setLightbox] = useState<{ slides: Slide[]; index: number } | null>(null)
   const shown = useMemo(() => (data ? filterModels(data, query) : []), [data, query])
   // Counted over what the other filters leave, so a chip's count is what clicking it shows.
   const tags = useMemo(() => tagCounts(shown, query.tags), [shown, query.tags])
 
   function setQuery(next: CatalogueQuery, options?: { replace?: boolean }) {
+    if (next.view !== query.view) {
+      storeView(next.view)
+      setStoredView(next.view)
+    }
     setParams(toParams(next), options)
   }
 
@@ -131,7 +145,24 @@ export function CataloguePage() {
           <NoResults onClear={() => setQuery(clearFilters(query))} />
         )}
 
-        {shown.length > 0 && (
+        {shown.length > 0 && query.view === 'list' && (
+          <ul aria-label="Models" className="flex flex-col gap-2">
+            {shown.map((model) => {
+              const slides = toSlides(model.slug, model.media ?? [])
+              return (
+                <ModelRow
+                  key={model.slug}
+                  model={model}
+                  slides={slides}
+                  onOpen={(index) => setLightbox({ slides, index })}
+                  onTag={addTag}
+                />
+              )
+            })}
+          </ul>
+        )}
+
+        {shown.length > 0 && query.view === 'cards' && (
           <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {shown.map((model) => (
               <ModelCard
@@ -145,6 +176,11 @@ export function CataloguePage() {
         )}
       </div>
 
+      <MediaLightbox
+        slides={lightbox?.slides ?? []}
+        index={lightbox?.index ?? null}
+        onClose={() => setLightbox(null)}
+      />
       <UploadDialog
         open={uploadOpen}
         onClose={() => setUploadOpen(false)}

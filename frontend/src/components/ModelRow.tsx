@@ -1,0 +1,115 @@
+import { Link } from 'react-router'
+import { api } from '../api/client'
+import type { ModelSummary } from '../api/types'
+import { modelPath } from '../lib/deeplink'
+import { timeAgo } from '../lib/format'
+import { DuplicateModelButton } from './DuplicateModelButton'
+import type { Slide } from './media/slides'
+import { ModelThumbnail } from './ModelThumbnail'
+import { UpstreamBadge } from './UpstreamUpdate'
+
+interface Props {
+  model: ModelSummary
+  /** The template's media, missing files already skipped (`toSlides`). */
+  slides: Slide[]
+  /** Opens the page's lightbox on these slides, at `index`. */
+  onOpen: (index: number) => void
+  onTag: (tag: string) => void
+}
+
+/**
+ * #278 — one template in the catalogue's list mode: a small cover (which opens the
+ * lightbox, never navigates), the name (which does), then the details a card shows.
+ * No carousel. On narrow widths only the cover, the name and the tags are kept.
+ */
+export function ModelRow({ model, slides, onOpen, onTag }: Props) {
+  const cover = slides[0]
+  const src = model.has_thumbnail
+    ? api.modelThumbnailUrl(model)
+    : cover?.kind === 'image'
+      ? cover.src
+      : cover?.poster
+  const tags = model.tags ?? []
+
+  return (
+    <li
+      data-model-card={model.slug}
+      data-model-row
+      className="flex items-center gap-3 rounded-[6px] border border-line bg-surface p-2 transition-colors hover:border-line-strong"
+    >
+      <div className="relative w-20 shrink-0 sm:w-24">
+        {cover ? (
+          <button
+            type="button"
+            aria-label={`View media of ${model.name}${slides.length > 1 ? ` (${slides.length})` : ''}`}
+            onClick={() => onOpen(0)}
+            className="block w-full cursor-zoom-in rounded-[4px] focus-visible:outline-2 focus-visible:outline-accent"
+          >
+            <ModelThumbnail src={src} alt="" />
+            {slides.length > 1 && (
+              <span
+                data-testid="media-count"
+                aria-hidden="true"
+                className="sb-num absolute right-1 bottom-1 rounded-[3px] bg-black/70 px-1 text-[10px] leading-4 text-white"
+              >
+                {slides.length}
+              </span>
+            )}
+          </button>
+        ) : (
+          <ModelThumbnail
+            src={model.has_thumbnail ? api.modelThumbnailUrl(model) : undefined}
+            alt={model.name}
+          />
+        )}
+      </div>
+
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <h2 className="min-w-0 truncate text-[14px] font-medium">
+            <Link to={modelPath(model.slug)} className="hover:underline focus-visible:rounded-[3px]">
+              {model.name}
+            </Link>
+          </h2>
+          <UpstreamBadge state={model.upstream_state} />
+          {model.origin === 'builtin' && (
+            <span
+              data-testid="builtin-badge"
+              className="hidden shrink-0 text-[11px] text-faint sm:inline"
+            >
+              Built-in — read-only
+            </span>
+          )}
+        </div>
+        {model.description && (
+          <p className="mt-0.5 hidden truncate text-[13px] text-muted sm:block">
+            {model.description}
+          </p>
+        )}
+        {tags.length > 0 && (
+          <ul className="mt-1.5 flex flex-wrap gap-1">
+            {tags.map((tag) => (
+              <li key={tag}>
+                <button
+                  type="button"
+                  aria-label={`Filter by ${tag}`}
+                  onClick={() => onTag(tag)}
+                  className="rounded-[3px] bg-surface-2 px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:bg-surface-3 hover:text-ink"
+                >
+                  {tag}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+
+      <p className="hidden shrink-0 text-[12px] text-faint md:block">
+        Updated {timeAgo(model.updated_at)}
+      </p>
+      <span className="hidden shrink-0 sm:block">
+        <DuplicateModelButton slug={model.slug} name={model.name} />
+      </span>
+    </li>
+  )
+}
