@@ -184,6 +184,9 @@ export class ChatConnection {
 
   /** (Re)starts following a session's log after `afterSeq`. */
   private follow(id: string, afterSeq: number): void {
+    // The socket may have closed while handle() awaited start/get: close()
+    // has run already and will not run again, so nothing may be registered.
+    if (this.closed) return
     this.follows.get(id)?.abort()
     this.follows.delete(id)
     while (this.follows.size >= MAX_FOLLOWS) {
@@ -196,6 +199,12 @@ export class ChatConnection {
     void (async () => {
       try {
         const stream = await this.sessions.attach(id, this.principal, { afterSeq, signal: controller.signal })
+        // Closed while attach() checked the session: stop before the first read,
+        // so the log's follower is never registered.
+        if (this.closed || controller.signal.aborted) {
+          controller.abort()
+          return
+        }
         for await (const { event: e } of stream) {
           if (controller.signal.aborted) return
           this.emit(e)
@@ -262,7 +271,10 @@ type Pingable = { readyState: number; ping(): void; terminate(): void; on(event:
  * pings keep it open without adding frames the panel would have to parse.
  * Returns a stop function.
  */
-export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = 25_000): () => void {
+/** The chat socket's ping interval; must stay under the ingress read timeout (docs/ai/operating.md §1.1). */
+export const HEARTBEAT_MS = 25_000
+
+export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = HEARTBEAT_MS): () => void {
   const alive = new WeakMap<Pingable, boolean>()
   const timer = setInterval(() => {
     for (const socket of server.clients) {

@@ -14,9 +14,12 @@ const agent = process.env.SCADBUDDY_AGENT_URL ?? 'http://127.0.0.1:8081'
  * `/api` would swallow `/api/v1/ai/*`, the mistake §4.2 warns about. `vite preview`
  * uses the same table (`preview.proxy` defaults to `server.proxy`).
  *
- * The agent entries keep the browser's `Host` (no `changeOrigin`): the agent's origin
- * check (agent/src/http/origins.ts) accepts a loopback `Origin` only when `Host` names
- * the same loopback origin, as it does through the real ingress for the public URL.
+ * Only the agent entries leave out `changeOrigin`, on purpose. The agent's origin check
+ * (agent/src/http/origins.ts) accepts a loopback `Origin` only when `Host` names the
+ * same loopback origin, so `Host` must reach it as the browser sent it, as it does
+ * through the real ingress for the public URL. The backend's WebSocket check
+ * (`origin_allowed()`, backend/scadbuddy/api/realtime.py) reads only `Origin`, so its
+ * entry keeps `changeOrigin` as it always had.
  * `ws: true` carries the assistant's socket (`/api/v1/ai/chat`) and the backend's
  * `/api/v1/ws`. The backend's entry needs it too, not only for live updates. Vite
  * leaves an upgrade it does not proxy hanging, and a browser keeps at most one
