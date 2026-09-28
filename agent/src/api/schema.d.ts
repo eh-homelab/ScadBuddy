@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/api/v1/assets/usage": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * How much the upload store holds
+         * @description The files stored for `// file` parameters: how many, their total bytes, and the caps an upload is refused past (0 is no limit). Files that no output, preset or render job references are removed by a sweep once nothing has uploaded or used them for SCADBUDDY_ASSET_SWEEP_GRACE.
+         */
+        get: operations["get_asset_usage_api_v1_assets_usage_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/fonts": {
         parameters: {
             query?: never;
@@ -89,6 +109,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/jobs/{job_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Render job preview from a named view
+         * @description The job's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG, so the geometry can be checked without a 3D viewer.
+         */
+        get: operations["get_job_view_api_v1_jobs__job_id__views__view__png_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/libraries": {
         parameters: {
             query?: never;
@@ -104,6 +144,46 @@ export interface paths {
         put?: never;
         post?: never;
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/libraries/installed": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Library checkouts on the volume
+         * @description Every library checkout on the data volume, with the models whose live pins read it. One no model uses can be removed.
+         */
+        get: operations["list_installed_libraries_api_v1_libraries_installed_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/libraries/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Remove a library's checkouts from the volume
+         * @description Deletes the checkout at `commit`, or every checkout of the library. Refused with a 409 naming the models while any model's live pin still reads one, and with a 409 naming the jobs while a running render reads one. Older revisions are not counted: rendering one that pinned a removed checkout is the 409 that asks for the library to be pinned again.
+         */
+        delete: operations["remove_library_api_v1_libraries__name__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -203,7 +283,7 @@ export interface paths {
         put?: never;
         /**
          * Upload a file for a file parameter
-         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422.
+         * @description Stores an SVG or PNG for a `// file` parameter and answers its id, the SHA-256 of the stored bytes, which is the value the render takes. The content is sniffed, not trusted by its name: an SVG is stripped of scripts and external references, a PNG is re-encoded and downscaled to at most 256 px on its long side. Anything else is a 422. A file not already stored that would take the store past SCADBUDDY_ASSET_MAX_COUNT files or SCADBUDDY_ASSET_MAX_TOTAL_BYTES bytes is a 413 whose problem document carries the store's `usage`; re-uploading stored content is never refused.
          */
         post: operations["upload_asset_api_v1_models__slug__assets_post"];
         delete?: never;
@@ -238,6 +318,26 @@ export interface paths {
         };
         /** An uploaded file's bytes */
         get: operations["get_asset_content_api_v1_models__slug__assets__asset_id__content_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/diagnostics": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Diagnostics of the latest render
+         * @description OpenSCAD's warnings and errors, with the file and line each names, from the model's most recently settled render (done or failed). A 404 when no render of it is on record: jobs are kept for `SCADBUDDY_JOB_TTL`.
+         */
+        get: operations["get_model_diagnostics_api_v1_models__slug__diagnostics_get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -287,7 +387,11 @@ export interface paths {
         delete: operations["unpin_library_api_v1_models__slug__libraries__name__delete"];
         options?: never;
         head?: never;
-        patch?: never;
+        /**
+         * Re-pin a model's library from the upstream it already pins
+         * @description Clones the library again from the URL this model's pin records -- a fork stays a fork -- at `ref`, or at the ref already pinned when `ref` is omitted (so a branch pin moves to the branch's current commit), and records the commit as one revision of the model. The same checks and errors as pinning it in the first place; a 404 when the model does not declare the library, and a 409 when its entry is changed or removed by another request while the clone runs.
+         */
+        patch: operations["repin_library_api_v1_models__slug__libraries__name__patch"];
         trace?: never;
     };
     "/api/v1/models/{slug}/outputs": {
@@ -360,6 +464,26 @@ export interface paths {
         patch: operations["update_preset_api_v1_models__slug__presets__preset_id__patch"];
         trace?: never;
     };
+    "/api/v1/models/{slug}/presets/{preset_id}/duplicate": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Duplicate a preset
+         * @description Copies any preset of the template, shipped or saved, to a new saved preset under `name`, with the original's values: the way to change a shipped preset, which is read-only. The values are checked as a save checks them (422), so a shipped preset naming a parameter the template has since dropped cannot be copied as it is. Names are unique per template, ignoring case (409).
+         */
+        post: operations["duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/models/{slug}/readme": {
         parameters: {
             query?: never;
@@ -396,6 +520,26 @@ export interface paths {
         put?: never;
         /** Queue a render */
         post: operations["render_model_api_v1_models__slug__render_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/models/{slug}/samples/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A sample file the template ships
+         * @description Serves one of the files a `file` parameter's `samples` lists: an SVG or PNG directly in the template's directory, by its bare name. `version` reads the template as it was at that revision. Any other name is a 404.
+         */
+        get: operations["get_sample_content_api_v1_models__slug__samples__name__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -675,6 +819,30 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/outputs/{output_id}/geometry": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Mesh geometry analysis
+         * @description Printability measurements of the output's closed per-colour solids (#284):
+         *     open and non-manifold edges with their locations, bounding box, bed contact,
+         *     height-to-base ratio, overhang area by angle, and estimates of the thinnest
+         *     wall and smallest feature. Coordinates are the model's own (mm, Z up), as in
+         *     the preview. Computed on first ask and cached beside the output.
+         */
+        get: operations["get_output_geometry_api_v1_outputs__output_id__geometry_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/outputs/{output_id}/model.3mf": {
         parameters: {
             query?: never;
@@ -769,6 +937,26 @@ export interface paths {
         get: operations["get_output_thumbnail_api_v1_outputs__output_id__thumbnail_get"];
         /** Upload the canvas capture */
         put: operations["put_output_thumbnail_api_v1_outputs__output_id__thumbnail_put"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/outputs/{output_id}/views/{view}.png": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Output preview from a named view
+         * @description The saved output's preview mesh drawn from `view` (iso, front, back, left, right, top, bottom) as a shaded PNG.
+         */
+        get: operations["get_output_view_api_v1_outputs__output_id__views__view__png_get"];
+        put?: never;
         post?: never;
         delete?: never;
         options?: never;
@@ -1287,6 +1475,20 @@ export interface components {
             width?: number | null;
         };
         /**
+         * AssetUsage
+         * @description How much the upload store holds, against its caps (#296).
+         */
+        AssetUsage: {
+            /** Bytes */
+            bytes: number;
+            /** Count */
+            count: number;
+            /** Max Count */
+            max_count: number;
+            /** Max Total Bytes */
+            max_total_bytes: number;
+        };
+        /**
          * AttachResult
          * @description What was attached, so the UI can say so rather than claiming more than happened.
          */
@@ -1479,7 +1681,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
             /** Waiting Reason */
             waiting_reason?: string | null;
         };
@@ -1610,6 +1812,18 @@ export interface components {
             target_printer_id?: number | null;
             /** Target Printer Name */
             target_printer_name?: string | null;
+        };
+        /** FeatureEstimate */
+        FeatureEstimate: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Colour */
+            colour: string;
+            /** Islands */
+            islands: number;
+            /** Min Extent Mm */
+            min_extent_mm: number;
+            /** Part */
+            part: number;
         };
         /**
          * FilamentOptions
@@ -1745,6 +1959,40 @@ export interface components {
              */
             weight: number;
         };
+        /**
+         * GeometryAnalysis
+         * @description What :func:`analyze_geometry` measured. See the module docstring for methods.
+         */
+        GeometryAnalysis: {
+            bbox: components["schemas"]["BoundingBox"];
+            /** Bed Contact Area Mm2 */
+            bed_contact_area_mm2: number;
+            /** Bed Z */
+            bed_z: number;
+            /** Edges */
+            edges?: components["schemas"]["MeshEdge"][];
+            /**
+             * Edges Truncated
+             * @default false
+             */
+            edges_truncated: boolean;
+            footprint?: components["schemas"]["BoundingBox"] | null;
+            /** Height Mm */
+            height_mm: number;
+            /** Height To Base Ratio */
+            height_to_base_ratio?: number | null;
+            /** Overhangs */
+            overhangs: components["schemas"]["OverhangBucket"][];
+            /** Parts */
+            parts: components["schemas"]["PartGeometry"][];
+            smallest_feature?: components["schemas"]["FeatureEstimate"] | null;
+            thinnest_wall?: components["schemas"]["WallEstimate"] | null;
+            /**
+             * Version
+             * @default 1
+             */
+            version: number;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -1790,6 +2038,18 @@ export interface components {
             /** Styles */
             styles?: string[];
         };
+        /**
+         * InstalledLibrary
+         * @description One checkout on the volume, and the models whose live pins read it.
+         */
+        InstalledLibrary: {
+            /** Commit */
+            commit: string;
+            /** Name */
+            name: string;
+            /** Used By */
+            used_by?: string[];
+        };
         /** JobStatus */
         JobStatus: {
             bbox_mm?: components["schemas"]["BoundingBox"] | null;
@@ -1800,6 +2060,10 @@ export interface components {
              * Format: date-time
              */
             created_at: string;
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
             /** Error */
             error?: string | null;
             /** Finished At */
@@ -1810,6 +2074,8 @@ export interface components {
             log_tail?: string[];
             /** Model Version */
             model_version?: string | null;
+            /** Notes */
+            notes?: string[] | null;
             /** Params */
             params?: {
                 [key: string]: boolean | number | string;
@@ -1842,6 +2108,14 @@ export interface components {
              * @description An https git URL; the catalogue's when omitted
              */
             url?: string | null;
+        };
+        /** LibraryRepinRequest */
+        LibraryRepinRequest: {
+            /**
+             * Ref
+             * @description The tag or branch to pin; the ref already pinned when omitted, which moves a branch pin to where that branch is now
+             */
+            ref?: string | null;
         };
         /**
          * LoadedAt
@@ -1898,6 +2172,58 @@ export interface components {
              * @description The upstream's current `model.scad`
              */
             theirs: string;
+        };
+        /**
+         * MeshEdge
+         * @description One defective edge, located so the preview can draw it.
+         */
+        MeshEdge: {
+            /** Colour */
+            colour: string;
+            /** End */
+            end: [
+                number,
+                number,
+                number
+            ];
+            /** Faces */
+            faces: number;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "open" | "non_manifold";
+            /** Part */
+            part: number;
+            /** Start */
+            start: [
+                number,
+                number,
+                number
+            ];
+        };
+        /**
+         * ModelDiagnostics
+         * @description What the latest settled render of a model reported (#252).
+         */
+        ModelDiagnostics: {
+            /** Diagnostics */
+            diagnostics?: components["schemas"]["Diagnostic"][];
+            /** Diagnostics Dropped */
+            diagnostics_dropped?: number;
+            /** Error */
+            error?: string | null;
+            /** Finished At */
+            finished_at?: string | null;
+            /** Job Id */
+            job_id: string;
+            /** Model Version */
+            model_version?: string | null;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "done" | "failed";
         };
         /**
          * ModelLibrary
@@ -2087,6 +2413,19 @@ export interface components {
             /** Index */
             index: number;
         };
+        /**
+         * OverhangBucket
+         * @description Faces tipped at least ``min_angle_deg`` below horizontal (cumulative).
+         */
+        OverhangBucket: {
+            /** Area Mm2 */
+            area_mm2: number;
+            bbox?: components["schemas"]["BoundingBox"] | null;
+            /** Faces */
+            faces: number;
+            /** Min Angle Deg */
+            min_angle_deg: number;
+        };
         /** Overshoot */
         Overshoot: {
             /**
@@ -2128,6 +2467,14 @@ export interface components {
             };
         };
         /**
+         * ParamPresetDuplicate
+         * @description The copy's name; its values are the original's.
+         */
+        ParamPresetDuplicate: {
+            /** Name */
+            name: string;
+        };
+        /**
          * ParamPresetUpdate
          * @description A rename, a new set of values, or both. ``params`` replaces the old ones whole.
          */
@@ -2162,6 +2509,8 @@ export interface components {
             name: string;
             /** Options */
             options?: components["schemas"]["Option"][];
+            /** Samples */
+            samples?: string[];
             /** Step */
             step?: number | null;
             /**
@@ -2169,6 +2518,31 @@ export interface components {
              * @enum {string}
              */
             type: "number" | "integer" | "string" | "boolean" | "select" | "color" | "font" | "slider" | "file";
+        };
+        /** PartGeometry */
+        PartGeometry: {
+            bbox: components["schemas"]["BoundingBox"] | null;
+            /** Colour */
+            colour: string;
+            /** Edges Checked */
+            edges_checked: boolean;
+            /** Name */
+            name: string;
+            /** Non Manifold Edges */
+            non_manifold_edges?: number | null;
+            /** Open Edges */
+            open_edges?: number | null;
+            /** Part */
+            part: number;
+            /**
+             * Source
+             * @enum {string}
+             */
+            source: "solid" | "split";
+            /** Triangles */
+            triangles: number;
+            /** Volume Mm3 */
+            volume_mm3?: number | null;
         };
         /** PartInfo */
         PartInfo: {
@@ -2731,7 +3105,7 @@ export interface components {
              * @default unknown
              * @enum {string}
              */
-            stage: "pending" | "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
+            stage: "running" | "queued" | "done" | "failed" | "cancelled" | "unknown";
         };
         /**
          * PrintRunRequest
@@ -2965,6 +3339,8 @@ export interface components {
             params?: {
                 [key: string]: boolean | number | string;
             };
+            /** Supersedes */
+            supersedes?: string | null;
             /** Version */
             version?: string | null;
         };
@@ -3292,6 +3668,23 @@ export interface components {
             /** Status */
             status: string;
         };
+        /** WallEstimate */
+        WallEstimate: {
+            /** At */
+            at: [
+                number,
+                number,
+                number
+            ];
+            /** Colour */
+            colour: string;
+            /** Part */
+            part: number;
+            /** Samples */
+            samples: number;
+            /** Thickness Mm */
+            thickness_mm: number;
+        };
     };
     responses: never;
     parameters: never;
@@ -3301,6 +3694,26 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_asset_usage_api_v1_assets_usage_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AssetUsage"];
+                };
+            };
+        };
+    };
     get_fonts_api_v1_fonts_get: {
         parameters: {
             query?: never;
@@ -3449,6 +3862,41 @@ export interface operations {
             };
         };
     };
+    get_job_view_api_v1_jobs__job_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_libraries_api_v1_libraries_get: {
         parameters: {
             query?: never;
@@ -3465,6 +3913,59 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CatalogueLibrary"][];
+                };
+            };
+        };
+    };
+    list_installed_libraries_api_v1_libraries_installed_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["InstalledLibrary"][];
+                };
+            };
+        };
+    };
+    remove_library_api_v1_libraries__name__delete: {
+        parameters: {
+            query?: {
+                /** @description Only this checkout; every one when omitted */
+                commit?: string | null;
+            };
+            header?: never;
+            path: {
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -3794,6 +4295,37 @@ export interface operations {
             };
         };
     };
+    get_model_diagnostics_api_v1_models__slug__diagnostics_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelDiagnostics"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     duplicate_model_api_v1_models__slug__duplicate_post: {
         parameters: {
             query?: never;
@@ -3878,6 +4410,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelRecord"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    repin_library_api_v1_models__slug__libraries__name__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                /** @description The directory `use <NAME/...>` names */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["LibraryRepinRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -4097,6 +4666,42 @@ export interface operations {
             };
         };
     };
+    duplicate_preset_api_v1_models__slug__presets__preset_id__duplicate_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                slug: string;
+                preset_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ParamPresetDuplicate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ParamPreset"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_readme_api_v1_models__slug__readme_get: {
         parameters: {
             query?: never;
@@ -4216,6 +4821,48 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RenderAccepted"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+            /** @description SCADBUDDY_RENDER_QUEUE_MAX renders are already waiting (only when that limit is set); retry after `Retry-After` seconds */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_sample_content_api_v1_models__slug__samples__name__get: {
+        parameters: {
+            query?: {
+                version?: string | null;
+            };
+            header?: never;
+            path: {
+                slug: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                    "image/svg+xml": unknown;
                 };
             };
             /** @description Validation Error */
@@ -4815,6 +5462,37 @@ export interface operations {
             };
         };
     };
+    get_output_geometry_api_v1_outputs__output_id__geometry_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                output_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["GeometryAnalysis"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     download_output_api_v1_outputs__output_id__model_3mf_get: {
         parameters: {
             query?: never;
@@ -4996,6 +5674,41 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_output_view_api_v1_outputs__output_id__views__view__png_get: {
+        parameters: {
+            query?: {
+                /** @description Edge of the square PNG, in pixels */
+                size?: number;
+            };
+            header?: never;
+            path: {
+                output_id: string;
+                view: "iso" | "front" | "back" | "left" | "right" | "top" | "bottom";
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "image/png": unknown;
+                };
             };
             /** @description Validation Error */
             422: {

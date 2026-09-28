@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 
 from fastapi import APIRouter, FastAPI
@@ -34,6 +34,7 @@ from scadbuddy.core.logging import configure_logging
 from scadbuddy.core.metrics import HttpMetrics
 from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
+from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.libraries import migrate_lockfile
 
@@ -86,6 +87,38 @@ def _name_in_openapi(app: FastAPI, *extra: type[BaseModel]) -> None:
     app.openapi = openapi  # type: ignore[method-assign]
 
 
+def sweep_assets(state: AppState) -> list[str]:
+    """Remove the uploads nothing references or has used for the grace (#296).
+
+    The references are read first -- every job in the queue's store, then every
+    output, preset and template (`referenced_asset_ids`) -- and any failure to read
+    them raises before anything is removed. What is referenced after that is kept by
+    its last use, which the sweep re-checks under the store's lock per asset.
+    """
+    jobs = state.queue.store.list_jobs()
+    referenced = referenced_asset_ids(state.paths, [job.params for job in jobs])
+    removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
+    state.metrics.assets_swept.inc(len(removed))
+    if removed:
+        logger.info("removed unused uploads", extra={"count": len(removed)})
+    return removed
+
+
+async def _sweep_assets_logged(state: AppState) -> None:
+    # Best effort, like the boot's other sweeps: a store or volume error skips this
+    # sweep (removing nothing it could not prove unused) and the next one retries.
+    try:
+        await asyncio.to_thread(sweep_assets, state)
+    except Exception:
+        logger.exception("could not sweep unused uploads")
+
+
+async def _asset_sweeper(state: AppState) -> None:
+    while True:
+        await asyncio.sleep(state.config.asset_sweep_interval)
+        await _sweep_assets_logged(state)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
@@ -110,6 +143,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await asyncio.to_thread(state.catalogue.sweep_tombstones)
     except OSError:
         logger.exception("could not sweep tombstones")
+    # A duplicate the process died in the middle of left its staging copy. Nothing
+    # is duplicating yet: no request has been served.
+    try:
+        await asyncio.to_thread(state.catalogue.sweep_duplicate_staging)
+    except OSError:
+        logger.exception("could not sweep duplicate staging folders")
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
@@ -129,6 +168,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # RenderQueue.start() fails unfinished jobs and prunes expired ones before it
     # spawns its workers, so a restart never leaves a job stuck "running".
     await state.queue.start()
+    # After the queue has opened its store: the jobs in it are references too.
+    sweeper: asyncio.Task[None] | None = None
+    if state.config.asset_sweep_interval > 0:
+        await _sweep_assets_logged(state)
+        sweeper = asyncio.create_task(_asset_sweeper(state))
     logger.info(
         "scadbuddy started",
         extra={
@@ -143,7 +187,12 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        if sweeper is not None:
+            sweeper.cancel()
+            with suppress(asyncio.CancelledError):
+                await sweeper
         await state.queue.aclose()
+        await state.events.aclose()
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:

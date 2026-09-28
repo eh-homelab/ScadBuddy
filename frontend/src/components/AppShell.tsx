@@ -15,6 +15,7 @@ import {
   isAssistantShortcut,
 } from '../agent/chat/shortcut'
 import type { ChatTransportFactory } from '../agent/chat/transport'
+import { useGlobalAgentTools } from '../agent/global'
 import { isEmbedded } from '../lib/embed'
 import { useLoadDisplayUnit } from '../lib/units'
 
@@ -39,6 +40,8 @@ interface Props {
 
 export function AppShell({ embedded = isEmbedded(), assistantTransport }: Props) {
   useLoadDisplayUnit()
+  // #254 — navigate, snapshot and the click/fill fallbacks, on every route.
+  useGlobalAgentTools()
   const ai = useAiAvailability()
   const [open, setOpen] = useState(false)
   // Mounted from the first open on, and hidden rather than unmounted when closed, so

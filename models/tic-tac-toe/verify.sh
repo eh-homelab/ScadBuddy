@@ -78,7 +78,7 @@ def defines(ov):
 
 
 def docker(script):
-    r = subprocess.run(["docker", "run", "--rm", "-v", os.getcwd() + ":/w", "-w", "/w",
+    r = subprocess.run(["docker", "run", "--rm", "--label", "scadbuddy-verify=" + os.environ.get("SCADBUDDY_VERIFY_LABEL", "local"), "-v", os.getcwd() + ":/w", "-w", "/w",
                         IMAGE, "bash", "-ec", script], capture_output=True, text=True)
     if r.returncode or "WARNING" in r.stderr or "ERROR" in r.stderr:
         print(r.stderr)

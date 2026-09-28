@@ -10,19 +10,24 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
+    ConfigDep,
+    EventsDep,
     OutputIdPath,
     OutputsDep,
+    PrintProgressDep,
     QueueDep,
     SettingsStoreDep,
     SlugPath,
 )
-from scadbuddy.api.jobs import require_job
+from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
+from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
+    PREVIEW_NAME,
     THUMBNAIL_NAME,
     OutputMeta,
     OutputNotFoundError,
@@ -32,6 +37,7 @@ from scadbuddy.library.outputs import (
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
 router = APIRouter(tags=["outputs"])
 
@@ -101,6 +107,7 @@ def create_output(
     outputs: OutputsDep,
     queue: QueueDep,
     store: SettingsStoreDep,
+    events: EventsDep,
 ) -> OutputDetail:
     require_model(catalogue, slug)
     job = require_job(queue, body.job_id)
@@ -112,7 +119,9 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    return _detail(outputs, outputs.create(job, name=body.name, public_url=store.load().public_url))
+    meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
+    emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
+    return _detail(outputs, meta)
 
 
 @router.get("/models/{slug}/outputs", response_model=list[OutputDetail], summary="Output history")
@@ -179,9 +188,10 @@ def get_edit_target(
 @router.delete(
     "/outputs/{output_id}", status_code=status.HTTP_204_NO_CONTENT, summary="Delete an output"
 )
-def delete_output(output_id: OutputIdPath, outputs: OutputsDep) -> Response:
-    require_output(outputs, output_id)
+def delete_output(output_id: OutputIdPath, outputs: OutputsDep, events: EventsDep) -> Response:
+    meta = require_output(outputs, output_id)
     outputs.delete(output_id)
+    emit(events, OutputEvent(kind="output.deleted", output_id=meta.id, slug=meta.slug))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -211,6 +221,33 @@ def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileRe
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     return FileResponse(path, media_type="image/png")
+
+
+@router.get(
+    "/outputs/{output_id}/views/{view}.png",
+    response_class=Response,
+    responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
+    summary="Output preview from a named view",
+    description=(
+        "The saved output's preview mesh drawn from `view` (iso, front, back, left, "
+        "right, top, bottom) as a shaded PNG."
+    ),
+)
+async def get_output_view(
+    output_id: OutputIdPath,
+    view: ViewName,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    size: ViewSize = PLATE_PNG_SIZE,
+) -> Response:
+    require_output(outputs, output_id)
+    return await preview_view(
+        outputs.directory(output_id) / PREVIEW_NAME,
+        view,
+        size,
+        config=config,
+        owner=f"output {output_id!r}",
+    )
 
 
 def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
@@ -306,6 +343,7 @@ async def send_output_to_bambuddy(
     body: SendRequest,
     outputs: OutputsDep,
     store: SettingsStoreDep,
+    observer: PrintProgressDep,
 ) -> SendResult:
     """Upload ``model.3mf`` to the configured library folder and, in ``queue`` mode,
     slice and queue it.
@@ -317,4 +355,8 @@ async def send_output_to_bambuddy(
     meta = require_output(outputs, output_id)
     settings = store.load()
     async with client_for(settings) as client:
-        return await send_output(client, outputs, meta, settings, body)
+        result = await send_output(client, outputs, meta, settings, body)
+    # Only a send that queued a print starts one; an upload alone leaves nothing to follow.
+    if result.pipeline_run_id is not None or result.queue_item_id is not None:
+        observer.started(meta)
+    return result

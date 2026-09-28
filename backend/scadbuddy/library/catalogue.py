@@ -7,9 +7,11 @@ import logging
 import os
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -31,7 +33,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import ModelLibrary, entry_name
+from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
 from scadbuddy.library.upstream import (
     InvalidMergeBaseError,
     MergeConflictError,
@@ -57,6 +59,16 @@ THUMBNAIL_NAME = "thumbnail.png"
 README_NAME = "README.md"
 SYNC_MESSAGE = "Sync built-in templates from the image"
 LINK_MESSAGE = "Link seeded templates to their built-ins"
+#: A duplicate's staging folder under ``cache/`` (#156, #212).
+DUPLICATE_STAGING_PREFIX = "duplicate-"
+#: Seconds before the boot sweep treats a duplicate's staging as abandoned. A copy
+#: takes seconds, so anything this old is a crash, not another replica's live copy
+#: on a shared ``/data``.
+DUPLICATE_STAGING_MAX_AGE = 3600
+
+#: How many times a merge is worked out again when the template or its upstream
+#: moves between planning and writing it, before it is refused.
+MERGE_ATTEMPTS = 3
 
 
 def _ignore_vanished(function: Any, path: str, error: BaseException) -> None:
@@ -94,6 +106,10 @@ def _still_there(path: Path) -> bool:
         return True
 
 
+class _StaleMergeError(Exception):
+    """The template or its upstream moved between planning a merge and writing it."""
+
+
 class ModelNotFoundError(KeyError):
     pass
 
@@ -108,6 +124,11 @@ class ModelExistsError(ValueError):
 
 class LibraryNotDeclaredError(KeyError):
     """The model has no library of that name to remove."""
+
+
+class LibraryPinChangedError(RuntimeError):
+    """A re-pin found the model's entry for the library changed, or gone, since it
+    was read: another request moved or removed it while the clone ran."""
 
 
 class InvalidModelMetaError(ValueError):
@@ -425,12 +446,46 @@ class Catalogue:
     def _has_history(self) -> bool:
         return self.history is not None and self.history.available
 
+    def slugs(self) -> list[str]:
+        """Every template id, mine then the built-ins, without building records."""
+        return _templates_in(self.paths.models) + [
+            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
+        ]
+
+    def library_users(self, name: str, commit: str | None = None) -> list[str]:
+        """The models whose live ``model.json`` pins ``name`` (at ``commit``).
+
+        Read leniently and counted conservatively, because the answer decides
+        whether a checkout may be deleted: an entry that only names the library --
+        a bare name from before per-model pins, or a hand edit with no readable
+        commit -- counts at every commit, and a ``model.json`` that is not JSON
+        counts when its text mentions the name at all.
+        """
+        users: list[str] = []
+        for slug in self.slugs():
+            try:
+                raw = self.read_raw_meta(slug)
+            except InvalidModelMetaError:
+                with contextlib.suppress(OSError):
+                    if name in self.paths.model_meta(slug).read_text(errors="replace"):
+                        users.append(slug)
+                continue
+            entries = raw.get("libraries")
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if entry_name(entry) != name:
+                    continue
+                pinned = entry.get("commit") if isinstance(entry, dict) else None
+                if commit is None or not isinstance(pinned, str) or pinned == commit:
+                    users.append(slug)
+                    break
+        return users
+
     def list_models(self) -> list[ModelRecord]:
         """Mine, then the built-ins. Only a directory with a ``model.scad`` at its top
         is a template, so the ``_builtin`` mirror itself is never listed as one."""
-        slugs = _templates_in(self.paths.models) + [
-            f"{BUILTIN_PREFIX}{slug}" for slug in _templates_in(self.paths.builtins)
-        ]
+        slugs = self.slugs()
         # ONE git call for the page, not one per model: see `last_commits`. The same
         # walk answers every duplicate's upstream revision too.
         versions = self.versions()
@@ -495,7 +550,7 @@ class Catalogue:
                 # no commit; either way there is no revision to copy or to record.
                 raise GitError(f"could not read the current revision of {upstream_id!r}")
         self.paths.cache.mkdir(parents=True, exist_ok=True)
-        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix="duplicate-"))
+        staging = Path(tempfile.mkdtemp(dir=self.paths.cache, prefix=DUPLICATE_STAGING_PREFIX))
         staged = staging / slug
         target = self.paths.model_dir(slug)
         try:
@@ -553,6 +608,14 @@ class Catalogue:
         finally:
             _remove_tree(staging)
         self._commit(f"Duplicate {upstream_id} as {slug}", slug)
+        # And any an earlier duplicate crashed out of, once it is old enough not to
+        # be another replica's copy in flight: a single replica that crashed and
+        # restarted inside the hour clears it here rather than never. Best-effort:
+        # the duplicate is committed, so a failure here is logged, not reported.
+        try:
+            self.sweep_duplicate_staging()
+        except OSError:
+            logger.exception("could not sweep duplicate staging")
         return self.record(slug)
 
     def update(self, slug: str, patch: ModelPatch) -> ModelRecord:
@@ -566,15 +629,26 @@ class Catalogue:
         self._commit_change(f"Update {slug} metadata", change, slug)
         return self.record(slug)
 
-    def pin_library(self, slug: str, library: ModelLibrary) -> ModelRecord:
+    def pin_library(
+        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+    ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
-        or at the end. One revision of the model; no other model moves."""
+        or at the end. One revision of the model; no other model moves.
+
+        With ``replacing``, only in place of that entry: checked in the same
+        read-modify-write as the pin (under the history's write lock), and
+        :class:`LibraryPinChangedError` when the entry is no longer what the
+        caller read -- so a re-pin cannot bring back a library an unpin removed
+        while its clone ran, nor overwrite a pin another request just moved.
+        """
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if replacing is not None and not _declares(entries, library.name, replacing):
+                raise LibraryPinChangedError(library.name)
             # Where the old entry was, so a re-pin is a one-line diff; any duplicate a
             # hand edit left goes with it.
             index = next(
@@ -769,36 +843,58 @@ class Catalogue:
         """Take the upstream's current revision as one commit, or raise
         :class:`MergeConflictError` having written nothing.
 
-        Worked out and written under the history's write lock, so no other
-        catalogue commit lands between reading this template and committing it.
+        Worked out outside the history's write lock -- its git reads would stall
+        every other catalogue write -- and written under it only if neither this
+        template nor its upstream has moved since. If one has, it is worked out
+        again, a bounded number of times, and then refused as a 409.
         """
         history = self._require_history()
         self._require(slug)
         upstream_id = self._upstream(slug).id
-        plans: list[MergePlan] = []
+        directory = self.paths.model_dir(slug)
 
-        def merge() -> None:
-            upstream, revision, state = self._upstream_now(slug)
+        for _ in range(MERGE_ATTEMPTS):
+            planned = (history.last_commit(model_path(slug)), *self._upstream_now(slug))
+            _, upstream, revision, state = planned
             if state not in ("update", "dismissed") or revision is None:
                 raise UpstreamStateError(f"{slug!r} has no upstream update to merge", state)
-            plan = plan_merge(history, slug, self.paths.model_dir(slug), upstream, revision)
+            plan = plan_merge(history, slug, directory, upstream, revision)
             if plan.conflicts:
                 raise MergeConflictError(plan)
-            if plan.preview.merged != plan.preview.ours:
-                self._replace_source(slug, plan.preview.merged)
-            directory = self.paths.model_dir(slug)
-            for name, content in plan.files.items():
-                target = directory / name
-                if content is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    write_atomic(target, content)
-            self._advance_base(slug, upstream, revision)
-            plans.append(plan)
+            merge = partial(self._write_merge, slug, plan, planned)
+            try:
+                self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
+            except _StaleMergeError:
+                continue
+            return self.record(slug), plan
+        raise UpstreamStateError(
+            f"{slug!r} or its upstream kept changing while the merge was worked out; try again",
+            state,
+        )
 
-        self._commit_change(f"Merge {upstream_id} into {slug}", merge, slug)
-        return self.record(slug), plans[0]
+    def _write_merge(
+        self,
+        slug: str,
+        plan: MergePlan,
+        planned: tuple[str | None, Upstream, str | None, UpstreamState],
+    ) -> None:
+        """Write ``plan`` -- under the write lock -- unless the template's revision, its
+        upstream or the files the plan read have moved since ``planned`` was read."""
+        history = self._require_history()
+        directory = self.paths.model_dir(slug)
+        now = (history.last_commit(model_path(slug)), *self._upstream_now(slug))
+        if now != planned or not plan.still_applies(directory):
+            raise _StaleMergeError
+        if plan.preview.merged != plan.preview.ours:
+            self._replace_source(slug, plan.preview.merged)
+        for name, content in plan.files.items():
+            target = directory / name
+            if content is None:
+                target.unlink(missing_ok=True)
+            else:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write_atomic(target, content)
+        self._advance_base(slug, planned[1], plan.revision)
 
     def dismiss_upstream(self, slug: str) -> ModelRecord:
         """Don't offer the upstream's current revision again; a later one still is."""
@@ -886,6 +982,33 @@ class Catalogue:
         for tombstone in sorted(root.iterdir()):
             if _remove_tree(tombstone):
                 removed.append(tombstone.name)
+        return removed
+
+    def sweep_duplicate_staging(self) -> list[str]:
+        """Remove the ``cache/duplicate-*`` folders a duplicate killed mid-copy left.
+
+        Runs at boot and after each duplicate. Another replica sharing ``/data`` may
+        be mid-copy, so only staging older than ``DUPLICATE_STAGING_MAX_AGE`` goes.
+        One that cannot be read or removed is logged and the rest still go.
+        """
+        root = self.paths.cache
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - DUPLICATE_STAGING_MAX_AGE
+        removed: list[str] = []
+        for entry in sorted(root.glob(f"{DUPLICATE_STAGING_PREFIX}*")):
+            try:
+                if entry.stat().st_mtime > cutoff:
+                    continue
+            except FileNotFoundError:
+                continue
+            except OSError:
+                logger.exception(
+                    "could not read a duplicate's staging", extra={"entry": entry.name}
+                )
+                continue
+            if _remove_tree(entry):
+                removed.append(entry.name)
         return removed
 
     def sweep_orphans(self) -> list[str]:
@@ -1164,6 +1287,20 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     if not resolved or not any(history.touched(resolved, place) for place in places):
         raise InvalidMergeBaseError(f"merge_base {commit!r} is not a revision of {upstream.id!r}")
     return resolved
+
+
+def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+    """Is ``expected`` still the entry ``entries`` has for ``name``?"""
+    found = [entry for entry in entries if entry_name(entry) == name]
+    if len(found) != 1:
+        return False
+    [entry] = found
+    if isinstance(expected, str):
+        return bool(entry == expected)
+    try:
+        return ModelLibrary.model_validate(entry) == expected
+    except ValidationError:
+        return False
 
 
 def _templates_in(directory: Path) -> list[str]:

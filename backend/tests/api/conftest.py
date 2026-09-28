@@ -163,6 +163,7 @@ def _fake_result(paths: DataPaths, job: Job) -> JobResult:
         bbox_mm=BoundingBox(min=(0, 0, 0), max=(10, 10, 5), size=(10, 10, 5)),
         colors=["#FF0000"],
         warnings=["a warning"],
+        notes=["a note"],
     )
 
 
@@ -184,10 +185,16 @@ def app(settings: Settings, paths: DataPaths) -> Iterator[FastAPI]:
     async def queue_override() -> RenderQueue:
         # Built on first use so its workers live on the app's own event loop.
         if "queue" not in queues:
-            # On the app's own registry, as `build_state` wires it, so /metrics
-            # reports this queue's jobs.
-            metrics = getattr(application.state, STATE_ATTR).metrics
-            queue = RenderQueue(settings.to_config(), paths, render=fake_render, metrics=metrics)
+            # On the app's own registry and bus, as `build_state` wires them, so
+            # /metrics reports this queue's jobs and its states are published.
+            state = getattr(application.state, STATE_ATTR)
+            queue = RenderQueue(
+                settings.to_config(),
+                paths,
+                render=fake_render,
+                metrics=state.metrics,
+                events=state.events,
+            )
             await queue.start()
             queues["queue"] = queue
         return queues["queue"]

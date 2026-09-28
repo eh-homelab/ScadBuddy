@@ -9,13 +9,21 @@ import shutil
 import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Iterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
-from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
+from contextlib import (
+    AbstractContextManager,
+    AsyncExitStack,
+    asynccontextmanager,
+    contextmanager,
+    nullcontext,
+    suppress,
+)
 from dataclasses import dataclass, replace
 from pathlib import Path
 
 from scadbuddy.core.config import Config
+from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
 from scadbuddy.core.metrics import Metrics, RenderOutcome, RenderStage
 from scadbuddy.core.paths import (
     BUILTIN_PREFIX,
@@ -26,7 +34,12 @@ from scadbuddy.core.paths import (
 )
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
-from scadbuddy.library.libraries import model_search_path, revision_search_path
+from scadbuddy.library.libraries import (
+    CheckoutGate,
+    model_search_path,
+    require_checkouts,
+    revision_search_path,
+)
 from scadbuddy.render.bambu3mf import write_bambu_3mf
 from scadbuddy.render.colours import colour_hex
 from scadbuddy.render.glb import write_glb
@@ -36,7 +49,7 @@ from scadbuddy.render.job_models import JobState as JobState
 from scadbuddy.render.job_models import PartInfo as PartInfo
 from scadbuddy.render.job_models import now as _now
 from scadbuddy.render.job_store import SUPERSEDED_ERROR as SUPERSEDED_ERROR
-from scadbuddy.render.job_store import JobBackend, render_key
+from scadbuddy.render.job_store import JobBackend, Listener, render_key
 from scadbuddy.render.job_store import JobNotFoundError as JobNotFoundError
 from scadbuddy.render.job_store import JobStore as JobStore
 from scadbuddy.render.job_store import QueueFullError as QueueFullError
@@ -51,6 +64,16 @@ from scadbuddy.render.thumbnail import PlateThumbnails, render_plate_thumbnails
 # lived here before the stores were split out, and routes and tests import them here.
 
 logger = logging.getLogger(__name__)
+
+#: The event each way a job leaves the queue is published as. An expired job is a
+#: failed one to its subscribers; a superseded one gets its own kind, so a client
+#: still following it knows a newer render replaced it rather than that it broke.
+OUTCOME_EVENT_KINDS: dict[RenderOutcome, JobKind] = {
+    "done": "job.done",
+    "failed": "job.failed",
+    "expired": "job.failed",
+    "superseded": "job.superseded",
+}
 
 RAW_RENDER_NAME = "render.3mf"
 MODEL_NAME = "model.3mf"
@@ -356,6 +379,23 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
         shutil.rmtree(staging, ignore_errors=True)
 
 
+@asynccontextmanager
+async def _library_lease(
+    checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
+) -> AsyncIterator[None]:
+    """A lease on the checkouts a render resolved, when there are any to hold.
+    Released when the attempt's render ends however it ends -- done, failed,
+    cancelled -- and per attempt: a retry of the same job after a lapsed lease
+    holds its own, so the first attempt finishing late never releases it."""
+    if checkouts is None or not library_path:
+        yield
+        return
+    async with checkouts.rendering(holder, library_path):
+        # A removal that ran between resolving and leasing took one away.
+        require_checkouts(library_path)
+        yield
+
+
 def attempt_work_dir(paths: DataPaths, job: Job) -> Path:
     """Where this attempt at ``job`` writes its files.
 
@@ -379,6 +419,7 @@ async def render_job(
     history: ModelHistory | None = None,
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
+    checkouts: CheckoutGate | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         return metrics.stage(name) if metrics is not None else nullcontext()
@@ -386,40 +427,52 @@ async def render_job(
     # Resolved again rather than carried on the job: the model can be edited
     # between submit and render, and a stored "this one is live" flag would then
     # render newer source while claiming the older revision.
-    with stage("source"):
-        source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
-        scad = source.scad
-        # #90 stamps the model's own commit id, which `provenance.source_version`
-        # was written to accept (a free string, never a structured field). The
-        # content hash remains the answer when there is no repository to name a
-        # revision -- and it hashes what was actually rendered, which for an old
-        # revision is its export, not the live model directory. Reads every file
-        # under it; off the loop, like the other two. One timed stage for all of
-        # it: resolving the source and deriving its schema are the same step.
-        version = source.version
-        config = source.configure(config)
-        if version is None:
-            version = await asyncio.to_thread(source_version, scad.parent)
-        schema = await cached_schema(scad, source.schema_cache, config=config)
-    work = attempt_work_dir(paths, job)
-    work.mkdir(parents=True, exist_ok=True)
+    async with AsyncExitStack() as held:
+        with stage("source"):
+            source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+            scad = source.scad
+            # #90 stamps the model's own commit id, which `provenance.source_version`
+            # was written to accept (a free string, never a structured field). The
+            # content hash remains the answer when there is no repository to name a
+            # revision -- and it hashes what was actually rendered, which for an old
+            # revision is its export, not the live model directory. Reads every file
+            # under it; off the loop, like the other two. One timed stage for all of
+            # it: resolving the source and deriving its schema are the same step.
+            version = source.version
+            config = source.configure(config)
+            if version is None:
+                version = await asyncio.to_thread(source_version, scad.parent)
+            # Held from here for every openscad run below -- the schema derivation
+            # included: those are what read the checkouts on OPENSCADPATH, and a
+            # removal must not take one out from under them (#253).
+            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            schema = await cached_schema(scad, source.schema_cache, config=config)
+        work = attempt_work_dir(paths, job)
+        work.mkdir(parents=True, exist_ok=True)
 
-    with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
-        with stage("render"):
-            output = await render_3mf(scad, schema, params, work / RAW_RENDER_NAME, config=config)
-        with stage("split"):
-            preview_parts = extruder_order(
-                split_by_material(work / RAW_RENDER_NAME), schema, params
-            )
-            if not preview_parts:
-                raise OpenSCADError("the render produced no geometry", output.log_tail)
-            preview_path = work / PREVIEW_NAME
-            box = write_glb(preview_parts, preview_path)
+        with staged_assets(schema, job.params, scad.parent, AssetStore(paths.assets)) as params:
+            with stage("render"):
+                output = await render_3mf(
+                    scad, schema, params, work / RAW_RENDER_NAME, config=config
+                )
+            with stage("split"):
+                preview_parts = extruder_order(
+                    split_by_material(work / RAW_RENDER_NAME), schema, params
+                )
+                if not preview_parts:
+                    raise OpenSCADError(
+                        "the render produced no geometry",
+                        output.log_tail,
+                        diagnostics=output.diagnostics,
+                        diagnostics_dropped=output.diagnostics_dropped,
+                    )
+                preview_path = work / PREVIEW_NAME
+                box = write_glb(preview_parts, preview_path)
 
-        with stage("solids"):
-            parts, warnings = await solid_parts(
-                scad, schema, params, preview_parts, work, config=config
-            )
+            with stage("solids"):
+                parts, warnings = await solid_parts(
+                    scad, schema, params, preview_parts, work, config=config
+                )
     # Exit 0 with the picture missing is otherwise invisible: the preview simply
     # has no overlay, and nothing says why.
     warnings = [
@@ -461,6 +514,9 @@ async def render_job(
         bbox_mm=box,
         colors=[part.colour for part in parts],
         warnings=warnings,
+        diagnostics=list(output.diagnostics),
+        diagnostics_dropped=output.diagnostics_dropped,
+        notes=list(output.notes),
     )
     return result, output.log_tail
 
@@ -492,6 +548,11 @@ class RenderQueue:
       that for a worker is failed unrendered rather than rendered for nobody.
     - **Leases** (Postgres). A worker heartbeats its job; one whose worker died is
       requeued after `render_lease_timeout`, up to `render_max_attempts` tries.
+    - **Wake-ups.** An idle worker waits for a submit in this process, or (Postgres)
+      for the NOTIFY any replica's submit sends, which one LISTEN connection per
+      process turns into the same wake-up. While that connection is up the poll is
+      only a fallback, every `render_fallback_poll_interval` (30 s); while it is
+      down, or with the file store, it is `render_poll_interval`.
 
     **Admission is off by default**: `render_queue_max` (SCADBUDDY_RENDER_QUEUE_MAX)
     0 accepts every render. Set, a submit that would be a new job past that many
@@ -511,10 +572,14 @@ class RenderQueue:
         render: RenderCallable | None = None,
         history: ModelHistory | None = None,
         metrics: Metrics | None = None,
+        events: EventBus | None = None,
+        checkouts: CheckoutGate | None = None,
     ) -> None:
         self.config = config
         self.paths = paths
         self.history = history
+        #: Told of every state a job enters (`job.*`), whichever path moved it.
+        self.events = events
         self.store: JobBackend = store if store is not None else JobStore(paths)
         self.metrics = metrics if metrics is not None else Metrics()
         self.metrics.workers.set(config.render_concurrency)
@@ -536,12 +601,17 @@ class RenderQueue:
                 history=history,
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
+                checkouts=checkouts,
             )
         )
         self._tasks: list[asyncio.Task[None]] = []
-        # Set on every submit so an idle worker claims at once rather than at its
-        # next poll; the poll is what finds jobs another replica submitted.
+        # Set on every submit, and (Postgres) on every NOTIFY from any replica's, so
+        # an idle worker claims at once rather than at its next poll.
         self._wakeup = asyncio.Event()
+        #: What wakes the workers for other processes' jobs; `None` with the file store.
+        self.listener: Listener | None = None
+        self._listening = False
+        self._listened_before = False
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
@@ -555,15 +625,24 @@ class RenderQueue:
         # start never reaches, and a process that builds many apps -- the test
         # suite -- would otherwise leak a pool per failure.
         try:
-            await asyncio.to_thread(self.store.abandon_orphans)
+            abandoned = await asyncio.to_thread(self.store.abandon_orphans)
             await self._prune()
         except BaseException:
             await asyncio.to_thread(self.store.close)
             raise
+        for job in abandoned:
+            self._announce(job, "job.failed")
         self._tasks = [
             asyncio.create_task(self._worker()) for _ in range(self.config.render_concurrency)
         ]
         self._tasks.append(asyncio.create_task(self._reaper()))
+        self.listener = self.store.listener(
+            on_notify=self._wakeup.set,
+            on_state=self._listener_state,
+            check_interval=self.config.render_fallback_poll_interval,
+        )
+        if self.listener is not None:
+            self._tasks.append(asyncio.create_task(self.listener.run()))
 
     async def aclose(self) -> None:
         for task in self._tasks:
@@ -615,11 +694,17 @@ class RenderQueue:
         if submitted.superseded is not None:
             self._settled(submitted.superseded, "superseded")
         if submitted.coalesced:
+            # The answer is a job already waiting, whose `job.pending` went out when
+            # it was submitted: nothing about it changed.
             self.metrics.render_coalesced.inc()
         else:
             self.metrics.render_submitted.inc()
+            self._announce(submitted.job, "job.pending")
             self._wakeup.set()
         return submitted.job
+
+    def _announce(self, job: Job, kind: JobKind) -> None:
+        emit(self.events, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
     def retry_after(self) -> int:
         """Seconds a refused client should wait: about one render, the time it takes
@@ -661,10 +746,31 @@ class RenderQueue:
         await asyncio.to_thread(prune_revision_exports, self.paths, self.config.job_ttl)
 
     def _settled(self, job: Job, outcome: RenderOutcome) -> None:
+        """Every way a job leaves the queue comes through here: done, failed,
+        expired, superseded, and failed by the reaper."""
+        self._announce(job, OUTCOME_EVENT_KINDS[outcome])
         self.metrics.render_finished.labels(outcome).inc()
         self.metrics.job_latency.labels(outcome).observe(
             max(0.0, ((job.finished_at or _now()) - job.created_at).total_seconds())
         )
+
+    def _listener_state(self, connected: bool) -> None:
+        if connected and self._listened_before:
+            self.metrics.listener_reconnects.inc()
+        self._listened_before = self._listened_before or connected
+        self._listening = connected
+        self.metrics.listener_connected.set(1 if connected else 0)
+        if not connected:
+            # Workers asleep on the long fallback go back to the short poll now,
+            # not up to `render_fallback_poll_interval` later.
+            self._wakeup.set()
+
+    @property
+    def idle_poll_interval(self) -> float:
+        """How long an idle worker waits for a wake-up before it looks anyway."""
+        if self._listening:
+            return self.config.render_fallback_poll_interval
+        return self.config.render_poll_interval
 
     async def _worker(self) -> None:
         while True:
@@ -694,9 +800,7 @@ class RenderQueue:
                 continue
             if job is None:
                 with suppress(TimeoutError):
-                    await asyncio.wait_for(
-                        self._wakeup.wait(), timeout=self.config.render_poll_interval
-                    )
+                    await asyncio.wait_for(self._wakeup.wait(), timeout=self.idle_poll_interval)
 
     async def _reaper(self) -> None:
         """Recover jobs whose worker died, every third of a lease."""
@@ -717,6 +821,8 @@ class RenderQueue:
                 for job in reaped.requeued:
                     logger.warning("requeued a render whose worker stopped", extra={"job": job.id})
                     self.metrics.render_retried.inc()
+                    # Waiting again: `job.running` follows when a worker retakes it.
+                    self._announce(job, "job.pending")
                 if reaped.requeued:
                     self._wakeup.set()
                 for job in reaped.failed:
@@ -752,6 +858,7 @@ class RenderQueue:
                 self._settled(job, "expired")
             return
 
+        self._announce(job, "job.running")
         outcome: RenderOutcome
         started = time.monotonic()
         heartbeat = asyncio.create_task(self._heartbeat(job))
@@ -762,6 +869,8 @@ class RenderQueue:
             job.state = "failed"
             job.error = str(error)
             job.log_tail = error.log_tail
+            job.diagnostics = error.diagnostics
+            job.diagnostics_dropped = error.diagnostics_dropped
         except Exception as error:  # the job carries the failure, the worker lives on
             outcome = "failed"
             job.state = "failed"
@@ -771,6 +880,8 @@ class RenderQueue:
             job.state = "done"
             job.result = result
             job.log_tail = log_tail
+            job.diagnostics = result.diagnostics
+            job.diagnostics_dropped = result.diagnostics_dropped
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

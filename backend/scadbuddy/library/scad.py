@@ -3,17 +3,19 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 import shutil
 import tempfile
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from pydantic import BaseModel, Field
 
 from scadbuddy.core.config import Config
+
+# Re-exported: the editor's check and a render share one parser (#252).
+from scadbuddy.render.diagnostics import Diagnostic as Diagnostic
+from scadbuddy.render.diagnostics import parse_diagnostics as parse_diagnostics
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput, RenderTimeoutError, run_openscad
 from scadbuddy.render.schema import CustomizerSchema, build_schema
 
@@ -26,19 +28,6 @@ NUL = b"\x00"
 #: when a candidate is checked against that directory.
 SIDECARS = frozenset({"model.scad", "model.json", "thumbnail.png", "README.md"})
 
-Severity = Literal["error", "warning", "trace"]
-
-# OpenSCAD prefixes every diagnostic and appends its location, e.g.
-#   ERROR: Parser error: syntax error in file model.scad, line 3
-#   WARNING: Can't find include file 'lib.scad'. in file model.scad, line 1
-#   TRACE: called by 'assert' in file model.scad, line 2
-# Lines without a prefix ("Can't parse file 'model.scad'!") carry no location and
-# stay in the log tail rather than becoming a diagnostic.
-_DIAGNOSTIC_RE = re.compile(
-    r"^(?P<severity>ERROR|WARNING|TRACE):\s+(?P<message>.+?)"
-    r"(?:\s+in file (?P<file>.+?), line (?P<line>\d+))?\s*$"
-)
-
 
 class NotOpenSCADError(ValueError):
     """The upload is not something OpenSCAD will parse."""
@@ -46,15 +35,6 @@ class NotOpenSCADError(ValueError):
     def __init__(self, message: str, log_tail: list[str] | None = None) -> None:
         super().__init__(message)
         self.log_tail = log_tail or []
-
-
-class Diagnostic(BaseModel):
-    """One OpenSCAD message, with the line it points at when it names one."""
-
-    severity: Severity
-    message: str
-    line: int | None = None
-    file: str | None = None
 
 
 class SourceCheck(BaseModel):
@@ -94,24 +74,6 @@ def decode_source(raw: bytes) -> str:
         return raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise NotOpenSCADError("the upload is not valid UTF-8 text") from error
-
-
-def parse_diagnostics(log: list[str]) -> list[Diagnostic]:
-    diagnostics: list[Diagnostic] = []
-    for line in log:
-        match = _DIAGNOSTIC_RE.match(line.strip())
-        if match is None:
-            continue
-        raw_line = match["line"]
-        diagnostics.append(
-            Diagnostic(
-                severity=match["severity"].lower(),  # type: ignore[arg-type]
-                message=match["message"],
-                line=int(raw_line) if raw_line else None,
-                file=match["file"],
-            )
-        )
-    return diagnostics
 
 
 def _stage(source: str, directory: Path, context: Path | None) -> Path:
