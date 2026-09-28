@@ -34,6 +34,13 @@ with workflow.unsafe.imports_passed_through():
 RETRY = RetryPolicy(
     maximum_attempts=3, initial_interval=timedelta(seconds=2), backoff_coefficient=2.0
 )
+#: `project` is the job row's only writer: a Postgres blip must not fail the job.
+PROJECT_RETRY = RetryPolicy(
+    maximum_attempts=0,
+    initial_interval=timedelta(seconds=1),
+    maximum_interval=timedelta(seconds=30),
+    backoff_coefficient=2.0,
+)
 SHORT = timedelta(seconds=60)
 
 
@@ -42,6 +49,12 @@ def _openscad_timeout() -> timedelta:
     # by the submitter, so the workflow stays deterministic across config changes.
     memo = workflow.memo_value("activity_timeout", default=180.0, type_hint=float)
     return timedelta(seconds=memo)
+
+
+def _waiter_recheck() -> timedelta:
+    # Three attempts of a piece's worst case (two openscad activities plus two short
+    # ones), so a live piece is never re-checked mid-render but a gone one is noticed.
+    return 3 * (2 * _openscad_timeout() + 2 * SHORT)
 
 
 def _failure_of(error: BaseException) -> Failure:
@@ -63,7 +76,8 @@ class RenderPiece:
 
     @workflow.signal
     def wait_for_me(self, job_workflow_id: str) -> None:
-        self._waiting.append(job_workflow_id)
+        if job_workflow_id not in self._waiting:
+            self._waiting.append(job_workflow_id)
 
     @workflow.run
     async def run(self, req: PieceRequest) -> PieceResult:
@@ -131,38 +145,40 @@ class TemplatePipeline:
         async def project(**fields: object) -> None:
             await workflow.execute_activity(
                 "project",
-                Projection(job_id=job.id, slug=job.slug, **fields),  # type: ignore[arg-type]
+                Projection.model_validate({"job_id": job.id, "slug": job.slug, **fields}),
                 start_to_close_timeout=SHORT,
-                retry_policy=RETRY,
+                retry_policy=PROJECT_RETRY,
             )
 
-        await project(state="running")
-        params = job.inputs.get("params", job.params) if job.inputs else job.params
-        key = piece_key(job.slug, job.model_version, "model.scad", params)
-        req = PieceRequest(
-            slug=job.slug, revision=job.model_version, params=dict(params), piece_key=key
-        )
         steps = [StepInfo(name="render", state="running", done=0, total=1)]
-        await project(steps=steps)
         try:
+            await project(state="running")
+            params = job.inputs.get("params", job.params) if job.inputs else job.params
+            key = piece_key(job.slug, job.model_version, "model.scad", params)
+            req = PieceRequest(
+                slug=job.slug, revision=job.model_version, params=dict(params), piece_key=key
+            )
+            await project(steps=steps)
             outcome = await self._piece(req)
-        except (asyncio.CancelledError, ChildWorkflowError):
+            if outcome.result is None:
+                steps[0].state = "failed"
+                await project(state="failed", failure=outcome.failure, steps=steps)
+                return
+            steps[0].state, steps[0].done = "done", 1
+            await project(
+                state="done",
+                result=outcome.result.result,
+                log_tail=outcome.result.log_tail,
+                steps=steps,
+                blob_key=key,
+            )
+        except (asyncio.CancelledError, ActivityError, ChildWorkflowError) as error:
+            if not (is_cancelled_exception(error) and workflow.cancellation_reason() is not None):
+                raise
             # A superseded/withdrawn job. The API may already have moved the row to
             # cancelled; the projection is idempotent for the case it did not.
             await project(state="cancelled", failure=Failure(error="cancelled"), steps=steps)
             raise
-        if outcome.result is None:
-            steps[0].state = "failed"
-            await project(state="failed", failure=outcome.failure, steps=steps)
-            return
-        steps[0].state, steps[0].done = "done", 1
-        await project(
-            state="done",
-            result=outcome.result.result,
-            log_tail=outcome.result.log_tail,
-            steps=steps,
-            blob_key=key,
-        )
 
     async def _piece(self, req: PieceRequest) -> PieceOutcome:
         """Run the piece as this job's child, or wait on the one another job started.
@@ -174,6 +190,7 @@ class TemplatePipeline:
                     RenderPiece.run,
                     req,
                     id=piece_id,
+                    memo={"activity_timeout": _openscad_timeout().total_seconds()},
                     cancellation_type=workflow.ChildWorkflowCancellationType.ABANDON,
                     parent_close_policy=workflow.ParentClosePolicy.ABANDON,
                 )
@@ -183,12 +200,17 @@ class TemplatePipeline:
                     await piece.signal(RenderPiece.wait_for_me, workflow.info().workflow_id)
                 except FailureError:
                     continue  # it closed in between; start it again
-                await workflow.wait_condition(lambda: self._outcome is not None)
+                try:
+                    await workflow.wait_condition(
+                        lambda: self._outcome is not None, timeout=_waiter_recheck()
+                    )
+                except TimeoutError:
+                    continue  # it may have closed without telling us (terminated, timed out)
                 assert self._outcome is not None
                 return self._outcome
             try:
                 return PieceOutcome(result=await child)
             except ChildWorkflowError as error:
-                if is_cancelled_exception(error):
+                if is_cancelled_exception(error) and workflow.cancellation_reason() is not None:
                     raise  # this job was cancelled: ABANDON resolves the child as cancelled
                 return PieceOutcome(failure=_failure_of(error))
