@@ -14,6 +14,7 @@ from scadbuddy.api.deps import (
     AssetsDep,
     CatalogueDep,
     ConfigDep,
+    FetcherDep,
     HistoryDep,
     JobIdPath,
     PathsDep,
@@ -198,11 +199,18 @@ async def render_model(
     config: ConfigDep,
     queue: QueueDep,
     assets: AssetsDep,
+    fetcher: FetcherDep,
 ) -> RenderAccepted:
     require_model_exists(catalogue, slug)
     requested = await _resolve_version(history, slug, body.version)
     source, schema = await schema_of(
-        slug, requested, paths=paths, history=history, config=config, version=body.version
+        slug,
+        requested,
+        paths=paths,
+        history=history,
+        config=config,
+        version=body.version,
+        fetcher=fetcher,
     )
     require_valid_params(schema, body.params)
     try:

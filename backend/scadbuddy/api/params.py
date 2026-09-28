@@ -13,6 +13,7 @@ from scadbuddy.core.paths import DataPaths
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
+from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.jobs import ModelSource, resolve_source
 from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
@@ -26,6 +27,7 @@ async def schema_of(
     history: ModelHistory,
     config: Config,
     version: str | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> tuple[ModelSource, CustomizerSchema]:
     """The source a render of ``slug`` at ``requested`` reads, and its schema.
 
@@ -35,7 +37,9 @@ async def schema_of(
     ``version`` is what the client asked for, for the 404's message.
     """
     try:
-        source = await resolve_source(slug, requested, paths=paths, history=history)
+        source = await resolve_source(
+            slug, requested, paths=paths, history=history, fetcher=fetcher
+        )
         schema = await cached_schema(
             source.scad, source.schema_cache, config=source.configure(config)
         )
@@ -94,6 +98,7 @@ async def require_valid_presets(
     history: ModelHistory,
     config: Config,
     assets: AssetStore,
+    fetcher: CheckoutFetcher | None = None,
 ) -> None:
     """422 unless every one of ``presets`` would render the template as it is now:
     the values a render takes, a dropdown value among its options, and a `file` value
@@ -103,7 +108,9 @@ async def require_valid_presets(
     The one check for a preset's values, whether it is saved on its own or defined
     in the template's `model.json` (#326), so the two can never drift apart.
     """
-    source, schema = await schema_of(slug, None, paths=paths, history=history, config=config)
+    source, schema = await schema_of(
+        slug, None, paths=paths, history=history, config=config, fetcher=fetcher
+    )
     has_files = any(parameter.type == "file" for parameter in schema.parameters)
     for params in presets:
         require_valid_preset_params(schema, params)
