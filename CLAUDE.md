@@ -127,10 +127,10 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   per tool, projected in-process for the harness and over `/mcp` (`src/mcp/http.ts`,
   auth in `src/auth/`); every `/api/v1` operation needs a tool or a
   `src/tools/coverage.ts` entry, or `test/coverage.test.ts` fails.
-  - Database: the agent owns the `ai_*` tables. Schema changes are appended to
-    `src/db/migrations.ts` (numbered by position, never edited once merged, applied at
+  - Database: the agent owns the `ai_*` tables. Schema changes are new files in
+    `src/db/migrations/` (see "Migrations" below; `src/db/migrations.ts` applies them at
     start under advisory lock "SCADAGNT" with `lock_timeout`/`statement_timeout`,
-    ledger `ai_migrations` with a sha256 per entry: an edited merged entry stops the
+    ledger `ai_migrations` with a sha256 per file: an edited merged file stops the
     service at start; separate from the backend's `scadbuddy_migrations`). Secrets are
     envelope-encrypted with `src/secrets.ts` under the KEK in
     `SCADBUDDY_SECRET_KEY_FILE` (32 random bytes, base64; spec §9); the AAD binds each
@@ -155,6 +155,23 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   the root `.claude-plugin/marketplace.json`. Every skill cites its sources, which
   `.github/scripts/lint-plugin.sh` checks; `claude plugin validate plugins/scadbuddy` is
   the authoritative manifest check.
+
+## Migrations (#491)
+
+Both services keep one file per migration, named by UTC timestamp plus a slug:
+`backend/scadbuddy/migrations/` (ledger `scadbuddy_migrations`, applied by
+`render/pg_store.py` `migrate`) and `agent/src/db/migrations/` (ledger `ai_migrations`,
+applied by `src/db/migrations.ts`). To add one, create a NEW file named
+`$(date -u +%Y%m%dT%H%MZ)_<slug>.sql` (slug `[a-z0-9_]`) and edit nothing else. Never
+edit, rename or remove a merged file; the agent checks each applied file's sha256 and
+stops at start on a mismatch. At start every file not yet in the ledger is applied, in
+timestamp order, under the service's advisory lock; that includes a file OLDER than ones
+already applied (a branch that merged late), so a migration may depend only on files
+already on main. The pre-#491 positional entries are frozen as `LEGACY_VERSIONS` in each
+module; a ledger still keyed by position is rewritten to file ids once, and a positional
+row main never had (a dev database that ran an unmerged branch's entry) stops the
+service with `MigrationLedgerError` rather than being guessed at. The agent's files reach
+the image because `pnpm build` copies them into `dist/db/migrations/`.
 
 ## Verified OpenSCAD facts (do not re-derive; re-measure if the base image moves)
 

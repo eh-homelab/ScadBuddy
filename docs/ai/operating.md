@@ -210,12 +210,15 @@ match `SCADBUDDY_PUBLIC_URL`.
   ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). That test is the only
   reader of `ai` today; no backend or frontend code on `main` reads it (the `AiStatus`
   comment in `agent/src/app.ts`).
-- **Migrations** (`agent/src/db/migrations.ts`) run in the background at start
+- **Migrations** (one file each in `agent/src/db/migrations/`, applied by
+  `agent/src/db/migrations.ts`) run in the background at start
   (`void database?.ready()` in `main.ts`). They run under a transaction-scoped advisory
   lock with `lock_timeout` 10 s and `statement_timeout` 60 s
   (`DEFAULT_LOCK_TIMEOUT_MS`, `DEFAULT_STATEMENT_TIMEOUT_MS`). A failure is retried on
   the next `ready()` call. An already-applied migration whose SQL was edited fails its
-  recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it.
+  recorded sha256 check (`MigrationChecksumError`), and `main.ts` exits 1 on it. So
+  does a ledger still keyed by position (before #491) that holds a row main never had
+  (`MigrationLedgerError`): that database ran an unmerged branch's migration.
 
 ## 6. Origin allowlist and trusted proxies
 
@@ -263,9 +266,12 @@ the same rule to the stored public URL (`origin_allowed()` in
 ## 7. Database tables
 
 The agent owns and migrates its `ai_*` tables (spec §9;
+[`agent/src/db/migrations/`](../../agent/src/db/migrations/), applied by
 [`agent/src/db/migrations.ts`](../../agent/src/db/migrations.ts)):
 
-- `ai_migrations`: the ledger, with a checksum per entry.
+- `ai_migrations`: the ledger, one row per applied file (its id is the file name
+  without `.sql`), with a checksum each. `version` and `story` are set only for the
+  two files that predate #491, so an older image can still read the ledger.
 - `ai_credentials`: the sealed credential.
 - `ai_settings`: non-secret key/value settings. `SettingsStore` in `credentials.ts`.
   The keys read today are `model` (`main.ts`), and `session_max_turns` and
@@ -273,7 +279,7 @@ The agent owns and migrates its `ai_*` tables (spec §9;
   `SETTING_SESSION_BUDGET_USD` in [`agent/src/sessions/manager.ts`](../../agent/src/sessions/manager.ts)).
   No route writes them yet.
 - `ai_sessions`, `ai_session_entries` and `ai_session_events`: sessions (#377,
-  migration 2). The session manager is not wired into `main.ts` yet (PR #377 body,
+  `20260928T0107Z_sessions.sql`). The session manager is not wired into `main.ts` yet (PR #377 body,
   "HTTP routes").
 
 The migration advisory lock key is "SCADAGNT", distinct from the backend's "SCADBDDY"
