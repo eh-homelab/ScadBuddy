@@ -98,7 +98,7 @@ top_color = "#FFFFFF"; // color
 overlay_file = ""; // file:svg,png
 
 // File type: auto picks by extension; an SVG outline, or a PNG cut at a brightness threshold
-overlay_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, image_threshold:Image threshold - PNG]
+overlay_type = "auto"; // [auto:Auto - by file extension, svg:SVG outline, png_threshold:Image threshold - PNG]
 
 // How the picture is applied
 overlay_detail = "links"; // [links:Recolour whole links - link-sized pixels, inlay:Exact outline in the top layers]
@@ -447,7 +447,10 @@ function ends_with(f, suffix) =
     && [for (i = [0 : len(suffix) - 1]) f[len(f) - len(suffix) + i]] == [for (c = suffix) c];
 function lower(s) = s == "" ? "" : chr([for (c = s) let(o = ord(c)) o >= 65 && o <= 90 ? o + 32 : o]);
 // "auto" reads the extension (any case), so an uploaded PNG needs no second setting.
-OVERLAY_IS_IMAGE = overlay_type == "image_threshold"
+// "png_threshold" was "image_threshold" until #318 renamed it (it shared a name
+// with the numeric image_threshold parameter); saved presets and past outputs
+// still hold the old value, so both force the image reader.
+OVERLAY_IS_IMAGE = overlay_type == "png_threshold" || overlay_type == "image_threshold"
     || (overlay_type == "auto" && ends_with(lower(overlay_file), ".png"));
 PIXEL = OVERLAY_ON && overlay_detail == "links";
 FINE = OVERLAY_ON && overlay_detail == "inlay";

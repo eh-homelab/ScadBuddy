@@ -112,6 +112,13 @@ from, returns diagnostics with line numbers and saves nothing
 parse-checks too, unless `force` is set (main spec §8). A source that fails the
 check is one the customizer cannot open, so fix it rather than forcing it.
 
+When the template changes what the user asked for (caps a size, shrinks text to
+fit the plate), say so with a single-string echo starting `NOTE: `, e.g.
+`echo(str("NOTE: letter_size reduced from ", a, " to ", b, " mm"));`. ScadBuddy
+shows those under the preview of a successful render; `WARNING: ` is accepted
+too. Anything else you echo, including `echo("NOTE:", x)` with more than one
+argument, stays in the render log (main spec §6.1, "Template notes").
+
 ## 5. Colour: every solid in a `color()`, one colour parameter per extruder
 
 ScadBuddy renders with `--backend=Manifold -o out.3mf`. That writes one object
@@ -144,6 +151,31 @@ the printable parts all come from that. So:
   templates use.
 - Ignore the alpha byte of `displaycolor`: this OpenSCAD build writes it as `00`
   (main spec §3; `CLAUDE.md`, section "Verified OpenSCAD facts").
+
+### Parts that need more than one plate
+
+When the parts cannot share one bed (a tray and its lid, a box and its dividers), put
+them on separate plates of the same 3MF instead of offering a "which part" parameter
+(main spec §6.4; `models/maze-puzzle/model.scad` puts its lid on plate 2):
+
+```scad
+/* [Hidden] */
+$plate = 0;                          // 0 = every plate; ScadBuddy sets 1..N
+echo(plates = lid_fits ? 1 : 2);     // the plate count, may follow the parameters
+function on_plate(n) = $plate == 0 || $plate == n;
+
+if (on_plate(1)) tray();
+if (on_plate(2)) translate($plate == 2 ? [0, 0, 0] : beside) lid();
+```
+
+- Declare `$plate = 0` in `[Hidden]`. It is not a customizer parameter, and with 0 the
+  file still renders everything in plain OpenSCAD and on MakerWorld (main spec §6.4).
+- `echo(plates = N)` exactly, as a top-level statement. Absent or 1 means one plate and
+  nothing changes (main spec §6.4).
+- Draw each plate at the model origin when `$plate` names it; lay them out side by side
+  when `$plate` is 0, which is what the preview shows (main spec §6.4).
+- Keep the colour parameters the same on every plate: a colour is one extruder across
+  the whole 3MF, in declaration order (main spec §6.4 and §7).
 
 ## 6. Fonts: installed family names only
 

@@ -4,6 +4,7 @@ the app's own bus. Payloads carry ids only, so what is checked is kind and ids."
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +27,41 @@ API = f"{BASE}/api/v1"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
 
 
+class Recorded(list[Event]):
+    """Every event the bus publishes, in order, with a way to wait for one.
+
+    A job's terminal state is committed to the store before its event is published
+    (#409): the queue announces a state only once it is true. So a client polling
+    `GET /jobs/{id}` can see `failed` a moment before `job.failed` is on the bus,
+    and a test that reads the events as soon as the poll settles races the worker.
+    `wait_for` blocks on the listener itself instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._changed = threading.Condition()
+
+    def record(self, event: Event) -> None:
+        with self._changed:
+            self.append(event)
+            self._changed.notify_all()
+
+    def wait_for(self, kind: str, job_id: str, timeout: float = 5.0) -> None:
+        def seen() -> bool:
+            return any(
+                event.kind == kind and getattr(event, "job_id", None) == job_id for event in self
+            )
+
+        with self._changed:
+            assert self._changed.wait_for(seen, timeout), f"{kind} for {job_id} never published"
+
+
 @pytest.fixture
-def events(app: FastAPI) -> list[Event]:
+def events(app: FastAPI) -> Recorded:
     bus = getattr(app.state, STATE_ATTR).events
     assert isinstance(bus, InProcessEventBus)
-    seen: list[Event] = []
-    bus.add_listener(seen.append)
+    seen = Recorded()
+    bus.add_listener(seen.record)
     return seen
 
 
@@ -232,16 +262,64 @@ def test_pinning_and_unpinning_a_library_publish_library_changed(
     )
 
 
+@pytest.mark.requires_git
+def test_repinning_and_removing_checkouts_publish_their_events(
+    app: FastAPI, client: TestClient, mine: str, events: list[Event], tmp_path: Path
+) -> None:
+    """#253: a re-pin changes the model as a pin does; removing checkouts changes no
+    model (it is refused while one pins them), so it is `library.removed` alone. A
+    refused removal and a refused re-pin publish nothing."""
+    url, commits = make_library_upstream(
+        tmp_path, {"v1": "module marker() cube(1);\n", "v2": "module marker() cube(2);\n"}
+    )
+    state: AppState = getattr(app.state, STATE_ATTR)
+    store = LibraryStore(
+        state.paths,
+        catalogue=(
+            CatalogueLibrary(
+                name="BOSL2", url=url, ref="v1", licence="BSD-2-Clause", homepage="https://x"
+            ),
+        ),
+        protocols=("file",),
+    )
+    app.dependency_overrides[get_libraries] = lambda: store
+    _ok(client.put(f"/api/v1/models/{mine}/libraries/BOSL2", json={}))
+    events.clear()
+
+    _ok(client.patch(f"/api/v1/models/{mine}/libraries/BOSL2", json={"ref": "v2"}))
+    assert client.delete("/api/v1/libraries/BOSL2").status_code == 409  # still pinned
+    assert client.patch("/api/v1/models/widget/libraries/other", json={}).status_code == 404
+    repinned = [
+        event.model_dump(exclude={"id", "at"})
+        for event in events
+        if event.kind in ("library.changed", "model.updated", "library.removed")
+    ]
+    events.clear()
+    _ok(
+        client.delete("/api/v1/libraries/BOSL2", params={"commit": commits["v1"]}),
+        204,
+    )
+
+    assert repinned == [
+        {"kind": "library.changed", "slug": mine, "name": "BOSL2"},
+        {"kind": "model.updated", "slug": mine},
+    ]
+    assert published(events) == [
+        {"kind": "library.removed", "name": "BOSL2", "commits": [commits["v1"]]}
+    ]
+
+
 # ── renders and outputs ──────────────────────────────────────────────────────────
 
 
 def test_a_render_publishes_each_job_state(
-    client: TestClient, model: str, events: list[Event]
+    client: TestClient, model: str, events: Recorded
 ) -> None:
     job_id = _ok(
         client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}), 202
     )["job_id"]
-    wait_for_job(client, job_id)
+    assert wait_for_job(client, job_id)["status"] == "done"
+    events.wait_for("job.done", job_id)
 
     assert published(events) == [
         {"kind": "job.pending", "job_id": job_id, "slug": model},
@@ -251,13 +329,19 @@ def test_a_render_publishes_each_job_state(
 
 
 def test_a_failed_render_publishes_job_failed(
-    client: TestClient, model: str, events: list[Event]
+    client: TestClient, model: str, events: Recorded
 ) -> None:
     job_id = _ok(
         client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 999}}), 202
     )["job_id"]
-    wait_for_job(client, job_id)
-    assert published(events)[-1] == {"kind": "job.failed", "job_id": job_id, "slug": model}
+    assert wait_for_job(client, job_id)["status"] == "failed"
+    events.wait_for("job.failed", job_id)
+
+    assert published(events) == [
+        {"kind": "job.pending", "job_id": job_id, "slug": model},
+        {"kind": "job.running", "job_id": job_id, "slug": model},
+        {"kind": "job.failed", "job_id": job_id, "slug": model},
+    ]
 
 
 def test_saving_and_deleting_an_output_publish_their_events(

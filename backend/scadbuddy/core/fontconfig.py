@@ -11,6 +11,14 @@ The cache directory is declared **before** the system include on purpose. fontco
 appends cache directories in document order and writes to the first one it can, and
 the container's system cache is baked at build time and owned by root; without this
 line ``fc-cache`` as uid 10001 falls back to ``$HOME/.cache`` and every render warns.
+
+Those processes get an explicit, minimal environment rather than a copy of the
+backend's (#281). ``openscad`` runs whatever a template says, and ``import()`` /
+``surface()`` read any path they are handed — ``/proc/self/environ`` included — so
+every variable the backend holds (a Bambuddy API key, a database URL) would be one
+string parameter away from a render log. Only what the binaries actually read
+passes through: the executable search path, the home and XDG directories, locale,
+the temp dir and fontconfig's own variables.
 """
 
 from __future__ import annotations
@@ -64,14 +72,49 @@ def write_conf(data_dir: Path, *, system_conf: str = SYSTEM_CONF) -> Path:
     return target
 
 
+#: Parent variables a child process may inherit, by exact name. Anything else —
+#: including every ``SCADBUDDY_*`` setting — is dropped.
+PASSTHROUGH: frozenset[str] = frozenset(
+    {
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "TZ",
+        "LANG",
+        "LANGUAGE",
+        "FONTCONFIG_FILE",
+        "FONTCONFIG_PATH",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_DATA_DIRS",
+        "XDG_CONFIG_DIRS",
+        "XDG_RUNTIME_DIR",
+    }
+)
+#: ...and by prefix: ``LC_ALL``, ``LC_CTYPE`` and the rest of the locale family.
+PASSTHROUGH_PREFIXES: tuple[str, ...] = ("LC_",)
+
+
+def minimal_env(base: Mapping[str, str]) -> dict[str, str]:
+    """The part of ``base`` a font-reading child process needs, and nothing else."""
+    return {
+        name: value
+        for name, value in base.items()
+        if name in PASSTHROUGH or name.startswith(PASSTHROUGH_PREFIXES)
+    }
+
+
 def env_for(data_dir: Path, base: Mapping[str, str] | None = None) -> dict[str, str]:
-    """``base`` plus ``FONTCONFIG_FILE``, or ``base`` unchanged when no config exists.
+    """:func:`minimal_env` of ``base`` (the process environment by default), plus
+    ``FONTCONFIG_FILE`` once the data volume's config exists.
 
     Falling through rather than pointing at a missing file matters: fontconfig treats
     an unreadable ``FONTCONFIG_FILE`` as a fatal config error and every ``fc-*`` call
     and every render would fail, instead of merely not seeing the downloaded fonts.
     """
-    env = dict(os.environ if base is None else base)
+    env = minimal_env(os.environ if base is None else base)
     target = conf_path(data_dir)
     if target.is_file():
         env["FONTCONFIG_FILE"] = str(target)

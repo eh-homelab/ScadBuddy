@@ -1,0 +1,5 @@
+{
+  "hooks": {
+    "Stop": [{ "hooks": [{ "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/untyped.sh" }] }]
+  }
+}
