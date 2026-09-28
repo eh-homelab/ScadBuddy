@@ -8,6 +8,7 @@ import type { BoundingBox, ChoicesView, Job, Plate } from '../api/types'
 import { choicesView } from '../mocks/choices'
 import {
   BUILTIN_SLUG,
+  CANCELLED_ERROR,
   keychainSchema,
   printOptions,
   settings as settingsFixture,
@@ -48,7 +49,7 @@ vi.mock('../components/Preview', () => ({
           {plate.name} {plate.size[0]} × {plate.size[1]}
         </span>
       )}
-      {job?.status === 'failed' && (
+      {(job?.status === 'failed' || job?.status === 'cancelled') && (
         <pre data-testid="render-log">{(job.log_tail ?? []).join('\n')}</pre>
       )}
       {job?.bbox_mm && (
@@ -103,6 +104,28 @@ describe('CustomizePage', () => {
     const { user } = render()
     await user.click(await screen.findByRole('button', { name: 'Delete' }))
     expect(screen.getByRole('dialog', { name: 'Delete Name Keychain?' })).toBeInTheDocument()
+  })
+
+  it('manages the template media from a Media dialog (#279)', async () => {
+    const { user } = render()
+    await user.click(await screen.findByRole('button', { name: 'Media' }))
+    const dialog = screen.getByRole('dialog', { name: 'Media' })
+    // The keychain's legacy thumbnail.png is its one item, and so its cover.
+    const items = within(within(dialog).getByRole('list', { name: 'Media items' })).getAllByRole(
+      'listitem',
+    )
+    expect(items).toHaveLength(1)
+    expect(items[0]).toHaveTextContent('Cover')
+    expect(within(dialog).getByLabelText('Add images or videos')).toBeInTheDocument()
+  })
+
+  it('shows a built-in media read-only, with Duplicate (#279)', async () => {
+    const { user } = render(`/m/${encodeURIComponent(BUILTIN_SLUG)}`)
+    await user.click(await screen.findByRole('button', { name: 'Media' }))
+    const dialog = screen.getByRole('dialog', { name: 'Media' })
+    expect(within(dialog).getByText(/Built-in media is read-only/)).toBeInTheDocument()
+    expect(within(dialog).queryByLabelText('Add images or videos')).not.toBeInTheDocument()
+    expect(within(dialog).getByRole('button', { name: 'Duplicate' })).toBeInTheDocument()
   })
 
   it('offers to edit the model details (#179)', async () => {
@@ -185,6 +208,23 @@ describe('CustomizePage', () => {
 
     const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
     expect(log).toHaveTextContent('Compilation failed')
+  })
+
+  it('shows the log when a render is cancelled, same as a failure, with the backend\'s own wording', async () => {
+    // Preview is mocked above (its own copy for `cancelled` vs `failed` is covered
+    // by Preview.test.tsx); this only checks the mock job store and useRenderJob
+    // wiring carry the cancellation through, with the same text the real backend's
+    // `CANCELLED_ERROR` uses rather than an OpenSCAD-shaped failure message.
+    const { user } = render()
+    await firstRender()
+
+    const name = screen.getByRole('textbox', { name: 'Name on the tag' })
+    await user.clear(name)
+    await user.type(name, 'superseded')
+
+    const log = await screen.findByTestId('render-log', {}, { timeout: 4000 })
+    expect(log).toHaveTextContent(CANCELLED_ERROR)
+    expect(log).not.toHaveTextContent('Compilation failed')
   })
 
   it('disables Generate while a render is in flight', async () => {

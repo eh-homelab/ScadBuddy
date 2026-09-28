@@ -433,6 +433,8 @@ export const schemas: Record<string, CustomizerSchema> = {
   'name-keychain': keychainSchema,
   'gridfinity-bin': gridfinitySchema,
   [BUILTIN_SLUG]: builtinSchema,
+  // #280 — the template page's gallery needs a template with media that opens.
+  [GALLERY_SLUG]: { ...keychainSchema, title: 'Crème Coaster' },
 }
 
 export const fonts: FontFamily[] = [
@@ -838,6 +840,14 @@ export const queuedSliceProgress: PrintProgress = {
 }
 
 export const FAILING_NAME = 'boom'
+
+/** A name the mock ends `cancelled` instead of `failed`, the way a job superseded by a newer request while running does. */
+export const CANCELLED_NAME = 'superseded'
+
+/** The backend's own wording (`render/projection.py` `CANCELLED_ERROR`), so the mock's `error`/`log_tail` match what a real cancelled job carries. */
+export const CANCELLED_ERROR = 'cancelled: every request for it was withdrawn'
+
+export const CANCELLED_LOG_TAIL = [CANCELLED_ERROR]
 
 /** #285 — a name the mock renders fine but, like `name-puzzle`, has to shrink to fit. */
 export const NOTED_NAME = 'alexandra'

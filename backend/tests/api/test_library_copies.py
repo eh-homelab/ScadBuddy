@@ -13,6 +13,7 @@ import json
 from typing import Any
 
 import httpx
+import psycopg
 import pytest
 import respx
 from fastapi.testclient import TestClient
@@ -251,6 +252,75 @@ def test_the_same_folder_and_target_reuses_the_copy(client: TestClient, model: s
     assert upload.call_count == 1
 
 
+# --- the filament step reads any copy (#457) -------------------------------------------
+
+
+def open_dialog(client: TestClient, output_id: str) -> dict[str, Any]:
+    response = client.get(f"/api/v1/print/outputs/{output_id}/filaments?printer_id=1")
+    assert response.status_code == 200, response.text
+    result: dict[str, Any] = response.json()
+    return result
+
+
+@respx.mock
+def test_a_dialog_open_after_a_run_does_not_upload_again(client: TestClient, model: str) -> None:
+    """The first open has nothing to read and uploads; the run needs its own layout and
+    uploads again, superseding the first. From then on the dialog reads the run's copy."""
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    deletes()
+
+    open_dialog(client, output_id)
+    run(client, output_id)
+    assert upload.call_count == 2
+    open_dialog(client, output_id)
+    open_dialog(client, output_id)
+    run(client, output_id)
+
+    assert upload.call_count == 2
+
+
+@respx.mock
+def test_the_dialog_reads_a_projects_copy_without_moving_it(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41)
+    moved = never_moved()
+    run(client, output_id, project_id=7)
+
+    open_dialog(client, output_id)
+
+    assert upload.call_count == 1
+    assert not moved.called
+    assert copies(client, output_id) == [(41, 9)]
+
+
+@respx.mock
+def test_a_copy_deleted_in_bambuddy_is_not_read(client: TestClient, model: str) -> None:
+    output_id = set_up(client, model)
+    upload = uploads(41, 42)
+    deletes()
+    run(client, output_id)
+    respx.get(f"{API}/library/files/41").mock(return_value=httpx.Response(404, json={}))
+
+    open_dialog(client, output_id)
+
+    assert upload.call_count == 2
+    assert copies(client, output_id) == [(42, INBOX)]
+
+
+@respx.mock
+def test_a_recolored_copy_still_shows_the_models_colors(client: TestClient, model: str) -> None:
+    """The run's copy is in the spools' colors (#476); the dialog shows the model's."""
+    output_id = set_up(client, model)
+    uploads(41)
+    run(client, output_id)
+
+    slots = open_dialog(client, output_id)["slots"]
+
+    # The test model is one red filament; the recorded file reports blue and pink.
+    assert [slot["colour"] for slot in slots] == ["#FF0000", "#FF1493"]
+
+
 # --- records written before #455 ----------------------------------------------------
 
 
@@ -317,7 +387,7 @@ def test_a_pipeline_runs_sliced_file_is_recorded_when_the_progress_read_sees_it(
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
     client.get(f"/api/v1/print/outputs/{output_id}/progress")
 
-    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1"}]]
+    assert sliced(client, output_id) == [[{"id": 52, "preset_key": "1", "file_hash": None}]]
 
 
 # --- deleting an output --------------------------------------------------------------
@@ -393,3 +463,29 @@ def test_deleting_a_model_forgets_its_outputs_upload_records(
 
     assert asyncio.run(store.for_outputs([output_id, other])) == {output_id: [], other: []}
     assert not delete.called
+
+
+@respx.mock
+def test_an_output_whose_records_cannot_be_forgotten_is_still_deleted(
+    client: TestClient, model: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The files are gone by then, so the delete answers 204 and the records are left
+    for a later cleanup rather than a 500 that says the output survived (#522 review)."""
+    output_id = set_up(client, model)
+
+    async def fail(_ids: object) -> None:
+        raise psycopg.OperationalError("the database went away")
+
+    monkeypatch.setattr(upload_store(client), "delete_outputs", fail)
+    links = getattr(client.app.state, STATE_ATTR).print_links  # type: ignore[attr-defined]
+    forgotten: list[object] = []
+
+    async def forget(ids: object) -> None:
+        forgotten.append(ids)
+
+    monkeypatch.setattr(links, "delete_outputs", forget)
+
+    assert client.delete(f"/api/v1/outputs/{output_id}").status_code == 204
+    assert client.get(f"/api/v1/outputs/{output_id}").status_code == 404
+    # The upload records' failure does not keep the links serving its archives.
+    assert forgotten == [[output_id]]
