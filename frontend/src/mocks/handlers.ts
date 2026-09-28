@@ -2181,8 +2181,15 @@ export const handlers = [
     const hardware = printerId === null ? { nozzles: [] } : {}
     // #480 — like the server, each plate uses only some of the slots (here plate N uses
     // slot N, so plate 1 has only slot 1), and `all_plates` answers with the union of
-    // every plate's slots: an all-plates read differs from a plate-1 read.
-    const plateId = Math.max(1, Number(search.get('plate_id') ?? 1))
+    // every plate's slots: an all-plates read differs from a plate-1 read. This filters
+    // the shared `fixtures.filamentOptions` for every caller, not just the plate-2+/
+    // all-plates tests that motivate it — it stays safe only because PrintPicker.tsx's
+    // `chosenPlate === 1 && !allPlates` shortcut seeds plate 1 from the bulk
+    // `choices.filaments` payload instead of ever hitting this route. If that shortcut
+    // is ever removed, every other test's default single-plate fixture would silently
+    // start losing slots instead of getting the fixture's full list.
+    const rawPlateId = Number(search.get('plate_id') ?? 1)
+    const plateId = Number.isFinite(rawPlateId) ? Math.max(1, rawPlateId) : 1
     const every = fixtures.filamentOptions.slots ?? []
     const slots =
       search.get('all_plates') === 'true'

@@ -551,15 +551,28 @@ async def gather_plate_options(
 
     The spools, assignments and printer are the same for every plate, so they are read
     once; only each plate's slots are read per plate (#480). Every read runs
-    concurrently. A failed read raises the first failure in the order spools,
-    assignments, printer, then plates, as reading them in turn would."""
+    concurrently, and a failed read raises the first failure in the order spools,
+    assignments, printer, inventory-remain, then plates in ``plate_ids`` order — the
+    order reading them in turn would raise in. Because the reads are concurrent, a
+    failure in an earlier read does not stop the later ones from reaching Bambuddy:
+    an auth failure on ``spools()`` still issues the assignments, printer and every
+    plate's requirements call before the error is raised. That extra load is an
+    accepted cost of reading everything at once rather than one at a time."""
 
     async def printer_side() -> tuple[Printer | None, list[SlotMaterial]]:
         if printer_id is None:
             return None, []
         printer, remain = await asyncio.gather(
-            client.printer(printer_id), client.inventory_remain(printer_id)
+            client.printer(printer_id),
+            client.inventory_remain(printer_id),
+            return_exceptions=True,
         )
+        # Deterministic even when both fail: printer's failure is reported first,
+        # matching the order a sequential read would have raised in.
+        if isinstance(printer, BaseException):
+            raise printer
+        if isinstance(remain, BaseException):
+            raise remain
         return printer, remain.slot_materials
 
     shared = asyncio.gather(

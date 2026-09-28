@@ -39,6 +39,7 @@ from scadbuddy.bambuddy.models import (
     Spool,
     SpoolAssignment,
 )
+from scadbuddy.core.problems import ApiError
 from tests.bambuddy.conftest import BASE_URL, recording
 
 API = f"{BASE_URL}/api/v1"
@@ -392,6 +393,102 @@ async def test_several_plates_read_the_spools_and_printer_once(bambuddy: Bambudd
     ]
     assert (spools.call_count, assignments.call_count) == (1, 1)
     assert (printer.call_count, remain.call_count) == (1, 1)
+
+
+# --- the failure path (#525): concurrent reads, deterministic errors ----------
+
+
+@respx.mock
+async def test_an_early_shared_read_failure_raises_it_despite_the_plates_still_being_read(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Reading everything concurrently means a failing ``spools()`` no longer skips the
+    other calls the way a sequential read would — that is an accepted cost (#525) — but
+    the error that surfaces must still be ``spools()``'s."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(500, json={"detail": "spools-boom"})
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    requirements = respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+    )
+    printer = respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(200, json=recording("printer.json"))
+    )
+    remain = respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(200, json=recording("inventory-remain.json"))
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1, 2, 3])
+    assert "spools-boom" in excinfo.value.detail
+
+    # The extra calls still reach Bambuddy; only the surfaced error is pinned.
+    assert requirements.call_count == 3
+    assert printer.called
+    assert remain.called
+
+
+@respx.mock
+async def test_a_double_printer_side_failure_raises_the_printers_error(
+    bambuddy: BambuddyClient,
+) -> None:
+    """When both ``printer()`` and ``inventory_remain()`` fail, the printer's failure
+    wins deterministically — the order a sequential read would have raised in — rather
+    than whichever of the two happens to finish first."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements.json"))
+    )
+    respx.get(f"{API}/printers/1").mock(
+        return_value=httpx.Response(500, json={"detail": "printer-boom"})
+    )
+    respx.get(f"{API}/printers/1/inventory-remain").mock(
+        return_value=httpx.Response(500, json={"detail": "remain-boom"})
+    )
+
+    with pytest.raises(ApiError) as excinfo:
+        await gather_plate_options(bambuddy, library_file_id=62, printer_id=1, plate_ids=[1])
+    assert "printer-boom" in excinfo.value.detail
+    assert "remain-boom" not in excinfo.value.detail
+
+
+@respx.mock
+async def test_a_plate_failure_raises_the_lowest_indexed_failing_plates_error(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Two plates fail; the one earliest in ``plate_ids`` (not the lowest plate number)
+    is the error that surfaces."""
+    respx.get(f"{API}/inventory/spools").mock(
+        return_value=httpx.Response(200, json=recording("inventory-spools.json"))
+    )
+    respx.get(f"{API}/inventory/assignments").mock(
+        return_value=httpx.Response(200, json=recording("inventory-assignments.json"))
+    )
+
+    def answer(request: httpx.Request) -> httpx.Response:
+        plate = request.url.params.get("plate_id")
+        if plate == "3":
+            return httpx.Response(500, json={"detail": "plate-3-boom"})
+        if plate == "1":
+            return httpx.Response(500, json={"detail": "plate-1-boom"})
+        return httpx.Response(200, json=recording("filament-requirements.json"))
+
+    respx.get(f"{API}/library/files/62/filament-requirements").mock(side_effect=answer)
+
+    # plate_ids lists plate 3 before plate 1, so plate 3's failure — the earlier one in
+    # this order, not the lower plate number — must be the one raised.
+    with pytest.raises(ApiError) as excinfo:
+        await gather_plate_options(bambuddy, library_file_id=62, plate_ids=[3, 2, 1])
+    assert "plate-3-boom" in excinfo.value.detail
+    assert "plate-1-boom" not in excinfo.value.detail
 
 
 @respx.mock
