@@ -15,7 +15,13 @@ from scadbuddy.store.refs import BlobRefs
 class BlobStore(Protocol):
     backend: str
 
-    def dir_for(self, key: str) -> Path: ...
+    def dir_for(self, key: str) -> Path:
+        """The blob's directory, created if missing. Every call, for a blob that
+        already exists too, refreshes its `touched_at`: a claimant calls this before
+        `BlobRefs.add`, and that is what keeps `sweep_blobs` from taking a blob
+        claimed between its `referenced()` snapshot and its pass over the keys."""
+        ...
+
     def exists(self, key: str) -> bool: ...
     def remove(self, key: str) -> None: ...
     def keys(self) -> list[str]: ...
@@ -35,7 +41,13 @@ def sweep_blobs(
     removed: list[str] = []
     blob_keys = store.keys()
     for key in blob_keys:
-        if key in kept or store.touched_at(key) > cutoff:
+        if key in kept:
+            continue
+        try:
+            touched = store.touched_at(key)
+        except FileNotFoundError:
+            continue  # gone since `keys()`: another sweep took it
+        if touched > cutoff:
             continue
         store.remove(key)
         removed.append(key)
