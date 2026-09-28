@@ -218,10 +218,14 @@ opens where it was left.
 - **Link** → `GET /projects/` plus `GET /library/folders/by-project/{id}`; a project
   that already has a folder keeps it, so linking twice does not leave two.
 - **Send** → the project's folder replaces `settings.library_folder_id` for that send,
-  which is what puts the 3MF on the project's page. An output uploaded *before* a
-  project was chosen keeps its library file — re-uploading would make a second copy —
-  so `POST /api/v1/library/files/move` puts it in the right folder instead. Reporting
-  `folder_id` without that move would report a folder the file is not in.
+  which is what puts the 3MF on the project's page. A project with no folder yet gets
+  one created and linked first (as **Link** does) — never the inbox fallback, where the
+  copy would be superseded. An output keeps one library copy
+  per (folder, target) (#316): a project that has none gets a new copy in its folder,
+  even when the output was uploaded before a project was chosen. A copy is never
+  moved — a project's file is its record of what it printed, and its slices and
+  archives stay where it is — and only a copy in the inbox (`library_folder_id`) is
+  ever deleted, when a newer inbox copy supersedes it.
 - **Attach** → `POST /projects/{id}/add-queue` and `/add-archives`.
 
 Attaching is a **separate call**, not part of the run: a pipeline run's
