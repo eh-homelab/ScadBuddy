@@ -174,7 +174,7 @@ All in `backend/scadbuddy/workflows/`, `temporalio` Python SDK.
 
 ```
 TemplatePipeline   id render-<job_id>          one per Generate (render_jobs.kind = 'render')
-  └─ RenderPiece   id piece-<piece_key>         one per DISTINCT openscad render; USE_EXISTING
+  └─ RenderPiece   id piece-<piece_key>         one per DISTINCT openscad render; shared (below)
 Arrange            id render-<job_id>          objects → plates (§7); render_jobs.kind = 'arrange'
 ```
 
@@ -230,9 +230,26 @@ activity directly, not the workflow.
 A `RenderPiece` is keyed by `piece_key`. Fourteen identical walls render once; two
 people building the same house share one child; changing the wallpaper re-renders
 walls but not floors or corner posts. Children are started with
-`parent_close_policy=ABANDON`: cancelling a `TemplatePipeline` never cancels a piece
-another job may be sharing, and a Part nothing references is swept by the store's
-grace rule (§6.2).
+`parent_close_policy=ABANDON` **and** `cancellation_type=ABANDON`: cancelling a
+`TemplatePipeline` never cancels a piece another job may be sharing (without the
+second, the SDK's default `WAIT_CANCELLATION_COMPLETED` requests cancellation of the
+awaited child when the parent is cancelled), and a Part nothing references is swept
+by the store's grace rule (§6.2).
+
+Sharing a piece is start-then-signal, not `USE_EXISTING`. The SDK's child start has no
+`id_conflict_policy` (verified against `temporalio` 1.33.0, §3.6), so a second job
+cannot attach to a running child by starting it. Instead the job calls
+`start_child_workflow`; on `WorkflowAlreadyStartedError` it signals the running piece
+`RenderPiece.wait_for_me(<its own workflow id>)` and waits for the piece's
+`TemplatePipeline.piece_finished(PieceOutcome)` signal, which carries the `PieceResult`
+or the `Failure`. The piece signals every waiter when it finishes; a signal to a
+waiter that has since closed is ignored. The wait is bounded (a multiple of the
+piece's worst-case run): on timeout the job retries the start — success means the
+piece closed without signalling (terminated by an operator, a workflow task stuck
+failing) and this job now owns a fresh render; `WorkflowAlreadyStartedError` means it
+re-signals and waits again. `wait_for_me` ignores an id it already holds. A piece
+that closes between a job's failed start and its signal makes that job start the
+piece again: a re-render the render cache makes cheap.
 
 Activity timeouts, and who kills what. `SCADBUDDY_RENDER_TIMEOUT` (operator-set,
 default 120 s) stays the one number an operator tunes: the `openscad_*` activities
@@ -259,14 +276,32 @@ in-flight runs, then exit. The Deployment's `preStop` waits for the worker's
 carries `workflow.patched(...)` markers only where a change must apply to running
 workflows; the default is to let them finish on the old build.
 
-### 3.6 To verify against the pinned `temporalio` before phase 1 lands
+### 3.6 Verified against the pinned `temporalio` (1.33.0)
 
-`temporalio` is not a dependency yet, so these are recalled, not measured (the base
-spec's §3 rule): the sandbox exception type and message shape on a restricted
-import or call; that a traceback through `exec`'d source compiled with a file name
-carries usable line numbers; that `parent_close_policy=ABANDON` with
-`id_conflict_policy=USE_EXISTING` behaves as §3.4 assumes for shared children;
-worker build-ID versioning semantics in the pinned SDK release (§3.5).
+Measured while phase 1 landed (the base spec's §3 rule), in `backend/tests/test_workflows.py`:
+
+- `workflow.start_child_workflow` / `execute_child_workflow` take `id_reuse_policy`
+  and **no `id_conflict_policy`**; the core `StartChildWorkflowExecution` command has
+  no such field either, and `WorkflowIDReusePolicy` only governs closed ids. Hence
+  §3.4's start-then-signal sharing. `WorkflowIDConflictPolicy.USE_EXISTING` exists on
+  the *client's* `start_workflow` and is what §3.3 uses.
+- A second child start with a running id raises
+  `temporalio.exceptions.WorkflowAlreadyStartedError`; an external handle
+  (`get_external_workflow_handle_for`) can signal and cancel but not await a result.
+- `parent_close_policy=ABANDON` alone does not keep a shared child alive through the
+  parent's cancellation: `cancellation_type=ChildWorkflowCancellationType.ABANDON` is
+  needed too. Under it the child resolves at once as a `ChildWorkflowError` whose cause
+  is a `CancelledError`, which `is_cancelled_exception` recognises.
+- `workflow.CancelledError` does not exist; cancellation arrives as
+  `asyncio.CancelledError`. `workflow.memo_value(key, default, type_hint=float)` exists.
+- `imports_passed_through` for `scadbuddy.render.job_models` and
+  `scadbuddy.workflows.models` (pydantic) is accepted by the sandbox.
+
+Still to verify when their phases land: the sandbox exception type and message shape
+on a restricted import or call, and that a traceback through `exec`'d source compiled
+with a file name carries usable line numbers (phase 4, §5.2); worker build-ID
+versioning semantics, including whether the dev server needs
+`system.enableDeploymentVersions` (§3.5, the worker PR).
 
 ### 3.7 Tests
 
