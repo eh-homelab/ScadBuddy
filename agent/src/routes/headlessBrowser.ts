@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { SETTING_HEADLESS_BROWSER } from '../harness/headlessBrowser.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/settings/headless-browser (#349): turns the headless browser on or
 // off for session turns (spec §5.3, "Off unless enabled"). Stored in
@@ -79,4 +80,23 @@ export function registerHeadlessBrowserRoutes(app: Hono, deps: HeadlessBrowserRo
     const view: HeadlessBrowserSettingView = { enabled: body.enabled }
     return c.json(view)
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) answers 503 without it. */
+    settings?: SettingsRepo | undefined
+  }
+}
+
+/** The headless-browser setting (#349). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerHeadlessBrowserRoutes(app, {
+      settings: deps.settings,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

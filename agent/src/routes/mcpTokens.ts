@@ -5,6 +5,8 @@ import { TIERS } from '../auth/principal.js'
 import type { TokenRecord, TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { DEFAULT_MCP_AUTH } from '../auth/authenticate.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp-tokens (#251, spec §8.1 "minted in Settings, stored hashed",
 // §8.3): Settings mints, lists and revokes the bearer tokens `/mcp` accepts.
@@ -174,4 +176,28 @@ export function registerMcpTokenRoutes(app: Hono, deps: McpTokenRouteDeps): void
     }
     return c.body(null, 204)
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /**
+     * The MCP bearer-token store Settings manages. Pass the same instance as
+     * `mcp.tokens`. Undefined (or left out) when there is no database: the routes
+     * then answer 503.
+     */
+    tokens?: TokenStore | undefined
+  }
+}
+
+/** The MCP token routes (#251). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerMcpTokenRoutes(app, {
+      tokens: deps.database ? deps.tokens : undefined,
+      ready: ready(deps),
+      authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

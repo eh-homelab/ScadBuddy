@@ -11,6 +11,8 @@ import {
 import { type Tier, TIERS } from '../auth/principal.js'
 import { forwardedClient, type OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, requestFacts, uiReadProblem, uiRequestProblem } from './guard.js'
+import { DEFAULT_MCP_AUTH } from '../auth/authenticate.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/auth (#251, spec §8.3): Settings reads and changes the `/mcp`
 // auth mode and the cap on what an anonymous caller may do. Both are
@@ -190,4 +192,28 @@ export function registerMcpAuthModeRoutes(app: Hono, deps: McpAuthModeRouteDeps)
     if (!after) return c.json({ detail: SAVED_UNREADABLE }, 503)
     return c.json(view(after))
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /**
+     * Where Settings writes the /mcp auth mode and anonymous cap (credentials.ts
+     * `SettingsStore`). The routes read them back through `mcp.authSettings`.
+     * Undefined (or left out) when there is no database: the routes then answer 503.
+     */
+    aiSettings?: SettingsWriter | undefined
+  }
+}
+
+/** The /mcp auth-mode routes (#251). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerMcpAuthModeRoutes(app, {
+      settings: deps.database ? deps.aiSettings : undefined,
+      authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

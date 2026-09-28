@@ -15,6 +15,7 @@ import {
 import { EgressError } from '../http/egress.js'
 import type { OriginPolicy } from '../http/origins.js'
 import { type RemoteAddress, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/mcp/oidc (issue #262): the OIDC configuration for `/mcp`,
 // stored in `ai_settings` (src/auth/oidc.ts `SettingsOidcConfigRepo`).
@@ -149,4 +150,27 @@ export function registerMcpAuthRoutes(app: Hono, deps: McpAuthRouteDeps): void {
     if ('detail' in result) return c.json(result, 400)
     return c.json(result)
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /**
+     * The OIDC settings routes for /mcp (#262). Left out, there are none. `repo` is
+     * undefined exactly when `database` is.
+     */
+    mcpOidc?: Pick<McpAuthRouteDeps, 'repo' | 'provider' | 'publicUrl'> | undefined
+  }
+}
+
+/** The OIDC settings routes for /mcp (#262), when `mcpOidc` is given. */
+export const route: RouteModule = {
+  register(app, deps) {
+    if (!deps.mcpOidc) return
+    registerMcpAuthRoutes(app, {
+      ...deps.mcpOidc,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

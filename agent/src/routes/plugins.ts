@@ -15,6 +15,9 @@ import {
 import type { PluginTest } from '../plugins/testConnection.js'
 import { type KekStatus, SealError } from '../secrets.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import type { PluginForwarder } from '../plugins/forwarder.js'
+import { testPlugin } from '../plugins/testConnection.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/plugins (issue #297): the admin surface of the plugin registry
 // (src/plugins/registry.ts, table `ai_plugins`).
@@ -242,4 +245,42 @@ export function registerPluginRoutes(app: Hono, deps: PluginRouteDeps): void {
       testing.delete(name)
     }
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** The plugin registry (#297); undefined when there is no database. */
+    plugins?: PluginRepo | undefined
+    /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
+    testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
+    /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
+    pluginForwarder?: PluginForwarder
+  }
+}
+
+/** The plugin registry routes (#297). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerPluginRoutes(app, {
+      plugins: deps.plugins,
+      ready: ready(deps),
+      kek: deps.kek,
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+      testPlugin:
+        deps.testPlugin ??
+        ((plugin, address) =>
+          deps.pluginForwarder
+            ? testPlugin(plugin, address, deps.pluginForwarder)
+            : Promise.resolve({
+                ok: false,
+                detail: 'the plugin forwarder is not running',
+                duration_ms: 0,
+                server: null,
+                tools: [],
+                truncated: false,
+              })),
+      ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
+    })
+  },
 }

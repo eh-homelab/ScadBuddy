@@ -4,6 +4,7 @@ import { ApprovalError, type ApprovalRecord, type ApprovalService } from '../app
 import type { OriginPolicy } from '../http/origins.js'
 import type { Owner } from '../sessions/protocol.js'
 import { type RemoteAddress, uiReadProblem, uiRequestProblem } from './guard.js'
+import { ready, type RouteModule } from './module.js'
 
 // /api/v1/ai/approvals (#258): the panel's and the tests' way to see and decide
 // approvals of outward tool calls until #266's socket carries the panel's
@@ -134,4 +135,23 @@ export function registerApprovalRoutes(app: Hono, deps: ApprovalRouteDeps): void
       throw err
     }
   })
+}
+
+declare module '../app.js' {
+  interface AppDeps {
+    /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
+    approvals?: ApprovalService
+  }
+}
+
+/** The approval routes (#258). */
+export const route: RouteModule = {
+  register(app, deps) {
+    registerApprovalRoutes(app, {
+      approvals: deps.approvals,
+      ready: ready(deps),
+      remoteAddress: deps.remoteAddress,
+      origins: deps.origins,
+    })
+  },
 }

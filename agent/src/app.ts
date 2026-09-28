@@ -1,39 +1,25 @@
 import { Hono } from 'hono'
-import type { ApprovalService } from './approvals/service.js'
-import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
-import type { TokenStore } from './auth/tokens.js'
-import type { Credential, CredentialRepo } from './credentials.js'
-import type { ConnectionTest } from './harness/testConnection.js'
+import type { CredentialRepo } from './credentials.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
-import type { PluginForwarder } from './plugins/forwarder.js'
-import type { PackageInstaller } from './plugins/packages/install.js'
-import type { PackageRepo } from './plugins/packages/store.js'
-import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
-import { type PluginTest, testPlugin } from './plugins/testConnection.js'
-import { registerApprovalRoutes } from './routes/approvals.js'
-import { registerCredentialRoutes } from './routes/credentials.js'
-import { registerPluginPackageRoutes } from './routes/pluginPackages.js'
-import { type McpAuthRouteDeps, registerMcpAuthRoutes } from './routes/mcpAuth.js'
-import { registerHeadlessBrowserRoutes, type SettingsRepo } from './routes/headlessBrowser.js'
-import { registerPluginRoutes } from './routes/plugins.js'
-import { registerMcpAuthModeRoutes, type SettingsWriter } from './routes/mcpAuthMode.js'
-import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
+import { ROUTES } from './routes/index.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
-// direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), the approval routes (#258, routes/approvals.ts), the
-// plugin registry routes (#297, routes/plugins.ts), the plugin package routes
-// (#297, routes/pluginPackages.ts), the MCP token and auth-mode routes (#251,
-// routes/mcpTokens.ts, routes/mcpAuthMode.ts), the headless-browser setting
-// (#349, routes/headlessBrowser.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// direct streaming. /healthz and /mcp (when `mcp` is given; #251, mcp/http.ts) are
+// here; every other route group is a file in routes/ that exports `route`
+// (routes/module.ts), registered below without an edit to this file.
 
 export type Probe = () => Promise<boolean>
 
-export type AppDeps = {
+/**
+ * What the app is built from. Only what `/healthz`, `/mcp` and several route groups
+ * share is declared here; a dependency only one route group needs is declared in that
+ * group's file, by augmenting this interface (routes/module.ts).
+ */
+export interface AppDeps {
   /** Undefined when SCADBUDDY_DATABASE_URL is unset. */
   database: { ping: Probe; ready: Probe } | undefined
   backend: Probe
@@ -41,56 +27,21 @@ export type AppDeps = {
   kek: KekStatus
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
-  /** The plugin registry (#297); undefined when there is no database. */
-  plugins?: PluginRepo | undefined
-  /** The plugin connection test; src/plugins/testConnection.ts when omitted. */
-  testPlugin?: (plugin: RemotePlugin, address: string) => Promise<PluginTest>
-  /** The loopback forwarder plugin traffic goes through (plugins/forwarder.ts); needed by the default test. */
-  pluginForwarder?: PluginForwarder
-  /** Installed plugin packages (#297, plugins/packages/); undefined when there is no database. */
-  pluginPackages?: PackageRepo | undefined
-  /** Fetches and caches plugin packages; undefined disables installing. */
-  packageInstaller?: Pick<PackageInstaller, 'prepare' | 'evict'> | undefined
-  testConnection: (credential: Credential) => Promise<ConnectionTest>
-  /**
-   * The MCP bearer-token store Settings manages (routes/mcpTokens.ts). Pass the
-   * same instance as `mcp.tokens`. Undefined (or left out) when there is no
-   * database: the routes then answer 503.
-   */
-  tokens?: TokenStore | undefined
-  /**
-   * Where Settings writes the /mcp auth mode and anonymous cap
-   * (routes/mcpAuthMode.ts; credentials.ts `SettingsStore`). The routes read
-   * them back through `mcp.authSettings`. Undefined (or left out) when there is
-   * no database: the routes then answer 503.
-   */
-  aiSettings?: SettingsWriter | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
   /** Gateway host resolver for the SSRF check; the system resolver when omitted. */
   resolveHost?: Resolver
-  /** Connection-test cooldown; routes/credentials.ts's default when omitted. */
-  testCooldownMs?: number
   /** Upper bound on each database step of /healthz (migrations, credential read). */
   healthTimeoutMs?: number
   /** Clock for the connection-test cooldown; Date.now when omitted. */
   now?: () => number
-  /** Approvals of outward tool calls (#258); the routes answer 503 without it. */
-  approvals?: ApprovalService
-  /** `ai_settings` (credentials.ts SettingsStore); the headless-browser setting (#349) answers 503 without it. */
-  settings?: SettingsRepo | undefined
   /**
    * The external MCP endpoint (src/mcp/http.ts). Left out, there is no /mcp
    * route. It uses the same `origins` policy and `remoteAddress` as the
    * credential routes, so there is one allowlist (src/http/origins.ts).
    */
   mcp?: McpEndpointDeps | undefined
-  /**
-   * The OIDC settings routes for /mcp (#262, routes/mcpAuth.ts). Left out,
-   * there are none. `repo` is undefined exactly when `database` is.
-   */
-  mcpOidc?: Pick<McpAuthRouteDeps, 'repo' | 'provider' | 'publicUrl'> | undefined
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -195,85 +146,7 @@ export function createApp(deps: AppDeps): AgentApp {
     return c.json(body)
   })
 
-  registerCredentialRoutes(app, {
-    credentials: deps.credentials,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    kek: deps.kek,
-    testConnection: deps.testConnection,
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
-    ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
-    ...(deps.now === undefined ? {} : { now: deps.now }),
-  })
-
-  if (deps.mcpOidc) {
-    registerMcpAuthRoutes(app, {
-      ...deps.mcpOidc,
-      ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-      remoteAddress: deps.remoteAddress,
-      origins: deps.origins,
-    })
-  }
-  registerPluginRoutes(app, {
-    plugins: deps.plugins,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    kek: deps.kek,
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-    testPlugin:
-      deps.testPlugin ??
-      ((plugin, address) =>
-        deps.pluginForwarder
-          ? testPlugin(plugin, address, deps.pluginForwarder)
-          : Promise.resolve({
-              ok: false,
-              detail: 'the plugin forwarder is not running',
-              duration_ms: 0,
-              server: null,
-              tools: [],
-              truncated: false,
-            })),
-    ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
-  })
-
-  registerMcpTokenRoutes(app, {
-    tokens: deps.database ? deps.tokens : undefined,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-  })
-
-  registerMcpAuthModeRoutes(app, {
-    settings: deps.database ? deps.aiSettings : undefined,
-    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-  })
-
-  registerPluginPackageRoutes(app, {
-    packages: deps.pluginPackages,
-    installer: deps.packageInstaller,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-  })
-
-  registerHeadlessBrowserRoutes(app, {
-    settings: deps.settings,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-  })
-
-  registerApprovalRoutes(app, {
-    approvals: deps.approvals,
-    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
-    remoteAddress: deps.remoteAddress,
-    origins: deps.origins,
-  })
+  for (const { route } of ROUTES) route.register(app, deps)
 
   if (deps.mcp) {
     const database = deps.database
