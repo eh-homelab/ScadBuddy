@@ -165,6 +165,15 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
