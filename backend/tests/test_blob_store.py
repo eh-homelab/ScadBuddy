@@ -29,6 +29,53 @@ def test_keys_are_confined_to_the_root(tmp_path: Path) -> None:
     assert not (tmp_path / "blobs").exists() or store.keys() == []
 
 
+#: Keys that would name something other than one directory under the root. `.` and
+#: `..` match the character class, so only the explicit check refuses them; without it
+#: `remove("..")` would delete the whole data volume.
+BAD_KEYS = [
+    "..",
+    ".",
+    "a/b",
+    "/etc",
+    "",
+    "k" * 129,
+    "piece\n",
+]
+ENTRIES = ["dir_for", "remove", "exists", "touched_at"]
+
+
+@pytest.mark.parametrize("entry", ENTRIES)
+@pytest.mark.parametrize("key", BAD_KEYS, ids=lambda k: repr(k)[:12])
+def test_every_entry_refuses_a_key_that_leaves_the_root(
+    tmp_path: Path, entry: str, key: str
+) -> None:
+    store = LocalBlobStore(tmp_path / "data" / "blobs")
+    with pytest.raises(ValueError, match="not a blob key"):
+        getattr(store, entry)(key)
+
+
+def _snapshot(root: Path) -> dict[str, tuple[bool, int]]:
+    return {
+        str(path.relative_to(root)): (path.is_dir(), path.stat().st_mtime_ns)
+        for path in [root, *root.rglob("*")]
+    }
+
+
+def test_a_refused_key_leaves_the_data_volume_untouched(tmp_path: Path) -> None:
+    data = tmp_path / "data"
+    (data / "models" / "demo").mkdir(parents=True)
+    (data / "models" / "demo" / "model.scad").write_text("cube();\n", encoding="utf-8")
+    store = LocalBlobStore(data / "blobs")
+    store.dir_for("kept")
+    os.utime(data, ns=(1, 1))  # an mtime a touch of the data root would change
+    before = _snapshot(tmp_path)
+    for key in BAD_KEYS:
+        for entry in ENTRIES:
+            with pytest.raises(ValueError):
+                getattr(store, entry)(key)
+    assert _snapshot(tmp_path) == before
+
+
 def test_removing_a_blob_already_gone_is_fine(tmp_path: Path) -> None:
     LocalBlobStore(tmp_path / "blobs").remove("never-made")
 
