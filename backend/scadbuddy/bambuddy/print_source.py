@@ -212,7 +212,7 @@ UNKNOWN_COLOUR = ""
 
 
 def printable(file_type: str | None) -> bool:
-    return (file_type or "") in PRINTABLE_TYPES
+    return (file_type or "").lower() in PRINTABLE_TYPES
 
 
 def _refusal(file: LibraryFile) -> str:
@@ -240,7 +240,12 @@ class LibrarySource:
         if not printable(file.file_type):
             raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, _refusal(file))
         plates = sorted(plate.index for plate in (await client.library_plates(file_id)).plates)
-        needs = (await client.filament_requirements(file_id)).filaments
+        # Slots are 1-based; a slot Bambuddy numbers below 1 is not one the dialog can fill.
+        needs = [
+            need
+            for need in (await client.filament_requirements(file_id)).filaments
+            if need.slot_id >= 1
+        ]
         colours = [UNKNOWN_COLOUR] * max((need.slot_id for need in needs), default=0)
         for need in needs:
             colours[need.slot_id - 1] = normalise_colour(need.color) or UNKNOWN_COLOUR

@@ -54,6 +54,7 @@ def test_only_an_unsliced_3mf_is_printable() -> None:
     assert not printable("gcode.3mf")
     assert not printable("stl")
     assert not printable(None)
+    assert printable("3MF")
 
 
 @respx.mock
@@ -83,6 +84,24 @@ async def test_a_library_file_is_its_plates_and_its_filaments(bambuddy: Bambuddy
     assert (printed.id, printed.folder_id) == (67, None)
     # Nothing is uploaded, replated or recolored: every call was a read.
     assert {call.request.method for call in respx.calls} == {"GET"}
+
+
+@respx.mock
+async def test_a_library_files_colors_drop_the_alpha_bambuddy_reads(
+    bambuddy: BambuddyClient,
+) -> None:
+    """Bambuddy reads a file's colors as #RRGGBBAA; the dialog's swatches are #RRGGBB."""
+    _file(67, "3mf")
+    respx.get(f"{API}/library/files/67/plates").mock(
+        return_value=httpx.Response(200, json=recording("library-plates-multi.json"))
+    )
+    respx.get(f"{API}/library/files/67/filament-requirements").mock(
+        return_value=httpx.Response(200, json=recording("filament-requirements-rgba.json"))
+    )
+
+    source = await LibrarySource.load(bambuddy, 67)
+
+    assert source.colours == ["#867A93"]
 
 
 @respx.mock
