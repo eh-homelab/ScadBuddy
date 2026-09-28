@@ -28,8 +28,7 @@ multi-colour rules, connecting Bambuddy and each feature.
   (`{"id": "bag-tag", "name": "Bag tag", "params": {…}}`; the `id` keeps a preset the
   same one when it is renamed or moved); **Duplicate** copies one of those, or any
   saved preset, to an editable preset of your own. Saved presets are kept in the
-  database (`SCADBUDDY_DATABASE_URL`); without one, a template's own presets still
-  list but saving one is refused.
+  database.
 - **The preview is the real render**: OpenSCAD (Manifold) runs on every parameter
   change and shows per-colour parts and the bounding box.
 - **Multi-colour 3MF**: one closed solid per colour, each on its own extruder, with
@@ -487,9 +486,15 @@ the backend on `http://127.0.0.1:8080` (§4.3).
   (spec §4.4; the CI smoke test runs it with `--read-only`). At start it
   recreates `claude/` and `work/` in that volume, and it exits 1 with a
   message naming the directory if it cannot (`agent/src/harness/stateDirs.ts`).
-- Nothing deploys it yet. The clusters manifest, and the ingress routes for
-  `/mcp` and `/api/v1/ai/*` (spec §4.2), come with the stories
-  that give it routes. Until then the image's publish job is
+- **Routing** (spec §4.2): the ingress sends `/api/v1/ai/*` and `/mcp` to the
+  agent's port `8081`, ahead of the backend's `/`. That keeps the SPA, the
+  backend, the agent and the assistant's WebSocket on one origin, which is what
+  works inside Bambuddy's iframe. The rules, an example `Ingress` and a
+  `curl` check per path (every agent response carries
+  `X-ScadBuddy-Service: agent`) are in `docs/ai/operating.md` §1.1.
+  `frontend/vite.config.ts` routes the same way for `pnpm dev` and
+  `pnpm preview`. The clusters manifest is in eh-homelab/clusters, and until it
+  deploys the sidecar the image's publish job is
   `continue-on-error`, so it cannot hold back a backend deploy, and the new
   GHCR package needs the same one-time **public** visibility step as
   `scadbuddy` (see the header of `build-image.yml`).

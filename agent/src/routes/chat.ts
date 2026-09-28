@@ -1,4 +1,5 @@
 import type { Hono, MiddlewareHandler } from 'hono'
+import { WebSocket } from 'ws'
 import type { UpgradeWebSocket, WSContext } from 'hono/ws'
 import { ApprovalError } from '../approvals/service.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -260,6 +261,9 @@ export function registerChatRoute(app: Hono, deps: ChatRouteDeps): void {
   )
 }
 
+/** `WebSocket.OPEN` (the WHATWG readyState, which `ws` uses too); `Pingable` stays structural for tests. */
+const OPEN = WebSocket.OPEN
+
 /** A socket that can be pinged: `ws`'s WebSocket (the server's `clients`). */
 type Pingable = { readyState: number; ping(): void; terminate(): void; on(event: 'pong', fn: () => void): unknown }
 
@@ -271,11 +275,14 @@ type Pingable = { readyState: number; ping(): void; terminate(): void; on(event:
  * pings keep it open without adding frames the panel would have to parse.
  * Returns a stop function.
  */
-export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = 25_000): () => void {
+/** The chat socket's ping interval; must stay under the ingress read timeout (docs/ai/operating.md §1.1). */
+export const HEARTBEAT_MS = 25_000
+
+export function startHeartbeat(server: { clients: Set<Pingable> }, intervalMs = HEARTBEAT_MS): () => void {
   const alive = new WeakMap<Pingable, boolean>()
   const timer = setInterval(() => {
     for (const socket of server.clients) {
-      if (socket.readyState !== 1) continue
+      if (socket.readyState !== OPEN) continue
       if (alive.get(socket) === false) {
         socket.terminate()
         continue
