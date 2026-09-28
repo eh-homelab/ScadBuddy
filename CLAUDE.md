@@ -117,6 +117,9 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
   `model.json`, with a legacy `presets.json` still read).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
+- A new backend service is a `Component` (`core/components.py`) in a `component.py`
+  beside its feature (`scadbuddy/<feature>/component.py`, discovered), never a new
+  `AppState` field; routes read it through `api/components.py` `component_dep` (#508).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
   the mocked e2e run.
 - `agent/` — the AI agent service (#261), TypeScript on the Claude Agent SDK, shipped
