@@ -226,6 +226,46 @@ test.describe('real backend', () => {
       await request.delete(`/api/v1/models/${slug}`)
     }
   })
+
+  /**
+   * #266, end to end: `WS /api/v1/ws` in the image. One tab follows `models`
+   * through the page's own socket, the way `lib/realtime.ts` does; a change made
+   * from elsewhere reaches it as an event.
+   */
+  test('delivers a change made elsewhere to a tab following it', async ({ page, request }) => {
+    await page.goto('/')
+    const url = new URL('/api/v1/ws', page.url())
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+    type Frame = { type: string; kind?: string; data?: { slug?: string } }
+    type Page = { realtimeFrames: Frame[]; realtimeSocket: WebSocket }
+    await page.evaluate((socketUrl) => {
+      const w = globalThis as unknown as Page
+      w.realtimeFrames = []
+      w.realtimeSocket = new WebSocket(socketUrl)
+      w.realtimeSocket.onmessage = (message) => {
+        w.realtimeFrames.push(JSON.parse(String(message.data)) as Frame)
+      }
+      w.realtimeSocket.onopen = () =>
+        w.realtimeSocket.send(JSON.stringify({ type: 'subscribe', topics: ['models'] }))
+    }, url.toString())
+    const frames = () => page.evaluate(() => (globalThis as unknown as Page).realtimeFrames)
+    await expect.poll(frames).toContainEqual({ type: 'subscribed', topics: ['models'] })
+
+    const slug = `e2e-ws-${Date.now().toString(36)}`
+    const created = await request.post('/api/v1/models', {
+      multipart: {
+        file: { name: `${slug}.scad`, mimeType: 'text/plain', buffer: Buffer.from('cube(4);\n') },
+      },
+    })
+    expect(created.ok()).toBeTruthy()
+    try {
+      await expect
+        .poll(async () => (await frames()).find((f) => f.kind === 'model.created')?.data?.slug)
+        .toBe(slug)
+    } finally {
+      await request.delete(`/api/v1/models/${slug}`)
+    }
+  })
 })
 
 /**
