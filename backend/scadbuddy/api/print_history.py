@@ -75,6 +75,10 @@ ARCHIVES_PAGE = "/archives"
 QUEUE_PAGE = "/queue"
 MAX_LIMIT = 100
 DEFAULT_LIMIT = 50
+#: How many linked prints one list request examines at most, each an archive read
+#: from Bambuddy: a filter that matches little returns what it found so far, with
+#: a cursor to carry on from, rather than sweeping the whole history (#609 review).
+MAX_SCANNED = 200
 #: How many archive reads one list request has in flight at once.
 READ_CONCURRENCY = 8
 #: A cursor is the last archive id of the page before; opaque to the client.
@@ -127,7 +131,9 @@ class PrintSummary(_Response):
 class PrintPage(_Response):
     items: list[PrintSummary]
     #: Pass as ``cursor`` for the next page; None when no linked print is left. A
-    #: next page can still be empty when the remaining prints all fail the filters.
+    #: page can hold fewer than ``limit`` prints, or none, and still have a cursor:
+    #: one request examines at most `MAX_SCANNED` prints, so a filter that matches
+    #: little is answered a stretch of history at a time.
     next_cursor: str | None = None
 
 
@@ -430,7 +436,8 @@ async def _bounded[T](calls: Sequence[Awaitable[T]], limit: int) -> list[T]:
         "time. Filters: the template (`slug`), Bambuddy's `status` (or "
         "`deleted_in_bambuddy`), `printer_id`, the day the print started (`from`, `to`, "
         "inclusive) and `q`, matched against the output's and the print's names and "
-        "the parameter values."
+        f"the parameter values. One request examines at most {MAX_SCANNED} linked prints, "
+        "so a page can be short, even empty, and still carry a `next_cursor`."
     ),
 )
 async def list_prints(
@@ -464,9 +471,13 @@ async def list_prints(
     #: The archives Bambuddy still has, of those in ``items``.
     present: set[int] = set()
 
+    scanned = 0
+
     async with client_for(store.load()) as client:
         while True:
-            batch = await links.page(limit=limit, before=before, output_ids=output_ids)
+            wanted = min(limit, MAX_SCANNED - scanned)
+            batch = await links.page(limit=wanted, before=before, output_ids=output_ids)
+            scanned += len(batch)
             archives = await _bounded(
                 [cache.archive(client, link.archive_id) for link in batch], READ_CONCURRENCY
             )
@@ -498,8 +509,14 @@ async def list_prints(
                         items=await _named(cache, client, items, present),
                         next_cursor=str(before) if more else None,
                     )
-            if len(batch) < limit:
+            if len(batch) < wanted:
                 return PrintPage(items=await _named(cache, client, items, present))
+            if scanned >= MAX_SCANNED:
+                more = bool(await links.page(limit=1, before=before, output_ids=output_ids))
+                return PrintPage(
+                    items=await _named(cache, client, items, present),
+                    next_cursor=str(before) if more else None,
+                )
 
 
 async def _require_print(links: PrintLinksDep, archive_id: int) -> LinkedPrint:

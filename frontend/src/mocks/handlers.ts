@@ -170,6 +170,15 @@ function runJob(jobId: string): void {
         announce('job.failed')
         return
       }
+      if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.CANCELLED_NAME) {
+        job.status = 'cancelled'
+        job.error = fixtures.CANCELLED_ERROR
+        job.log_tail = fixtures.CANCELLED_LOG_TAIL
+        // `core.events.JobKind` has no `job.cancelled`; `render/projection.py`'s
+        // `_FINISHED_KINDS` maps a job that ends `cancelled` to `job.superseded`.
+        announce('job.superseded')
+        return
+      }
       if (String(job.params?.['name'] ?? '').toLowerCase() === fixtures.PICTURELESS_NAME) {
         job.status = 'failed'
         job.error = 'openscad exited with 1'
@@ -804,7 +813,9 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (status !== null && print.status !== status) return false
   const printer = query.get('printer_id')
   if (printer !== null && print.printer_id !== Number(printer)) return false
-  const day = print.started_at?.slice(0, 10) ?? null
+  const archive = fixtures.printArchives[print.archive_id]
+  // The backend's `_day`: when it started, else (for a deleted archive) first seen.
+  const day = (print.started_at ?? archive?.first_seen)?.slice(0, 10) ?? null
   const from = query.get('from')
   const to = query.get('to')
   if ((from !== null || to !== null) && day === null) return false
@@ -814,7 +825,12 @@ function printMatches(print: PrintDetail, query: URLSearchParams): boolean {
   if (slug !== null && print.slug !== slug) return false
   const q = query.get('q')?.toLowerCase()
   if (q) {
-    const haystack = [print.output_name ?? '', print.slug, JSON.stringify(print.provenance.params)]
+    const haystack = [
+      print.output_name ?? '',
+      print.slug,
+      archive?.print_name ?? '',
+      JSON.stringify(print.provenance.params),
+    ]
     if (!haystack.some((text) => text.toLowerCase().includes(q))) return false
   }
   return true

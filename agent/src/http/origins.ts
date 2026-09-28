@@ -17,11 +17,13 @@ import { BlockList, isIP } from 'node:net'
 //
 // THE LIST. `SCADBUDDY_PUBLIC_URL`, the same variable the backend reads for the
 // URL Bambuddy's sidebar points at (backend/scadbuddy/core/settings.py
-// `public_url`; README "Running it"). Its origin is the one public origin. The
-// loopback pair (Host `localhost`/`127.0.0.1`/`[::1]` with the same Origin, from
-// a loopback peer) is always accepted, for local development and
-// `kubectl port-forward`; with the variable unset it is the only thing
-// accepted.
+// `public_url`; README "Running it"), plus `SCADBUDDY_ALLOWED_ORIGINS`, the
+// other origins the same deployment is served under (comma-separated; the LAN
+// hostname beside an SSO proxy, say — also read by the backend for its
+// realtime socket). The loopback pair (Host `localhost`/`127.0.0.1`/`[::1]`
+// with the same Origin, from a loopback peer) is always accepted, for local
+// development and `kubectl port-forward`; with both variables unset it is the
+// only thing accepted.
 //
 // FORWARDED HEADERS. `X-Forwarded-Proto` and `X-Forwarded-Host` are read only
 // from a peer inside `SCADBUDDY_AGENT_TRUSTED_PROXIES` (a comma-separated CIDR
@@ -114,12 +116,24 @@ export function parseCidrList(raw: string | undefined, name = 'SCADBUDDY_AGENT_T
   return list
 }
 
-/** Builds the policy from SCADBUDDY_PUBLIC_URL and SCADBUDDY_AGENT_TRUSTED_PROXIES. Throws on malformed values. */
-export function originPolicy(publicUrl: string | undefined, trustedProxies: string | undefined): OriginPolicy {
+/**
+ * Builds the policy from SCADBUDDY_PUBLIC_URL, SCADBUDDY_ALLOWED_ORIGINS (comma-separated)
+ * and SCADBUDDY_AGENT_TRUSTED_PROXIES. Throws on malformed values.
+ */
+export function originPolicy(
+  publicUrl: string | undefined,
+  trustedProxies: string | undefined,
+  allowedOrigins?: string | undefined,
+): OriginPolicy {
   const publicOrigins = new Set<string>()
   if (publicUrl !== undefined) {
     const origin = normaliseOrigin(publicUrl)
     if (!origin) throw new OriginConfigError('SCADBUDDY_PUBLIC_URL must be an http(s) URL')
+    publicOrigins.add(origin)
+  }
+  for (const entry of (allowedOrigins ?? '').split(',').map((s) => s.trim()).filter(Boolean)) {
+    const origin = normaliseOrigin(entry)
+    if (!origin) throw new OriginConfigError(`SCADBUDDY_ALLOWED_ORIGINS: "${entry}" is not an http(s) origin`)
     publicOrigins.add(origin)
   }
   return { publicOrigins, trustedProxies: parseCidrList(trustedProxies) }
