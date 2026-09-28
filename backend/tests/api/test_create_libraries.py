@@ -19,6 +19,7 @@ from scadbuddy.api.deps import STATE_ATTR, AppState, get_libraries
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.library.libraries import LibraryStore
 from tests.api import test_libraries as shared
+from tests.api.conftest import set_fake_env
 from tests.api.test_libraries import SLUG, SOURCE, create_model, pin
 
 pytestmark = pytest.mark.requires_git
@@ -45,11 +46,10 @@ def test_a_paste_pins_its_libraries_in_its_first_revision_and_checks_with_them(
     paths: DataPaths,
     upstream: tuple[str, dict[str, str]],
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     url, commits = upstream
     log = tmp_path / "openscadpath.log"
-    monkeypatch.setenv("FAKE_OPENSCAD_PATH_LOG", str(log))
+    set_fake_env(tmp_path, "FAKE_OPENSCAD_PATH_LOG", str(log))
 
     created = lib_client.post(
         "/api/v1/models",
