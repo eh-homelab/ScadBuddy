@@ -1,32 +1,39 @@
-"""Which extruder a chosen spool feeds, and what that means for the slice (#469).
+"""Which extruder each filament is sliced for, and whether the print can run (#469).
 
-On a dual-nozzle printer every AMS is wired to one side, so a spool's extruder is fixed
-by the tray it is loaded in, not chosen by the slicer. Left to itself (``filament_map_mode:
-"Auto For Flush"``) the slicer spreads the filaments across both extruders and slices
-each for the chosen nozzle size. When the other side has a different nozzle fitted, the
-printer pauses at the first layer (HMS 05FE8053, "the left nozzle is not matched with
-slicing file").
+Left to itself (``filament_map_mode: "Auto For Flush"``) the slicer spreads the
+filaments across both extruders and slices each for the chosen nozzle size. When the
+other side has a different nozzle fitted, the printer pauses at the first layer (HMS
+05FE8053, "the left nozzle is not matched with slicing file"). So the run pins every
+filament to an extruder whose fitted nozzle is the chosen size, and refuses before
+upload when it can't.
 
-So the run reads each spool's side from Bambuddy, refuses a spool whose side has the
-wrong nozzle before anything is uploaded, and pins the slice to the sides otherwise.
+What decides a filament's extruder depends on the printer:
+
+* **With the Filament Track Switch** (``fila_switch.installed``) the switch routes any
+  AMS to either nozzle, so where a spool is loaded constrains nothing; its inlet is only
+  where it rests between prints. Every filament goes to the side with the chosen size;
+  when both sides have it, the dialog may pick a side per filament (``extruders``),
+  and with none picked the slicer chooses.
+* **Without it**, each AMS is wired to one side, and a spool on the side with another
+  nozzle fitted cannot print.
 
 Extruder numbers are the printer's **physical** ones: 0 is the right (main) extruder,
-1 the left (deputy), and ``PrinterStatus.nozzles`` is indexed the same way. The side
-comes from, in order (mirroring upstream Bambuddy's ``utils/fts_routing.py``):
+1 the left (deputy), and ``PrinterStatus.nozzles`` is indexed the same way. A spool's
+side comes from, in order (mirroring upstream Bambuddy's ``utils/fts_routing.py``):
 
 * the external holder, assignment ``ams_id`` 255, whose tray names the side: tray 0 is
   Ext-L, tray 1 Ext-R;
-* ``ams_extruder_map``, which a printer without the Filament Track Switch reports;
-* ``ams_switch_inlet`` with the switch fitted: inlet A feeds the left extruder, B the
-  right, in the switch's rest position.
+* ``ams_extruder_map``, which a printer without the switch reports;
+* ``ams_switch_inlet`` with the switch fitted: inlet A rests on the left extruder, B on
+  the right.
 
 Anything else is ``None``, "unknown" — never quietly the right-hand side.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Literal
 
 from scadbuddy.bambuddy.filaments import FilamentOptions, FilamentPlan, FilamentWarning
@@ -41,15 +48,24 @@ FTS_INLET_EXTRUDER: dict[str, int] = {"A": LEFT, "B": RIGHT}
 Side = Literal["L", "R"]
 
 
+UnknownCause = Literal["no-status", "not-loaded", "no-side"]
+
+
+def track_switch(status: PrinterStatus | None) -> bool:
+    """Whether the Filament Track Switch is fitted, so any AMS reaches either nozzle."""
+    return status is not None and status.fila_switch is not None and status.fila_switch.installed
+
+
 def extruder_of(ams_id: int, tray_id: int, status: PrinterStatus | None) -> int | None:
-    """The physical extruder the tray feeds, or ``None`` when it cannot be told."""
+    """The physical extruder the tray feeds (or, with the switch, rests on), or
+    ``None`` when it cannot be told. An extruder id other than 0 or 1 is unknown."""
     if status is None:
         return None
     if ams_id == EXTERNAL_AMS_ID:
         return 1 - tray_id if tray_id in (0, 1) else None
     mapped = status.ams_extruder_map.get(str(ams_id))
     if mapped is not None:
-        return mapped
+        return mapped if mapped in (RIGHT, LEFT) else None
     inlet = status.ams_switch_inlet.get(str(ams_id))
     return FTS_INLET_EXTRUDER.get(inlet.upper()) if inlet else None
 
@@ -76,13 +92,15 @@ def fitted_size(status: PrinterStatus | None, extruder: int) -> str | None:
 
 @dataclass(frozen=True)
 class SlotSide:
-    """Where one slot's chosen spool is on the run's printer, and the side it feeds."""
+    """Where one slot's chosen spool is on the run's printer, and the side it feeds.
+    ``unknown`` says why ``extruder`` is ``None``."""
 
     slot_id: int
     spool_id: int
     ams_id: int | None
     tray_id: int | None
     extruder: int | None
+    unknown: UnknownCause | None = None
 
 
 def slot_sides(
@@ -99,13 +117,18 @@ def slot_sides(
     sides: list[SlotSide] = []
     for slot in sorted(plan.slots, key=lambda choice: choice.slot_id):
         row = here.get(slot.spool_id)
+        extruder = extruder_of(row.ams_id, row.tray_id, status) if row else None
+        unknown: UnknownCause | None = None
+        if extruder is None:
+            unknown = "no-status" if status is None else "not-loaded" if row is None else "no-side"
         sides.append(
             SlotSide(
                 slot_id=slot.slot_id,
                 spool_id=slot.spool_id,
                 ams_id=row.ams_id if row else None,
                 tray_id=row.tray_id if row else None,
-                extruder=extruder_of(row.ams_id, row.tray_id, status) if row else None,
+                extruder=extruder,
+                unknown=unknown,
             )
         )
     return sides
@@ -119,12 +142,14 @@ def _where(side: SlotSide) -> str:
     return f"AMS {side.ams_id}"
 
 
-def mismatch_errors(
-    sides: Sequence[SlotSide], size: str, status: PrinterStatus | None
-) -> list[str]:
-    """Why each slot cannot print at ``size``: its spool feeds a side whose mounted
-    nozzle is another size. A slot with no known side, or a side whose nozzle the
-    printer does not report, is not refused — the slicer chooses there."""
+def _unknown_reason(side: SlotSide) -> str:
+    if side.unknown == "not-loaded":
+        return f"Slot {side.slot_id}'s spool isn't loaded in this printer"
+    return f"The printer doesn't say which extruder {_where(side)} feeds (slot {side.slot_id})"
+
+
+def _spool_errors(sides: Sequence[SlotSide], size: str, status: PrinterStatus | None) -> list[str]:
+    """Without the switch: each spool whose side has another nozzle size fitted."""
     errors: list[str] = []
     for side in sides:
         if side.extruder is None:
@@ -145,43 +170,154 @@ def mismatch_errors(
     return errors
 
 
-def unknown_side_warnings(sides: Sequence[SlotSide]) -> list[FilamentWarning]:
-    return [
-        FilamentWarning(
-            kind="side-unknown",
-            slot_id=side.slot_id,
-            message=(
-                f"Slot {side.slot_id}'s spool isn't in an AMS of this printer, so the slicer "
-                "chooses which extruder prints every slot."
-            ),
-        )
-        for side in sides
-        if side.extruder is None
-    ]
+@dataclass(frozen=True)
+class ExtruderPlan:
+    """What the run does about extruders: the pin (``None`` leaves the slicer to
+    choose), the refusals, and the advisories."""
+
+    extruders: tuple[int, ...] | None = None
+    errors: list[str] = field(default_factory=list)
+    warnings: list[FilamentWarning] = field(default_factory=list)
 
 
-def extruder_map(sides: Sequence[SlotSide], *, filament_count: int) -> tuple[int, ...] | None:
-    """One physical extruder per filament of the file, or ``None`` to leave the choice
-    to the slicer — which is what any slot with an unknown side means for the whole
-    file, since one pinned filament and one auto-placed one is not a mode the slicer
-    has. A filament no slot chose a spool for follows the first pinned one: no plate
-    prints it (the resolver refuses a used slot with no spool), but the list needs an
-    entry for it."""
-    by_slot: dict[int, int] = {}
-    for side in sides:
-        if side.slot_id > filament_count:
-            continue
-        if side.extruder is None:
-            return None
-        by_slot[side.slot_id] = side.extruder
-    if not by_slot:
-        return None
-    first = next(iter(by_slot.values()))
+def _filled(by_slot: Mapping[int, int], filament_count: int) -> tuple[int, ...]:
+    """One extruder per filament. A filament no slot chose a spool for follows the first
+    pinned one: no plate prints it (the resolver refuses a used slot with no spool),
+    but the list needs an entry for it."""
+    first = by_slot[min(by_slot)]
     return tuple(by_slot.get(index + 1, first) for index in range(filament_count))
 
 
+def plan_extruders(
+    sides: Sequence[SlotSide],
+    status: PrinterStatus | None,
+    *,
+    size: str,
+    filament_count: int,
+    chosen: Mapping[int, int] | None = None,
+) -> ExtruderPlan:
+    """Pin every filament to an extruder whose fitted nozzle is ``size``, or say why not.
+
+    ``chosen`` is the dialog's per-slot extruder, where it picked one; each must name a
+    side with ``size`` fitted (and, without the switch, the side the spool feeds).
+
+    * Neither side has ``size``: refused. Nozzles the printer doesn't report: no pin,
+      and a warning, since nothing can be checked.
+    * One side has it: every filament goes there, whatever the spools' sides — never
+      Auto, which is what paused queue item 108. Without the switch a spool on the
+      other side is refused, and one of unknown side is pinned there with a warning.
+    * Both have it: with the switch, the chosen sides, else Auto (either nozzle
+      prints any filament). Without it, each spool's own side; one unknown side leaves
+      the file on Auto with a warning, which is safe because both nozzles match.
+    """
+    picks = {slot: extruder for slot, extruder in (chosen or {}).items() if slot <= filament_count}
+    own = [side for side in sides if side.slot_id <= filament_count]
+    by_slot = {side.slot_id: side for side in own}
+    switch = track_switch(status)
+    fitted = {extruder: fitted_size(status, extruder) for extruder in (RIGHT, LEFT)}
+    matching = [extruder for extruder in (RIGHT, LEFT) if fitted[extruder] == size]
+
+    errors: list[str] = []
+    for slot, extruder in sorted(picks.items()):
+        if extruder not in matching:
+            there = fitted.get(extruder)
+            errors.append(
+                f"Slot {slot} can't print on the {_side_word(extruder)}: "
+                + (
+                    f"its nozzle is {there} mm and this print is sliced for {size} mm."
+                    if there
+                    else "the printer doesn't report the nozzle fitted there."
+                )
+            )
+            continue
+        side = by_slot.get(slot)
+        wired = side.extruder if side is not None and not switch else None
+        if side is not None and wired is not None and wired != extruder:
+            errors.append(
+                f"Slot {slot}'s spool ({_where(side)}) feeds the {_side_word(wired)} "
+                f"extruder, so it can't print on the {_side_word(extruder)}."
+            )
+
+    if not matching:
+        right, left = fitted[RIGHT], fitted[LEFT]
+        if right is not None and left is not None:
+            sizes = " or ".join(dict.fromkeys((right, left)))
+            errors.append(
+                f"Neither nozzle is {size} mm: the right has {right} mm and the left "
+                f"{left} mm. Choose {sizes}, or fit a {size} mm nozzle."
+            )
+            return ExtruderPlan(errors=errors)
+        if errors:
+            return ExtruderPlan(errors=errors)
+        return ExtruderPlan(
+            warnings=[
+                FilamentWarning(
+                    kind="side-unknown",
+                    message=(
+                        "ScadBuddy couldn't read which nozzles the printer has fitted, so the "
+                        "slicer chooses the extruder for every color."
+                    ),
+                )
+            ]
+        )
+
+    if not switch:
+        errors += _spool_errors(own, size, status)
+    if errors:
+        return ExtruderPlan(errors=errors)
+
+    if len(matching) == 1:
+        only = matching[0]
+        warnings = (
+            []
+            if switch
+            else [
+                FilamentWarning(
+                    kind="side-unknown",
+                    slot_id=side.slot_id,
+                    message=(
+                        f"{_unknown_reason(side)}, so it's sliced for the {_side_word(only)} "
+                        f"extruder, the one with the {size} mm nozzle. Load it where it feeds "
+                        f"the {_side_word(only)}."
+                    ),
+                )
+                for side in own
+                if side.extruder is None and side.slot_id not in picks
+            ]
+        )
+        return ExtruderPlan(extruders=(only,) * filament_count, warnings=warnings)
+
+    if switch:
+        if not picks:
+            return ExtruderPlan()
+        # A filament left on Auto beside a picked one rests where its inlet does, else
+        # follows the first pick: both nozzles are the chosen size, so either prints it.
+        pinned = {side.slot_id: side.extruder for side in own if side.extruder is not None} | picks
+        return ExtruderPlan(extruders=_filled(pinned, filament_count))
+
+    unknown = [side for side in own if side.extruder is None and side.slot_id not in picks]
+    if unknown or not own:
+        return ExtruderPlan(
+            warnings=[
+                FilamentWarning(
+                    kind="side-unknown",
+                    slot_id=side.slot_id,
+                    message=(
+                        f"{_unknown_reason(side)}. Both nozzles are {size} mm, so the slicer "
+                        "chooses the extruder for every color."
+                    ),
+                )
+                for side in unknown
+            ]
+        )
+    pinned = {side.slot_id: side.extruder for side in own if side.extruder is not None} | picks
+    return ExtruderPlan(extruders=_filled(pinned, filament_count))
+
+
 def with_sides(options: FilamentOptions, status: PrinterStatus | None) -> FilamentOptions:
-    """``options`` with each spool loaded in its printer labelled with its side."""
+    """``options`` with each spool loaded in its printer labelled with its side, and
+    whether that side is only where it rests (the switch is fitted)."""
+    options.track_switch = track_switch(status)
     for option in options.spools:
         loaded = option.loaded
         if loaded is None or loaded.printer_id != options.printer_id:

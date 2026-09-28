@@ -18,6 +18,8 @@ outright rather than offering an override.
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from scadbuddy.bambuddy.catalogue import PresetChoice, _Catalogue
@@ -87,6 +89,10 @@ class PrintChoices(BaseModel):
     process_name: str | None = None
     bed_type: str = Field(default=DEFAULT_BED, max_length=64)
     filament_overrides: dict[int, PresetRef] = Field(default_factory=dict)
+    #: The dialog's extruder per slot — 0 right, 1 left — where it picked one (#469).
+    #: Offered when the Filament Track Switch lets any spool reach either nozzle and
+    #: both have the chosen size; the run refuses a side without that size fitted.
+    extruders: dict[int, Literal[0, 1]] = Field(default_factory=dict)
 
 
 class Resolved(BaseModel):

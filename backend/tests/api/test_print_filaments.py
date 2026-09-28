@@ -171,6 +171,8 @@ def test_each_loaded_spool_says_which_extruder_it_feeds(client: TestClient, mode
     assert sides[7] == (0, "R")  # AMS 1 tray 0
     assert sides[10] == (1, "L")  # AMS 2 tray 0
     assert sides[5] == (None, None)  # on the shelf
+    # With the switch any AMS reaches either nozzle, so those sides are where each rests.
+    assert body["track_switch"] is True
 
 
 def test_the_filament_step_takes_no_nozzle_diameter(client: TestClient) -> None:
