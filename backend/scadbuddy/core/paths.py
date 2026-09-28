@@ -15,9 +15,14 @@ MODEL_META_NAME = "model.json"
 SCHEMA_CACHE_NAME = "schema.json"
 #: The file a template's presets used to ship in, beside its source. They are defined
 #: in ``model.json`` now (#326); this one is still read for a template that has it.
-#: The presets people save are not kept with a template -- see
-#: :meth:`DataPaths.model_presets`.
+#: The presets people save are not kept with a template: they are rows in Postgres
+#: (`library.presets.PresetStore`), so a save never moves the template's revision.
 LEGACY_PRESETS_NAME = "presets.json"
+#: Finished renders kept under a template, one directory per render key
+#: (`render/render_cache.py`). Hidden, so a duplicate or upload staging (which skip
+#: ``.*``) never copies them, and ignored by the models repository: they are
+#: derived from the source and must never move a template's revision.
+RENDERS_DIR_NAME = ".renders"
 #: Where the built-in templates are mirrored from the image, inside the models
 #: repository. Slugs are `[a-z0-9-]`, so it can never be one.
 BUILTIN_DIR = "_builtin"
@@ -76,17 +81,6 @@ class DataPaths:
         and not under ``cache/`` (an output's parameters name them for as long as the
         output exists; the sweep removes only what nothing names, #296)."""
         return self.root / "assets"
-
-    @property
-    def presets(self) -> Path:
-        """The presets people save, one file per template. Not under ``models/``: a
-        built-in's directory is the image's and only the boot sync writes it, and a
-        saved preset is not a change to the template, so it must not move the
-        template's revision (which outputs are stamped with, and duplicates track)."""
-        return self.root / "presets"
-
-    def model_presets(self, slug: str) -> Path:
-        return self.presets / f"{slug}.json"
 
     @property
     def builtins(self) -> Path:
@@ -154,6 +148,5 @@ class DataPaths:
             self.fonts,
             self.libraries,
             self.assets,
-            self.presets,
         ):
             directory.mkdir(parents=True, exist_ok=True)

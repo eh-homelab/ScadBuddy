@@ -15,7 +15,12 @@ from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import GitError, ModelHistory, RevisionNotFoundError
 from scadbuddy.library.libraries import CheckoutFetcher
 from scadbuddy.render.jobs import ModelSource, resolve_source
-from scadbuddy.render.runner import UnknownParameterError, build_defines, cached_schema
+from scadbuddy.render.runner import (
+    ParameterValueError,
+    UnknownParameterError,
+    build_defines,
+    cached_schema,
+)
 from scadbuddy.render.schema import CustomizerSchema, ParamValue
 
 
@@ -55,7 +60,8 @@ async def schema_of(
 
 
 def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamValue]) -> None:
-    """422 unless every one of ``params`` is a parameter of ``schema``, of its type."""
+    """422 unless every one of ``params`` is a parameter of ``schema``, of its type,
+    inside its customizer range and, for a select, one of its options (#432)."""
     unknown = sorted(set(params) - {p.name for p in schema.parameters})
     if unknown:
         raise ApiError(
@@ -67,6 +73,10 @@ def require_valid_params(schema: CustomizerSchema, params: Mapping[str, ParamVal
         build_defines(schema, params)
     except UnknownParameterError as error:  # pragma: no cover - covered by the check above
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
+    except ParameterValueError as error:
+        raise ApiError(
+            status.HTTP_422_UNPROCESSABLE_CONTENT, str(error), parameters=[error.parameter]
+        ) from None
     except ValueError as error:
         raise ApiError(status.HTTP_422_UNPROCESSABLE_CONTENT, str(error)) from None
 
