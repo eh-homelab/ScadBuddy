@@ -106,7 +106,5 @@ claude plugin validate .
 The plugin README says `version` in `plugin.json` follows the app release and matches
 `backend/pyproject.toml` and `frontend/package.json`. Both are `0.1.0` today.
 
-**Discrepancy found while writing this page:** `plugin.json` declares
-`"license": "MIT"`, but the repository switched to Apache-2.0 in #301
-([`LICENSE`](../../LICENSE)). Spec §2 "Licensing" also still says "ScadBuddy stays MIT".
-Neither is changed here.
+The plugin's `license` is `Apache-2.0`, the repository's license since #301
+([`LICENSE`](../../LICENSE)).

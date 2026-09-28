@@ -207,9 +207,9 @@ match `SCADBUDDY_PUBLIC_URL`.
 
 - Keep these strings stable. The CI smoke test asserts
   `.ai == "disabled (no database)"` on the image
-  ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). The `AiStatus` comment
-  also says the backend's health report will read `ai` to decide whether the UI shows
-  AI (#261). No backend code on `main` reads it yet.
+  ([`.github/workflows/ci.yml`](../../.github/workflows/ci.yml)). That test is the only
+  reader of `ai` today; no backend or frontend code on `main` reads it (the `AiStatus`
+  comment in `agent/src/app.ts`).
 - **Migrations** (`agent/src/db/migrations.ts`) run in the background at start
   (`void database?.ready()` in `main.ts`). They run under a transaction-scoped advisory
   lock with `lock_timeout` 10 s and `statement_timeout` 60 s
