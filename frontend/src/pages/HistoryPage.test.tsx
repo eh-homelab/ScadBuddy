@@ -1,5 +1,5 @@
 import { act, screen, waitFor, within } from '@testing-library/react'
-import { HttpResponse, http } from 'msw'
+import { delay, HttpResponse, http } from 'msw'
 import { Route, Routes, useLocation, useParams } from 'react-router'
 import { describe, expect, it } from 'vitest'
 import { bbox } from '../mocks/fixtures'
@@ -180,6 +180,18 @@ describe('HistoryPage', () => {
 
     await waitFor(() => expect(screen.queryAllByText('Nova')).toHaveLength(0))
     expect(asked).toBe('?delete_inbox_copies=true')
+  })
+
+  it('does not label a copy inbox or project before the settings have loaded', async () => {
+    server.use(http.get('/api/v1/settings', () => delay('infinite')))
+    const { user } = render()
+    await user.click(within(await row('Nova')).getByRole('button', { name: 'Delete' }))
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete Nova?' })
+    const copies = within(dialog).getByRole('list', { name: 'Library copies' })
+    expect(copies).not.toHaveTextContent('in the inbox folder')
+    expect(copies).not.toHaveTextContent('in a project folder')
+    expect(within(copies).getAllByText(/folder not recorded/)).toHaveLength(2)
   })
 
   it('leaves Bambuddy alone unless the inbox copies are ticked', async () => {

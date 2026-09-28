@@ -109,7 +109,9 @@ export function HistoryPage() {
 
       <DeleteOutputDialog
         output={confirmFor}
-        inboxFolderId={settings?.library_folder_id ?? null}
+        // Undefined until the settings load: every copy then reads as not yet placed,
+        // rather than being labelled against a guessed inbox.
+        inboxFolderId={settings === undefined ? undefined : (settings.library_folder_id ?? null)}
         deleting={confirmFor !== undefined && deleting === confirmFor.id}
         onClose={() => setConfirmFor(undefined)}
         onConfirm={(output, deleteInboxCopies) => remove(output.id, deleteInboxCopies)}
@@ -133,8 +135,8 @@ function lastCopy(output: Output): LibraryCopy | undefined {
 
 type CopyPlace = 'inbox' | 'project' | 'unknown'
 
-function placeOf(copy: LibraryCopy, inboxFolderId: number | null): CopyPlace {
-  if (copy.folder_known === false) return 'unknown'
+function placeOf(copy: LibraryCopy, inboxFolderId: number | null | undefined): CopyPlace {
+  if (copy.folder_known === false || inboxFolderId === undefined) return 'unknown'
   return (copy.folder_id ?? null) === inboxFolderId ? 'inbox' : 'project'
 }
 
@@ -152,7 +154,7 @@ function DeleteOutputDialog({
   onConfirm,
 }: {
   output: Output | undefined
-  inboxFolderId: number | null
+  inboxFolderId: number | null | undefined
   deleting: boolean
   onClose: () => void
   onConfirm: (output: Output, deleteInboxCopies: boolean) => Promise<void>

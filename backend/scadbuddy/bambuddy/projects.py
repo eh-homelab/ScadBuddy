@@ -158,14 +158,21 @@ async def ensure_project(client: BambuddyClient, request: ProjectRequest) -> Pro
     return _view(project, folder)
 
 
-async def folder_for(client: BambuddyClient, project_id: int) -> int | None:
-    """The folder a project's sends belong in, or ``None`` if it has none.
+async def folder_for(client: BambuddyClient, project_id: int) -> int:
+    """The folder a project's sends belong in, created and linked if it has none yet.
 
-    ``None`` is not an error: the caller falls back to the folder from Settings, which
-    is where every send went before this issue.
+    Never ``None``: falling back to the Settings folder would put the project's copy in
+    the inbox, where the next inbox upload supersedes and deletes it (#316) — and the
+    picker offers folderless projects on the promise that the first send creates the
+    folder. One read when the folder exists; :func:`ensure_project` otherwise.
     """
     folder = next(iter(await client.folders_by_project(project_id)), None)
-    return folder.id if folder else None
+    if folder is not None:
+        return folder.id
+    view = await ensure_project(client, ProjectRequest(project_id=project_id))
+    if view.folder_id is None:  # pragma: no cover - ensure_project always links one
+        raise ApiError(502, f"Bambuddy did not link a library folder to project {project_id}")
+    return view.folder_id
 
 
 class AttachResult(BaseModel):

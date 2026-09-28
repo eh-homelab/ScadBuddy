@@ -127,6 +127,38 @@ def test_a_send_to_project_a_then_b_leaves_a_file_in_each(client: TestClient, mo
 
 
 @respx.mock
+def test_a_project_without_a_folder_gets_one_and_its_copy_is_never_superseded(
+    client: TestClient, model: str
+) -> None:
+    """The picker offers projects that have no folder yet. Such a send must not land in
+    the inbox, where the next inbox upload would delete it: the folder is created and
+    linked first, as the picker promises."""
+    output_id = set_up(client, model)
+    respx.get(f"{API}/library/folders/by-project/11").mock(
+        return_value=httpx.Response(200, json=[])
+    )
+    respx.get(f"{API}/projects/11").mock(
+        return_value=httpx.Response(200, json={"id": 11, "name": "Kids", "status": "active"})
+    )
+    created = respx.post(f"{API}/library/folders/").mock(
+        return_value=httpx.Response(200, json={"id": 12, "name": "Kids", "project_id": 11})
+    )
+    upload = uploads(41, 42)
+    delete = deletes()
+
+    body = run(client, output_id, pipeline_id=1, project_id=11)
+    assert (body["library_file_id"], body["folder_id"]) == (41, 12)
+    assert created.called
+    assert json.loads(created.calls[0].request.content)["project_id"] == 11
+
+    # A send with no project, for another printer, supersedes inbox copies only.
+    run(client, output_id, pipeline_id=2)
+    assert folders_uploaded_to(upload) == ["12", str(INBOX)]
+    assert not delete.called, "the project's copy was deleted as if it were in the inbox"
+    assert copies(client, output_id) == [(41, 12), (42, INBOX)]
+
+
+@respx.mock
 def test_a_printer_change_keeps_the_old_file_in_a_project_folder(
     client: TestClient, model: str
 ) -> None:
