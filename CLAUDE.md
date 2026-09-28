@@ -102,7 +102,8 @@ SCADBUDDY_OPENSCAD_IMAGE=scadbuddy-verify:ci SCADBUDDY_FONTS_IMAGE=scadbuddy-ver
 - `backend/scadbuddy/library/` — catalogue, outputs, git-backed model history
   (`history.py`), fonts (`fonts.py`, `googlefonts.py`), per-template presets
   (`presets.py`: saved ones under `data/presets/`, outside git so a save never moves a
-  template's revision; shipped read-only ones in a template's `presets.json`).
+  template's revision; a template's own read-only ones in the `presets` list of its
+  `model.json`, with a legacy `presets.json` still read).
 - `backend/scadbuddy/api/` — FastAPI routes under `/api/v1`; `core/` — config/settings
   (every env var is `SCADBUDDY_<FIELD>`, see `core/settings.py`).
 - `frontend/src/` — React 19 + Vite; `src/mocks/` is the msw API used by vitest and
