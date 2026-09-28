@@ -105,6 +105,17 @@ test.describe('customizer', () => {
     // The readouts move clear of it; the scene stays where it was.
     expect((await bbox.boundingBox())?.x).toBeGreaterThanOrEqual(360)
     expect(await canvas.boundingBox()).toEqual(whole)
+
+    // A dialog from the flyout, in the browser's own full screen. The page's part of
+    // Escape: the dialog takes it, and nothing in the page leaves full screen for it.
+    // A real browser leaves anyway, on its own and past any page's reach (spec §5.3);
+    // automated Chromium never hands it the key, so that half is checked by hand.
+    await page.getByRole('button', { name: 'Browse' }).click()
+    const picker = page.getByRole('dialog', { name: 'Choose a font' })
+    await expect(picker).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(picker).toBeHidden()
+    expect(await page.evaluate('document.fullscreenElement !== null')).toBe(true)
     await page.getByRole('button', { name: 'Close parameters' }).click()
     await expect(parameters).toBeHidden()
 

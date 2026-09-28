@@ -1099,7 +1099,7 @@ describe('full screen', () => {
     expect(screen.queryByRole('textbox', { name: 'Name on the tag' })).not.toBeInTheDocument()
   })
 
-  it('lets Escape close the font picker in the flyout without leaving full screen', async () => {
+  it('lets Escape close the font picker in the flyout without leaving the stand-in', async () => {
     const { user } = render()
     await firstRender()
     await user.click(screen.getByRole('button', { name: 'Full screen' }))
