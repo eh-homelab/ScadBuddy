@@ -111,7 +111,7 @@ describe('MCP authorization end to end: discovery → 401 → login → token �
     const claims = decodeJwt(provider.saved!.access_token)
     expect(claims.aud).toBe(SERVER_URL.href)
 
-    // 3. With the token, the session opens and a tool runs as oidc:alice.
+    // 3. With the token, the session opens and a tool runs as oidc:<issuer>#alice.
     const client = new Client({ name: 'e2e', version: '0' })
     await client.connect(new StreamableHTTPClientTransport(SERVER_URL, { authProvider: provider, fetch: fetchFn }))
     try {

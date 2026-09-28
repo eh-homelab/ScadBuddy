@@ -99,6 +99,10 @@ What is checked, in order:
   at all, which also closes RSA-public-key-as-HMAC-secret confusion (tested).
 - **`typ`**, when present, must be `at+jwt`, `application/at+jwt` or `JWT`. An ID token
   typed as such is refused.
+- **Not an ID token** (`idTokenMarker()`): a token carrying `nonce` or `at_hash`, or
+  Keycloak's payload `typ: "ID"`, is refused. When **Audience** is overridden (typically
+  to the client id, which an ID token also names), the token must also be an RFC 9068
+  access token: header `typ` `at+jwt`, or a `client_id` claim.
 - **Signature** by a key from the issuer's JWKS (`jose` `jwtVerify` with a local JWK set).
   Private (`d`) and symmetric (`oct`) keys and keys with `use` other than `sig` are
   dropped from the fetched set.
@@ -131,8 +135,10 @@ the principal handed to tools carries the subject and tiers, not the token
 - Redirects are not followed; bodies over 512 KiB and requests over 5 s fail.
 - **Caching:** metadata and JWKS for 10 minutes. An unknown `kid` triggers one JWKS
   refetch, at most every 30 s, so a flood of forged tokens cannot make the agent hammer
-  the IdP. A failed fetch is remembered for 30 s; a failed refresh keeps the last good
-  keys. An unreachable IdP answers `503` (with `Retry-After`), not `401`, so clients do
+  the IdP. A failed fetch is remembered for 30 s; a failed refresh keeps serving the last
+  good metadata and keys, but only until 1 hour after they were fetched (a failure never
+  re-stamps them as fresh), so a key the IdP rotated out stops verifying even while the
+  IdP stays unreachable. An unreachable IdP answers `503` (with `Retry-After`), not `401`, so clients do
   not discard good tokens.
 
 **Enabling** (`PUT /api/v1/ai/mcp/oidc`, [`agent/src/routes/mcpAuth.ts`](../../agent/src/routes/mcpAuth.ts)):
@@ -141,9 +147,11 @@ exactly, and a JWKS with at least one public signing key). The write passes the 
 interim UI gate as credential writes (`uiRequestProblem()`), which is **not an approval**
 (#258) and not authentication; see [Known limitations](#known-limitations).
 
-**Audit.** OIDC principals are `oidc:<sub>` with `subject` (and `clientId` from `azp` or
-`client_id`) on the principal. There is no audit log on `main` yet (#258); when it lands
-it records the subject in place of a token name.
+**Audit.** OIDC principals are `oidc:<issuer>#<sub>` (a `sub` is unique only per
+issuer, so a new issuer's colliding `sub` does not inherit anything) with `subject` (and `clientId` from `azp` or
+`client_id`) on the principal. An approval records it as `requested_by` kind `oidc`, labelled
+`MCP OIDC <sub> via <client>` (`ownerOf()` in
+[`agent/src/approvals/mcp.ts`](../../agent/src/approvals/mcp.ts), an exhaustive switch).
 
 **Tests.** [`agent/test/oidc.test.ts`](../../agent/test/oidc.test.ts) (bad issuer,
 audience, expiry, `nbf`, missing claims, algorithm allowlist, `none`, HS256 confusion,

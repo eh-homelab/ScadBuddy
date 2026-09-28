@@ -42,7 +42,7 @@ describe('OidcProvider.verify: a good token', () => {
     const verdict = await provider.verify(await idp.sign({ azp: 'claude-code' }), config, AUD)
     expect(verdict).toEqual({
       ok: true,
-      principal: { id: 'oidc:alice', kind: 'oidc', tiers: ['read'], subject: 'alice', clientId: 'claude-code' },
+      principal: { id: `oidc:${idp.issuer}#alice`, kind: 'oidc', tiers: ['read'], subject: 'alice', clientId: 'claude-code' },
     })
   })
 
@@ -153,6 +153,45 @@ describe('OidcProvider.verify: refused tokens', () => {
     expect((await refused(await idp.sign({}, { typ: 'id_token+jwt' }))).detail).toContain('not an access token')
   })
 
+  it('refuses an ID token by its ID-token claims, even typed JWT or untyped', async () => {
+    for (const typ of ['JWT', 'at+jwt']) {
+      expect((await refused(await idp.sign({ nonce: 'n-0S6_WzA2Mj' }, { typ }))).detail).toContain('"nonce"')
+      expect((await refused(await idp.sign({ at_hash: 'HK6E_P6Dh8Y93mRNtsDB1Q' }, { typ }))).detail).toContain('"at_hash"')
+    }
+    // Keycloak types its ID tokens in the payload.
+    expect((await refused(await idp.sign({ typ: 'ID' }, { typ: 'JWT' }))).detail).toContain('ID token')
+  })
+
+  it('with an overridden audience, accepts only an RFC 9068 access token (at+jwt, or client_id)', async () => {
+    // The setup operating.md describes for IdPs that cannot put a URL in aud:
+    // the audience is the client id, which an ID token names too.
+    const custom = { ...config, audience: 'scadbuddy', tier_claim: 'groups', scopes: { read: 'r', write: 'w', outward: 'o' } }
+    const idToken = { aud: 'scadbuddy', azp: 'scadbuddy', groups: ['o'] }
+    const verdict = await provider.verify(await idp.sign(idToken, { typ: 'JWT' }), custom, 'scadbuddy')
+    expect(verdict).toMatchObject({ ok: false, error: 'invalid_token' })
+    expect((verdict as { detail: string }).detail).toContain('RFC 9068')
+    // An access token says so: by header type, or by client_id.
+    expect((await provider.verify(await idp.sign(idToken, { typ: 'at+jwt' }), custom, 'scadbuddy')).ok).toBe(true)
+    expect(
+      (await provider.verify(await idp.sign({ ...idToken, client_id: 'scadbuddy' }, { typ: 'JWT' }), custom, 'scadbuddy')).ok,
+    ).toBe(true)
+    // With the resource URI as audience, a JWT-typed access token is fine as before.
+    expect((await provider.verify(await idp.sign({}, { typ: 'JWT' }), config, AUD)).ok).toBe(true)
+  })
+
+  it('names the principal by issuer and subject, so a new issuer does not inherit an old sub', async () => {
+    const other = await startFakeIdp()
+    try {
+      const a = await provider.verify(await idp.sign({ sub: 'alice' }), config, AUD)
+      const otherConfig = { ...defaultOidcConfig(other.issuer), enabled: true }
+      const b = await provider.verify(await other.sign({ sub: 'alice' }), otherConfig, AUD)
+      expect(a.ok && b.ok).toBe(true)
+      if (a.ok && b.ok) expect(a.principal.id).not.toBe(b.principal.id)
+    } finally {
+      await other.close()
+    }
+  })
+
   it('refuses a token with no mapped scope as insufficient_scope', async () => {
     const v = await refused(await idp.sign({ scope: 'openid profile' }))
     expect(v.error).toBe('insufficient_scope')
@@ -195,6 +234,31 @@ describe('OidcProvider: key rotation and refetch limits', () => {
     const stranger = await newKey('RS256')
     for (let i = 0; i < 5; i++) await provider.verify(await idp.sign(clock, { key: stranger }), config, AUD)
     expect(idp.hits.jwks).toBe(2)
+  })
+})
+
+describe('OidcProvider: an unreachable IdP', () => {
+  it('serves the last good keys only up to maxStaleMs after they were fetched, however often a refresh fails', async () => {
+    let skew = 0
+    provider = new OidcProvider({ now: () => Date.now() + skew, ttlMs: 60_000, refreshCooldownMs: 30_000, maxStaleMs: 120_000 })
+    const iat = now()
+    const token = await idp.sign({ iat, exp: iat + 3600 })
+    expect((await provider.verify(token, config, AUD)).ok).toBe(true)
+    await idp.close()
+
+    // Past the TTL the refresh fails and the old keys are served.
+    skew = 70_000
+    expect((await provider.verify(token, config, AUD)).ok).toBe(true)
+    skew = 71_000
+    expect((await provider.verify(token, config, AUD)).ok).toBe(true)
+    // Another failed refresh does not re-stamp them as fresh...
+    skew = 105_000
+    expect((await provider.verify(token, config, AUD)).ok).toBe(true)
+    // ...so past the cap (fetched at 0) they are no longer trusted.
+    skew = 125_000
+    expect(await provider.verify(token, config, AUD)).toMatchObject({ ok: false, error: 'temporarily_unavailable' })
+    skew = 200_000
+    expect(await provider.verify(token, config, AUD)).toMatchObject({ ok: false, error: 'temporarily_unavailable' })
   })
 })
 

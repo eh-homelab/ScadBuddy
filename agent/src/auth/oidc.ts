@@ -279,13 +279,23 @@ export class DiscoveryError extends Error {
   override name = 'DiscoveryError'
 }
 
-type Entry<T> = { at: number; value?: T; error?: Error; inflight?: Promise<T> }
+/**
+ * `at` is the last fetch attempt (for the cooldown); `fetchedAt` is when
+ * `value` was fetched (for the TTL and the staleness cap).
+ */
+type Entry<T> = { at: number; fetchedAt?: number; value?: T; error?: Error; inflight?: Promise<T> }
 
 export type OidcProviderOptions = {
   /** For the egress check; the system resolver by default. */
   resolve?: Resolver
   /** How long metadata and keys are reused (default 10 min). */
   ttlMs?: number
+  /**
+   * How long after it was fetched a value may still be served while the IdP
+   * cannot be reached (default 1 h). Past it, tokens get `503` until a fetch
+   * succeeds.
+   */
+  maxStaleMs?: number
   /**
    * The least time between two fetches of the same document (default 30 s):
    * a failure is remembered this long, and an unknown `kid` forces a JWKS
@@ -306,6 +316,43 @@ export type OidcVerdict =
 
 function isJwt(token: string): boolean {
   return /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/.test(token)
+}
+
+/**
+ * The principal id of an OIDC subject: `oidc:<issuer>#<sub>`. `sub` is only
+ * unique per issuer (OIDC Core §2), so after the issuer changes in Settings a
+ * colliding `sub` must not inherit the old user's sessions, approvals or limits.
+ */
+export function oidcPrincipalId(issuer: string, sub: string): string {
+  return `oidc:${issuer}#${sub}`
+}
+
+/**
+ * Why a verified JWT is an ID token rather than an access token, or undefined.
+ * An ID token is signed by the same keys and names the client as its `aud`,
+ * so with an overridden audience (the client id) it would pass every other
+ * check. Refused: `nonce` and `at_hash` (OIDC Core §2, §3.1.3.6: ID-token
+ * claims, never in an RFC 9068 access token) and Keycloak's `typ: "ID"`. With
+ * an overridden audience the token must also show it is an access token, by
+ * the RFC 9068 `at+jwt` header type or its required `client_id` claim (§2.2).
+ */
+function idTokenMarker(payload: JWTPayload, typ: string | undefined, config: OidcConfig): string | undefined {
+  for (const claim of ['nonce', 'at_hash']) {
+    if (payload[claim] !== undefined) return `the token carries "${claim}": it is an ID token, not an access token`
+  }
+  if (typeof payload['typ'] === 'string' && payload['typ'].toLowerCase() === 'id') {
+    return 'the token is typed "ID": it is an ID token, not an access token'
+  }
+  if (config.audience !== null) {
+    const typed = typ !== undefined && ['at+jwt', 'application/at+jwt'].includes(typ.toLowerCase())
+    if (!typed && typeof payload['client_id'] !== 'string') {
+      return (
+        'with an overridden audience the token must be an RFC 9068 access token ' +
+        '(header typ "at+jwt" or a "client_id" claim)'
+      )
+    }
+  }
+  return undefined
 }
 
 /** A short reason for a refused token; it goes into `error_description` (RFC 6750 §3). */
@@ -338,6 +385,7 @@ function reasonOf(err: unknown): string {
 export class OidcProvider {
   readonly #resolve: Resolver | undefined
   readonly #ttlMs: number
+  readonly #maxStaleMs: number
   readonly #cooldownMs: number
   readonly #timeoutMs: number
   readonly #clockTolerance: number
@@ -348,6 +396,7 @@ export class OidcProvider {
   constructor(options: OidcProviderOptions = {}) {
     this.#resolve = options.resolve
     this.#ttlMs = options.ttlMs ?? 10 * 60_000
+    this.#maxStaleMs = Math.max(options.maxStaleMs ?? 60 * 60_000, this.#ttlMs)
     this.#cooldownMs = options.refreshCooldownMs ?? 30_000
     this.#timeoutMs = options.timeoutMs ?? 5000
     this.#clockTolerance = options.clockToleranceSec ?? 30
@@ -365,26 +414,42 @@ export class OidcProvider {
   /**
    * The cached value, or a fetch. `fresh` forces a fetch unless one ran
    * within the cooldown. Concurrent callers share one fetch.
+   *
+   * A failed refresh keeps (and serves) the last good value, but with the
+   * time it was fetched (`fetchedAt`), never re-stamped: it is served only until
+   * `maxStaleMs` after that fetch, so a key the IdP rotated out stops
+   * verifying even while the IdP stays unreachable.
    */
   async #cached<T>(cache: Map<string, Entry<T>>, key: string, fresh: boolean, load: () => Promise<T>): Promise<T> {
     const now = this.#now()
     const entry = cache.get(key)
     if (entry?.inflight) return entry.inflight
     if (entry) {
-      const age = now - entry.at
-      if (entry.error && age < this.#cooldownMs) throw entry.error
-      if (entry.value !== undefined && age < this.#ttlMs && (!fresh || age < this.#cooldownMs)) return entry.value
+      const sinceAttempt = now - entry.at
+      const valueAge = entry.fetchedAt === undefined ? Infinity : now - entry.fetchedAt
+      if (entry.value !== undefined) {
+        if (valueAge < this.#ttlMs && (!fresh || sinceAttempt < this.#cooldownMs)) return entry.value
+        // Stale after a failed refresh: served during the cooldown, up to the cap.
+        if (entry.error && sinceAttempt < this.#cooldownMs && valueAge < this.#maxStaleMs) return entry.value
+      }
+      if (entry.error && sinceAttempt < this.#cooldownMs) throw entry.error
     }
     const inflight = load()
     cache.set(key, { ...entry, at: now, inflight })
     try {
       const value = await inflight
-      cache.set(key, { at: this.#now(), value })
+      const at = this.#now()
+      cache.set(key, { at, fetchedAt: at, value })
       return value
     } catch (err) {
       const error = err instanceof Error ? err : new Error(String(err))
-      // Keep serving the last good value on a failed refresh; remember the failure otherwise.
-      cache.set(key, entry?.value !== undefined ? { at: this.#now(), value: entry.value } : { at: this.#now(), error })
+      const at = this.#now()
+      const keep =
+        entry?.value !== undefined && entry.fetchedAt !== undefined && at - entry.fetchedAt < this.#maxStaleMs
+      cache.set(key, keep ? { at, fetchedAt: entry.fetchedAt, value: entry.value, error } : { at, error })
+      // A routine refresh falls back to the kept value; a forced one (an
+      // unknown kid) reports the failure, since the kept keys lack that kid.
+      if (keep && !fresh) return entry.value!
       throw error
     }
   }
@@ -522,6 +587,9 @@ export class OidcProvider {
       return { ok: false, error: 'invalid_token', detail: reasonOf(err) }
     }
 
+    const notAccess = idTokenMarker(payload, typ, config)
+    if (notAccess) return { ok: false, error: 'invalid_token', detail: notAccess }
+
     const sub = payload.sub
     if (typeof sub !== 'string' || sub.length === 0 || sub.length > 255) {
       return { ok: false, error: 'invalid_token', detail: 'the token has no usable "sub"' }
@@ -537,7 +605,13 @@ export class OidcProvider {
     const clientId = typeof payload['azp'] === 'string' ? payload['azp'] : typeof payload['client_id'] === 'string' ? payload['client_id'] : undefined
     return {
       ok: true,
-      principal: { id: `oidc:${sub}`, kind: 'oidc', tiers: tiersUpTo(tier), subject: sub, ...(clientId ? { clientId } : {}) },
+      principal: {
+        id: oidcPrincipalId(config.issuer, sub),
+        kind: 'oidc',
+        tiers: tiersUpTo(tier),
+        subject: sub,
+        ...(clientId ? { clientId } : {}),
+      },
     }
   }
 }

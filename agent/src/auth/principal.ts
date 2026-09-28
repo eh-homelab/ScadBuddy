@@ -15,7 +15,7 @@ export type PrincipalKind = 'bearer' | 'oidc' | 'anonymous' | 'browser'
 
 export type Principal = {
   /**
-   * Stable per principal: `token:<id>`, `oidc:<sub>` (the IdP's subject, #262),
+   * Stable per principal: `token:<id>`, `oidc:<issuer>#<sub>` (the IdP's subject, #262),
    * `anonymous:<mcp session id>`, or the browser user.
    */
   readonly id: string

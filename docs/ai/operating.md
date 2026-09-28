@@ -339,6 +339,8 @@ keep working. The design and the specifications followed are in spec §8.3 (`oid
    mapper (Keycloak: an "Audience" protocol mapper; other IdPs have their own
    setting, not verified here). If the IdP cannot put a URL in `aud`, set **Audience** in Settings to
    what it does write, understanding that any client of that audience is then accepted.
+   Tokens must then be RFC 9068 access tokens (header `typ` `at+jwt`, or a `client_id`
+   claim), so the IdP's ID tokens for that client are not accepted.
 3. Keep access-token lifetimes short (minutes): a JWT stays valid until `exp`.
 
 **Client registration.** MCP clients register in one of two ways
