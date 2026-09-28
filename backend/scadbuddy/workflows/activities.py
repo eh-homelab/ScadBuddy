@@ -19,7 +19,7 @@ from temporalio.exceptions import ApplicationError
 from scadbuddy.core.config import Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
-from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.assets import AssetStore, asset_ids_in
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate
 from scadbuddy.render.job_models import Job, JobNotFoundError, now
@@ -36,6 +36,7 @@ from scadbuddy.render.previews import PreviewFailedError, render_preview
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.runner import OpenSCADError, ProcessOutput
 from scadbuddy.store import BlobRefs, BlobStore, PieceStateLostError
+from scadbuddy.store.assets import RemoteAssets
 from scadbuddy.store.content import BlobScope, template_title
 from scadbuddy.store.fonts import FontMirror
 from scadbuddy.store.snapshots import SnapshotStore
@@ -69,6 +70,7 @@ class WorkerDeps:
     metrics: Metrics | None = None
     snapshots: SnapshotStore | None = None
     fonts_mirror: FontMirror | None = None
+    remote_assets: RemoteAssets | None = None
 
 
 def _failure(error: OpenSCADError) -> ApplicationError:
@@ -262,6 +264,10 @@ class RenderActivities:
         # It renders into a directory it never fetched: the compare-and-swap baseline is
         # what the index holds now, and the directory is no hit until this publishes.
         baseline = await d.blobs.checkout_fresh(req.piece_key)
+        if d.remote_assets is not None:
+            await _heartbeating(
+                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
+            )
         work = asyncio.create_task(
             render_main(
                 _prepared(prepared),
@@ -294,6 +300,10 @@ class RenderActivities:
         d = self.deps
         # The main 3MF may have been rendered on another worker.
         baseline = await _checkout(d.blobs, req.piece_key)
+        if d.remote_assets is not None:
+            await _heartbeating(
+                asyncio.create_task(d.remote_assets.ensure(d.assets, asset_ids_in(req.params)))
+            )
         work = asyncio.create_task(
             render_solids_stage(
                 _prepared(prepared),
