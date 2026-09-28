@@ -968,12 +968,15 @@ describe('the prints mock', () => {
   })
 
   it('serves a detail with and without a timelapse, and 404s an unlinked archive', async () => {
-    const done = (await (await fetch('/api/v1/prints/35')).json()) as { media: { timelapse: unknown } }
+    const done = (await (await fetch('/api/v1/prints/35')).json()) as {
+      media: { timelapse: unknown; finish_photo: { name: string } | null }
+    }
     const failed = (await (await fetch('/api/v1/prints/36')).json()) as {
       media: { timelapse: unknown }
       outcome: { failure_reason: string }
     }
     expect(done.media.timelapse).not.toBeNull()
+    expect(done.media.finish_photo?.name).toMatch(/^finish_/)
     expect(failed.media.timelapse).toBeNull()
     expect(failed.outcome.failure_reason).toBe('Spaghetti detected')
     expect((await fetch('/api/v1/prints/99')).status).toBe(404)
