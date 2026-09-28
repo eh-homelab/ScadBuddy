@@ -6,13 +6,12 @@ import asyncio
 import json
 import uuid
 from collections.abc import Iterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 
 import psycopg
 import pytest
 import trimesh
-from temporalio.api.workflowservice.v1 import SetWorkerDeploymentCurrentVersionRequest
 from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
@@ -36,7 +35,7 @@ from scadbuddy.workflows.activities import (
     _heartbeating,
     _write_piece,
 )
-from scadbuddy.workflows.client import DEPLOYMENT_NAME, render_worker
+from scadbuddy.workflows.client import make_current, render_worker
 from scadbuddy.workflows.models import Failure, PieceRequest, PieceResult, Projection, piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import write_openscad_3mf
@@ -443,16 +442,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             max_concurrent_activities=2,
         ):
             # A versioned worker takes new workflows only once its version is current.
-            await client.workflow_service.set_worker_deployment_current_version(
-                SetWorkerDeploymentCurrentVersionRequest(
-                    namespace=client.namespace,
-                    deployment_name=DEPLOYMENT_NAME,
-                    build_id="test",
-                    ignore_missing_task_queues=True,
-                    allow_no_pollers=True,
-                ),
-                timeout=timedelta(seconds=30),
-            )
+            await make_current(client, namespace=client.namespace, build_id="test")
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, job, id=workflow_id_for(job.id), task_queue=queue

@@ -24,85 +24,9 @@ from scadbuddy.render.provenance import source_version
 from scadbuddy.render.runner import OpenSCADError
 from scadbuddy.render.split import ColourPart
 
-MODEL_SLUG = "demo"
 FAIL_WIDTH = 999.0
 #: What the failing stub says it could not open (#408).
 FAILED_WARNING = "OpenSCAD could not open pic.svg"
-
-# A stand-in for the real binary: enough to answer --version and to export a .param,
-# so the routes that shell out are exercised where no openscad is installed.
-FAKE_OPENSCAD = """#!/usr/bin/env python3
-import json
-import os
-import pathlib
-import sys
-
-args = sys.argv[1:]
-# Test settings sit beside the binary: the backend passes openscad no FAKE_* variable.
-sidecar = pathlib.Path(sys.argv[0]).with_name("fake-env.json")
-settings = json.loads(sidecar.read_text(encoding="utf-8")) if sidecar.is_file() else {}
-
-# Lets a test count how many times openscad was actually run.
-log = settings.get("FAKE_OPENSCAD_LOG")
-if log:
-    with open(log, "a", encoding="utf-8") as handle:
-        handle.write(" ".join(args) + "\\n")
-# And what OPENSCADPATH it was given (#93).
-path_log = settings.get("FAKE_OPENSCAD_PATH_LOG")
-if path_log:
-    with open(path_log, "a", encoding="utf-8") as handle:
-        handle.write(os.environ.get("OPENSCADPATH", "") + "\\n")
-if "--version" in args:
-    print("OpenSCAD version 2099.01.01", file=sys.stderr)  # the real one uses stderr too
-    raise SystemExit(0)
-
-out = None
-for index, arg in enumerate(args):
-    if arg == "-o" and index + 1 < len(args):
-        out = args[index + 1]
-
-source = pathlib.Path(args[-1])
-text = source.read_text(encoding="utf-8", errors="replace") if source.is_file() else ""
-if "%%FAIL%%" in text:
-    print("ERROR: Parser error: syntax error", file=sys.stderr)
-    raise SystemExit(1)
-
-if "%%BADPARAM%%" in text and out is not None and out.endswith(".param"):
-    # Exit 0, and an export with a parameter that has no name.
-    pathlib.Path(out).write_text(json.dumps({"parameters": [{"type": "number"}]}))
-    raise SystemExit(0)
-
-if "%%RANGED%%" in text and out is not None and out.endswith(".param"):
-    # A customizer range and a select, as `// [1:100]` and `// [a, b]` export (#432).
-    pathlib.Path(out).write_text(
-        json.dumps(
-            {
-                "parameters": [
-                    {"name": "width", "type": "number", "initial": 10, "group": "Main",
-                     "min": 1, "max": 100, "step": 1},
-                    {"name": "shape", "type": "string", "initial": "round", "group": "Main",
-                     "options": [{"name": "Round", "value": "round"},
-                                 {"name": "Square", "value": "square"}]},
-                ],
-            }
-        )
-    )
-    raise SystemExit(0)
-
-if out is not None and out.endswith(".param"):
-    pathlib.Path(out).write_text(
-        json.dumps(
-            {
-                "title": "Fake",
-                "parameters": [
-                    {"name": "width", "type": "number", "initial": 10, "group": "Main"},
-                    {"name": "label", "type": "string", "initial": "hi", "group": "Main"},
-                ],
-            }
-        )
-    )
-raise SystemExit(0)
-"""
 
 PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"fake png body"
 
@@ -124,59 +48,6 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in list(os.environ):
         if key.startswith("SCADBUDDY_"):
             monkeypatch.delenv(key)
-
-
-@pytest.fixture
-def fake_openscad(tmp_path: Path) -> str:
-    binary = tmp_path / "fake-openscad"
-    binary.write_text(FAKE_OPENSCAD, encoding="utf-8")
-    binary.chmod(0o755)
-    return str(binary)
-
-
-@pytest.fixture
-def data_dir(tmp_path: Path) -> Path:
-    return tmp_path / "data"
-
-
-@pytest.fixture
-def seed_dir(tmp_path: Path) -> Path:
-    directory = tmp_path / "seed"
-    directory.mkdir()
-    return directory
-
-
-@pytest.fixture
-def settings(data_dir: Path, seed_dir: Path, fake_openscad: str, pg_conninfo: str) -> Settings:
-    """The app's settings, on a throwaway Postgres schema: it will not start without one."""
-    return Settings(
-        openscad=fake_openscad,
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-        database_url=pg_conninfo,
-        # Off, so no test renders a preview behind its back; `test_previews`
-        # turns them on with a stub render.
-        preview_renders=False,
-    )
-
-
-@pytest.fixture
-def paths(data_dir: Path) -> DataPaths:
-    data = DataPaths(data_dir)
-    data.ensure()
-    return data
-
-
-@pytest.fixture
-def model(paths: DataPaths) -> str:
-    paths.model_dir(MODEL_SLUG).mkdir(parents=True, exist_ok=True)
-    paths.model_source(MODEL_SLUG).write_text('width = 10;\nlabel = "hi";\n', encoding="utf-8")
-    paths.model_meta(MODEL_SLUG).write_text(
-        json.dumps({"name": "Demo", "description": "a demo", "tags": ["test"]}) + "\n",
-        encoding="utf-8",
-    )
-    return MODEL_SLUG
 
 
 def _fake_result(paths: DataPaths, job: Job) -> JobResult:
