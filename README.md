@@ -198,7 +198,7 @@ pins the image **by digest**; this repo's workflows are what move the pin.
 Nothing here talks to the cluster.
 
 With `SCADBUDDY_DATABASE_URL` set, a deploy that rolls the pod also migrates the
-database at startup (migration 3 adds the `events` log). The event log's retention
+database at startup (migration 4 adds the `events` log). The event log's retention
 is `SCADBUDDY_EVENT_LOG_RETENTION_SECONDS` / `SCADBUDDY_EVENT_LOG_RETENTION_ROWS`
 (see the render queue settings above); the defaults need no manifest change.
 
