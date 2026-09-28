@@ -593,7 +593,7 @@ export interface paths {
         };
         /**
          * Model thumbnail
-         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output. 404 when there is neither. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
+         * @description The thumbnail set on the model or, when it has none, the plate image of its first generated output, or else its default-render preview. 404 when there is none of the three. Carries a strong `ETag` over the image and `Cache-Control: no-cache`; a matching `If-None-Match` is answered 304 with no body.
          */
         get: operations["get_thumbnail_api_v1_models__slug__thumbnail_get"];
         /**
@@ -604,7 +604,7 @@ export interface paths {
         post?: never;
         /**
          * Remove a model's thumbnail
-         * @description Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`).
+         * @description Removes the thumbnail set on the model, as one revision in its history. The record that comes back can still have one: a generated model falls back to its first output's plate image (`thumbnail_source` is then `output`), and any other to its default-render preview (`preview`) once that has rendered in the background.
          */
         delete: operations["delete_thumbnail_api_v1_models__slug__thumbnail_delete"];
         options?: never;
@@ -2210,8 +2210,10 @@ export interface components {
             tags?: string[];
             /** Thumbnail Output Id */
             thumbnail_output_id?: string | null;
+            /** Thumbnail Preview Id */
+            thumbnail_preview_id?: string | null;
             /** Thumbnail Source */
-            thumbnail_source?: ("model" | "output") | null;
+            thumbnail_source?: ("model" | "output" | "preview") | null;
             /**
              * Updated At
              * Format: date-time
