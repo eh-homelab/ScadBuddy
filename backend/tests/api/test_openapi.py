@@ -61,6 +61,7 @@ EXPECTED_PATHS = {
     "/api/v1/settings",
     "/api/v1/settings/print-options",
     "/api/v1/settings/test",
+    "/api/v1/store/usage",
     "/api/v1/settings/targets",
     "/api/v1/settings/register-sidebar",
     "/api/v1/fonts",

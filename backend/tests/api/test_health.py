@@ -19,6 +19,12 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) ->
         "data_dir_writable": True,
         "revision": "unknown",
         "version": "dev",
+        "store": {
+            "backend": "local",
+            "configured_backend": "local",
+            "render_key_fallback": False,
+            "multi_worker": False,
+        },
     }
 
 

@@ -20,6 +20,7 @@ from scadbuddy.api.deps import (
     QueueDep,
     SettingsStoreDep,
     SlugPath,
+    StateDep,
     UploadsDep,
 )
 from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
@@ -43,6 +44,7 @@ from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis, NoSuchPlateError
 from scadbuddy.render.schema import ParamValue
 from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
+from scadbuddy.store.cache import materialize_result
 
 router = APIRouter(tags=["outputs"])
 
@@ -120,7 +122,7 @@ def require_output(store: OutputStore, output_id: str) -> OutputMeta:
     status_code=status.HTTP_201_CREATED,
     summary="Persist a finished render",
 )
-def create_output(
+async def create_output(
     slug: SlugPath,
     body: CreateOutputRequest,
     catalogue: CatalogueDep,
@@ -128,9 +130,10 @@ def create_output(
     queue: QueueDep,
     store: SettingsStoreDep,
     events: EventsDep,
+    state: StateDep,
 ) -> OutputDetail:
-    require_model(catalogue, slug)
-    job = require_job(queue, body.job_id)
+    await asyncio.to_thread(require_model, catalogue, slug)
+    job = await asyncio.to_thread(require_job, queue, body.job_id)
     if job.slug != slug:
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} rendered {job.slug!r}, not {slug!r}"
@@ -139,7 +142,10 @@ def create_output(
         raise ApiError(
             status.HTTP_409_CONFLICT, f"job {job.id!r} is {job.state}, so there is nothing to save"
         )
-    meta = outputs.create(job, name=body.name, public_url=store.load().public_url)
+    # The copy reads the job's files, which on the bambuddy backend come through the cache.
+    await materialize_result(state.store.blobs, job.result)
+    public_url = (await asyncio.to_thread(store.load)).public_url
+    meta = await asyncio.to_thread(outputs.create, job, name=body.name, public_url=public_url)
     emit(events, OutputEvent(kind="output.created", output_id=meta.id, slug=meta.slug))
     # A new output has no uploads yet: no read to make.
     return _detail(outputs, meta, [])

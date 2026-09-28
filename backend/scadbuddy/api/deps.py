@@ -57,8 +57,8 @@ from scadbuddy.render.previews import (
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.render.submit import RenderService
-from scadbuddy.store import BlobRefs
-from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store import BlobRefs, BlobStore
+from scadbuddy.store.factory import StoreBundle
 
 logger = logging.getLogger(__name__)
 
@@ -130,7 +130,10 @@ class AppState:
     #: The Temporal path's (all None on the legacy one): the `render_jobs` projection,
     #: the blob store and its references, and the client the lifespan connects.
     projection: JobProjection | None = field(default=None)
-    blobs: LocalBlobStore | None = field(default=None)
+    blobs: BlobStore | None = field(default=None)
+    #: The blob store (#426), built in the lifespan once the settings pool is open,
+    #: on both render paths; nothing reads it earlier.
+    store: StoreBundle = field(init=False)
     refs: BlobRefs | None = field(default=None)
     temporal: Client | None = field(default=None)
 
@@ -242,10 +245,8 @@ def build_state(settings: Settings) -> AppState:
     history.on_commit = announce_commits(events, catalogue)
     queue: RenderBackend
     runner: PreviewRender
-    blobs: LocalBlobStore | None = None
     refs: BlobRefs | None = None
     if projection is not None:
-        blobs = LocalBlobStore(paths.blobs)
         refs = BlobRefs(projection.pool)
         render = RenderService(
             projection=projection,
@@ -344,7 +345,6 @@ def build_state(settings: Settings) -> AppState:
         language_servers=asyncio.Semaphore(config.lsp_sessions),
         realtime_sockets=asyncio.Semaphore(config.realtime_sockets),
         projection=projection,
-        blobs=blobs,
         refs=refs,
     )
 

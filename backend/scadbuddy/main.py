@@ -28,11 +28,16 @@ from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
+from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.jobs import RenderQueue
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
 from scadbuddy.render.projection import LEGACY_INTERRUPTED_ERROR
 from scadbuddy.render.submit import RenderService
 from scadbuddy.store import sweep_blobs
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.content import sweep_content
+from scadbuddy.store.factory import build_store
 from scadbuddy.worker import run_inprocess_worker, worker_deps_from_state
 from scadbuddy.workflows.activities import WorkerDeps
 from scadbuddy.workflows.client import connect
@@ -95,6 +100,9 @@ async def _close_quietly(state: AppState) -> None:
     closes = [state.events.aclose, state.queue.aclose]
     if state.projection is not None:
         closes.append(partial(asyncio.to_thread, state.projection.close))
+    store = getattr(state, "store", None)  # unset when the start failed before it
+    if store is not None:
+        closes.append(store.aclose)
     for close in closes:
         try:
             await close()
@@ -196,14 +204,36 @@ async def _sweep_blobs_logged(state: AppState) -> None:
     if state.blobs is None or state.refs is None:
         return
     try:
-        removed = await asyncio.to_thread(
-            sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
-        )
+        if state.store.content is None:
+            removed = await asyncio.to_thread(
+                sweep_blobs, state.blobs, state.refs, grace=state.config.job_ttl
+            )
+        else:
+            removed = await sweep_content(
+                state.store.content, state.refs, grace=state.config.asset_sweep_grace
+            )
+            if isinstance(state.store.blobs, CachedBlobStore):
+                await asyncio.to_thread(state.store.blobs.evict)
     except Exception:
         logger.exception("could not sweep unreferenced blobs")
         return
     if removed:
         logger.info("removed unreferenced blobs", extra={"count": len(removed)})
+
+
+async def _backfill_store_logged(state: AppState, *, uploads: bool) -> None:
+    """The boot's mirror of what predates the store, in the background and best effort:
+    an unreachable Bambuddy never holds up or fails the start. Uploads only when no
+    periodic asset sweep runs (`SCADBUDDY_ASSET_SWEEP_INTERVAL` 0); otherwise that
+    sweep backfills them. Fonts always: nothing else mirrors a family installed before."""
+    try:
+        if uploads and state.store.remote_assets is not None:
+            mirrored = await state.store.remote_assets.backfill(state.assets)
+            logger.info("mirrored uploads", extra={"count": mirrored})
+        if state.store.fonts is not None:
+            logger.info("mirrored fonts", extra={"count": await state.store.fonts.backfill()})
+    except Exception:
+        logger.exception("could not mirror what predates the blob store; the next boot retries")
 
 
 async def _asset_sweeper(state: AppState) -> None:
@@ -347,6 +377,26 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # First: without its database ScadBuddy has no settings, so it does not start.
     # It also brings the schema up to date, before the queue's store opens.
     await asyncio.to_thread(state.settings_store.open)
+    # The blob store (#426), on both render paths: its index and the render settings
+    # live in the settings pool, open only from here on.
+    pool = state.settings_store.pool
+    source = RenderSettingsSource(pool, state.settings)
+    current = await asyncio.to_thread(load_render_store_settings, pool, state.settings)
+    # The legacy queue renders in-process from the volume: always the local store.
+    state.store = build_store(
+        backend=current.store_backend if state.projection is not None else "local",
+        current=current,
+        config=state.config,
+        paths=state.paths,
+        pool=pool,
+        source=source,
+        history=state.history,
+        fonts=state.fonts,
+        metrics=state.metrics,
+    )
+    state.blobs = state.store.blobs
+    if isinstance(state.queue, RenderService):
+        state.queue.snapshots = state.store.snapshots
     state.paths.ensure()
     # Before the built-in sync: an existing models directory becomes revision 1,
     # so what a newer image changes in a built-in is a commit on top of it rather
@@ -391,6 +441,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # failure while starting up closes the queue as a shutdown does, rather than
     # leaking it -- the failure `RenderQueue.start` guards against for its own steps.
     sweeper: asyncio.Task[None] | None = None
+    backfill: asyncio.Task[None] | None = None
     worker: tuple[asyncio.Task[None], WorkerDeps] | None = None
     stop = asyncio.Event()
     try:
@@ -407,6 +458,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if state.config.asset_sweep_interval > 0:
             await _sweep_assets_logged(state)
             sweeper = asyncio.create_task(_asset_sweeper(state))
+        if state.store.content is not None:
+            backfill = asyncio.create_task(
+                _backfill_store_logged(state, uploads=state.config.asset_sweep_interval == 0)
+            )
         if state.previews is not None:
             state.previews.start()
             # Every model without a thumbnail gets its default render, one at a time
@@ -435,10 +490,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if state.previews is not None:
             await state.previews.aclose()
-        if sweeper is not None:
-            sweeper.cancel()
-            with suppress(asyncio.CancelledError):
-                await sweeper
+        for background in (sweeper, backfill):
+            if background is not None:
+                background.cancel()
+                with suppress(asyncio.CancelledError):
+                    await background
         await state.print_watcher.aclose()
         if worker is not None:
             stop.set()
@@ -450,6 +506,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             await asyncio.to_thread(state.decisions.close)
         await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
+        await state.store.aclose()
         await asyncio.to_thread(state.settings_store.close)
 
 

@@ -51,9 +51,8 @@ TRANSFER = timedelta(seconds=180)
 HEARTBEAT = timedelta(seconds=30)
 #: `prepare` downloads the revision's snapshot and the template's font families on a
 #: worker without the API's volume (phase 3): a transfer, heartbeated, so a stalled
-#: download is noticed within `TRANSFER_HEARTBEAT` rather than at the budget's end.
+#: download is noticed within `HEARTBEAT` rather than at the budget's end.
 PREPARE_TIMEOUT = timedelta(minutes=10)
-TRANSFER_HEARTBEAT = timedelta(seconds=30)
 
 
 def _openscad_timeout() -> timedelta:
@@ -82,7 +81,9 @@ FINISH_TIMEOUT = SHORT + 2 * TRANSFER
 def _waiter_recheck() -> timedelta:
     # Three attempts of a piece's worst case (every stage at its bound): a live piece
     # is rarely re-checked, and harmlessly (the re-signal is idempotent).
-    return 3 * (CACHED_TIMEOUT + SHORT + _main_timeout() + _solids_timeout() + FINISH_TIMEOUT)
+    return 3 * (
+        CACHED_TIMEOUT + PREPARE_TIMEOUT + _main_timeout() + _solids_timeout() + FINISH_TIMEOUT
+    )
 
 
 def _failure_of(error: BaseException) -> Failure:
@@ -134,7 +135,7 @@ class RenderPiece:
             req,
             result_type=PrepareResult,
             start_to_close_timeout=PREPARE_TIMEOUT,
-            heartbeat_timeout=TRANSFER_HEARTBEAT,
+            heartbeat_timeout=HEARTBEAT,
             retry_policy=RETRY,
         )
         main: RenderMainResult = await workflow.execute_activity(

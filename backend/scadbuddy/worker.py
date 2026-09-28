@@ -29,12 +29,16 @@ from scadbuddy.core.pg_events import PgNotifyEventBus
 from scadbuddy.core.pg_listener import PgListener
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import AssetStore
+from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import CheckoutFetcher, CheckoutGate, LibraryStore
+from scadbuddy.library.settings_store import load_render_store_settings
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.solids import WRAPPER_PREFIX
 from scadbuddy.store import BlobRefs
-from scadbuddy.store.local import LocalBlobStore
+from scadbuddy.store.bambuddy import RenderSettingsSource
+from scadbuddy.store.cache import CachedBlobStore
+from scadbuddy.store.factory import StoreBundle, build_store, store_health
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.client import connect, drained, make_current, render_worker
 
@@ -48,7 +52,7 @@ HEALTH_PORT = 9090
 DRAIN_POLL = 5.0
 
 
-def build_worker_deps(settings: Settings) -> WorkerDeps:
+def build_worker_deps(settings: Settings) -> tuple[WorkerDeps, StoreBundle]:
     config = settings.to_config()
     paths = DataPaths(root=settings.data_dir)
     paths.ensure()
@@ -72,33 +76,52 @@ def build_worker_deps(settings: Settings) -> WorkerDeps:
         max_total_bytes=config.asset_max_total_bytes,
         max_count=config.asset_max_count,
     )
-    return WorkerDeps(
+    source = RenderSettingsSource(projection.pool, settings)
+    current = load_render_store_settings(projection.pool, settings)
+    backend = current.store_backend
+    store = build_store(
+        backend=backend,
+        current=current,
+        config=config,
+        paths=paths,
+        pool=projection.pool,
+        source=source,
+        # On bambuddy a worker has no git: the API makes the snapshots it renders from.
+        history=None,
+        fonts=FontService(settings.data_dir),
+        metrics=metrics,
+    )
+    deps = WorkerDeps(
         config=config,
         paths=paths,
         assets=assets,
-        blobs=LocalBlobStore(paths.blobs),
+        blobs=store.blobs,
         refs=BlobRefs(projection.pool),
         projection=projection,
-        history=history,
+        history=history if backend == "local" else None,
         checkouts=checkouts,
         fetcher=fetcher,
         thumbnail_executor=ThreadPoolExecutor(
             max_workers=config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=metrics,
+        snapshots=store.snapshots,
+        fonts_mirror=store.fonts,
+        remote_assets=store.remote_assets,
     )
+    return deps, store
 
 
 def worker_deps_from_state(state: AppState) -> WorkerDeps:
     """SCADBUDDY_TEMPORAL_WORKER_INPROCESS: the worker on the API's own stores and
     gates, so its renders lease the same checkouts the routes do. The thumbnail pool is
     its own; the lifespan shuts it down with the worker."""
-    assert state.projection is not None and state.blobs is not None and state.refs is not None
+    assert state.projection is not None and state.refs is not None
     return WorkerDeps(
         config=state.config,
         paths=state.paths,
         assets=state.assets,
-        blobs=state.blobs,
+        blobs=state.store.blobs,
         refs=state.refs,
         projection=state.projection,
         history=state.history,
@@ -108,6 +131,9 @@ def worker_deps_from_state(state: AppState) -> WorkerDeps:
             max_workers=state.config.render_concurrency, thread_name_prefix="thumbnail"
         ),
         metrics=state.metrics,
+        snapshots=state.store.snapshots,
+        fonts_mirror=state.store.fonts,
+        remote_assets=state.store.remote_assets,
     )
 
 
@@ -184,13 +210,16 @@ class _HealthServer(uvicorn.Server):
         yield
 
 
-def _health_server(settings: Settings, metrics: Metrics, port: int) -> _HealthServer:
+def _health_server(
+    settings: Settings, metrics: Metrics, store: StoreBundle, port: int
+) -> _HealthServer:
     async def healthz(_: Request) -> JSONResponse:
         return JSONResponse(
             {
                 "ok": True,
                 "build_id": settings.revision,
                 "task_queue": settings.temporal_task_queue_render,
+                "store": (await store_health(store)).model_dump(),
             }
         )
 
@@ -203,6 +232,20 @@ def _health_server(settings: Settings, metrics: Metrics, port: int) -> _HealthSe
     )
 
 
+async def _evict_periodically(blobs: CachedBlobStore, interval: float) -> None:
+    """The worker's sweep: its piece cache, least recently used first, down to
+    SCADBUDDY_WORKER_CACHE_MAX_BYTES. Best effort; the next pass retries."""
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            evicted = await asyncio.to_thread(blobs.evict)
+        except Exception:
+            logger.exception("could not evict the piece cache")
+            continue
+        if evicted:
+            logger.info("evicted cached pieces", extra={"count": len(evicted)})
+
+
 async def run_worker(
     settings: Settings,
     *,
@@ -211,13 +254,20 @@ async def run_worker(
     client: Client | None = None,
 ) -> None:
     stop = stop or asyncio.Event()
-    deps = build_worker_deps(settings)
+    deps, store = build_worker_deps(settings)
     assert deps.metrics is not None and deps.thumbnail_executor is not None
+    evicting = (
+        asyncio.create_task(_evict_periodically(store.blobs, deps.config.asset_sweep_interval))
+        if isinstance(store.blobs, CachedBlobStore) and deps.config.asset_sweep_interval > 0
+        else None
+    )
     try:
         if client is None:
             client = await connect(settings.temporal_address, settings.temporal_namespace)
         server = (
-            _health_server(settings, deps.metrics, health_port) if health_port is not None else None
+            _health_server(settings, deps.metrics, store, health_port)
+            if health_port is not None
+            else None
         )
         serving = asyncio.create_task(server.serve()) if server is not None else None
         try:
@@ -227,6 +277,11 @@ async def run_worker(
                 server.should_exit = True
                 await serving
     finally:
+        if evicting is not None:
+            evicting.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await evicting
+        await store.aclose()
         deps.projection.close()
         deps.thumbnail_executor.shutdown(wait=False, cancel_futures=True)
 
