@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import type { Hono } from 'hono'
 import { authenticate, DEFAULT_MCP_AUTH, type McpAuthSettings, mcpTransportProblem } from '../auth/authenticate.js'
+import type { AuditLog } from '../audit/log.js'
 import type { Principal } from '../auth/principal.js'
 import { FailClosedTokenStore, type TokenStore } from '../auth/tokens.js'
 import type { OriginPolicy } from '../http/origins.js'
@@ -28,6 +29,8 @@ export type McpEndpointDeps = {
   tools: readonly Tool[]
   services: ToolServices
   tokens: TokenStore
+  /** Every tool call over /mcp is recorded here (#258, audit/log.ts). */
+  audit?: AuditLog | undefined
   /**
    * Read per request, so a Settings change (#255) applies without a restart.
    * If it throws (settings unreadable, database blip), the request is handled
@@ -186,7 +189,7 @@ export function mountMcp(
     // from the initialize request on.
     const id = newSessionId()
     const principal = sessionPrincipal(auth.principal, id)
-    const server = createExternalServer(deps.tools, deps.services)
+    const server = createExternalServer(deps.tools, deps.services, deps.audit)
     const transport: WebStandardStreamableHTTPServerTransport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: () => id,
       eventStore: new BoundedEventStore(),

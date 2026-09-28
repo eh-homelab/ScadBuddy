@@ -9,7 +9,10 @@ import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import type { PluginForwarder } from './plugins/forwarder.js'
 import type { PluginRepo, RemotePlugin } from './plugins/registry.js'
 import { type PluginTest, testPlugin } from './plugins/testConnection.js'
+import type { AuditRepo } from './audit/log.js'
+import { auditWrites } from './audit/writes.js'
 import { registerApprovalRoutes } from './routes/approvals.js'
+import { registerAuditRoutes } from './routes/audit.js'
 import { registerChatRoute } from './routes/chat.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
 import { registerPluginRoutes } from './routes/plugins.js'
@@ -70,6 +73,27 @@ export type AppDeps = {
   sessions?: SessionManager | undefined
   /** The runtime's WebSocket upgrade; without it there is no chat socket (and status says so). */
   upgradeWebSocket?: UpgradeWebSocket | undefined
+  /**
+   * The audit log (#258, audit/log.ts): GET /api/v1/ai/audit reads it (503
+   * without it), and credential and plugin writes are recorded in it.
+   */
+  audit?: AuditRepo | undefined
+}
+
+/** Which credential requests are writes, by method (audit/writes.ts). */
+function credentialVerb(method: string, path: string): string | undefined {
+  if (path !== '/api/v1/ai/credentials') return undefined
+  return method === 'PUT' ? 'save' : method === 'DELETE' ? 'delete' : undefined
+}
+
+/** Which plugin requests are writes; connection tests are not. */
+function pluginVerb(method: string, path: string): string | undefined {
+  if (path.endsWith('/test')) return undefined
+  const one = path.startsWith('/api/v1/ai/plugins/')
+  if (method === 'POST' && !one) return 'create'
+  if (method === 'PATCH' && one) return 'update'
+  if (method === 'DELETE' && one) return 'delete'
+  return undefined
 }
 
 export const DEFAULT_HEALTH_TIMEOUT_MS = 2000
@@ -222,6 +246,22 @@ export function createApp(deps: AppDeps): AgentApp {
     const body: AiStatusView = { available: ai === 'enabled' && chat, state, ai, ...(reason ? { reason } : {}) }
     c.header('Cache-Control', 'no-store')
     return c.json(body)
+  })
+
+  // Credential and plugin writes, refused attempts included, go in the audit
+  // log (#258). Mounted before the routes so they run around them.
+  if (deps.audit) {
+    const audit = deps.audit
+    app.use('/api/v1/ai/credentials', auditWrites({ audit, kind: 'credential', remoteAddress: deps.remoteAddress, verb: credentialVerb }))
+    // Hono's `/*` also matches the bare prefix, so this covers POST /api/v1/ai/plugins too.
+    app.use('/api/v1/ai/plugins/*', auditWrites({ audit, kind: 'plugin', remoteAddress: deps.remoteAddress, verb: pluginVerb }))
+  }
+
+  registerAuditRoutes(app, {
+    audit: deps.audit,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   registerCredentialRoutes(app, {

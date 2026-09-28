@@ -2,7 +2,9 @@ import { createSdkMcpServer, type McpSdkServerConfigWithInstance, tool as sdkToo
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import type { Principal } from '../auth/principal.js'
-import { errorResult, type Progress, runTool, type Tool, type ToolServices } from './registry.js'
+import type { AuditLog } from '../audit/log.js'
+import { MCP_UNTRUSTED_CONTENT_POLICY } from '../safety/untrusted.js'
+import { errorResult, type Progress, runTool, runToolWithOutcome, type Tool, type ToolServices } from './registry.js'
 
 // The two projections of the registry (spec §5.1, D3). Both hand every call to
 // `runTool`, with the same names, descriptions, input shapes and annotations;
@@ -86,7 +88,7 @@ export function principalFrom(extra: unknown): Principal | undefined {
  * connects to exactly one transport). The principal is re-read from every
  * request's auth, so a token revoked mid-session stops working at once.
  */
-export function createExternalServer(tools: readonly Tool[], services: ToolServices): McpServer {
+export function createExternalServer(tools: readonly Tool[], services: ToolServices, audit?: AuditLog): McpServer {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
@@ -94,7 +96,7 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
       instructions:
         'ScadBuddy: an OpenSCAD customizer that sends multi-colour 3MFs to Bambuddy. Outward tools ' +
         '(send, print, delete, settings writes) return a pending action for a human to approve in the ' +
-        'ScadBuddy UI instead of acting.',
+        `ScadBuddy UI instead of acting. ${MCP_UNTRUSTED_CONTENT_POLICY}`,
     },
   )
   for (const t of tools) {
@@ -104,7 +106,30 @@ export function createExternalServer(tools: readonly Tool[], services: ToolServi
       async (args, extra): Promise<CallToolResult> => {
         const principal = principalFrom(extra)
         if (!principal) return errorResult('unauthenticated')
-        return runTool(t, args, { ...services, principal, progress: progressFrom(extra), signal: extra.signal })
+        const startedAt = new Date()
+        const run = await runToolWithOutcome(t, args, {
+          ...services,
+          principal,
+          progress: progressFrom(extra),
+          signal: extra.signal,
+        })
+        // Every /mcp call, whatever became of it (#258, audit/log.ts).
+        const input = (args ?? {}) as Record<string, unknown>
+        await audit?.record({
+          kind: 'tool_call',
+          action: t.name,
+          surface: 'mcp',
+          actor: { kind: principal.kind, id: principal.id, label: principal.id },
+          clientIp: principal.clientIp,
+          tier: t.risk,
+          inputHash: audit.hash(t.name, input),
+          inputSummary: audit.summarise(t.name, input),
+          outcome: run.outcome,
+          ...(run.detail === undefined ? {} : { detail: run.detail }),
+          startedAt,
+          finishedAt: new Date(),
+        })
+        return run.result
       },
     )
   }

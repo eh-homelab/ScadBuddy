@@ -3,6 +3,7 @@ import { z } from 'zod'
 import type { BackendClient } from '../api/backend.js'
 import type { paths } from '../api/schema.js'
 import { hasTier, type Principal, type Tier } from '../auth/principal.js'
+import { DEFAULT_SOURCE, markUntrusted } from '../safety/untrusted.js'
 import { type PendingActionStore, PendingStoreFullError } from './pending.js'
 
 // The tool registry, spec §5.1 and D3
@@ -66,6 +67,13 @@ export type ToolSpec<S extends z.ZodRawShape> = {
   approval?: 'required' | 'none'
   /** A human-readable line for the pending action a gated call creates. */
   summarize?: (args: z.infer<z.ZodObject<S>>) => string
+  /**
+   * Where the content this tool returns comes from, for the untrusted-data
+   * envelope every text result is wrapped in (safety/untrusted.ts, #258).
+   * Say who could have written it, e.g. "the model's README, written by its
+   * author or imported from the web". Defaults to DEFAULT_SOURCE.
+   */
+  source?: string
   handler: (args: z.infer<z.ZodObject<S>>, ctx: ToolContext) => Promise<CallToolResult>
 }
 
@@ -80,6 +88,8 @@ export type Tool = {
   readonly routes: readonly Operation[]
   readonly gated: boolean
   readonly annotations: ToolAnnotations
+  /** Where its content comes from (ToolSpec.source). */
+  readonly source: string
   summarize(args: unknown): string
   /** Parses `args` and runs the handler, with no tier check or gate: call `runTool` instead. */
   execute(args: unknown, ctx: ToolContext): Promise<CallToolResult>
@@ -98,6 +108,7 @@ export function defineTool<S extends z.ZodRawShape>(spec: ToolSpec<S>): Tool {
     readOnly,
     routes: spec.routes,
     gated,
+    source: spec.source ?? DEFAULT_SOURCE,
     annotations: {
       readOnlyHint: readOnly,
       destructiveHint: spec.risk === 'outward',
@@ -122,14 +133,38 @@ export function errorResult(message: string): CallToolResult {
   return { isError: true, content: [{ type: 'text', text: message }] }
 }
 
+/** How a call ended, for the audit log (audit/log.ts, #258). */
+export type ToolOutcome = 'ok' | 'error' | 'refused' | 'denied'
+
+export type ToolRun = {
+  result: CallToolResult
+  outcome: ToolOutcome
+  /** Why, when it did not succeed: the refusal or error message. */
+  detail?: string
+}
+
+function refused(message: string): ToolRun {
+  return { result: errorResult(message), outcome: 'refused', detail: message }
+}
+
+function failed(message: string): ToolRun {
+  return { result: errorResult(message), outcome: 'error', detail: message }
+}
+
 /**
  * The one entry point both projections use: tier check, then the approval
  * gate for outward tools, then the handler. Errors become `isError` results
  * so the model sees them; they are never thrown into the transport.
+ *
+ * What a handler returns is re-encoded as untrusted data
+ * (safety/untrusted.ts `markUntrusted`, #258): tools hand back READMEs,
+ * OpenSCAD source, render logs, library and Bambuddy data, any of which can
+ * carry a prompt injection. ScadBuddy's own messages (the tier refusal, the
+ * pending-approval notice, a thrown ToolError's summary) are not wrapped.
  */
-export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
+export async function runToolWithOutcome(tool: Tool, args: unknown, ctx: ToolContext): Promise<ToolRun> {
   if (!hasTier(ctx.principal, tool.risk)) {
-    return errorResult(
+    return refused(
       `${tool.name} needs the "${tool.risk}" tier; this caller has ${ctx.principal.tiers.join(', ') || 'none'}`,
     )
   }
@@ -141,23 +176,35 @@ export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Prom
         summary: tool.summarize(args),
         principalId: ctx.principal.id,
       })
-      return json({
-        status: 'pending_approval',
-        pending_action_id: action.id,
-        summary: action.summary,
-        expires_at: action.expiresAt.toISOString(),
-        next:
-          'Outward actions need a human approval in the ScadBuddy UI. That approval flow is not ' +
-          'available yet (#258), so confirm_action refuses for now; nothing was sent.',
-      })
+      return {
+        result: json({
+          status: 'pending_approval',
+          pending_action_id: action.id,
+          summary: action.summary,
+          expires_at: action.expiresAt.toISOString(),
+          next:
+            'Outward actions need a human approval in the ScadBuddy UI. That approval flow is not ' +
+            'available yet (#258), so confirm_action refuses for now; nothing was sent.',
+        }),
+        outcome: 'refused',
+        detail: `waiting for approval (pending action ${action.id}); nothing was sent`,
+      }
     }
-    return await tool.execute(args, ctx)
+    const result = markUntrusted(await tool.execute(args, ctx), tool.name, tool.source)
+    return result.isError
+      ? { result, outcome: 'error', detail: 'the tool returned an error result' }
+      : { result, outcome: 'ok' }
   } catch (err) {
-    if (err instanceof z.ZodError) return errorResult(`invalid arguments: ${z.prettifyError(err)}`)
-    if (err instanceof ToolError || err instanceof PendingStoreFullError) return errorResult(err.message)
-    if (err instanceof Error && err.name === 'AbortError') return errorResult('the call was cancelled')
-    return errorResult(`${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`)
+    if (err instanceof z.ZodError) return failed(`invalid arguments: ${z.prettifyError(err)}`)
+    if (err instanceof ToolError || err instanceof PendingStoreFullError) return failed(err.message)
+    if (err instanceof Error && err.name === 'AbortError') return failed('the call was cancelled')
+    return failed(`${tool.name} failed: ${err instanceof Error ? err.message : String(err)}`)
   }
+}
+
+/** `runToolWithOutcome`, the result only. */
+export async function runTool(tool: Tool, args: unknown, ctx: ToolContext): Promise<CallToolResult> {
+  return (await runToolWithOutcome(tool, args, ctx)).result
 }
 
 // ── result helpers ─────────────────────────────────────────────────────────

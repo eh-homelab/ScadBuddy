@@ -76,6 +76,8 @@ export const customizerTools: Tool[] = [
       'the schema at an earlier revision.',
     input: z.object({ slug, version: z.string().regex(/^[0-9a-f]{7,40}$/).optional() }),
     risk: 'read',
+    source:
+      "the customizer schema OpenSCAD derives from the model's source, with the parameter names and comments its author wrote",
     routes: ['GET /api/v1/models/{slug}/schema', 'GET /api/v1/models/{slug}/versions/{commit}/schema'],
     handler: async ({ slug, version }, ctx) => json(await fetchSchema(ctx, slug, version)),
   }),
@@ -107,6 +109,8 @@ export const customizerTools: Tool[] = [
       output_name: z.string().optional(),
     }),
     risk: 'write',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['POST /api/v1/models/{slug}/render', 'GET /api/v1/jobs/{job_id}'],
     handler: async ({ slug, params, version, save_output, output_name }, ctx) => {
       const report = validateParams(await fetchSchema(ctx, slug, version), params)
@@ -149,6 +153,8 @@ export const customizerTools: Tool[] = [
     description: "A render job's current state: status, error, warnings, bounding box, colours, parts and log tail.",
     input: z.object({ job_id: jobId }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: [],
     handler: async ({ job_id }, ctx) => json(jobSummary(await getJob(ctx, job_id))),
   }),
@@ -203,6 +209,8 @@ export const customizerTools: Tool[] = [
       'settled render (done or failed). Use it to fix a failing or warning-laden model.',
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      "OpenSCAD's output for a model, including echo() text and other messages the model's source controls",
     routes: ['GET /api/v1/models/{slug}/diagnostics'],
     handler: async ({ slug }, { backend }) =>
       json(
@@ -226,6 +234,8 @@ export const customizerTools: Tool[] = [
     description: "A model's saved parameter presets, including read-only ones a template ships.",
     input: z.object({ slug }),
     risk: 'read',
+    source:
+      'preset names and values written by model authors or users',
     routes: ['GET /api/v1/models/{slug}/presets'],
     handler: async ({ slug }, { backend }) =>
       json(await ok(backend.GET('/api/v1/models/{slug}/presets', { params: { path: { slug } } }), `list presets of ${slug}`)),

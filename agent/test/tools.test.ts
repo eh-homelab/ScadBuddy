@@ -9,6 +9,7 @@ import { runTool, type Tool, type ToolContext } from '../src/tools/registry.js'
 import { sameRepository } from '../src/tools/libraries.js'
 import { redact } from '../src/tools/settings.js'
 import { validateParams } from '../src/tools/validate.js'
+import { unwrapUntrusted } from '../src/safety/untrusted.js'
 import { OPENSCAD_COLOUR_NAMES } from '../src/tools/colours.js'
 import { BACKEND, firstText, services } from './helpers/mcp.js'
 
@@ -460,7 +461,7 @@ describe('binary results: inline under the cap, a link over it', () => {
       mimeType: 'model/3mf',
       size: 64,
     })
-    expect(JSON.parse((result.content[1] as { text: string }).text)).toMatchObject({
+    expect(JSON.parse(unwrapUntrusted((result.content[1] as { text: string }).text))).toMatchObject({
       inline: false,
       size_bytes: 64,
       fetch: { method: 'GET', path: `/api/v1/outputs/${OUT}/model.3mf` },

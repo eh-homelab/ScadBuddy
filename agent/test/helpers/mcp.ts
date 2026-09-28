@@ -7,6 +7,7 @@ import { DEFAULT_MCP_AUTH, type McpAuthSettings } from '../../src/auth/authentic
 import type { TokenStore } from '../../src/auth/tokens.js'
 import { originPolicy } from '../../src/http/origins.js'
 import type { McpEndpointDeps } from '../../src/mcp/http.js'
+import { unwrapUntrusted } from '../../src/safety/untrusted.js'
 import { ALL_TOOLS } from '../../src/tools/index.js'
 import { PendingActionStore } from '../../src/tools/pending.js'
 import type { ToolServices } from '../../src/tools/registry.js'
@@ -110,10 +111,13 @@ export async function connect(app: Hono, via: Via = {}): Promise<Client> {
   return client
 }
 
-/** The text of a tool result's first content block, parsed as JSON when it is. */
+/**
+ * The text of a tool result's first content block, taken out of the
+ * untrusted-data envelope (src/safety/untrusted.ts) and parsed as JSON when it is.
+ */
 export function firstText(result: unknown): unknown {
   const content = (result as { content?: { type: string; text?: string }[] }).content ?? []
-  const text = content.find((c) => c.type === 'text')?.text ?? ''
+  const text = unwrapUntrusted(content.find((c) => c.type === 'text')?.text ?? '')
   try {
     return JSON.parse(text)
   } catch {
