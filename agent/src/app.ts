@@ -1,16 +1,20 @@
 import { Hono } from 'hono'
+import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
+import type { TokenStore } from './auth/tokens.js'
 import type { Credential, CredentialRepo } from './credentials.js'
 import type { ConnectionTest } from './harness/testConnection.js'
 import type { Resolver } from './http/egress.js'
 import type { OriginPolicy } from './http/origins.js'
 import { type McpEndpointDeps, type McpHandle, mountMcp } from './mcp/http.js'
 import { registerCredentialRoutes } from './routes/credentials.js'
+import { registerMcpTokenRoutes } from './routes/mcpTokens.js'
 import type { RemoteAddress } from './routes/guard.js'
 import type { KekStatus } from './secrets.js'
 
 // The HTTP surface. Hono per spec §4.5: web-standard Request/Response and
 // direct streaming. /healthz, the Claude credential routes (#255,
-// routes/credentials.ts), and /mcp when `mcp` is given (#251, mcp/http.ts).
+// routes/credentials.ts), the MCP token routes (#251, routes/mcpTokens.ts), and
+// /mcp when `mcp` is given (#251, mcp/http.ts).
 
 export type Probe = () => Promise<boolean>
 
@@ -23,6 +27,12 @@ export type AppDeps = {
   /** Undefined exactly when `database` is. */
   credentials: CredentialRepo | undefined
   testConnection: (credential: Credential) => Promise<ConnectionTest>
+  /**
+   * The MCP bearer-token store Settings manages (routes/mcpTokens.ts). Pass the
+   * same instance as `mcp.tokens`. Undefined (or left out) when there is no
+   * database: the routes then answer 503.
+   */
+  tokens?: TokenStore | undefined
   remoteAddress: RemoteAddress
   /** Which origins may write (SCADBUDDY_PUBLIC_URL, SCADBUDDY_AGENT_TRUSTED_PROXIES; src/http/origins.ts). */
   origins: OriginPolicy
@@ -154,6 +164,14 @@ export function createApp(deps: AppDeps): AgentApp {
     ...(deps.resolveHost === undefined ? {} : { resolveHost: deps.resolveHost }),
     ...(deps.testCooldownMs === undefined ? {} : { testCooldownMs: deps.testCooldownMs }),
     ...(deps.now === undefined ? {} : { now: deps.now }),
+  })
+
+  registerMcpTokenRoutes(app, {
+    tokens: deps.database ? deps.tokens : undefined,
+    ready: deps.database ? deps.database.ready : () => Promise.resolve(false),
+    authSettings: deps.mcp?.authSettings ?? (() => DEFAULT_MCP_AUTH),
+    remoteAddress: deps.remoteAddress,
+    origins: deps.origins,
   })
 
   if (deps.mcp) {

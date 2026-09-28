@@ -76,12 +76,15 @@ const credentials = database ? new CredentialStore(database.sql) : undefined
 const settings = database ? new SettingsStore(database.sql) : undefined
 const backend = createBackendClient(config.backendUrl)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
 const app = createApp({
   database,
   backend: () => backendReachable(backend),
   kek,
   credentials,
+  tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -107,7 +110,7 @@ const app = createApp({
     // Without a database /mcp answers 503 before auth (app.ts), and the
     // fail-closed store only makes sure nothing could verify anyway.
     // TODO(#251 follow-up): the auth mode read from `ai_settings`.
-    tokens: database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore(),
+    tokens,
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
