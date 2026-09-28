@@ -27,7 +27,7 @@ RUN apt-get update \
 DOCKERFILE
 fi
 
-scad() { docker run --rm -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
+scad() { docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD":/w -w /w "$IMAGE" openscad --backend=Manifold "$@"; }
 
 # name | -D overrides separated by ";"
 CASES=(
@@ -69,7 +69,7 @@ echo "==> stacking"
 scad -o "$OUT/stack.stl" model.scad >/dev/null 2>&1
 for dz in 20.67 20.55; do
     echo "intersection() { import(\"stack.stl\"); translate([0, 0, $dz]) import(\"stack.stl\"); }" > "$OUT/stack.scad"
-    log=$(docker run --rm -v "$PWD/$OUT":/w -w /w "$IMAGE" openscad --backend=Manifold \
+    log=$(docker run --rm --label "scadbuddy-verify=${SCADBUDDY_VERIFY_LABEL:-local}" -v "$PWD/$OUT":/w -w /w "$IMAGE" openscad --backend=Manifold \
         -o "stack-$dz.stl" stack.scad 2>&1 || true)
     if grep -q "top level object is empty" <<< "$log"; then
         echo "stack $dz empty" >> "$OUT/cases.txt"
