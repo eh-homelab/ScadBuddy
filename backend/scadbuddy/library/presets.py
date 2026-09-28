@@ -9,8 +9,10 @@ Two kinds, listed together:
   metadata. A legacy ``presets.json`` (:data:`LEGACY_PRESETS_NAME`) beside the source
   is still read, below ``model.json``.
 - **mine** are the ones saved through the API, in Postgres (``saved_presets``, #332),
-  for built-ins as much as for templates of mine. Without a database there are none,
-  and saving one is refused (:class:`SavedPresetsUnavailableError`).
+  for built-ins as much as for templates of mine. The server always has a database
+  (#401); a store built without one reads only a template's own presets, as the
+  bundled-template checks do, and refuses a save
+  (:class:`SavedPresetsUnavailableError`).
 
 A preset holds only the values it sets. Applying one starts from the template's
 defaults, so a default the template changes later still reaches every preset that
@@ -264,11 +266,6 @@ class PresetStore:
             if conninfo
             else None
         )
-
-    @property
-    def saves(self) -> bool:
-        """Whether presets can be saved here: only with a database."""
-        return self._pool is not None
 
     def open(self) -> None:
         """Connect, and apply the migrations (the render queue's list, which is the
