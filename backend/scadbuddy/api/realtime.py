@@ -62,10 +62,12 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 
 from scadbuddy.api.deps import JOB_ID_PATTERN, AppState, StateDep
 from scadbuddy.core.events import (
+    AnalyzerDecisionEvent,
     BusResync,
     Event,
     FontInstalled,
     JobEvent,
+    JobProgress,
     LibraryChanged,
     LibraryRemoved,
     ModelEvent,
@@ -99,7 +101,7 @@ MAX_FRAME_CHARS = 16_384
 #: As ``urlsplit(...).hostname`` gives them: an IPv6 literal without its brackets.
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
-COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings"})
+COLLECTION_TOPICS = frozenset({"models", "outputs", "libraries", "fonts", "settings", "analyzers"})
 
 
 def _strip_anchors(pattern: str) -> str:
@@ -129,7 +131,7 @@ def valid_topic(topic: object) -> bool:
 def topics_of(event: Event) -> list[str]:
     """Every topic ``event`` is news for."""
     match event:
-        case JobEvent():
+        case JobEvent() | JobProgress():
             return [f"job:{event.job_id}"]
         case ModelEvent():
             return ["models", f"model:{event.slug}"]
@@ -147,6 +149,8 @@ def topics_of(event: Event) -> list[str]:
             return ["fonts"]
         case SettingsChanged():
             return ["settings"]
+        case AnalyzerDecisionEvent():
+            return ["analyzers"]
         case BusResync():
             # Not news for a topic: `pump` turns it into a ``resync`` frame.
             return []
