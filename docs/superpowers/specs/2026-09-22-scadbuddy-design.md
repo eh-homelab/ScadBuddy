@@ -261,10 +261,8 @@ jobs/<job-id>.json                render job state (pending/running/done/failed,
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
 cache/preview-work/.work-<uuid>/  a default-render preview's scratch space while it renders (§6.2.2)
-assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
-assets/<sha256>.json              its original name, kind and size; swept once unreferenced
-.assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
-.assets.usage.json                the upload store's running count and bytes (§5.5, "Usage")
+assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5); its name,
+                                  kind, size and last use are an `assets` row (#591)
 ```
 
 `origin_url` (#153) is the URL a model was imported from, exactly as it was pasted
@@ -610,16 +608,19 @@ string.
     `detail` names the setting and whose `usage` extension is the store's
     `{count, bytes, max_count, max_total_bytes}`. Content already stored is
     never refused, so re-uploading what an output uses keeps working at the cap.
-    The check and the write happen under one lock, so two uploads cannot both take
-    the last slot. Sizes are of the stored bytes, after sanitising and downscaling.
-  - *Usage.* A running total, not a directory scan (#390): `.assets.usage.json`
-    beside the store holds `{count, bytes, dirty}`, read and rewritten under the
-    store's flock by every upload that adds a blob and every sweep removal, so the
-    quota check is O(1) and replicas sharing the volume see the same numbers. A
-    change marks it dirty before touching a file and clean once counted; a dirty,
-    missing or unreadable ledger is recounted from the directory on the next read,
-    so a crash mid-change costs one scan, never a wrong total. The boot recounts
-    it unconditionally, for files added or removed while nothing was running.
+    The check and the insert happen in one transaction holding the store's advisory
+    lock, so two uploads -- in one process or on two replicas -- cannot both take
+    the last slot; a re-upload of stored content needs no room and skips it.
+    Sizes are of the stored bytes, after sanitising and downscaling.
+  - *Usage.* `count(*)` and `sum(size)` over the `assets` table (#591), not a
+    directory scan and not a running total: the metadata is one row per asset
+    (`id, name, kind, size, width, height, created_at, last_used_at`), so there is
+    nothing to recount at boot and every replica reads the same numbers. The bytes
+    stay on the volume. A blob is written before its row's insert commits, so no row
+    is ever without its blob; a blob with no row (an insert that failed, or one from
+    before #591, since nothing was copied over) is an orphan that `get` does not
+    find and usage does not count. The file-based store's `<id>.json` sidecars,
+    `.assets.usage.json` and `.assets.lock` are ignored and removed by the sweep.
     `GET /assets/usage` answers the same four numbers; Settings shows
     them under "Uploaded files". `/metrics` has `scadbuddy_assets_stored`,
     `scadbuddy_assets_bytes`, `scadbuddy_assets_max_count`,
@@ -636,13 +637,14 @@ string.
     values, so a damaged record still keeps what it names, and a coincidental
     match only keeps a file longer. An older revision's shipped `presets.json` in
     the models history is not read: shipped presets name samples, not uploads.
-  - *Last use.* An asset's last use is the later mtime of its two files. An upload
-    (a re-upload included) rewrites them; every `file` value that a render submit,
-    a render's staging or a preset save validates is marked used (`AssetStore.use`,
-    which `file_assets` calls). So a preset save now also refuses (422) a `file`
+  - *Last use.* An asset's last use is its row's `last_used_at` (an orphan blob's is
+    its mtime). An upload (a re-upload included) sets it; every `file` value that
+    a render submit, a render's staging or a preset save validates is marked used
+    (`AssetStore.use`, which `file_assets` calls). So a preset save now also refuses (422) a `file`
     value that is not an upload or a sample, as a render always did.
   - *The sweep* removes an asset nothing keeps whose last use is older than
-    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s). It runs at
+    `SCADBUDDY_ASSET_SWEEP_GRACE` (default 7 days, at least 3600 s): every row, and
+    every orphan blob on the volume. It runs at
     boot, after the render queue has opened its store, and then every
     `SCADBUDDY_ASSET_SWEEP_INTERVAL` (default 1 day; 0 turns the sweep off, boot
     included). Like the tombstone, orphan and library-staging sweeps it is best
@@ -652,17 +654,22 @@ string.
     read first, and if any source cannot be read (a store outage, an unreadable
     record, a 3MF that will not open as a zip) the sweep removes nothing. A reference made after that read is not in
     the set, so what protects it is the last use: every path that creates one
-    marks the asset used under the store's lock, and the sweep re-checks the last
-    use under the same lock immediately before it removes each asset. Either the
-    use wins, and the sweep sees a fresh asset and skips it, or the sweep wins and
-    the use is a not-found: a 422 for that render or preset, never a job that
-    loses its file halfway. A running render was marked used when it staged its
-    files, and its job stays in the store until the TTL prunes it. An upload whose
-    first render has not been submitted yet is protected by the grace alone, which
-    is why the grace has a floor. Removal takes the metadata first, so `get` stops
-    finding the asset before its bytes go. The lock is an `flock` on
-    `data/.assets.lock`, beside the store rather than in it, so it also holds
-    between replicas sharing the volume.
+    marks the asset used (an `UPDATE` of its row), and the sweep re-checks the last
+    use with that row locked (`SELECT … FOR UPDATE`) immediately before it removes
+    each asset. Either the use wins, and the sweep sees a fresh asset and skips it,
+    or the sweep wins and the use is a not-found: a 422 for that render or preset,
+    never a job that loses its file halfway. A running render was marked used when
+    it staged its files, and its job stays in the store until the TTL prunes it. An
+    upload whose first render has not been submitted yet is protected by the grace
+    alone, which is why the grace has a floor. Removal deletes the row first, so
+    `get` stops finding the asset before its bytes go. Each removal holds that
+    asset's advisory lock at session scope, from before the re-check until the blob
+    is gone -- past the commit of the delete -- and an upload holds the same lock
+    for its transaction, so an upload of the same content waits rather than
+    inserting a row over a blob about to be removed, while uploads of other content
+    never wait on a removal. The locks are Postgres's, so they hold between
+    replicas sharing the volume and the database. A removal that fails, in a file
+    or in the database, is logged and skipped; the rest are still tried.
 - **A missing file is a warning.** OpenSCAD reports `ERROR: Can't open file …`
   (`import()`) or `WARNING: The file … couldn't be opened` (`surface()`) and still
   exits 0 when anything else rendered. Both are read off the whole log, and the job

@@ -70,6 +70,16 @@ describe('downloadBlob', () => {
     expect(clicked).toBeUndefined()
   })
 
+  it('treats a popup that is already closed when opened as blocked, not as closed mid-fetch', async () => {
+    // Some blockers hand back a window that is closed straight away.
+    vi.spyOn(window, 'open').mockReturnValue({ closed: true, document: null, close: vi.fn() } as unknown as Window)
+    const load = vi.fn(async () => new Blob(['x']))
+    const saving = downloadBlob(load, 'a.3mf', true)
+    await expect(saving).rejects.toBeInstanceOf(DownloadBlockedError)
+    await expect(saving).rejects.not.toBeInstanceOf(DownloadWindowClosedError)
+    expect(load).not.toHaveBeenCalled()
+  })
+
   it('refuses rather than fall back to the frame when the popup is closed mid-fetch', async () => {
     // A closed window's `document` is null (WHATWG); the frame's own anchor would be
     // dropped silently (#612).

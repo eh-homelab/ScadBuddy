@@ -5,14 +5,11 @@ eligibility-check routes are gone (spec 2026-09-27 §4): the dialog now derives 
 slicer preset from the chosen spools, nozzles, quality and plate instead of picking a
 Bambuddy pipeline. What is left here is what the picker still remembers for itself —
 a model's printer and spools, and a printer's plate type — neither of which touches
-Bambuddy. The helpers below (``pipelines_route``, ``printers_route``, ``run_body``, …)
-stay because the send bar and the progress route still run a Bambuddy slicer pipeline
-and other test modules import them for that.
+Bambuddy. The helpers below (``printers_route``, ``presets_routes``) are imported by the
+other print test modules.
 """
 
 from __future__ import annotations
-
-from typing import Any
 
 import httpx
 import respx
@@ -20,19 +17,10 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from tests.api.conftest import read_stored
-from tests.api.test_send import BASE, presets_route
+from tests.api.test_send import BASE
 from tests.bambuddy.conftest import recording
 
 API = f"{BASE}/api/v1"
-
-
-def pipelines_route(body: Any | None = None) -> respx.Route:
-    # A pipeline's printer preset is named through the catalogue, for the nozzle the
-    # uploaded 3MF states (#126).
-    presets_route()
-    return respx.get(f"{API}/slicer-pipelines/").mock(
-        return_value=httpx.Response(200, json=body or recording("slicer-pipelines-configured.json"))
-    )
 
 
 def printers_route() -> respx.Route:
@@ -48,38 +36,6 @@ def presets_routes() -> None:
     respx.get(f"{API}/local-presets/").mock(
         return_value=httpx.Response(200, json=recording("local-presets.json"))
     )
-
-
-def run_body(run_id: int = 12, *, overridden: bool = False) -> dict[str, Any]:
-    return {
-        "id": run_id,
-        "pipeline_id": 1,
-        "pipeline_name": "Default",
-        "source_library_file_id": 41,
-        "copies": 2,
-        "copies_completed": 0,
-        "copies_failed": 0,
-        "copies_cancelled": 0,
-        "copies_in_progress": 2,
-        "status": "queued",
-        "slice_job_id": 9,
-        "sliced_library_file_id": 52,
-        "eligibility_overridden": overridden,
-        "target_kind": "specific_printer",
-        "target_printer_id": 1,
-        "fanout_strategy": "max_parallel",
-        "jobs": [
-            {
-                "id": 31,
-                "pipeline_run_id": run_id,
-                "copy_index": 0,
-                "assigned_printer_id": 1,
-                "assigned_printer_name": "3DP-31B-598",
-                "queue_entry_id": 77,
-                "status": "queued",
-            }
-        ],
-    }
 
 
 # --- the model's remembered printer and spools ---------------------------------------

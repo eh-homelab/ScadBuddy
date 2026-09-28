@@ -48,13 +48,12 @@ describe('usePrintProgress', () => {
   })
 
   it('stops as soon as the backend says the print has settled', async () => {
-    // The recorded failed run: Bambuddy still calls it `in_progress` with a copy in
-    // flight, so only `settled` can end this.
-    read.mockResolvedValue(fixtures.failedRunProgress)
+    // A failed slice is settled, so only `settled` can end the poll.
+    read.mockResolvedValue(fixtures.failedSliceProgress)
     const { result } = renderHook(() => usePrintProgress(OUTPUT_A, true))
     await settle()
 
-    expect(result.current.progress).toEqual(fixtures.failedRunProgress)
+    expect(result.current.progress).toEqual(fixtures.failedSliceProgress)
     expect(result.current.polling).toBe(false)
     expect(read).toHaveBeenCalledTimes(1)
 
@@ -76,7 +75,7 @@ describe('usePrintProgress', () => {
   })
 
   it('leaves no timer behind when it unmounts mid-print', async () => {
-    read.mockResolvedValue(fixtures.pipelineProgress)
+    read.mockResolvedValue(fixtures.queuedSliceProgress)
     const { result, unmount } = renderHook(() => usePrintProgress(OUTPUT_A, true))
     await settle()
 
@@ -105,7 +104,7 @@ describe('usePrintProgress', () => {
     await settle()
     // The older output's read finishes last, which is the ordering that would otherwise
     // overwrite the newer answer.
-    first.resolve(fixtures.failedRunProgress)
+    first.resolve(fixtures.failedSliceProgress)
     await settle()
 
     expect(result.current.progress).toEqual(fixtures.queuedSliceProgress)
@@ -120,7 +119,7 @@ describe('usePrintProgress', () => {
 
   describe('following a print (#268)', () => {
     it('reads again on each event for the print, and not on the 2 s timer while the socket is up', async () => {
-      read.mockResolvedValue(fixtures.pipelineProgress)
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
       const { result } = renderHook(() => usePrintProgress(OUTPUT_A, true))
       await settle()
       expect(realtime.following()).toEqual([`print:${OUTPUT_A}`])
@@ -128,7 +127,7 @@ describe('usePrintProgress', () => {
       await tick(10_000)
       expect(read).toHaveBeenCalledTimes(1)
 
-      read.mockResolvedValue(fixtures.failedRunProgress)
+      read.mockResolvedValue(fixtures.failedSliceProgress)
       await realtime.signal(`print:${OUTPUT_A}`, 'print.settled')
       expect(read).toHaveBeenCalledTimes(2)
       expect(result.current.polling).toBe(false)
@@ -136,7 +135,7 @@ describe('usePrintProgress', () => {
     })
 
     it('reads every 30 s while the socket is up, in case no event is coming', async () => {
-      read.mockResolvedValue(fixtures.pipelineProgress)
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
       renderHook(() => usePrintProgress(OUTPUT_A, true))
       await settle()
       await tick(29_000)
@@ -147,7 +146,7 @@ describe('usePrintProgress', () => {
 
     it('polls every 2 s while the socket is unavailable', async () => {
       realtime.setStatus('unavailable')
-      read.mockResolvedValue(fixtures.pipelineProgress)
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
       renderHook(() => usePrintProgress(OUTPUT_A, true))
       await settle()
       await tick(6_000)
@@ -155,7 +154,7 @@ describe('usePrintProgress', () => {
     })
 
     it('stops following when the view goes', async () => {
-      read.mockResolvedValue(fixtures.pipelineProgress)
+      read.mockResolvedValue(fixtures.queuedSliceProgress)
       const { unmount } = renderHook(() => usePrintProgress(OUTPUT_A, true))
       await settle()
       unmount()
