@@ -38,7 +38,7 @@ from scadbuddy.library.history import (
     ModelHistory,
     RevisionNotFoundError,
 )
-from scadbuddy.library.libraries import Declared, ModelLibrary, entry_name
+from scadbuddy.library.libraries import ModelLibrary, entry_name
 from scadbuddy.library.media import (
     LEGACY_ID,
     MAX_MEDIA_ITEMS,
@@ -53,7 +53,7 @@ from scadbuddy.library.media import (
     readable_media,
 )
 from scadbuddy.library.media_store import MediaStore
-from scadbuddy.library.presets import TemplatePreset, TemplatePresets
+from scadbuddy.library.presets import PresetStore, TemplatePreset, TemplatePresets
 from scadbuddy.library.previews import PreviewStore
 from scadbuddy.library.slugs import is_slug
 from scadbuddy.library.upstream import (
@@ -68,7 +68,6 @@ from scadbuddy.library.upstream import (
     plan_merge,
     state_of,
 )
-from scadbuddy.render.solids import WRAPPER_PREFIX
 
 if TYPE_CHECKING:
     # Type-only: `library.outputs` reaches this module again through
@@ -214,9 +213,9 @@ class ModelMeta(BaseModel):
     @field_validator("libraries", mode="before")
     @classmethod
     def _readable_pins(cls, value: Any) -> Any:
-        """Only the entries that are pins. A bare name from before per-model pins,
-        or a hand-edited entry, must not stop the model listing; its render says
-        what is wrong with it (`parse_declaration`), and pinning it again fixes it."""
+        """Only the entries that are pins. A hand-edited entry that is not one must
+        not stop the model listing; its render says what is wrong with it
+        (`parse_declaration`), and pinning it again fixes it."""
         if not isinstance(value, list):
             return []
         readable: list[ModelLibrary] = []
@@ -333,8 +332,10 @@ class Catalogue:
         previews: PreviewStore | None = None,
         duplicate_staging_max_age: float = DUPLICATE_STAGING_MAX_AGE,
         media_store: MediaStore | None = None,
+        presets: PresetStore | None = None,
         *,
         serve_previews: bool = True,
+        wrapper_prefix: str,
     ) -> None:
         self.paths = paths
         self.history = history
@@ -351,6 +352,11 @@ class Catalogue:
         #: while it was on (SCADBUDDY_PREVIEW_RENDERS).
         self.serve_previews = serve_previews
         self.duplicate_staging_max_age = duplicate_staging_max_age
+        #: Whose saved presets a template that is gone, or whose slug is reused,
+        #: takes with it. None: nothing is saved beside the templates.
+        self.presets = presets
+        #: A render's colour wrapper file prefix, which a duplicate leaves out.
+        self.wrapper_prefix = wrapper_prefix
         #: Called with a model's id after every catalogue change to it, from
         #: whichever thread made the change: how the preview scheduler hears that a
         #: model's source, thumbnail or existence may have changed. Must not raise.
@@ -615,10 +621,10 @@ class Catalogue:
         """The models whose live ``model.json`` pins ``name`` (at ``commit``).
 
         Read leniently and counted conservatively, because the answer decides
-        whether a checkout may be deleted: an entry that only names the library --
-        a bare name from before per-model pins, or a hand edit with no readable
-        commit -- counts at every commit, and a ``model.json`` that is not JSON
-        counts when its text mentions the name at all.
+        whether a checkout may be deleted: an entry that names the library with no
+        readable commit -- a hand edit -- counts at every commit, and a
+        ``model.json`` that is not JSON counts when its text mentions the name at
+        all.
         """
         users: list[str] = []
         for slug in self.slugs():
@@ -747,7 +753,9 @@ class Catalogue:
                         staged,
                         # Nor a render's colour wrapper, written beside the source
                         # for the length of a render and gitignored for that reason.
-                        ignore=shutil.ignore_patterns(".*", f"{WRAPPER_PREFIX}*"),
+                        ignore=shutil.ignore_patterns(
+                            ".*", *([f"{self.wrapper_prefix}*"] if self.wrapper_prefix else [])
+                        ),
                     )
                 except FileNotFoundError:
                     raise ModelNotFoundError(upstream_id) from None
@@ -828,7 +836,7 @@ class Catalogue:
         return self.record(slug)
 
     def pin_library(
-        self, slug: str, library: ModelLibrary, *, replacing: Declared | None = None
+        self, slug: str, library: ModelLibrary, *, replacing: ModelLibrary | None = None
     ) -> ModelRecord:
         """Pin ``library`` for this model: in place of any entry of the same name,
         or at the end. One revision of the model; no other model moves.
@@ -1556,9 +1564,7 @@ class Catalogue:
         the rest are still swept.
         """
         candidates: list[tuple[str, Path]] = []
-        # The saved presets are not derived, but they are keyed and orphaned the same
-        # way: a template that is gone takes its presets with it.
-        keyed_by_file = (self.paths.schema_cache, self.paths.presets)
+        keyed_by_file = (self.paths.schema_cache,)
         roots = (self.paths.outputs, self.paths.model_revisions, *keyed_by_file)
         for root in roots:
             try:
@@ -1583,7 +1589,64 @@ class Catalogue:
                 removed.append(str(path.relative_to(self.paths.root)))
                 if path.parent == self.paths.outputs:
                     self._forget_cover(slug)
+        # The saved presets are not derived, but they are keyed and orphaned the same
+        # way: a template that is gone takes its presets with it.
+        if self.presets is not None:
+            try:
+                forgotten = self.presets.sweep_orphans(
+                    lambda slug: self.paths.model_dir(slug).exists()
+                )
+            except (OSError, psycopg.Error):
+                logger.exception("could not sweep saved presets for orphans")
+            else:
+                removed.extend(f"saved presets of {slug}" for slug in forgotten)
         return removed
+
+    def sweep_stranded_claims(self) -> list[str]:
+        """Move to tombstones the model directories a claim left with nothing in them.
+
+        `_claim` makes a slug's directory before `create` or `duplicate` writes
+        into it; a process killed in between leaves one with no ``model.scad``,
+        which reads as missing yet refuses a retry as taken. Only one with nothing
+        tracked at HEAD either goes, and only once older than ``duplicate_staging_max_age``:
+        another replica sharing ``/data`` may be mid-claim. Runs at boot, before
+        the tombstone sweep. One that cannot be read or moved is logged and skipped.
+        """
+        root = self.paths.models
+        if not root.is_dir():
+            return []
+        cutoff = time.time() - self.duplicate_staging_max_age
+        moved: list[str] = []
+        try:
+            entries = sorted(root.iterdir())
+        except OSError:
+            logger.exception("could not list for stranded claims", extra={"path": str(root)})
+            return []
+        for directory in entries:
+            slug = directory.name
+            if slug.startswith(".") or slug == BUILTIN_DIR:
+                continue
+            try:
+                if not directory.is_dir() or (directory / SOURCE_NAME).exists():
+                    continue
+                if directory.stat().st_mtime > cutoff:
+                    continue
+                # Tracked at HEAD: a model whose source is missing from disk, not a
+                # claim -- restoring it is the history's job, not this sweep's.
+                if self.history is not None and self.history.available:
+                    head = self.history.head()
+                    if head is not None and self.history.files_at(head, slug):
+                        continue
+                tombstones = self.paths.tombstones
+                tombstones.mkdir(parents=True, exist_ok=True)
+                directory.rename(tombstones / f"{slug}.{uuid.uuid4().hex}")
+            except FileNotFoundError:
+                continue
+            except (OSError, GitError):
+                logger.exception("could not sweep a stranded claim", extra={"slug": slug})
+                continue
+            moved.append(slug)
+        return moved
 
     def sweep_orphan_previews(self) -> list[str]:
         """Drop the default-render preview of every model that is gone; returns their
@@ -1654,14 +1717,18 @@ class Catalogue:
             self.paths.model_schema_cache(slug),
             self.paths.model_revisions / slug,
             self.paths.outputs / slug,
-            # Not derived, but the previous model's: its saved presets.
-            self.paths.model_presets(slug),
         ):
             _remove_tree(path)
         # Under the model's preview lock: a render of the previous model finishing
         # now is either dropped here or discarded by its own "still wanted?" check.
         self._drop_preview(slug)
         self._forget_cover(slug)
+        # Not derived, but the previous model's: its saved presets.
+        if self.presets is not None:
+            try:
+                self.presets.forget(slug)
+            except psycopg.Error:
+                logger.exception("could not forget saved presets", extra={"slug": slug})
 
     def _forget_cover(self, slug: str) -> None:
         """Drop the output store's resolved fallback cover for ``slug``, whose
@@ -1899,14 +1966,12 @@ def _merge_base_of(history: ModelHistory, upstream: Upstream, commit: str) -> st
     return resolved
 
 
-def _declares(entries: list[Any], name: str, expected: Declared) -> bool:
+def _declares(entries: list[Any], name: str, expected: ModelLibrary) -> bool:
     """Is ``expected`` still the entry ``entries`` has for ``name``?"""
     found = [entry for entry in entries if entry_name(entry) == name]
     if len(found) != 1:
         return False
     [entry] = found
-    if isinstance(expected, str):
-        return bool(entry == expected)
     try:
         return ModelLibrary.model_validate(entry) == expected
     except ValidationError:

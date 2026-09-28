@@ -25,7 +25,6 @@ from scadbuddy.core.problems import install_problem_handlers
 from scadbuddy.core.settings import Settings
 from scadbuddy.library.assets import referenced_asset_ids
 from scadbuddy.library.history import GitError
-from scadbuddy.library.libraries import LOCKFILE_NAME, migrate_lockfile, read_lock
 from scadbuddy.library.library_seed import seed_libraries, seeded_checkouts
 from scadbuddy.library.previews import sweep_work_dirs
 from scadbuddy.render.previews import TIMEOUT_FACTOR as PREVIEW_TIMEOUT_FACTOR
@@ -96,12 +95,13 @@ def sweep_assets(state: AppState) -> list[str]:
     """Remove the uploads nothing references or has used for the grace (#296).
 
     The references are read first -- every job in the queue's store, then every
-    output, preset and template (`referenced_asset_ids`) -- and any failure to read
+    saved preset, output and template (`referenced_asset_ids`) -- and any failure to read
     them raises before anything is removed. What is referenced after that is kept by
     its last use, which the sweep re-checks under the store's lock per asset.
     """
     jobs = state.queue.store.list_jobs()
-    referenced = referenced_asset_ids(state.paths, [job.params for job in jobs])
+    params = [job.params for job in jobs] + state.presets.saved_params()
+    referenced = referenced_asset_ids(state.paths, params)
     removed = state.assets.sweep(referenced, grace=state.config.asset_sweep_grace)
     state.metrics.assets_swept.inc(len(removed))
     if removed:
@@ -112,18 +112,14 @@ def sweep_assets(state: AppState) -> list[str]:
 def _sweep_checkouts(state: AppState) -> list[str]:
     """The thread half of :func:`sweep_library_checkouts`."""
     # Every id any revision of any model.json -- live or deleted model, mine or a
-    # built-in -- or of the legacy lockfile ever held: ONE `git log -p`. A restore
+    # built-in -- ever held: ONE `git log -p`. A restore
     # puts a revision's pins back, so each of them is still a pin. Glob pathspecs, so
     # `*` stops at `/`: a model's own model.json, a built-in's one level deeper, and
     # no file of that name inside a model's folder.
     named = state.history.object_ids_in(
         f":(glob)*/{MODEL_META_NAME}",
         f":(glob){BUILTIN_DIR}/*/{MODEL_META_NAME}",
-        f":(literal){LOCKFILE_NAME}",
     )
-    lock = read_lock(state.paths)
-    if lock is not None:
-        named |= {pin.commit for pin in lock.pins.values()}
     # The image's seed (#169) is kept pinned or not: the boot would copy it back.
     seed_dir = state.settings.resolve_seed_libraries_dir()
     seeded = set(seeded_checkouts(seed_dir)) if seed_dir is not None else set()
@@ -133,8 +129,8 @@ def _sweep_checkouts(state: AppState) -> list[str]:
             commit in named
             or (name, commit) in seeded
             or bool(state.checkouts.leased(state.paths.libraries / name / commit))
-            # The live pins as a removal counts them: uncommitted edits, and a bare
-            # name or an unreadable model.json keeps every checkout of the library.
+            # The live pins as a removal counts them: uncommitted edits, and an
+            # entry with no commit or an unreadable model.json keeps every checkout.
             or bool(state.catalogue.library_users(name, commit))
         )
 
@@ -193,6 +189,10 @@ async def _prepare_catalogue(state: AppState) -> None:
     # After the sync, so the built-ins exist: a model the old seed copied in
     # becomes a duplicate of its built-in (#158). Contains its own failures.
     await asyncio.to_thread(state.catalogue.link_seeded)
+    # A create or duplicate that died between claiming its slug and writing it left
+    # an empty directory; it becomes a tombstone for the sweep below. Logs and skips
+    # whatever it cannot read or move, so it never stops the boot.
+    await asyncio.to_thread(state.catalogue.sweep_stranded_claims)
     # A delete that died between its rename and its rmtree left a tombstone.
     # Best effort, as it is after a delete: leftovers must not stop the boot.
     try:
@@ -202,6 +202,9 @@ async def _prepare_catalogue(state: AppState) -> None:
     # A duplicate the process died in the middle of left its staging copy. Nothing
     # is duplicating yet: no request has been served.
     await _sweep_duplicate_staging_logged(state)
+    # Before the orphan sweep, which forgets the saved presets of templates that are
+    # gone: the database, and its migrations, as the render queue's store opens it.
+    await asyncio.to_thread(state.presets.open)
     # Derived files a failed or raced delete left keyed to a slug that is gone.
     # It logs and skips whatever it cannot read, so it never stops the boot.
     await asyncio.to_thread(state.catalogue.sweep_orphans)
@@ -220,13 +223,6 @@ async def _prepare_catalogue(state: AppState) -> None:
         )
     except OSError:
         logger.exception("could not sweep preview scratch directories")
-    # Pins from before they moved into each model (#93): once, then the shared
-    # lockfile is gone. It logs what it cannot record, so it never stops the boot.
-    try:
-        slugs = [record.slug for record in await asyncio.to_thread(state.catalogue.list_models)]
-        await asyncio.to_thread(migrate_lockfile, state.paths, state.history, slugs)
-    except (OSError, ValueError, GitError):
-        logger.exception("could not migrate the library lockfile")
     # A library clone the process died in the middle of. Nothing is cloning yet:
     # no request has been served.
     try:
@@ -241,8 +237,7 @@ async def _prepare_catalogue(state: AppState) -> None:
             await asyncio.to_thread(seed_libraries, state.paths, seed_libraries_dir)
         except OSError:
             logger.exception("could not seed library checkouts from the image")
-    # After the migration, so every pin is where the sweep reads it. It logs and
-    # keeps what it cannot remove; one that cannot read the history removes nothing.
+    # It logs and keeps what it cannot remove; one that cannot read the history removes nothing.
     try:
         await sweep_library_checkouts(state)
     except (OSError, GitError):
@@ -259,6 +254,9 @@ async def _prepare_catalogue(state: AppState) -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     state: AppState = getattr(app.state, STATE_ATTR)
+    # First: without its database ScadBuddy has no settings, so it does not start.
+    # It also brings the schema up to date, before the queue's store opens.
+    await asyncio.to_thread(state.settings_store.open)
     state.paths.ensure()
     # Before the built-in sync: an existing models directory becomes revision 1,
     # so what a newer image changes in a built-in is a commit on top of it rather
@@ -341,7 +339,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await state.queue.aclose()
         if state.decisions is not None:
             await asyncio.to_thread(state.decisions.close)
+        await asyncio.to_thread(state.presets.close)
         await state.events.aclose()
+        await asyncio.to_thread(state.settings_store.close)
 
 
 def create_app(settings_override: Settings | None = None) -> FastAPI:
@@ -391,6 +391,3 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
     else:
         logger.info("no frontend bundle found; serving the API only")
     return app
-
-
-app = create_app()

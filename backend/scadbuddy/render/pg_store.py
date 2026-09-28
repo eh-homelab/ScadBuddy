@@ -440,6 +440,32 @@ class PostgresJobStore:
                     assert dropped is not None
                     superseded = _job(dropped)
                     self._announce(conn, superseded, "job.superseded")
+            if job.state == "done":
+                # Already answered, from the render kept under the template: on the
+                # row for the status poll, past the pending-key index and the limit.
+                conn.execute(
+                    "INSERT INTO render_jobs"
+                    " (id, slug, params, model_version, state, created_at, started_at,"
+                    "  finished_at, log_tail, result, diagnostics, diagnostics_dropped,"
+                    "  render_key)"
+                    " VALUES (%s, %s, %s, %s, 'done', %s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        job.id,
+                        job.slug,
+                        Jsonb(job.params),
+                        job.model_version,
+                        job.created_at,
+                        job.started_at,
+                        job.finished_at,
+                        Jsonb(job.log_tail),
+                        Jsonb(job.result.model_dump(mode="json")) if job.result else None,
+                        Jsonb([d.model_dump(mode="json") for d in job.diagnostics]),
+                        job.diagnostics_dropped,
+                        key,
+                    ),
+                )
+                self._announce(conn, job, "job.done")
+                return Submitted(job, cached=True, superseded=superseded)
             if max_pending:
                 # Inside the transaction: raising rolls the supersede above back,
                 # so a refusal changes nothing. A soft limit across replicas --

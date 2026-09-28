@@ -2,16 +2,14 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import httpx
 import respx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from scadbuddy.core.paths import DataPaths
+from scadbuddy.api.deps import STATE_ATTR
 from scadbuddy.core.settings import Settings
-from scadbuddy.library.settings_store import SETTINGS_NAME, SettingsStore
+from tests.api.conftest import read_stored
 from tests.bambuddy.conftest import recording
 
 ROUTE = "/api/v1/settings/print-options"
@@ -33,7 +31,7 @@ def test_nothing_is_remembered_to_begin_with_and_bambuddys_defaults_are_served(
 
 
 def test_a_per_printer_override_is_remembered_under_the_printer_id(
-    client: TestClient, data_dir: Path
+    client: TestClient, settings: Settings
 ) -> None:
     response = client.put(
         ROUTE, json={"scope": "printer", "key": "1", "options": {"timelapse": False}}
@@ -42,7 +40,7 @@ def test_a_per_printer_override_is_remembered_under_the_printer_id(
     assert response.status_code == 200
     assert response.json()["printers"] == {"1": {**_unset(), "timelapse": False}}
 
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["printer_print_options"]["1"]["timelapse"] is False
 
 
@@ -72,14 +70,14 @@ def test_a_scope_is_replaced_wholesale_not_merged(client: TestClient) -> None:
 
 
 def test_clearing_a_scope_removes_it_rather_than_storing_an_empty_object(
-    client: TestClient, data_dir: Path
+    client: TestClient, settings: Settings
 ) -> None:
     client.put(ROUTE, json={"scope": "model", "key": "demo", "options": {"timelapse": False}})
 
     body = client.put(ROUTE, json={"scope": "model", "key": "demo", "options": {}}).json()
 
     assert body["models"] == {}
-    stored = json.loads((data_dir / "settings.json").read_text(encoding="utf-8"))
+    stored = read_stored(settings.database_url)
     assert stored["model_print_options"] == {}
 
 
@@ -172,7 +170,7 @@ def test_remembering_an_option_never_needs_a_reachable_bambuddy(client: TestClie
 
 @respx.mock
 def test_a_models_stored_pipeline_no_longer_decides_the_printer_the_scope_keys_on(
-    client: TestClient, model: str, paths: DataPaths, settings: Settings
+    client: TestClient, app: FastAPI, model: str
 ) -> None:
     """Final review 3: the send runs the Settings pipeline only, so the scope keys on
     that pipeline's printer even when a legacy per-model pipeline is still stored."""
@@ -180,7 +178,7 @@ def test_a_models_stored_pipeline_no_longer_decides_the_printer_the_scope_keys_o
         "/api/v1/settings",
         json={"bambuddy_url": "https://bambuddy.test", "pipeline_id": 4},
     )
-    SettingsStore(paths.root / SETTINGS_NAME, settings).set_model_pipeline(model, 9)
+    getattr(app.state, STATE_ATTR).settings_store.set_model_pipeline(model, 9)
     respx.get("https://bambuddy.test/api/v1/slicer-pipelines/4").mock(
         return_value=httpx.Response(
             200, json={**recording("slicer-pipeline.json"), "id": 4, "target_printer_id": 2}
@@ -204,7 +202,7 @@ def test_an_unreachable_bambuddy_still_serves_what_needs_no_bambuddy(
     The read side now has the property the write side was built and tested for. Without
     it a transient outage — or a pipeline deleted on Bambuddy's side, which ScadBuddy
     cannot notice because it stores only the id — disabled Remember and blanked the global
-    and per-model rows that were sitting in settings.json all along.
+    and per-model rows that were sitting in the database all along.
     """
     client.put(
         "/api/v1/settings",

@@ -165,8 +165,8 @@ async def get_print_options(
             async with client_for(settings) as client:
                 printer_id = (await client.pipeline(pipeline_id)).target_printer_id
         except ApiError as error:
-            # Everything else here is read from settings.json and needs no network, so a
-            # Bambuddy hiccup — or a pipeline deleted on its side, which ScadBuddy cannot
+            # Everything else here is read from the stored settings and needs no network, so
+            # a Bambuddy hiccup — or a pipeline deleted on its side, which ScadBuddy cannot
             # notice, since it stores only the id — must not take the whole panel down. The
             # fallback is the state the UI already has a shape for: no printer known, so the
             # per-printer scope is disabled and the global and per-model rows still show.

@@ -30,7 +30,7 @@ from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
 from scadbuddy.render.bambu3mf import PLATE_THUMBNAIL
 from scadbuddy.render.previews import PreviewScheduler
-from tests.api.conftest import PNG_BYTES, wait_for_job
+from tests.api.conftest import PNG_BYTES, job_file, wait_for_job
 
 pytestmark = [pytest.mark.requires_git, pytest.mark.requires_postgres]
 
@@ -124,7 +124,7 @@ def _generate(client: TestClient, paths: DataPaths, cover: bytes) -> str:
         f"/api/v1/models/{SLUG}/render", json={"params": {"width": next(_WIDTHS)}}
     ).json()["job_id"]
     wait_for_job(client, job_id)
-    with zipfile.ZipFile(paths.job_work_dir(job_id) / "model.3mf", "a") as archive:
+    with zipfile.ZipFile(job_file(paths, job_id, "model.3mf"), "a") as archive:
         archive.writestr(PLATE_THUMBNAIL, cover)
     response = client.post(f"/api/v1/models/{SLUG}/outputs", json={"job_id": job_id})
     assert response.status_code == 201, response.text
@@ -495,35 +495,17 @@ def test_turning_previews_off_hides_the_ones_already_rendered(
     assert len(stub.calls) == 1
 
 
-def test_without_a_database_there_are_no_previews(settings: Settings, paths: DataPaths) -> None:
-    """Postgres-only (#454): no database means no store, no scheduler and no preview,
-    and nothing written under the data directory in their place."""
-    app, booted = _boot(settings.model_copy(update={"database_url": None}), StubRender(paths))
-    with TestClient(app) as client:
-        _create(client)
-        assert _model(client)["thumbnail_source"] is None
-    assert booted.previews is None
-    assert booted.catalogue.previews is None
-
-
 # ── startup: the backfill never leaks the queue ───────────────────────────────
 
 
 def _failing_backfill(
     booted: AppState, monkeypatch: pytest.MonkeyPatch, error: Exception
 ) -> list[str]:
-    """`list_models` fails on its second call -- the preview backfill's, after the
-    queue has opened; the first is the lockfile migration's, before it. Returns
-    the log of what was closed."""
-    real = booted.catalogue.list_models
-    calls = 0
+    """`list_models` fails: its first call at boot is the preview backfill's, after
+    the queue has opened. Returns the log of what was closed."""
 
     def listing() -> Any:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            raise error
-        return real()
+        raise error
 
     monkeypatch.setattr(booted.catalogue, "list_models", listing)
     closed: list[str] = []
