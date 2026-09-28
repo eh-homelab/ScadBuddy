@@ -278,6 +278,10 @@ class InvalidLibraryEntry(BaseModel):
         description="The name `DELETE /models/{slug}/libraries/{name}` removes it by; "
         "null when it has none that route takes"
     )
+    index: int | None = Field(
+        description="Its position in model.json's `libraries`: the DELETE's `index`, which "
+        "removes this entry alone; null when `libraries` is not a list"
+    )
     problem: str = Field(description="Why it is not a pin: the render's 409 detail")
 
 
@@ -287,16 +291,16 @@ def invalid_entries(raw: Any) -> list[InvalidLibraryEntry]:
     if raw is None:
         return []
     if not isinstance(raw, list):
-        return [InvalidLibraryEntry(name=None, problem=NOT_A_LIST)]
+        return [InvalidLibraryEntry(name=None, index=None, problem=NOT_A_LIST)]
     invalid: list[InvalidLibraryEntry] = []
-    for entry in raw:
+    for index, entry in enumerate(raw):
         problem = entry_problem(entry)
         if problem is None:
             continue
         name = entry_name(entry)
         if name is not None and not re.fullmatch(NAME_PATTERN, name):
             name = None
-        invalid.append(InvalidLibraryEntry(name=name, problem=problem))
+        invalid.append(InvalidLibraryEntry(name=name, index=index, problem=problem))
     return invalid
 
 

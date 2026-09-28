@@ -770,8 +770,12 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  unpinModelLibrary: (slug: string, name: string) =>
-    request<ModelSummary>(`/models/${seg(slug)}/libraries/${seg(name)}`, { method: 'DELETE' }),
+  /** With `index` (#217), only the invalid entry at that position of `libraries`. */
+  unpinModelLibrary: (slug: string, name: string, index?: number) =>
+    request<ModelSummary>(
+      `/models/${seg(slug)}/libraries/${seg(name)}${index === undefined ? '' : `?index=${index}`}`,
+      { method: 'DELETE' },
+    ),
 
   getSettings: () => request<Settings>('/settings'),
 

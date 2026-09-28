@@ -238,15 +238,32 @@ async def repin_library(
     "/models/{slug}/libraries/{name}",
     response_model=ModelRecord,
     summary="Remove a library from a model",
-    description="The checkout stays on the volume: an older revision may still pin it.",
+    description=(
+        "Removes every entry of that name, or with `index` only the invalid entry at that "
+        "position (`invalid_libraries[].index`): a 409 when that entry is no longer an "
+        "invalid one of that name. The checkout stays on the volume: an older revision "
+        "may still pin it."
+    ),
 )
 def unpin_library(
-    slug: SlugPath, name: LibraryName, catalogue: CatalogueDep, events: EventsDep
+    slug: SlugPath,
+    name: LibraryName,
+    catalogue: CatalogueDep,
+    events: EventsDep,
+    index: Annotated[
+        int | None,
+        Query(ge=0, description="Only the invalid entry at this position of `libraries`"),
+    ] = None,
 ) -> ModelRecord:
     require_mine(slug)
     require_model_exists(catalogue, slug)
     try:
-        record = catalogue.unpin_library(slug, name)
+        record = catalogue.unpin_library(slug, name, index=index)
+    except LibraryPinChangedError:
+        raise ApiError(
+            status.HTTP_409_CONFLICT,
+            f"{slug!r}'s entry {index} is no longer an invalid {name!r}; nothing was removed",
+        ) from None
     except LibraryNotDeclaredError:
         raise ApiError(
             status.HTTP_404_NOT_FOUND, f"{slug!r} does not declare a library named {name!r}"

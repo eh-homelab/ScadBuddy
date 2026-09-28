@@ -2441,7 +2441,7 @@ export const handlers = [
     return HttpResponse.json(view(updated))
   }),
 
-  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params }) => {
+  http.delete(`${base}/models/:slug/libraries/:name`, async ({ params, request }) => {
     const slug = String(params['slug'])
     const name = String(params['name'])
     const refused = refuseBuiltin(slug)
@@ -2450,6 +2450,25 @@ export const handlers = [
     if (!model) return problem(404, 'Not Found', `no model named '${slug}'`)
     const current = model.libraries ?? []
     const invalid = model.invalid_libraries ?? []
+    const at = new URL(request.url).searchParams.get('index')
+    if (at !== null) {
+      // #217 — that invalid entry alone, as the backend's `unpin_library(index=)`.
+      const index = Number(at)
+      if (!invalid.some((entry) => entry.index === index && entry.name === name)) {
+        return problem(409, 'Conflict', `'${slug}'s entry ${index} is no longer an invalid '${name}'`)
+      }
+      await delay(50)
+      const updated = {
+        ...model,
+        invalid_libraries: invalid
+          .filter((entry) => entry.index !== index)
+          .map((entry) =>
+            entry.index !== null && entry.index > index ? { ...entry, index: entry.index - 1 } : entry,
+          ),
+      }
+      state.models = state.models.map((m) => (m.slug === slug ? updated : m))
+      return HttpResponse.json(view(updated))
+    }
     if (![...current, ...invalid].some((row) => row.name === name)) {
       return problem(404, 'Not Found', `'${slug}' does not declare '${name}'`)
     }

@@ -42,6 +42,7 @@ from scadbuddy.library.libraries import (
     InvalidLibraryEntry,
     ModelLibrary,
     entry_name,
+    entry_problem,
     invalid_entries,
 )
 from scadbuddy.library.media import (
@@ -879,15 +880,30 @@ class Catalogue:
         self._commit_change(message, change, slug)
         return self.record(slug)
 
-    def unpin_library(self, slug: str, name: str) -> ModelRecord:
+    def unpin_library(self, slug: str, name: str, *, index: int | None = None) -> ModelRecord:
         """Take ``name`` off this model's libraries. :class:`KeyError` when the
-        model does not declare it."""
+        model does not declare it.
+
+        With ``index``, only the invalid entry at that position of ``libraries``
+        (#217), which may share its name with a pin or another entry; checked in
+        the same read-modify-write, and :class:`LibraryPinChangedError` when that
+        entry is no longer an invalid one of that name."""
         self._require(slug)
 
         def change() -> None:
             raw = self.read_raw_meta(slug)
             current = raw.get("libraries")
             entries: list[Any] = list(current) if isinstance(current, list) else []
+            if index is not None:
+                if not (
+                    0 <= index < len(entries)
+                    and entry_name(entries[index]) == name
+                    and entry_problem(entries[index]) is not None
+                ):
+                    raise LibraryPinChangedError(name)
+                raw["libraries"] = entries[:index] + entries[index + 1 :]
+                self.write_raw_meta(slug, raw)
+                return
             kept = [entry for entry in entries if entry_name(entry) != name]
             if len(kept) == len(entries):
                 raise LibraryNotDeclaredError(name)

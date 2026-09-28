@@ -364,7 +364,12 @@ function InvalidRow({
             <Button
               size="sm"
               variant="ghost"
-              onClick={() => void run('remove', () => api.unpinModelLibrary(slug, name))}
+              // By its position as well: a pin or another entry may share its name.
+              onClick={() =>
+                void run('remove', () =>
+                  api.unpinModelLibrary(slug, name, entry.index ?? undefined),
+                )
+              }
               disabled={busy !== null}
               aria-busy={busy === 'remove'}
             >

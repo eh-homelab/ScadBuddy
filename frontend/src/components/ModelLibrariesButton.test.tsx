@@ -15,14 +15,15 @@ function row(name: string) {
   return screen.getByRole('listitem', { name })
 }
 
-/** Records every library PUT/DELETE as `METHOD name body`. */
+/** Records every library PUT/DELETE as `METHOD name?query body`. */
 function watchPins() {
   const seen: string[] = []
   server.events.on('request:start', async ({ request }) => {
-    const match = /\/libraries\/([^/]+)$/.exec(new URL(request.url).pathname)
+    const url = new URL(request.url)
+    const match = /\/libraries\/([^/]+)$/.exec(url.pathname)
     if (!match) return
     const body = request.method === 'PUT' ? ` ${JSON.stringify(await request.clone().json())}` : ''
-    seen.push(`${request.method} ${decodeURIComponent(match[1] ?? '')}${body}`)
+    seen.push(`${request.method} ${decodeURIComponent(match[1] ?? '')}${url.search}${body}`)
   })
   return seen
 }
@@ -286,8 +287,8 @@ describe('ModelLibrariesButton, invalid entries (#217)', () => {
 
   it('lists an entry that is not a pin, says why, and removes it', async () => {
     setMockInvalidLibraries('name-keychain', [
-      { name: 'threads', problem: BARE },
-      { name: null, problem: NAMELESS },
+      { name: 'threads', index: 0, problem: BARE },
+      { name: null, index: 1, problem: NAMELESS },
     ])
     const seen = watchPins()
     const onSaved = vi.fn()
@@ -313,20 +314,22 @@ describe('ModelLibrariesButton, invalid entries (#217)', () => {
     expect(
       within(pinned).getByRole('listitem', { name: 'Invalid entry 1: unnamed' }),
     ).toHaveTextContent(NAMELESS)
-    expect(seen).toEqual(['DELETE threads'])
+    expect(seen).toEqual(['DELETE threads?index=0'])
     await user.click(within(dialog).getByRole('button', { name: 'Done' }))
     expect(onSaved).toHaveBeenCalledTimes(1)
   })
 
-  it('gives every invalid entry its own accessible name, when names repeat or are missing', async () => {
+  it('gives every invalid entry its own accessible name, and removes only the one clicked', async () => {
     // As the backend's fixture in tests/api/test_libraries.py: two entries with no
     // usable name, and here a name given twice as well.
+    const SECOND = "model.json library 'threads' is not valid: commit: Field required; pin it again"
     setMockInvalidLibraries('name-keychain', [
-      { name: 'threads', problem: BARE },
-      { name: 'threads', problem: BARE },
-      { name: null, problem: NAMELESS },
-      { name: null, problem: BAD_NAME },
+      { name: 'threads', index: 0, problem: BARE },
+      { name: 'threads', index: 1, problem: SECOND },
+      { name: null, index: 2, problem: NAMELESS },
+      { name: null, index: 3, problem: BAD_NAME },
     ])
+    const seen = watchPins()
     const { user } = renderPage(<ModelLibrariesButton slug="name-keychain" name="Name Keychain" />)
     const dialog = await openDialog(user, 'Libraries\\s*4')
     const pinned = await within(dialog).findByRole('list', { name: 'Pinned libraries' })
@@ -343,6 +346,17 @@ describe('ModelLibrariesButton, invalid entries (#217)', () => {
     expect(
       within(pinned).getByRole('listitem', { name: 'Invalid entry 4: unnamed' }),
     ).toHaveTextContent(BAD_NAME)
+
+    const second = within(pinned).getByRole('listitem', { name: 'Invalid entry 2: threads' })
+    await user.click(within(second).getByRole('button', { name: 'Remove' }))
+
+    await waitFor(() => expect(within(pinned).getAllByRole('listitem')).toHaveLength(3))
+    expect(seen).toEqual(['DELETE threads?index=1'])
+    // The other entry of that name stays.
+    expect(
+      within(pinned).getByRole('listitem', { name: 'Invalid entry 1: threads' }),
+    ).toHaveTextContent(BARE)
+    expect(pinned).not.toHaveTextContent(SECOND)
   })
 
   it('says why a 409 was refused on the row and reads the model again', async () => {
@@ -359,7 +373,7 @@ describe('ModelLibrariesButton, invalid entries (#217)', () => {
         { once: true },
       ),
     )
-    setMockInvalidLibraries('name-keychain', [{ name: 'threads', problem: BARE }])
+    setMockInvalidLibraries('name-keychain', [{ name: 'threads', index: 0, problem: BARE }])
     const reads: string[] = []
     server.events.on('request:start', ({ request }) => {
       const { pathname } = new URL(request.url)
