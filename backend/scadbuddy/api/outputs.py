@@ -10,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from scadbuddy.api.deps import (
     CatalogueDep,
+    ConfigDep,
     EventsDep,
     OutputIdPath,
     OutputsDep,
@@ -18,7 +19,7 @@ from scadbuddy.api.deps import (
     SettingsStoreDep,
     SlugPath,
 )
-from scadbuddy.api.jobs import require_job
+from scadbuddy.api.jobs import PNG_MEDIA_TYPE, ViewSize, preview_view, require_job
 from scadbuddy.api.models import PNG_MAGIC, require_model
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.send import SendRequest, SendResult, send_output
@@ -26,6 +27,7 @@ from scadbuddy.core.events import OutputEvent, emit
 from scadbuddy.core.problems import ApiError
 from scadbuddy.library.outputs import (
     MODEL_NAME,
+    PREVIEW_NAME,
     THUMBNAIL_NAME,
     OutputMeta,
     OutputNotFoundError,
@@ -35,6 +37,7 @@ from scadbuddy.library.outputs import (
 from scadbuddy.render.bambu3mf import plates_of
 from scadbuddy.render.geometry import GeometryAnalysis
 from scadbuddy.render.schema import ParamValue
+from scadbuddy.render.thumbnail import PLATE_PNG_SIZE, ViewName
 
 router = APIRouter(tags=["outputs"])
 
@@ -218,6 +221,33 @@ def get_output_thumbnail(output_id: OutputIdPath, outputs: OutputsDep) -> FileRe
     if not path.is_file():
         raise ApiError(status.HTTP_404_NOT_FOUND, f"output {output_id!r} has no thumbnail")
     return FileResponse(path, media_type="image/png")
+
+
+@router.get(
+    "/outputs/{output_id}/views/{view}.png",
+    response_class=Response,
+    responses={200: {"content": {PNG_MEDIA_TYPE: {}}}},
+    summary="Output preview from a named view",
+    description=(
+        "The saved output's preview mesh drawn from `view` (iso, front, back, left, "
+        "right, top, bottom) as a shaded PNG."
+    ),
+)
+async def get_output_view(
+    output_id: OutputIdPath,
+    view: ViewName,
+    outputs: OutputsDep,
+    config: ConfigDep,
+    size: ViewSize = PLATE_PNG_SIZE,
+) -> Response:
+    require_output(outputs, output_id)
+    return await preview_view(
+        outputs.directory(output_id) / PREVIEW_NAME,
+        view,
+        size,
+        config=config,
+        owner=f"output {output_id!r}",
+    )
 
 
 def _model_3mf(outputs: OutputStore, output_id: str) -> Path:
