@@ -40,7 +40,32 @@ Spec §8.1 ("minted in Settings, stored hashed") and §9 ("MCP auth mode, tokens
   `/mcp` answers 503 before any token is looked at (`app.ts`), and `main.ts` wires
   `FailClosedTokenStore`, which verifies nothing. The same store is the fallback when
   the auth settings cannot be read (`resolveAuth()` in `mcp/http.ts`).
-- **Not built:** the Settings routes and UI to mint, list and revoke tokens (#251).
+- **Minting, listing and revoking** are Settings → "MCP access tokens" (shown only
+  where `useAiAvailability()` says AI is available, so not in a production build yet)
+  ([`frontend/src/components/McpTokensSection.tsx`](../../frontend/src/components/McpTokensSection.tsx))
+  over `/api/v1/ai/mcp-tokens`
+  ([`agent/src/routes/mcpTokens.ts`](../../agent/src/routes/mcpTokens.ts);
+  routes in [operating.md §4.1](operating.md#41-mcp-access-tokens)):
+  - `GET` returns metadata only (name, tier, created, expires, last used, revoked and a
+    derived `status`), never the token or its hash. The store keeps no last-4 hint, so
+    none is shown. It passes `uiReadProblem()` (HTTPS, and an `Origin` or `Host` on the
+    allowlist; a cross-site `Sec-Fetch-Site` is refused).
+  - `POST` returns the plaintext once, in the `201` body, with `Cache-Control:
+    no-store`. The route never logs it. `DELETE /:id` sets `revoked_at`; a revoked
+    token stays listed and never verifies again.
+  - Both writes pass `uiRequestProblem()`, as credential writes do: minting a
+    token is an outward write (spec §8.1). `POST` also needs `Content-Type:
+    application/json` (`415` otherwise). The same limitation applies: this is a gate, not
+    authentication (spec §8.3, "Stated plainly").
+  - In the browser, the plaintext is held only in the section's React state until
+    **Done**. It is rendered as text in a `<code>` element, not as a field value, so the
+    browser agent's snapshot ([`frontend/src/agent/snapshot.ts`](../../frontend/src/agent/snapshot.ts)),
+    which reads field values and `role=status`/`alert` text, never sees it. Create,
+    Copy and Revoke are `USER_ONLY`, so the browser agent cannot press them.
+  - Every auth mode allows managing tokens. In `disabled` mode `/mcp` does not check
+    them; they are kept for when the mode returns to `bearer`, and Settings shows a
+    warning. In `oidc` mode (#262) bearer tokens keep working alongside the IdP
+    (spec §8.3). `GET` reports `auth_mode` for this.
 
 ## Risk tiers and the permission seam
 
@@ -275,7 +300,6 @@ merged code.
 |---|---|
 | Whether `canUseTool` can wait on an asynchronous human decision, or a `PreToolUse` hook must deny and the session resume after approval | #255, #258 |
 | Bambuddy 1.2.5.5 routes for print archive outcomes and stats | #251 |
-| Whether the #241 Postgres needs anything for `LISTEN/NOTIFY` across replicas | #264 |
 | Bambu Studio's "Open in Bambu Studio" hand-off | #284 |
 | Keys accepted by `filament_overrides` on `PrintQueueItemCreate` | #284 |
 | Whether `/local-presets/` can create a derived process preset | #284 |
@@ -289,6 +313,11 @@ merged code.
 | Whether `outputDir` confines every write | #349 |
 | How the backend matches the agent-actor marker to an approved outward action | #349 |
 | Chromium on the agent image: install, non-root, read-only root, size | #349 |
+
+The `LISTEN/NOTIFY` across replicas item is answered by #264 (spec §3.2): connect to
+the primary, since a hot standby refuses `LISTEN` and `NOTIFY`
+([PostgreSQL: Hot Standby](https://www.postgresql.org/docs/current/hot-standby.html));
+see [mcp-resources.md](mcp-resources.md#the-event-source).
 
 The headless browser (spec §5.3, merged as a spec in #363) stays off until its rows are
 verified (spec §8.2).

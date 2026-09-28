@@ -145,6 +145,23 @@ describe.skipIf(skip !== undefined)(`session routes${skip ? ` (skipped: ${skip})
     expect(cross.status).toBe(403)
     const form = await app.request('/api/v1/ai/sessions', { method: 'POST', headers: { ...UI, 'content-type': 'text/plain' }, body: '{"prompt":"x"}' })
     expect(form.status).toBe(415)
+    // The same for a message: only JSON is read.
+    const { session } = await m.start(browser, { origin: 'chat', title: 'x' })
+    for (const type of ['text/plain', 'application/x-www-form-urlencoded', 'multipart/form-data; boundary=b']) {
+      const res = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+        method: 'POST',
+        headers: { ...UI, 'content-type': type },
+        body: '{"text":"hi"}',
+      })
+      expect(res.status, type).toBe(415)
+    }
+    const none = await app.request(`/api/v1/ai/sessions/${session.id}/messages`, {
+      method: 'POST',
+      headers: UI,
+      body: '{"text":"hi"}',
+    })
+    expect(none.status).toBe(415)
+    expect((await m.get(session.id, browser)).turns).toBe(0)
     const unknown = await app.request('/api/v1/ai/sessions/00000000-0000-4000-8000-000000000000', { headers: UI_READ })
     expect(unknown.status).toBe(404)
     const junk = await app.request('/api/v1/ai/sessions/not-a-uuid/events', { headers: UI_READ })
