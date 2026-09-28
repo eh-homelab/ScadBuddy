@@ -232,12 +232,12 @@ def create_app(settings_override: Settings | None = None) -> FastAPI:
         BodySizeGate,
         limits=BODY_LIMITS,
         routes=[
-            # Read per request, so a limit changed in Settings applies at once.
             RouteLimit(
                 "POST",
                 MEDIA_UPLOAD_PATH,
-                lambda: state.settings_store.load().media_upload_max_bytes,
+                app_settings.media_upload_max_bytes,
                 "a media upload",
+                "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES",
             )
         ],
     )

@@ -80,7 +80,7 @@ DEFAULT_ASSET_SWEEP_INTERVAL = 86400.0
 # copy rather than another replica's copy in flight (#212).
 DEFAULT_DUPLICATE_STAGING_MAX_AGE = 3600.0
 # The largest template video (#274) or print attachment (#309) one upload may carry.
-# Settings > Uploads overrides it; the upload route streams it to disk either way.
+# SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES sets it; the upload route streams it to disk.
 DEFAULT_MEDIA_UPLOAD_MAX_BYTES = 1024 * 1024 * 1024
 
 

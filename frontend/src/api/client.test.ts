@@ -110,7 +110,7 @@ describe('uploadMedia (#274)', () => {
     xhr.answer(413, {
       title: 'Content Too Large',
       status: 413,
-      detail: 'a media upload is at most 1024 MB (Settings > Uploads), and this one is larger',
+      detail: 'a media upload is at most 1024 MB (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES), and this one is larger',
     })
     const error = await pending.catch((cause: unknown) => cause)
     expect(error).toBeInstanceOf(ApiError)

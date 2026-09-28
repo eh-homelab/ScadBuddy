@@ -575,10 +575,25 @@ def test_other_multipart_routes_keep_the_multipart_cap(
     assert "reads at most" in response.json()["detail"]
 
 
-def test_the_limit_set_in_the_ui_applies(client: TestClient, model: str) -> None:
-    saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 1024})
-    assert saved.status_code == 200, saved.text
+def test_the_limit_comes_from_the_environment(
+    data_dir: Path,
+    seed_dir: Path,
+    fake_openscad: str,
+    model: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES", "1024")
+    settings = Settings(
+        openscad=fake_openscad,
+        data_dir=data_dir,
+        seed_models_dir=seed_dir,
+        frontend_dir=Path("/nonexistent"),
+    )
+    with TestClient(create_app(settings)) as client:
+        # Reported read-only, for the UI's own check before an upload.
+        assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024
 
-    response = _upload(client, model, MP4 + b"\x00" * 2048)
+        response = _upload(client, model, MP4 + b"\x00" * 2048)
 
     assert response.status_code == 413, response.text
+    assert "SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES" in response.json()["detail"]

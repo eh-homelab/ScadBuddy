@@ -327,7 +327,9 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     response_model=ModelRecord,
     responses={
         409: {"description": f"The template already holds {MAX_MEDIA_ITEMS} items"},
-        413: {"description": "Larger than Settings > Uploads, or an image over 10 MB"},
+        413: {
+            "description": "Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB"
+        },
         415: {"description": f"Not {ACCEPTED}"},
     },
     openapi_extra={
@@ -342,9 +344,10 @@ def get_media_poster(slug: SlugPath, item_id: MediaIdPath, catalogue: CatalogueD
     description=(
         f"Adds {ACCEPTED} as the template's last media item, as one revision. The "
         "type comes from the bytes, not the name. A video may carry a `poster` image "
-        "and any item a `caption`. The body may be as large as `media_upload_max_bytes` "
-        "(Settings > Uploads); an image is at most 10 MB, since it is committed to the "
-        "template's history, while a video is not. The first write turns a legacy "
+        "and any item a `caption`. The body may be as large as "
+        "`SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (reported by `GET /settings` as "
+        "`media_upload_max_bytes`); an image is at most 10 MB, since it is committed to "
+        "the template's history, while a video is not. The first write turns a legacy "
         "`thumbnail.png` into an ordinary item."
     ),
 )

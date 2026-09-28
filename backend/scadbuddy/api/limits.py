@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Callable, Coroutine, Mapping, Sequence
+from collections.abc import Coroutine, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -65,17 +65,15 @@ def megabytes(size: int) -> str:
 
 @dataclass(frozen=True)
 class RouteLimit:
-    """A body limit of one route's own, checked in place of its content type's.
-
-    ``limit`` is asked on every request to the route, so a limit changed in
-    Settings applies to the next upload.
-    """
+    """A body limit of one route's own, checked in place of its content type's."""
 
     method: str
     path: re.Pattern[str]
-    limit: Callable[[], int]
+    limit: int
     #: What the route is, for the refusal: "a media upload".
     what: str
+    #: Where the limit is set, for the refusal: an environment variable.
+    source: str
 
     def matches(self, scope: Scope) -> bool:
         return scope.get("method") == self.method and bool(self.path.match(scope["path"]))
@@ -112,9 +110,9 @@ class BodySizeGate:
         limit: int | None
         if route is not None:
             # Whatever the content type: the route's limit is the only one it has.
-            limit = route.limit()
+            limit = route.limit
             too_large = (
-                f"{route.what} is at most {megabytes(limit)} (Settings > Uploads), "
+                f"{route.what} is at most {megabytes(limit)} ({route.source}), "
                 "and this one is larger"
             )
             declared_too_large = too_large

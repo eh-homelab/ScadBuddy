@@ -118,7 +118,8 @@ for the project picker).
     `GET /api/v1/assets/usage` and the `scadbuddy_assets_*` metrics.
 - **Template media** (images and videos, in `/data/models/<slug>/media`):
   `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (default 1073741824, 1 GiB) is the largest
-  single upload; it is the starting value of Settings > Uploads, which overrides it.
+  single upload. It is set only here (no Settings override); `GET /api/v1/settings`
+  reports it read-only as `media_upload_max_bytes`.
   The upload is streamed to the data volume, never held in memory. Images (and
   posters) are also capped at 10 MiB, since they are committed to the models'
   history; videos are not committed.

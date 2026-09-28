@@ -16,7 +16,7 @@
 2. **Libraries.** Use `embla-carousel-react` for the carousel and `yet-another-react-lightbox` for the lightbox, with its Video, Zoom and Captions plugins. Record the added gzip size in the #275 PR. If it exceeds 40 kB gz, lazy-load the lightbox with `React.lazy`, since it is only needed on click.
 3. **No autoplay.** A carousel shows a video's poster (or a play badge on a neutral tile) and never plays inline. Videos play only in the lightbox.
 4. **Legacy thumbnail.** When `media` is absent from `model.json` and `thumbnail.png` exists, the API synthesizes one image item `{id: "thumbnail", file: "thumbnail.png", kind: "image"}` with no migration. The first media write converts it: `thumbnail.png` moves to `media/<id>.png`, so there is still one cover and no duplicate. `GET /models/{slug}/thumbnail` keeps working and serves the cover: the first image, or the first video's poster, else the existing output plate-cover fallback (#179).
-5. **Upload limit.** Add `media_upload_max_bytes: int = 1 GiB` to `core/settings.py`, env-seeded (add to `ENV_SEEDED`, `_from_env`, `StoredSettings`, `SettingsPatch`). Env `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`. Add an "Uploads" section to `SettingsPage.tsx` with one number field in MB. #322 later reworks the page.
+5. **Upload limit.** Add `media_upload_max_bytes: int = 1 GiB` to `core/settings.py`, env only (`SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`). New state is not added to files (`settings.json`); a UI override waits for the Postgres settings table (#455/#322). `GET /settings` reports the value read-only as `media_upload_max_bytes`, for the client-side oversize check (#279).
 6. **Built-ins.** Bundled models may ship `media/` plus `model.json` `media`; `sync_builtins` mirrors them like any other file. Built-in media is read-only (403 on writes, as for the source). `duplicate` copies `media/`, including video files that are not in git.
 7. **In-browser agent tools.** If `frontend/src/pages/agentTools*` exposes catalogue or navigation tools, the new URL params (`q`, `tag`, `origin`, `sort`, `view`) must be settable through the existing navigate tool. Do not add new agent tools in this epic.
 
@@ -147,7 +147,7 @@ Each issue is one task, carried out with TDD by its implementer. The steps below
   - the router include wherever `api/models.py` is included.
 - Test: `backend/tests/api/test_media.py`, `backend/tests/test_media_store.py`
 - Regenerate: `backend/openapi.json`, `frontend/src/api/schema.d.ts`. Extend the `frontend/src/mocks/fixtures.ts` + `handlers.ts` media routes, with one fixture template holding 3 images and 1 video, one holding legacy only, and one with none.
-- Frontend: `types.ts` + `client.ts` additions; a Settings "Uploads" field.
+- Frontend: `types.ts` + `client.ts` additions.
 
 Checklist:
 - [ ] Tests first:
@@ -163,9 +163,9 @@ Checklist:
   - a chunked body over the limit → 413 before full read;
   - another multipart route is still capped at 32 MiB;
   - the cover changes `GET /thumbnail` after a reorder;
-  - `media_upload_max_bytes` env seed and UI override (settings_store tests).
+  - `media_upload_max_bytes` comes from the environment and is reported read-only by `GET /settings`.
 - [ ] Implement until green; run the full backend CI set.
-- [ ] Regenerate the generated files; add mocks; add vitest for the client helpers and the Settings field.
+- [ ] Regenerate the generated files; add mocks; add vitest for the client helpers.
 - [ ] Commit, push, open the PR `feat(media): multiple images and videos per template` with `Fixes #274`.
 
 ### Task 2 (#276): catalogue search and filters

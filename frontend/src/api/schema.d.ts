@@ -405,7 +405,7 @@ export interface paths {
         put?: never;
         /**
          * Add an image or video
-         * @description Adds a PNG, JPEG or WebP image, or an MP4 or WebM video as the template's last media item, as one revision. The type comes from the bytes, not the name. A video may carry a `poster` image and any item a `caption`. The body may be as large as `media_upload_max_bytes` (Settings > Uploads); an image is at most 10 MB, since it is committed to the template's history, while a video is not. The first write turns a legacy `thumbnail.png` into an ordinary item.
+         * @description Adds a PNG, JPEG or WebP image, or an MP4 or WebM video as the template's last media item, as one revision. The type comes from the bytes, not the name. A video may carry a `poster` image and any item a `caption`. The body may be as large as `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES` (reported by `GET /settings` as `media_upload_max_bytes`); an image is at most 10 MB, since it is committed to the template's history, while a video is not. The first write turns a legacy `thumbnail.png` into an ordinary item.
          */
         post: operations["upload_media_api_v1_models__slug__media_post"];
         delete?: never;
@@ -3586,8 +3586,6 @@ export interface components {
             filament_presets?: components["schemas"]["PresetRef"][] | null;
             /** Library Folder Id */
             library_folder_id?: number | null;
-            /** Media Upload Max Bytes */
-            media_upload_max_bytes?: number | null;
             /** Pipeline Id */
             pipeline_id?: number | null;
             /** Printer Id */
@@ -4693,7 +4691,7 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Larger than Settings > Uploads, or an image over 10 MB */
+            /** @description Larger than `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, or an image over 10 MB */
             413: {
                 headers: {
                     [name: string]: unknown;

@@ -168,6 +168,11 @@ export function setMockPlates(slug: string, plates: NonNullable<Job['plates']>):
 }
 
 /** Makes `GET /fonts/catalogue` fail, which is the air-gapped case the picker falls back for. */
+/** #274 — the deployment's `SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES`, which nothing else can change. */
+export function setMockUploadLimit(bytes: number): void {
+  state.settings = { ...state.settings, media_upload_max_bytes: bytes }
+}
+
 export function setCatalogueOffline(offline: boolean): void {
   state.catalogueOffline = offline
 }
@@ -1203,7 +1208,7 @@ export const handlers = [
       return problem(
         413,
         'Content Too Large',
-        `a media upload is at most ${limit / MiB} MB (Settings > Uploads), and this one is larger`,
+        `a media upload is at most ${limit / MiB} MB (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES), and this one is larger`,
       )
     }
     const poster = await stagedPart(form, 'poster')
@@ -2337,16 +2342,12 @@ export const handlers = [
       pipeline_id?: number | null
       printer_id?: number | null
       display_unit?: Settings['display_unit'] | null
-      media_upload_max_bytes?: number | null
     }
     state.settings = {
       ...state.settings,
       ...body,
-      // A clear puts the deployment's value back (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES).
-      media_upload_max_bytes:
-        body.media_upload_max_bytes === undefined
-          ? state.settings.media_upload_max_bytes
-          : (body.media_upload_max_bytes ?? fixtures.settings.media_upload_max_bytes),
+      // #274: read-only, SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES; a PUT does not store one.
+      media_upload_max_bytes: state.settings.media_upload_max_bytes,
       display_unit: body.display_unit === undefined ? state.settings.display_unit : (body.display_unit ?? 'mm'),
       has_api_key:
         body.bambuddy_api_key === undefined

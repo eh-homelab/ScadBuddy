@@ -166,12 +166,9 @@ def test_testing_without_a_url_configured_is_a_conflict(client: TestClient) -> N
     assert response.headers["content-type"] == "application/problem+json"
 
 
-def test_the_upload_limit_is_set_and_cleared(client: TestClient) -> None:
+def test_the_upload_limit_is_read_only(client: TestClient) -> None:
+    """It comes from SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES alone: a PUT cannot store one."""
     saved = client.put("/api/v1/settings", json={"media_upload_max_bytes": 5 * 1024 * 1024})
     assert saved.status_code == 200, saved.text
-    assert saved.json()["media_upload_max_bytes"] == 5 * 1024 * 1024
-    assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 5 * 1024 * 1024
-
-    cleared = client.put("/api/v1/settings", json={"media_upload_max_bytes": None})
-    assert cleared.json()["media_upload_max_bytes"] == 1024**3
-    assert client.put("/api/v1/settings", json={"media_upload_max_bytes": 0}).status_code == 422
+    assert saved.json()["media_upload_max_bytes"] == 1024**3
+    assert client.get("/api/v1/settings").json()["media_upload_max_bytes"] == 1024**3

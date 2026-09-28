@@ -3,7 +3,13 @@ import { ApiError, api } from '../api/client'
 import type { ModelSummary } from '../api/types'
 import { COPY, UPSTREAM, duplicateWithUpdate, ours, theirs } from '../test/upstream'
 import { BUILTIN_SLUG, MEDIA_MP4_BASE64, keychainSource, versionIds } from './fixtures'
-import { MAX_PRESET_NAME, MAX_PRESETS, resetMockState, setMockPresets } from './handlers'
+import {
+  MAX_PRESET_NAME,
+  MAX_PRESETS,
+  resetMockState,
+  setMockPresets,
+  setMockUploadLimit,
+} from './handlers'
 
 /**
  * The mock's multipart `POST /models` has to resolve a model's name, description
@@ -724,6 +730,32 @@ describe('mock media routes, as api/media.py holds them (#274)', () => {
     const removed = await api.deleteMedia('name-keychain', 'thumbnail')
     expect(removed.media).toEqual([])
     expect(removed.thumbnail_source).not.toBe('model')
+  })
+
+  it('reports the upload limit read-only: a settings PUT does not change it', async () => {
+    const limit = (await api.getSettings()).media_upload_max_bytes
+    const saved = await fetch('/api/v1/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ media_upload_max_bytes: 1024 }),
+    }).then((response) => response.json() as Promise<{ media_upload_max_bytes: number }>)
+    expect(saved.media_upload_max_bytes).toBe(limit)
+  })
+
+  it('refuses an upload over the limit with a 413 naming it', async () => {
+    const saved = (await api.getSettings()).media_upload_max_bytes
+    try {
+      setMockUploadLimit(1024 * 1024)
+      const { status, body } = await post('gridfinity-bin', [
+        { name: 'file', value: new Uint8Array([...MP4, ...new Uint8Array(1024 * 1024)]), filename: 'v.mp4' },
+      ])
+      expect(status).toBe(413)
+      expect(body.detail).toBe(
+        'a media upload is at most 1 MB (SCADBUDDY_MEDIA_UPLOAD_MAX_BYTES), and this one is larger',
+      )
+    } finally {
+      setMockUploadLimit(saved)
+    }
   })
 
   it('copies the media with a duplicate', async () => {
