@@ -57,6 +57,9 @@ PREPARE_TIMEOUT = timedelta(minutes=10)
 #: for a piece: the revision's snapshot and the font families it names, one transfer
 #: each. (Its default parameters name no upload: `file_assets` skips a file
 #: parameter's own default, so there is no assets transfer.)
+#: Not in it: the first clone of a library pinned outside the image (a piece has
+#: `PREPARE_TIMEOUT` for that). Such a template's first preview on a fresh worker may
+#: time out; the clone lands anyway, and the next pass renders the preview.
 PREVIEW_TRANSFER = 2 * TRANSFER
 
 

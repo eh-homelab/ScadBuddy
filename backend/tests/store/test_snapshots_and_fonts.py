@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
+import time
 from dataclasses import replace
 from pathlib import Path
 from typing import cast
@@ -18,6 +20,7 @@ from scadbuddy.library.assets import AssetStore
 from scadbuddy.library.fonts import FontService
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.render import previews as previews_module
+from scadbuddy.render.jobs import prune_revision_exports, resolve_source
 from scadbuddy.render.projection import JobProjection
 from scadbuddy.render.schema import CustomizerSchema
 from scadbuddy.render.solids import WRAPPER_PREFIX
@@ -26,7 +29,7 @@ from scadbuddy.store.fonts import FontMirror, font_key, model_dir, wanted_famili
 from scadbuddy.store.index import Pool
 from scadbuddy.store.local import LocalBlobStore
 from scadbuddy.store.refs import BlobRefs
-from scadbuddy.store.snapshots import SnapshotStore, snapshot_key
+from scadbuddy.store.snapshots import SnapshotStore, SnapshotUnavailableError, snapshot_key
 from scadbuddy.workflows.activities import RenderActivities, WorkerDeps
 from scadbuddy.workflows.models import PieceRequest, piece_key
 from tests.conftest import write_openscad_3mf
@@ -286,3 +289,28 @@ async def test_a_preview_whose_snapshot_is_gone_fails_clearly_on_a_worker(
             "0" * 40,
         )
     assert raised.value.non_retryable and raised.value.type == "SnapshotUnavailableError"
+
+
+async def test_an_export_a_worker_uses_again_is_not_pruned_within_the_ttl(
+    tmp_path: Path, content: ContentStore
+) -> None:
+    """Final re-review n1: a `materialize` hit is a use, so the prune's TTL runs from
+    the last render that read the export, not from when it was unpacked."""
+    rev = "9" * 40
+    await _stored(tmp_path, content, rev)
+    worker_paths = DataPaths(tmp_path / "worker")
+    worker = SnapshotStore(content, worker_paths, history=None)
+    assert await worker.materialize("demo", rev)
+    export = worker_paths.model_revision_dir("demo", rev)
+    old = time.time() - 7 * 86400
+    os.utime(export, (old, old))
+    assert await worker.materialize("demo", rev)  # a hit
+    assert prune_revision_exports(worker_paths, 86400) == []
+    assert (export / "model.scad").is_file()
+
+
+async def test_an_export_lost_to_the_prune_on_a_worker_without_git_fails_clearly(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(SnapshotUnavailableError, match="demo@"):
+        await resolve_source("demo", "8" * 40, paths=DataPaths(tmp_path / "worker"), history=None)

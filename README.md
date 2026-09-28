@@ -403,7 +403,7 @@ workers restart.
     | uploads fetched (`assets/`) | last use: those a render named within `SCADBUDDY_ASSET_SWEEP_GRACE`; in practice no more than the API's `SCADBUDDY_ASSET_MAX_TOTAL_BYTES` | 1 GB |
     | revision exports (`cache/`) | last use: the template revisions rendered within `SCADBUDDY_JOB_TTL` | measure |
     | fonts (`fonts/`) and library checkouts (`libraries/`) | nothing: the families and libraries the rendered templates name, kept for the pod's life | measure |
-    | **sum; `sizeLimit` with slack** | | **≈ 13.1 GiB plus the measured rows; `14Gi` at ~1 GiB for them** |
+    | **sum; `sizeLimit` with slack** | 10 + 1.2 + 0.93 (1 GB) ≈ 12.1 GiB, plus the measured rows (~1 GiB on a typical worker) ≈ 13.1 GiB | **`14Gi`: ~0.9 GiB of slack** |
 
     Use your own render timings and piece sizes for the second row; a longer interval
     scales it linearly. Measure the last two rows with
