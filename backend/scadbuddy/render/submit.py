@@ -24,7 +24,7 @@ from temporalio.common import WorkflowIDConflictPolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
-from scadbuddy.core.config import Config
+from scadbuddy.core.config import ACTIVITY_TIMEOUT_MARGIN, Config
 from scadbuddy.core.metrics import Metrics, RenderOutcome
 from scadbuddy.core.paths import DataPaths
 from scadbuddy.render.job_models import Job, now
@@ -71,7 +71,11 @@ class RenderService:
             on_state=self._listener_state,
             check_interval=self.config.render_fallback_poll_interval,
         )
-        await self.reconcile_once()
+        # A failed first pass must not stop the boot: the loop tries again.
+        try:
+            await self.reconcile_once()
+        except Exception:
+            logger.exception("the render reconciler's first pass failed")
         self._reconciler = asyncio.create_task(self._reconcile_forever())
 
     async def aclose(self) -> None:
@@ -166,6 +170,13 @@ class RenderService:
                 await self._start(job, WorkflowIDConflictPolicy.FAIL)
             except WorkflowAlreadyStartedError:
                 continue
+            except Exception:
+                # One row that cannot start must not hold back the rows behind it.
+                logger.exception(
+                    "could not start a pending render's workflow", extra={"job_id": job.id}
+                )
+                self.metrics.store_errors.labels("start_workflow").inc()
+                continue
             started.append(job.id)
         if started:
             logger.warning(
@@ -174,17 +185,27 @@ class RenderService:
             )
         return len(started)
 
-    async def render_preview(self, slug: str) -> bytes:
-        """``slug``'s default-render preview, rendered on the worker."""
+    async def render_preview(self, slug: str, timeout: float) -> bytes:
+        """``slug``'s default-render preview, rendered on the worker. A second request
+        for the slug joins the first run. Past ``timeout`` the run is cancelled, so a
+        preview that timed out stops rendering; the activity's own bound, the margin
+        later, is the backstop should that cancel never arrive."""
         assert self.client is not None
-        png: bytes = await self.client.execute_workflow(
+        preview_timeout = timeout + ACTIVITY_TIMEOUT_MARGIN
+        handle = await self.client.start_workflow(
             RenderPreview.run,
             slug,
             id=f"preview-{slug}",
             task_queue=self.task_queue,
             id_conflict_policy=WorkflowIDConflictPolicy.USE_EXISTING,
-            memo=self._memo(),
+            memo={**self._memo(), "preview_timeout": preview_timeout},
         )
+        try:
+            png: bytes = await asyncio.wait_for(handle.result(), timeout)
+        except TimeoutError:
+            with suppress(RPCError):
+                await handle.cancel()
+            raise
         return png
 
     def retry_after(self) -> int:

@@ -54,7 +54,9 @@ DEFAULT_INTERVAL = 1.0
 #: `render_timeout`; this bounds the three together.
 TIMEOUT_FACTOR = 3
 
-PreviewRender = Callable[[str], Awaitable[bytes]]
+#: Renders a slug's preview within the timeout it is given; it applies the timeout
+#: itself, so the legacy queue's runner can leave the wait for a worker out of it.
+PreviewRender = Callable[[str, float], Awaitable[bytes]]
 
 
 class PreviewFailedError(Exception):
@@ -209,7 +211,7 @@ class PreviewScheduler:
         if key is None:
             return False
         try:
-            png = await asyncio.wait_for(self.runner(slug), timeout=self.timeout)
+            png = await self.runner(slug, self.timeout)
         except asyncio.CancelledError:
             raise
         except Exception as error:
