@@ -1,6 +1,6 @@
 import { screen, waitFor, within } from '@testing-library/react'
 import { HttpResponse, http } from 'msw'
-import { Route, Routes, useLocation, useParams } from 'react-router'
+import { Route, Routes, useLocation, useNavigate, useParams } from 'react-router'
 import { afterEach, describe, expect, it } from 'vitest'
 import type { Output, PrintPage, PrintProgress } from '../api/types'
 import { outputs, prints, queuedSliceProgress } from '../mocks/fixtures'
@@ -16,6 +16,16 @@ function Location() {
   return <output data-testid="location">{`${location.pathname}${location.search}`}</output>
 }
 
+/** Changes the URL from outside the filter bar, as Back/Forward does. */
+function Elsewhere() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => void navigate('/prints?status=failed')}>
+      Navigate elsewhere
+    </button>
+  )
+}
+
 function PrintRoute() {
   return <div data-testid="print-route">{useParams()['archiveId']}</div>
 }
@@ -29,6 +39,7 @@ function render(route = '/prints') {
         <Route path="/m/:slug/prints" element={<TemplatePrintsPage />} />
       </Routes>
       <Location />
+      <Elsewhere />
     </>,
     { route },
   )
@@ -153,6 +164,28 @@ describe('PrintsPage (#310): the global print history', () => {
     await waitFor(async () => expect(await shown()).toHaveLength(4))
     expect(location()).toBe('/prints')
     expect(screen.getByRole('searchbox', { name: 'Search prints' })).toHaveValue('')
+  })
+
+  it('drops a pending search when the URL changes from outside, as back/forward does', async () => {
+    const { user } = render()
+    await waitFor(async () => expect(await shown()).toHaveLength(4))
+    await user.type(screen.getByRole('searchbox', { name: 'Search prints' }), 'nov')
+    await user.click(screen.getByRole('button', { name: 'Navigate elsewhere' }))
+    await waitFor(async () => expect(await shown()).toEqual(['36']))
+    // Past the debounce: the abandoned search must not come back onto the new URL.
+    await new Promise((resolve) => setTimeout(resolve, 400))
+    expect(location()).toBe('/prints?status=failed')
+    expect(screen.getByRole('searchbox', { name: 'Search prints' })).toHaveValue('')
+  })
+
+  it('keeps offering every printer seen after the list is filtered to one', async () => {
+    const { user } = render()
+    await waitFor(async () => expect(await shown()).toHaveLength(4))
+    const printer = screen.getByLabelText('Printer')
+    await user.selectOptions(printer, '2')
+    await waitFor(async () => expect(await shown()).toEqual(['37']))
+    expect(within(printer).getByRole('option', { name: '3DP-31B-598' })).toHaveValue('1')
+    expect(within(printer).getByRole('option', { name: '3DP-H2C-042' })).toHaveValue('2')
   })
 
   it('says when nothing matches, and offers to clear the filters', async () => {
@@ -382,6 +415,19 @@ describe('the print route in the app (#310, until #311)', () => {
   it('says so for a print ScadBuddy does not know', async () => {
     renderPage(<App />, { route: '/prints/99' })
     expect(await screen.findByRole('alert')).toHaveTextContent('not a print of any ScadBuddy output')
+  })
+
+  it('says the same for an archive id that is not a number, without asking the API', async () => {
+    let asked = false
+    server.use(
+      http.get('/api/v1/prints/:archiveId', () => {
+        asked = true
+        return HttpResponse.json({ title: 'Unprocessable Content', status: 422 }, { status: 422 })
+      }),
+    )
+    renderPage(<App />, { route: '/prints/abc' })
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a print of any ScadBuddy output')
+    expect(asked).toBe(false)
   })
 })
 

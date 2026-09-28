@@ -55,7 +55,14 @@ export function TemplatePrintsPage() {
  */
 export function PrintPlaceholderPage() {
   const { archiveId = '' } = useParams()
-  const print = useAsync(() => api.getPrint(Number(archiveId)), [archiveId])
+  // An id that is not one would be refused as malformed; it is not a print either way.
+  const print = useAsync(
+    () =>
+      /^[1-9]\d{0,14}$/.test(archiveId)
+        ? api.getPrint(Number(archiveId))
+        : Promise.reject(new Error(`archive ${archiveId} is not a print of any ScadBuddy output`)),
+    [archiveId],
+  )
   return (
     <div className="h-full overflow-y-auto">
       <div className="mx-auto max-w-5xl px-4 py-6">

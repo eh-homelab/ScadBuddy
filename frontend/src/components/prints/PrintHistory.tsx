@@ -172,13 +172,20 @@ export function PrintHistory({ fixedSlug }: { fixedSlug?: string }) {
     )
   }
 
-  // Each printer seen, by id, named by the first print that has its name.
-  const printers = useMemo(() => {
-    const seen = new Map<number, string | null>()
-    for (const { printer_id: id, printer_name: name } of pages.items) {
-      if (id !== null && !seen.get(id)) seen.set(id, name)
-    }
-    return seen
+  // Every printer seen on this page so far, by id, named by the first print that has
+  // its name. Kept across filter changes, so choosing one printer does not take the
+  // others off the list: there is no printers API to ask instead.
+  const [printers, setPrinters] = useState<Map<number, string | null>>(() => new Map())
+  useEffect(() => {
+    setPrinters((known) => {
+      let next: Map<number, string | null> | null = null
+      for (const { printer_id: id, printer_name: name } of pages.items) {
+        if (id === null || (known.has(id) && (known.get(id) || !name))) continue
+        next ??= new Map(known)
+        next.set(id, name)
+      }
+      return next ?? known
+    })
   }, [pages.items])
   const templateNames = useMemo(
     () => new Map((templates.data ?? []).map((model) => [model.slug, model.name])),

@@ -42,6 +42,21 @@ export function PrintFilterBar({ query, onChange, templates, printers }: Props) 
     setText(query.q)
   }, [query.q])
 
+  // The debounce only ever changes `q`, so any other field changing means the query was
+  // set from somewhere else: Back/Forward, a link, Clear filters. A search still pending
+  // belongs to a query that no longer exists, so it is dropped rather than written over
+  // the new URL, as the catalogue's filters do (#276). A change made here carries the
+  // pending text in `q` first; see `commit`.
+  const others = [query.slug, query.status, query.printer, query.from, query.to, query.view].join('\u0000')
+  const seenOthers = useRef(others)
+  useEffect(() => {
+    if (others === seenOthers.current) return
+    seenOthers.current = others
+    clearTimeout(timer.current)
+    sent.current = latest.current.q
+    setText(latest.current.q)
+  }, [others, latest])
+
   useEffect(() => () => clearTimeout(timer.current), [])
 
   function search(value: string) {
