@@ -129,7 +129,14 @@ def _write_piece(work: Path, piece: PieceResult) -> None:
 def _read_piece(path: Path) -> PieceResult | None:
     if not path.is_file():
         return None
-    return PieceResult.model_validate_json(path.read_text(encoding="utf-8"))
+    try:
+        return PieceResult.model_validate_json(path.read_text(encoding="utf-8"))
+    except ValueError as error:  # a pydantic ValidationError too: an older release wrote it
+        logger.warning(
+            "unreadable finished piece; rendering it again",
+            extra={"path": str(path), "error": str(error)},
+        )
+        return None
 
 
 def _process_output(main: RenderMainResult) -> ProcessOutput:
@@ -167,9 +174,13 @@ class RenderActivities:
 
     @activity.defn(name="cached_piece")
     async def cached_piece(self, req: PieceRequest) -> PieceResult | None:
-        """The piece as a finished render left it, so it is never rendered in place again."""
+        """The piece as a finished render left it, so it is never rendered in place again.
+        Only for a piece with a revision: without one the key stands for a live source
+        that can change under it (as `keep_render` refused it). The marker is written
+        atomically but not fsynced, so a power loss can leave it naming a file the
+        crash emptied."""
         blobs = self.deps.blobs
-        if not blobs.exists(req.piece_key):
+        if req.revision is None or not blobs.exists(req.piece_key):
             return None
         return await asyncio.to_thread(_read_piece, blobs.dir_for(req.piece_key) / PIECE_NAME)
 

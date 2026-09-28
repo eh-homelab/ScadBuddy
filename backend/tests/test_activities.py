@@ -34,9 +34,10 @@ from scadbuddy.workflows.activities import (
     RenderActivities,
     WorkerDeps,
     _heartbeating,
+    _write_piece,
 )
 from scadbuddy.workflows.client import DEPLOYMENT_NAME, render_worker
-from scadbuddy.workflows.models import Failure, PieceRequest, Projection, piece_key
+from scadbuddy.workflows.models import Failure, PieceRequest, PieceResult, Projection, piece_key
 from scadbuddy.workflows.pipelines import TemplatePipeline
 from tests.conftest import write_openscad_3mf
 from tests.support.temporal import temporal_client
@@ -63,6 +64,18 @@ if out is not None and out.endswith(".param"):
 elif out is not None and out.endswith(".3mf"):
     shutil.copyfile(settings["FAKE_3MF"], out)
 """
+
+
+REVISION = "c0ffee"
+
+
+class _History:
+    """A repository whose every template was last committed at `REVISION`."""
+
+    available = True
+
+    def last_commit(self, path: str) -> str:
+        return REVISION
 
 
 def _paths(tmp_path: Path, source: str = "cube();\n") -> DataPaths:
@@ -100,16 +113,17 @@ def _deps(
         blobs=LocalBlobStore(paths.blobs),
         refs=refs,  # type: ignore[arg-type]
         projection=projection,  # type: ignore[arg-type]
+        history=_History(),  # type: ignore[arg-type]
     )
 
 
-def _request(params: dict[str, int] | None = None) -> PieceRequest:
-    params = params or {"width": 12}
+def _request(revision: str | None = REVISION) -> PieceRequest:
+    params = {"width": 12}
     return PieceRequest(
         slug="demo",
-        revision=None,
+        revision=revision,
         params=dict(params),
-        piece_key=piece_key("demo", None, "model.scad", params),
+        piece_key=piece_key("demo", revision, "model.scad", params),
     )
 
 
@@ -134,9 +148,30 @@ async def test_the_four_stages_render_into_the_piece_blob(tmp_path: Path) -> Non
     assert await env.run(acts.cached_piece, req) == piece
     assert (paths.root / piece.result.model_3mf).is_file()
     assert (paths.root / piece.result.model_3mf).parent == blob
-    assert piece.result.source_version == prepared.version
+    assert piece.result.source_version == prepared.version == REVISION
     assert piece.log_tail == main.log_tail
     assert main.returncode == 0
+
+
+async def test_a_piece_without_a_revision_is_never_answered_from_its_blob(
+    tmp_path: Path,
+) -> None:
+    """Its key names no revision, so the live source can change under it."""
+    paths = _paths(tmp_path)
+    deps = _deps(tmp_path, paths)
+    req = _request(revision=None)
+    _write_piece(deps.blobs.dir_for(req.piece_key), PieceResult(result=_result()))
+
+    assert await ActivityEnvironment().run(RenderActivities(deps).cached_piece, req) is None
+
+
+async def test_an_unreadable_piece_is_a_miss(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    deps = _deps(tmp_path, paths)
+    req = _request()
+    (deps.blobs.dir_for(req.piece_key) / PIECE_NAME).write_text('{"result": 1}')
+
+    assert await ActivityEnvironment().run(RenderActivities(deps).cached_piece, req) is None
 
 
 async def test_an_openscad_failure_is_a_non_retryable_application_error(tmp_path: Path) -> None:
@@ -393,10 +428,10 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     paths = _paths(tmp_path)
     refs = BlobRefs(projection.pool)
     deps = _deps(tmp_path, paths, projection=projection, refs=refs)
-    job = _submitted(projection)
-    key = piece_key("demo", None, "model.scad", {"width": 1})
+    job, again = (_job(width=1).model_copy(update={"model_version": REVISION}) for _ in "ab")
+    projection.submit(job, render_key("demo", {"width": 1}, REVISION))
+    key = piece_key("demo", REVISION, "model.scad", {"width": 1})
     raw = deps.blobs.dir_for(key) / RAW_RENDER_NAME
-    again = _job(width=1)
 
     async with temporal_client() as client:
         queue = f"t-{uuid.uuid4().hex[:8]}"
@@ -426,7 +461,7 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
             )
             rendered = raw.stat().st_mtime_ns
             # The same piece again, after the first one closed: answered from the blob.
-            projection.submit(again, render_key("demo", {"width": 1}, None))
+            projection.submit(again, render_key("demo", {"width": 1}, REVISION))
             await asyncio.wait_for(
                 client.execute_workflow(
                     TemplatePipeline.run, again, id=workflow_id_for(again.id), task_queue=queue
@@ -444,3 +479,5 @@ async def test_a_job_renders_end_to_end_on_the_render_worker(
     assert repeat.state == "done", repeat.error
     assert repeat.result == stored.result
     assert raw.stat().st_mtime_ns == rendered
+    refs.drop_holder("job", job.id)
+    assert key in refs.referenced()  # the repeat's own ref
