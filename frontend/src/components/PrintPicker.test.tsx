@@ -16,6 +16,7 @@ const output = fixtures.outputs[0] as Output
 
 function renderPicker(
   props: {
+    onClose?: () => void
     onRan?: (result: PrintRunResult) => void
     onPrinterModel?: (model: string | null) => void
   } = {},
@@ -25,7 +26,7 @@ function renderPicker(
       open
       slug="name-keychain"
       output={{ ...output, library_files: [], pipeline_run_id: undefined }}
-      onClose={vi.fn()}
+      onClose={props.onClose ?? vi.fn()}
       onRan={props.onRan ?? vi.fn()}
       onPrinterModel={props.onPrinterModel}
     />,
@@ -416,42 +417,31 @@ describe('PrintPicker · A run that got no answer (#470)', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it("never lets a run from a closed dialog land on the next one's print", async () => {
-    const gates: Array<() => void> = []
+  it('stays open through a run, so a reopened dialog cannot print it twice', async () => {
+    let release: () => void = () => undefined
     let calls = 0
     server.use(
       http.post('/api/v1/print/outputs/:id/run', async () => {
         calls += 1
-        const first = calls === 1
-        await new Promise<void>((resolve) => gates.push(resolve))
-        return first
-          ? new HttpResponse('timeout', { status: 524 })
-          : HttpResponse.json(queuedResult)
+        await new Promise<void>((resolve) => (release = resolve))
+        return HttpResponse.json(queuedResult)
       }),
     )
+    const onClose = vi.fn()
     const onRan = vi.fn()
-    const { user } = renderPicker({ onRan })
+    const { user } = renderPicker({ onClose, onRan })
     await loaded()
     await user.click(screen.getByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(gates).toHaveLength(1))
-    // Closed while the first print is still waiting on a slow proxy, then printed again.
-    await user.keyboard('{Escape}')
-    await user.click(await screen.findByRole('button', { name: /^Print$/ }))
-    await waitFor(() => expect(gates).toHaveLength(2))
+    await waitFor(() => expect(calls).toBe(1))
 
-    // The first print's timeout lands while the second is still in flight: it is the
-    // closed dialog's, so it neither swaps in the "may have been queued" screen nor
-    // re-enables Print under the running second print.
-    gates[0]!()
-    await act(async () => {
-      await delay(20)
-    })
-    expect(screen.queryByText(/may still have been queued/)).toBeNull()
+    // Escape while the print waits on a slow proxy: the dialog keeps it.
+    await user.keyboard('{Escape}')
+    expect(onClose).not.toHaveBeenCalled()
     expect(screen.getByRole('button', { name: /Print/ })).toBeDisabled()
 
-    gates[1]!()
+    release()
     await waitFor(() => expect(onRan).toHaveBeenCalledTimes(1))
-    expect(screen.queryByText(/may still have been queued/)).toBeNull()
+    expect(calls).toBe(1)
   })
 
   it('opens the queue without a double slash when Settings has a trailing one', async () => {

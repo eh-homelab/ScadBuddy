@@ -319,14 +319,13 @@ export function PrintPicker({ open, slug, output, onClose, onRan, onPrinterModel
         plan.find((entry) => entry.slot_id === choice.slot_id)?.spool_id !== choice.spool_id,
     )
 
-  /** Which `run()` may still update the dialog: bumped by each run and by `close`. */
+  /** Which `run()` may still update the dialog: bumped by each run. */
   const runAttempt = useRef(0)
 
   function close() {
-    // A run still in flight belongs to the dialog being closed: its answer must not
-    // land on the next one (#539 review).
-    runAttempt.current += 1
-    setRunning(false)
+    // Escape and the backdrop are ignored mid-run, as Cancel is: a closed dialog would
+    // reopen with Print enabled and send the print a second time (#539 review).
+    if (running) return
     setProjectId(null)
     setOptions({})
     setRunError(null)
