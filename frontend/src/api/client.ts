@@ -33,6 +33,8 @@ import type {
   PlateCatalogue,
   PlateFit,
   PrinterBedType,
+  PrintAgain,
+  PrintDetail,
   PrintProgress,
   PrintRunRequest,
   PrintRunResult,
@@ -493,6 +495,23 @@ export const api = {
     }),
 
   downloadUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/model.3mf`,
+
+  /**
+   * #311 — one print. `printerMedia` also lists what the printer still holds, which
+   * asks the printer, so the page does it only when told to.
+   */
+  getPrint: (archiveId: number, { printerMedia = false } = {}) =>
+    request<PrintDetail>(`/prints/${archiveId}${printerMedia ? '?printer_media=1' : ''}`),
+
+  /** #311 — "Print again": queues the archive on its printer (Bambuddy's reprint is gone). */
+  reprint: (archiveId: number) => request<PrintAgain>(`/prints/${archiveId}/reprint`, { method: 'POST' }),
+
+  /** #311 — attaches a timelapse still on the printer to the print. */
+  pullTimelapse: (archiveId: number, filename: string) =>
+    request<void>(`/prints/${archiveId}/timelapse/pull`, {
+      method: 'POST',
+      body: JSON.stringify({ filename }),
+    }),
 
   outputThumbnailUrl: (id: string) => `${API_BASE}/outputs/${seg(id)}/thumbnail`,
 
