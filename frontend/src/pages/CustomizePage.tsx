@@ -9,6 +9,7 @@ import { ActionBar } from '../components/ActionBar'
 import { DeleteModelButton } from '../components/DeleteModelButton'
 import { DuplicatedFrom, DuplicateModelButton } from '../components/DuplicateModelButton'
 import { EditDetailsButton } from '../components/EditDetailsButton'
+import { MediaButton } from '../components/media/MediaButton'
 import { FlyoutHeader, FullscreenButton, ParametersButton } from '../components/FullscreenControls'
 import { ModelLibrariesButton } from '../components/ModelLibrariesButton'
 import { ParameterPanel } from '../components/ParameterPanel'
@@ -522,6 +523,9 @@ export function CustomizePage() {
               <span className="sb-num ml-1.5 text-faint">{outputsState.data.length}</span>
             )}
           </Link>
+          {modelState.data && origin && (
+            <MediaButton model={modelState.data} onChanged={modelState.setData} />
+          )}
           {origin && (
             <DuplicateModelButton slug={slug} name={displayName} />
           )}
