@@ -4,6 +4,7 @@ the app's own bus. Payloads carry ids only, so what is checked is kind and ids."
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +19,8 @@ from scadbuddy.core.events import Event, InProcessEventBus
 from scadbuddy.library.libraries import CatalogueLibrary, LibraryStore
 from tests.api.conftest import PNG_BYTES, wait_for_job
 from tests.api.test_fonts import FakeBackedService, FakeClient
-from tests.api.test_print import pipelines_route, printers_route, run_body
+from tests.api.test_print_filaments import queue_route, slice_routes
+from tests.api.test_print_run_choices import run_request, run_routes
 from tests.api.test_send import BASE, configure, make_output, upload_route
 from tests.conftest import make_library_upstream
 
@@ -26,12 +28,41 @@ API = f"{BASE}/api/v1"
 SOURCE = 'width = 10;\nlabel = "hi";\n'
 
 
+class Recorded(list[Event]):
+    """Every event the bus publishes, in order, with a way to wait for one.
+
+    A job's terminal state is committed to the store before its event is published
+    (#409): the queue announces a state only once it is true. So a client polling
+    `GET /jobs/{id}` can see `failed` a moment before `job.failed` is on the bus,
+    and a test that reads the events as soon as the poll settles races the worker.
+    `wait_for` blocks on the listener itself instead.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._changed = threading.Condition()
+
+    def record(self, event: Event) -> None:
+        with self._changed:
+            self.append(event)
+            self._changed.notify_all()
+
+    def wait_for(self, kind: str, job_id: str, timeout: float = 5.0) -> None:
+        def seen() -> bool:
+            return any(
+                event.kind == kind and getattr(event, "job_id", None) == job_id for event in self
+            )
+
+        with self._changed:
+            assert self._changed.wait_for(seen, timeout), f"{kind} for {job_id} never published"
+
+
 @pytest.fixture
-def events(app: FastAPI) -> list[Event]:
+def events(app: FastAPI) -> Recorded:
     bus = getattr(app.state, STATE_ATTR).events
     assert isinstance(bus, InProcessEventBus)
-    seen: list[Event] = []
-    bus.add_listener(seen.append)
+    seen = Recorded()
+    bus.add_listener(seen.record)
     return seen
 
 
@@ -51,6 +82,10 @@ def published(events: list[Event], kind: str | None = None) -> list[dict[str, An
         for event in events
         if kind is None or event.kind == kind
     ]
+
+
+def queue_item(status: str) -> dict[str, Any]:
+    return {"id": 51, "printer_id": 1, "printer_name": "3DP-31B-598", "status": status}
 
 
 def _ok(response: httpx.Response, status: int = 200) -> Any:
@@ -283,12 +318,13 @@ def test_repinning_and_removing_checkouts_publish_their_events(
 
 
 def test_a_render_publishes_each_job_state(
-    client: TestClient, model: str, events: list[Event]
+    client: TestClient, model: str, events: Recorded
 ) -> None:
     job_id = _ok(
         client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 12}}), 202
     )["job_id"]
-    wait_for_job(client, job_id)
+    assert wait_for_job(client, job_id)["status"] == "done"
+    events.wait_for("job.done", job_id)
 
     assert published(events) == [
         {"kind": "job.pending", "job_id": job_id, "slug": model},
@@ -298,13 +334,19 @@ def test_a_render_publishes_each_job_state(
 
 
 def test_a_failed_render_publishes_job_failed(
-    client: TestClient, model: str, events: list[Event]
+    client: TestClient, model: str, events: Recorded
 ) -> None:
     job_id = _ok(
         client.post(f"/api/v1/models/{model}/render", json={"params": {"width": 999}}), 202
     )["job_id"]
-    wait_for_job(client, job_id)
-    assert published(events)[-1] == {"kind": "job.failed", "job_id": job_id, "slug": model}
+    assert wait_for_job(client, job_id)["status"] == "failed"
+    events.wait_for("job.failed", job_id)
+
+    assert published(events) == [
+        {"kind": "job.pending", "job_id": job_id, "slug": model},
+        {"kind": "job.running", "job_id": job_id, "slug": model},
+        {"kind": "job.failed", "job_id": job_id, "slug": model},
+    ]
 
 
 def test_saving_and_deleting_an_output_publish_their_events(
@@ -330,31 +372,18 @@ def test_a_print_publishes_progress_and_then_settled_once(
     configure(client)
     output_id = make_output(client, model)
     upload_route()
-    pipelines_route()
-    printers_route()
-    respx.post(f"{API}/slicer-pipelines/1/run").mock(
-        return_value=httpx.Response(200, json=run_body())
-    )
-    run = respx.get(f"{API}/pipeline-runs/12").mock(
-        return_value=httpx.Response(200, json=run_body())
+    run_routes()
+    slice_routes()
+    queue_route()
+    item = respx.get(f"{API}/queue/51").mock(
+        return_value=httpx.Response(200, json=queue_item("pending"))
     )
     events.clear()
 
-    _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json={"pipeline_id": 1}))
+    _ok(client.post(f"/api/v1/print/outputs/{output_id}/run", json=run_request()))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))  # nothing new
-    run.mock(
-        return_value=httpx.Response(
-            200,
-            json={
-                **run_body(),
-                "status": "completed",
-                "copies_completed": 2,
-                "copies_in_progress": 0,
-                "jobs": [{**run_body()["jobs"][0], "status": "completed"}],
-            },
-        )
-    )
+    item.mock(return_value=httpx.Response(200, json=queue_item("completed")))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
     _ok(client.get(f"/api/v1/print/outputs/{output_id}/progress"))
 
@@ -380,14 +409,12 @@ def test_every_settings_write_publishes_settings_changed(
             json={"scope": "global", "options": {"use_ams": False}},
         )
     )
-    _ok(client.put(f"/api/v1/print/models/{model}/pipeline", json={"pipeline_id": 9}))
     _ok(client.put(f"/api/v1/print/models/{model}/choices", json={"printer_id": 2}))
     _ok(client.put("/api/v1/print/printers/1/bed-type", json={"bed_type": "Supertack Plate"}))
 
     assert [event["section"] for event in published(events, "settings.changed")] == [
         "connection",
         "print_options",
-        "model_pipeline",
         "model_choices",
         "printer_bed_type",
     ]

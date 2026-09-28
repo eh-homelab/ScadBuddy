@@ -110,8 +110,9 @@ class Target:
     """What the 3MF is laid out for: the target's plate and, when known, its nozzle."""
 
     plate: PlateGeometry
-    #: Read off the pipeline's printer preset name (#126). ``None`` — no pipeline, no
-    #: printer preset, or a name that states no nozzle — keeps the placeholder.
+    #: The nozzle the run chose, or read off the pipeline's printer preset name (#126).
+    #: ``None`` — no pipeline, no printer preset, or a name that states no nozzle —
+    #: keeps the placeholder.
     nozzle_diameter: str | None = None
 
     @property
@@ -197,18 +198,39 @@ async def _nozzle_diameter(client: BambuddyClient, preset: PresetRef | None) -> 
 
 
 async def target_for(
-    client: BambuddyClient, settings: StoredSettings, slug: str, *, pipeline_id: int | None = None
+    client: BambuddyClient,
+    settings: StoredSettings,
+    slug: str,
+    *,
+    pipeline_id: int | None = None,
+    printer_id: int | None = None,
+    nozzle_diameter: str | None = None,
 ) -> Target:
+    """The plate and nozzle the 3MF is laid out for.
+
+    With an explicit ``printer_id`` and ``nozzle_diameter`` — the spool-first run, which
+    has chosen both (spec 2026-09-27 §4) — no pipeline is read: the model comes from the
+    printer list and the nozzle is the one chosen. Otherwise, as the send bar and the
+    eligibility check need, from the pipeline in play.
+    """
+    if printer_id is not None and nozzle_diameter is not None:
+        printer = next((row for row in await client.printers() if row.id == printer_id), None)
+        model = printer.model if printer is not None else None
+        return Target(_plate_for_model(model), nozzle_diameter)
     model, printer_preset = await _target_model_and_preset(
         client, settings, slug, pipeline_id=pipeline_id
     )
+    return Target(_plate_for_model(model), await _nozzle_diameter(client, printer_preset))
+
+
+def _plate_for_model(model: str | None) -> PlateGeometry:
     plate = plate_for(model)
     if model and plate is FALLBACK_PLATE:
         logger.info(
             "no plate geometry for this printer model; using the default plate",
             extra={"printer_model": model},
         )
-    return Target(plate, await _nozzle_diameter(client, printer_preset))
+    return plate
 
 
 def _laid_out_for(payload: bytes, target: Target) -> bytes:
@@ -488,7 +510,7 @@ async def _queue_send(
     cannot carry any of them, so a send that has one takes the slice-and-queue route
     using that same pipeline's presets and target.
     """
-    # The model's own default pipeline wins over the global one (#86).
+    # The Settings pipeline; a legacy per-model one is no longer read.
     pipeline_id = settings.pipeline_for(meta.slug)
     # The printer the *option scopes* key on; see below, where conflating it with the
     # queue item's target pinned a printer-class pipeline to one printer.

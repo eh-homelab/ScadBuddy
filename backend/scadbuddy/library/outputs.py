@@ -6,6 +6,7 @@ import shutil
 import threading
 import uuid
 import zipfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -123,6 +124,18 @@ class OutputStore:
         #: flight across a forget still knows not to store what it found.
         self._cover_epoch = 0
         self._covers_lock = threading.Lock()
+        #: Called with a model's id when one of its outputs is saved or deleted --
+        #: which moves the catalogue's fallback cover, and with it whether the
+        #: default-render preview is needed. Must not raise.
+        self.on_change: Callable[[str], None] | None = None
+
+    def _changed(self, slug: str) -> None:
+        if self.on_change is None:
+            return
+        try:
+            self.on_change(slug)
+        except Exception:
+            logger.exception("an output change listener failed", extra={"slug": slug})
 
     def _find_dir(self, output_id: str) -> Path:
         for meta_path in self.paths.outputs.glob(f"*/{output_id}/{META_NAME}"):
@@ -205,6 +218,7 @@ class OutputStore:
         # After the record is complete: a lookup racing the writes above may have
         # resolved against a half-written output.
         self.forget_plate_cover(job.slug)
+        self._changed(job.slug)
         return meta
 
     def record_send(
@@ -271,6 +285,7 @@ class OutputStore:
         directory = self._find_dir(output_id)
         shutil.rmtree(directory, ignore_errors=True)
         self.forget_plate_cover(directory.parent.name)
+        self._changed(directory.parent.name)
 
     def _oldest_first(self, slug: str) -> list[OutputMeta]:
         """The model's outputs, oldest first, skipping any record that cannot be read.
@@ -380,16 +395,19 @@ class OutputStore:
             self.forget_plate_cover(slug)
             return None
 
-    def geometry(self, output_id: str) -> GeometryAnalysis:
-        """The mesh analysis of the output's 3MF (#284), computed once and cached.
+    def geometry(self, output_id: str, plate: int = 1) -> GeometryAnalysis:
+        """The mesh analysis of one plate of the output's 3MF (#284, #289), computed
+        once and cached.
 
         ``model.3mf`` is not rewritten after `create` stamps it -- a send re-places
         a copy in memory -- so the cache only goes stale when the analysis itself
         changes, which :data:`~scadbuddy.render.geometry.ANALYSIS_VERSION` tracks.
-        Raises `FileNotFoundError` when there is no 3MF to analyse.
+        Raises `FileNotFoundError` when there is no 3MF to analyse and
+        `~scadbuddy.render.geometry.NoSuchPlateError` when it has no such plate.
         """
         directory = self._find_dir(output_id)
-        cache = directory / GEOMETRY_NAME
+        name = GEOMETRY_NAME if plate == 1 else f"geometry-plate-{plate}.json"
+        cache = directory / name
         try:
             cached = GeometryAnalysis.model_validate_json(cache.read_text(encoding="utf-8"))
         except (OSError, ValidationError):
@@ -399,9 +417,9 @@ class OutputStore:
         model = directory / MODEL_NAME
         if not model.is_file():
             raise FileNotFoundError(model)
-        analysis = analyze_3mf(model, warnings=self.get(output_id).warnings)
+        analysis = analyze_3mf(model, warnings=self.get(output_id).warnings, plate=plate)
         # Written aside and renamed, so a concurrent reader never sees half a file.
-        partial = cache.with_name(f".{GEOMETRY_NAME}.{uuid.uuid4().hex}")
+        partial = cache.with_name(f".{name}.{uuid.uuid4().hex}")
         partial.write_text(analysis.model_dump_json(indent=2) + "\n", encoding="utf-8")
         partial.replace(cache)
         return analysis

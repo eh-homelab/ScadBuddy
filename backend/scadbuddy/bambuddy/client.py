@@ -32,9 +32,8 @@ from fastapi import status
 
 from scadbuddy.bambuddy.errors import Scope, map_response, map_transport, not_configured
 from scadbuddy.bambuddy.models import (
+    Archive,
     AvailableFilament,
-    EligibilityReport,
-    EligibilityRequest,
     ExternalLink,
     FilamentRequirements,
     Folder,
@@ -43,7 +42,6 @@ from scadbuddy.bambuddy.models import (
     LibraryFile,
     LocalPresetCatalogue,
     Pipeline,
-    PipelineCreate,
     PipelineList,
     PipelineRun,
     PipelineRunList,
@@ -338,6 +336,19 @@ class BambuddyClient:
         )
         return FilamentRequirements.model_validate(response.json())
 
+    async def archives(self, *, printer_id: int, limit: int = 20) -> list[Archive]:
+        """This printer's recent archives. Bambuddy's order is not documented, so callers
+        sort; ``limit`` keeps the read small."""
+        what = "list the archives"
+        response = await self._send(
+            "GET",
+            "/archives/",
+            scope=Scope.READ_STATUS,
+            what=what,
+            params={"printer_id": printer_id, "limit": limit},
+        )
+        return [Archive.model_validate(row) for row in self._rows(response, what=what)]
+
     # --- library -------------------------------------------------------------
 
     async def folders_by_project(self, project_id: int) -> list[Folder]:
@@ -475,39 +486,11 @@ class BambuddyClient:
 
     # --- pipelines and queue -------------------------------------------------
 
-    async def create_pipeline(self, pipeline: PipelineCreate) -> Pipeline:
-        response = await self._send(
-            "POST",
-            "/slicer-pipelines/",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"create the {pipeline.name!r} slicer pipeline",
-            json=pipeline.model_dump(mode="json", exclude_none=True),
-        )
-        return Pipeline.model_validate(response.json())
-
-    async def check_eligibility(
-        self, pipeline_id: int, request: EligibilityRequest
-    ) -> EligibilityReport:
-        """Ask whether a run would be refused, without starting one.
-
-        Unlike :meth:`run_pipeline` an ineligible answer is a **200** carrying the
-        report — it is not the 409 path, so nothing raises here.
-        """
-        response = await self._send(
-            "POST",
-            f"/slicer-pipelines/{pipeline_id}/check-eligibility",
-            scope=Scope.MANAGE_QUEUE,
-            what=f"check slicer pipeline {pipeline_id} for eligibility",
-            json=request.model_dump(mode="json", exclude_none=True),
-        )
-        return EligibilityReport.model_validate(response.json())
-
     async def run_pipeline(self, pipeline_id: int, request: PipelineRunRequest) -> PipelineRun:
         """Slice and queue ``copies`` prints.
 
-        A blocking eligibility issue answers 409 with the same report
-        :meth:`check_eligibility` returns; ``map_response`` passes that body through
-        verbatim. ``request.force`` runs anyway.
+        A blocking eligibility issue answers 409 with Bambuddy's eligibility report;
+        ``map_response`` passes that body through verbatim. ``request.force`` runs anyway.
         """
         response = await self._send(
             "POST",

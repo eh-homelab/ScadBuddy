@@ -9,7 +9,15 @@ from typing import Annotated
 from fastapi import APIRouter, File, Path, UploadFile, status
 from fastapi.responses import FileResponse
 
-from scadbuddy.api.deps import AssetsDep, CatalogueDep, HistoryDep, PathsDep, SlugPath, StateDep
+from scadbuddy.api.deps import (
+    AssetsDep,
+    CatalogueDep,
+    FetcherDep,
+    HistoryDep,
+    PathsDep,
+    SlugPath,
+    StateDep,
+)
 from scadbuddy.api.models import require_model_exists
 from scadbuddy.api.versions import CommitQuery, require_history
 from scadbuddy.core.problems import ApiError
@@ -160,6 +168,7 @@ async def get_sample_content(
     catalogue: CatalogueDep,
     history: HistoryDep,
     paths: PathsDep,
+    fetcher: FetcherDep,
     version: CommitQuery = None,
 ) -> FileResponse:
     require_model_exists(catalogue, slug)
@@ -167,7 +176,9 @@ async def get_sample_content(
     try:
         if version is not None:
             requested = await asyncio.to_thread(require_history(history).resolve, version)
-        source = await resolve_source(slug, requested, paths=paths, history=history)
+        source = await resolve_source(
+            slug, requested, paths=paths, history=history, fetcher=fetcher
+        )
     except RevisionNotFoundError:
         raise ApiError(status.HTTP_404_NOT_FOUND, f"no revision {version!r}") from None
     except GitError as error:

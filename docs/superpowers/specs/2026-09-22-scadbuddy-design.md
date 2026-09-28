@@ -253,6 +253,7 @@ outputs/<id>/<output-id>/         params.json, model.3mf, preview.glb, thumbnail
 jobs/<job-id>.json                render job state (pending/running/done/failed, log tail)
 cache/schema/<id>.json            the DERIVED customizer schema, keyed by source hash
 cache/revisions/<id>/<commit>/    an old model revision exported out of git, derived
+cache/previews/<id>.png|.json     the default-render preview and what it was rendered from (§6.2.2)
 assets/<sha256>.{svg,png}         a file uploaded for a `// file` parameter (§5.5), plus
 assets/<sha256>.json              its original name, kind and size; swept once unreferenced
 .assets.lock                      the upload store's flock (§5.5, "Limits and the sweep")
@@ -266,10 +267,14 @@ It is `null` for anything uploaded or pasted, and for a built-in, and it is not 
 
 The model record the API returns (`ModelRecord`) is `model.json` plus what is
 derived: `slug`, `origin` (`builtin` or `mine`), `updated_at`, `version` (the model's current commit),
-`has_readme`, `has_thumbnail`, `thumbnail_source` and `thumbnail_output_id` (#179). `thumbnail_source` is
-`model` when `thumbnail.png` is set on the model, `output` when there is none and
-the catalogue shows the plate image of the model's first generated output instead,
-and `null` when there is neither; `has_thumbnail` is true for either source. The
+`has_readme`, `has_thumbnail`, `thumbnail_source`, `thumbnail_output_id` (#179) and
+`thumbnail_preview_id`. `thumbnail_source` is, in order of precedence, `model` when
+`thumbnail.png` is set on the model, `output` when there is none and the catalogue
+shows the plate image of the model's first generated output instead, `preview` when
+there is neither but a default-render preview (§6.2.2) has been made, and `null`
+otherwise; `has_thumbnail` is true for any source. `thumbnail_preview_id` names the
+preview's render while the source is `preview`, and changes when a source edit is
+re-rendered, which is again no commit of its own. The
 output fallback is read out of that output's 3MF, never copied into `models/`, and
 which output holds it is resolved once per state of the model's outputs rather
 than on every listing. `thumbnail_output_id` names that output while `thumbnail_source` is `output`
@@ -415,8 +420,27 @@ when the source changes.
 
 Left: tabs per group, widgets, "Reset to defaults". Right: 3D preview
 (react-three-fiber, orbit controls, per-colour materials, build-plate grid,
-bounding-box dimensions in mm). Bottom bar: **Generate**, then **Download 3MF**
-and **Send to Bambuddy**.
+bounding-box dimensions in mm, a full-screen toggle). Bottom bar: **Generate**,
+then **Download 3MF** and **Send to Bambuddy**.
+
+Full screen takes the whole workspace. The viewer and its overlays (plate, bounding
+box, render state, a failed render's log) fill the screen; the parameter panel becomes
+a flyout over the scene, opened from **Parameters** (a full-width sheet on a narrow
+screen), with the overlays moving clear of it; the bottom bar waits outside. The panel
+and the canvas are never remounted, so the camera and the chosen tab survive. It goes
+through the Fullscreen API, but a cross-origin frame may only use that API when its
+`<iframe>` allows it (`allow="fullscreen"` or `allowfullscreen`), and Bambuddy's is
+only known to set its sandbox flags (§1), so wherever the API is refused the workspace
+covers the window instead — when embedded, the frame. Escape leaves either, but not
+alike. In the stand-in a dialog opened from the flyout takes the key first. In the
+API's full screen the key is the browser's, which always leaves and which no page can
+stop; whether that Escape also reaches an open dialog is the browser's call.
+Automated Chromium never hands Escape to the browser (headless, or headed but driven
+over CDP, as measured for this), so that path is checked by hand. While full screen
+lasts, the rest of the page is inert: it is covered or unpainted, and Tab must not
+reach a control nobody can see. Full screen hides the assistant panel with the rest of
+the page, so the assistant's shortcut leaves full screen and shows the panel rather
+than toggling it out of sight.
 
 The preview is not a separate cheap render — it **is** the render. Every
 parameter change (debounced 400 ms) submits a render job; the job produces the
@@ -724,8 +748,12 @@ params → openscad -D … --backend=Manifold -o work/render.3mf --summary all
   parameter's asset OpenSCAD could not open, uncoloured geometry, a skipped plate
   thumbnail) show beside the template notes under a "From ScadBuddy" heading, in
   the warn colour, so they do not read as the template's. A failed render shows
-  them above its log when the job carries any; today it carries none, since
-  `warnings` lives on the result and a failed job has no result.
+  them above its log. A failed job has no result, so its warnings (#408) live on
+  the job record beside `diagnostics` (the job file, or the `render_jobs.warnings`
+  column, migration 3): the files the run could not open (`OpenSCAD could not
+  open pic.svg`, without "rendered without it") and any unreadable colour
+  parameter. A template that draws only a missing picture exits 1 with "Current
+  top level object is empty.", so this is often the only explanation there is.
 
 ### 6.2 Bambu-style 3MF writer
 
@@ -794,6 +822,56 @@ content type, the three cover relationships and the plate's `thumbnail_file` /
 `top_file` / `pick_file` come out with them, so the package never carries a
 reference to an entry it does not hold. The job reports
 `plate thumbnail timed out; the 3MF carries no cover image` in `warnings`.
+
+### 6.2.2 Default-render previews
+
+A model with no thumbnail of its own and no generated output would otherwise show
+nothing in the catalogue. Instead its default configuration -- the parameters as the
+source declares them -- is rendered in the background, and that render's
+`plate_1.png` stands in (`render/previews.py`, `library/previews.py`).
+
+- **Trigger.** Every catalogue change to a model (create, import and duplicate
+  included) calls the scheduler, as do a saved or deleted output and a restored
+  revision. The call only records the model's id and returns, so no request waits
+  on it. The scheduler's one worker then decides whether a render is needed at all.
+- **Priority.** `RenderQueue.run_background` holds a preview in the process, and
+  one of that process's render workers runs it only when claiming from the job
+  store finds nothing: no render waiting, and with Postgres none waiting on any
+  replica. So a preview never starts ahead of a render someone has asked for,
+  including ones submitted after it was queued. It runs on a worker slot, so the
+  process never runs more openscad than `SCADBUDDY_RENDER_CONCURRENCY` allows. At
+  most one preview is in flight, so every other worker stays free for requested
+  renders. A preview that has started is not preempted, and it is bounded by three
+  render timeouts (schema, render, cover). It never touches the job store, so it is
+  not a job: never a `render_jobs` row or job file, never listed, never counted by
+  admission (`SCADBUDDY_RENDER_QUEUE_MAX`) or the queue metrics, never a `job.*`
+  event, and never makes a model's delete wait.
+- **Storage.** `cache/previews/<id>.png`, beside a `<id>.json` recording the source
+  key it was rendered from. It is never in the model's directory, so never
+  committed, and never among the outputs, so never in a print flow. The orphan
+  sweep and a reused slug's cleanup remove it like the schema cache.
+- **Precedence.** Own thumbnail, then the first output's plate, then the preview,
+  then none. Setting a thumbnail drops the preview at once. A model that has an
+  output drops it on its next change, and gets it back if the output is deleted.
+- **Invalidation.** The source key is a hash of `model.scad` and the libraries
+  `model.json` declares. It is deliberately not the revision, so a README or
+  metadata edit re-renders nothing. A model is rendered only when its key differs
+  from the recorded one. Requests are debounced (2 s) and coalesced per model, so
+  a burst of changes is one render. A render whose model changed, was deleted, or
+  gained a thumbnail or an output while it ran is discarded. That check and the write run under one store-wide lock that a drop also takes, so a thumbnail set mid-write never leaves a record without its image; and a record whose image is missing anyway counts as no record, so it is rendered again.
+- **Failure.** A render that fails or times out leaves no image and is logged. Its
+  key is recorded as failed, so the same source is never retried, at boot
+  included. The next source edit tries again.
+- **Built-ins and existing models.** Built-ins get previews too; they are derived
+  files, so a read-only template is untouched. At boot, every model is passed to
+  the scheduler once. A preview already current is left alone, so only the first
+  boot after an upgrade renders anything, and it renders one model at a time
+  behind requested renders, with a pause (1 s) after each.
+- **Off switch.** `SCADBUDDY_PREVIEW_RENDERS=false` turns the whole thing off: nothing is rendered, and the catalogue serves no preview, including ones rendered while it was on. Those stay on disk until their model goes, and the orphan sweep removes them by path either way.
+- **Frontend.** Only the new `preview` value (the Edit details dialog says a render
+  of the default settings stands in) and `thumbnail_preview_id` in the image's
+  cache key. There is no "rendering…" placeholder: the card shows no image until
+  the preview lands, exactly as before.
 
 ### 6.3 Closed parts: one solid render per colour
 
@@ -869,6 +947,105 @@ The semantics are unchanged from the sequential loop:
   stopping it, so a parse already under way runs to completion — bounded work,
   unlike an `openscad` run.
 
+### 6.4 More than one plate (#289)
+
+Some templates make parts that cannot share one bed: `models/maze-puzzle` in
+`ball_lid` mode at 15 x 15 cells and 16 mm pitch is a 244 mm tray plus a 248 mm
+lid, and the H2C reaches 300 x 320 mm with both nozzles. A template says which
+part goes on which plate with a **template convention**, not a new API field,
+so the same file still opens unchanged in OpenSCAD and on MakerWorld:
+
+```scad
+/* [Hidden] */
+$plate = 0;                        // 0 = every plate; ScadBuddy sets 1..N
+plates = lid_fits ? 1 : 2;
+echo(plates = plates);             // logs `ECHO: plates = 2`
+
+if ($plate == 0 || $plate == 1) tray();
+if ($plate == 0 || $plate == 2) translate($plate == 0 ? beside : [0, 0, 0]) lid();
+```
+
+- **`echo(plates = N)`** is how a template states its plate count. The render
+  reads `ECHO: plates = N` off the whole log (not the 50-line tail), the last
+  such line wins, and it may depend on parameters. Absent, or 1, and nothing
+  below happens: the pipeline and its 3MF are byte-for-byte what §6.1-§6.3
+  describe. More than `MAX_PLATES` (16) fails the job, since each plate is a
+  render and a solid render per colour of its own.
+- **`$plate`** is the plate being drawn. The template declares it as `0` in
+  `[Hidden]`, where 0 means "every plate, laid out as the template likes" —
+  what a plain OpenSCAD render, MakerWorld and ScadBuddy's preview all draw.
+  ScadBuddy renders plate *k* with `-D '$plate=k'`, which overrides the
+  template's own `$plate = 0`, and the solid wrapper of §6.3 passes it through
+  the same way. Measured on 2026.09.23: a `$`-variable is not exported to the
+  customizer schema even outside `[Hidden]`, and the `-D` override works through
+  the wrapper's `include`.
+- A special variable rather than a module or a parameter: it is dynamically
+  scoped, so a template can test it anywhere, including inside its own modules,
+  without threading an argument through; and it is not a customizer parameter, so
+  it never shows as a control and never reaches a preset.
+
+The pipeline for a multi-plate template:
+
+1. The ordinary render (no `$plate` set, so 0) gives the preview GLB, its
+   bounding box, the colour list and the **global extruder order** (§7) exactly
+   as for any template. Its log gives `plates`.
+2. For each plate *k*: a render with `$plate = k`, split by material, each part
+   mapped onto the global extruder list by colour (a colour plate 0 did not show
+   is appended, with a warning — the template drew something on one plate that
+   it does not draw on all of them), then the per-colour solids of §6.3 with
+   `$plate = k`. A plate that renders empty fails the job naming the plate.
+3. One cover image set per plate (`Metadata/plate_k.png`, `_small`, `top_k`,
+   `pick_k`), under the same single budget §6.2.1 gives the one plate.
+4. One 3MF with N plates (§6.2 generalised below).
+
+The job's result carries `plates`: for each, its index, bounding box and
+colours. The customizer checks every plate against the printer with
+`GET /plate/fit` and prefixes each problem with its plate; a one-plate job
+carries an empty list and is checked as before. The print dialog already offers
+a plate, or all of them, for any 3MF with more than one (#83, #240).
+
+**The 3MF.** Bambu Studio assigns objects to plates *by position*, not by the
+plate list in `model_settings.config`: `PartPlateList::load_from_3mf_structure`
+ends in `reload_all_objects`, which puts each instance on the first plate whose
+area its bounding box intersects (`src/slic3r/GUI/PartPlate.cpp`), and the CLI
+Bambuddy slices with runs the same code (`src/BambuStudio.cpp`). Plate *i*
+(0-based) of *n* sits at `(col * W * 1.2, -row * D * 1.2)`, where `W` x `D` is
+the printer's bed (`printable_area`, truncated to whole millimetres),
+`cols = ceil(sqrt(n))`, `row, col = divmod(i, cols)`, and 1.2 is `1 + LOGICAL_PART_PLATE_GAP`. Because we write no
+`printable_area`, the CLI takes the printer's own as the file's
+(`old_printable_width = current_printable_width`), so there is no shrink and
+nothing moves (`shrink_to_new_bed == 0`). `compute_colum_count` does not spell
+it `ceil`: it rounds `sqrt(n)` to the nearest whole number and adds one when that
+rounded down. Rounding a non-integer root up gives its ceiling, and rounding it
+down and adding one gives the same; a whole root is its own ceiling. So the two
+agree for every `n`, and `bambu3mf.plate_columns` keeps Bambu Studio's form while
+a test checks it against `ceil(sqrt(n))` for `n` up to ten times `MAX_PLATES`.
+So:
+
+- Objects are numbered across plates: `object_1..object_M` are every plate's
+  parts in plate order, each a component of its plate's assembly, and the
+  assemblies take ids `M+1..M+N`. Each part's `extruder` in
+  `model_settings.config` is its index in the global filament list.
+- One build `<item>` per plate, at that plate's origin plus the placement §6.2
+  already computes for its parts (centred on the reachable area, a prime tower
+  only for a plate that uses more than one colour).
+- One `<plate>` per plate with `plater_id` 1..N, its `model_instance` and its
+  own cover entries. The package cover relationships keep pointing at plate 1.
+- `wipe_tower_x`/`wipe_tower_y` become per-plate arrays (Bambu Studio's
+  `coFloats`, indexed by plate); a plate with no tower repeats another plate's
+  value, which it never reads.
+- `replate_3mf` re-places every item on the chosen printer with that printer's
+  plate stride, and a `PlateFitError` names the plate that does not fit.
+- The mesh analysis (#284, `GET /outputs/{id}/geometry?plate=k`) measures one
+  plate at a time, reading the plate's parts from its assembly. Every plate is
+  drawn at the model origin, so measuring them together would superimpose
+  geometry that is never on one bed. The result's `plate` and `plates` say which
+  plate it is and how many there are.
+
+Not verified end to end: no Bambu Studio or Bambuddy runs in CI, so the layout
+rests on the source above, and slicing a multi-plate ScadBuddy file through
+Bambuddy is an acceptance check still to make on a live instance.
+
 ## 7. Bambuddy integration
 
 Settings (stored in `settings.json` on the PVC, editable in the UI):
@@ -923,8 +1100,8 @@ All under `/api/v1`. Errors are RFC 9457 problem details.
 | POST | `/models/check` | body `{source, slug?}` → one OpenSCAD run: `{ok, checked, timed_out, diagnostics[], log_tail, parameters}`, saves nothing. `slug` names an existing model, whose directory the source is checked against so its `include` of a sibling resolves |
 | GET/PATCH/DELETE | `/models/{slug}` | metadata. Every `{slug}` also takes a built-in's `builtin:<slug>`; PATCH, DELETE, source PUT, restore, the upstream actions and the thumbnail and README writes answer 403 for one (§4.3). `PATCH` takes `{name?, description?, tags?}`; a blank name is a 422, and a name is stored stripped. A duplicate's record carries `upstream_state` (`current`/`update`/`dismissed`/`gone`), which the listing computes from the same single history walk as every `version`. DELETE answers 409 with `duplicates` (the count) and `slugs` while duplicates track the template; `?force=true` deletes it anyway and they report `gone` |
 | POST | `/models/{slug}/duplicate` | body `{name}` → copies any template, built-in or mine, to a new template of mine (slug derived from `name` as on `POST /models`, with the same 422/409), recording `upstream: {id, path, base, dismissed}` in its `model.json`, where `base` is the upstream's last commit. The copy includes the upstream's `thumbnail.png` and `README.md`, as its own (#179). One commit, `Duplicate <id> as <new-slug>`; derived files (schema cache, outputs, revisions) are not copied, and a metadata PATCH never touches `upstream` (201) |
-| GET | `/models/{slug}/thumbnail` | the model's own `thumbnail.png`, or else the `Metadata/plate_1.png` of its first (oldest) generated output that has one (the record's `thumbnail_output_id`); 404 when neither exists. A strong `ETag` over the image with `Cache-Control: no-cache`, so a copy is revalidated on every use and a matching `If-None-Match` is a 304 with no body. Not `immutable` behind the catalogue's `?v=` key: without git `version` is null, so the key is not proven to change with the bytes |
-| PUT/DELETE | `/models/{slug}/thumbnail` | multipart `file` (a PNG of at most 10 MiB, else a 422 naming the limit, with nothing written) sets or replaces the model's own thumbnail; `DELETE` removes it (404 when it has none of its own). Each is one git commit in the model's history, and each returns the record, which after a `DELETE` can still show the output fallback (#179) |
+| GET | `/models/{slug}/thumbnail` | the model's own `thumbnail.png`, or else the `Metadata/plate_1.png` of its first (oldest) generated output that has one (the record's `thumbnail_output_id`), or else its default-render preview (§6.2.2); 404 when there is none of the three. A strong `ETag` over the image with `Cache-Control: no-cache`, so a copy is revalidated on every use and a matching `If-None-Match` is a 304 with no body. Not `immutable` behind the catalogue's `?v=` key: without git `version` is null, so the key is not proven to change with the bytes |
+| PUT/DELETE | `/models/{slug}/thumbnail` | multipart `file` (a PNG of at most 10 MiB, else a 422 naming the limit, with nothing written) sets or replaces the model's own thumbnail; `DELETE` removes it (404 when it has none of its own). Each is one git commit in the model's history, and each returns the record, which after a `DELETE` can still show the output fallback (#179), or the default-render preview once that has rendered (§6.2.2) |
 | GET/PUT/DELETE | `/models/{slug}/readme` | `GET` returns `text/markdown` (404 when there is none); `PUT` body `{content}`, at most 1,000,000 characters, no NUL; `DELETE` removes it. Each write is one git commit in the model's history (#179) |
 | GET | `/models/{slug}/schema` | customizer schema |
 | GET | `/models/{slug}/source` | raw source |

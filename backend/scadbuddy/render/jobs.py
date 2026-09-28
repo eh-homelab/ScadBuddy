@@ -9,6 +9,7 @@ import shutil
 import threading
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import (
@@ -20,7 +21,9 @@ from contextlib import (
     suppress,
 )
 from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
+from typing import Any
 
 from scadbuddy.core.config import Config
 from scadbuddy.core.events import EventBus, JobEvent, JobKind, emit
@@ -35,18 +38,21 @@ from scadbuddy.core.paths import (
 from scadbuddy.library.assets import AssetStore, file_assets
 from scadbuddy.library.history import ModelHistory
 from scadbuddy.library.libraries import (
+    CheckoutFetcher,
     CheckoutGate,
     model_search_path,
     require_checkouts,
+    resolve_search_path,
     revision_search_path,
 )
-from scadbuddy.render.bambu3mf import write_bambu_3mf
+from scadbuddy.render.bambu3mf import PlateParts, single_plate, write_plates_3mf
 from scadbuddy.render.colours import colour_hex
-from scadbuddy.render.glb import write_glb
+from scadbuddy.render.glb import bounding_box, write_glb
 from scadbuddy.render.job_models import Job as Job
 from scadbuddy.render.job_models import JobResult as JobResult
 from scadbuddy.render.job_models import JobState as JobState
 from scadbuddy.render.job_models import PartInfo as PartInfo
+from scadbuddy.render.job_models import PlateInfo as PlateInfo
 from scadbuddy.render.job_models import now as _now
 from scadbuddy.render.job_store import SUPERSEDED_ERROR as SUPERSEDED_ERROR
 from scadbuddy.render.job_store import JobBackend, Listener, render_key
@@ -85,6 +91,11 @@ UNCOLOURED_WARNING = "uncoloured geometry present; parts are not closed"
 THUMBNAIL_TIMEOUT_WARNING = "plate thumbnail timed out; the 3MF carries no cover image"
 THUMBNAIL_FAILED_WARNING = "plate thumbnail failed; the 3MF carries no cover image"
 MISSING_FILE_WARNING = "OpenSCAD could not open {name}; the model rendered without it"
+#: The same fact on a render that failed, where "rendered without it" is untrue.
+MISSING_FILE_FAILED_WARNING = "OpenSCAD could not open {name}"
+#: The most plates a template may ask for with `echo(plates = N)`. Each plate is a
+#: render plus a solid render per colour of its own, so this bounds a job's cost.
+MAX_PLATES = 16
 
 
 def unreadable_colour_warnings(
@@ -103,6 +114,18 @@ def unreadable_colour_warnings(
                 "it gets no extruder"
             )
     return warnings
+
+
+def failed_render_warnings(
+    missing_files: Sequence[str], schema: CustomizerSchema, params: Mapping[str, ParamValue]
+) -> list[str]:
+    """The warnings a failed render can still give (#408): a file it could not open
+    is often why it failed -- a template that draws only the picture then renders
+    nothing -- and an unreadable colour is a fact about the parameters either way."""
+    return [
+        *(MISSING_FILE_FAILED_WARNING.format(name=name) for name in missing_files),
+        *unreadable_colour_warnings(schema, params),
+    ]
 
 
 def extruder_order(
@@ -142,6 +165,7 @@ async def solid_parts(
     work_dir: Path,
     *,
     config: Config,
+    extra_defines: Sequence[str] = (),
 ) -> tuple[list[ColourPart], list[str]]:
     """The parts the 3MF is written from: one closed solid per colour where OpenSCAD can
     give us one, the open split mesh where it cannot."""
@@ -154,12 +178,143 @@ async def solid_parts(
         [part.colour for part in preview_parts],
         work_dir,
         config=config,
+        extra_defines=extra_defines,
     )
     parts = [
         part if part.colour not in solids.meshes else replace(part, mesh=solids.meshes[part.colour])
         for part in preview_parts
     ]
     return parts, solids.warnings
+
+
+def plate_defines(index: int) -> list[str]:
+    """The `-D` that makes a multi-plate template draw only plate ``index`` (spec §6.4)."""
+    return ["-D", f"$plate={index}"]
+
+
+@dataclass(frozen=True)
+class PlateLayout:
+    """What the 3MF of a render is written from: its plates, and the one filament
+    list their extruder numbers index into."""
+
+    plates: list[PlateParts]
+    colours: list[str]
+    warnings: list[str]
+
+
+async def plate_layout(
+    scad_path: Path,
+    schema: CustomizerSchema,
+    params: Mapping[str, ParamValue],
+    preview_parts: Sequence[ColourPart],
+    count: int,
+    work_dir: Path,
+    *,
+    config: Config,
+) -> PlateLayout:
+    """The plates of a render: one for an ordinary template, ``count`` for one that
+    asked for more with `echo(plates = N)` (spec §6.4).
+
+    Plate *k* is its own render with ``$plate = k``, split, then the per-colour solids
+    of §6.3 with the same ``$plate``. Its parts are numbered against the extruder
+    order of the everything-at-once render (``preview_parts``), so a colour is the
+    same extruder on every plate. A colour only the everything render draws gets no
+    extruder, and one only a plate draws is appended; both are warnings, because
+    either means the template's plates and its preview disagree.
+    """
+    if count <= 1:
+        parts, solid_warnings = await solid_parts(
+            scad_path, schema, params, preview_parts, work_dir, config=config
+        )
+        return PlateLayout([single_plate(parts)], [part.colour for part in parts], solid_warnings)
+    if count > MAX_PLATES:
+        raise OpenSCADError(
+            f"the template asks for {count} plates; ScadBuddy renders at most {MAX_PLATES}", []
+        )
+
+    colours = [part.colour for part in preview_parts]
+    warnings: list[str] = []
+    drawn: list[tuple[list[ColourPart], list[int]]] = []
+    for index in range(1, count + 1):
+        plate_dir = work_dir / f"plate-{index}"
+        plate_dir.mkdir(parents=True, exist_ok=True)
+        defines = plate_defines(index)
+        raw = plate_dir / RAW_RENDER_NAME
+        try:
+            await render_3mf(scad_path, schema, params, raw, config=config, extra_defines=defines)
+        except OpenSCADError as error:
+            raise OpenSCADError(
+                f"plate {index} of {count}: {error}",
+                error.log_tail,
+                error.returncode,
+                diagnostics=error.diagnostics,
+                diagnostics_dropped=error.diagnostics_dropped,
+            ) from error
+        split = split_by_material(raw)
+        if not split:
+            raise OpenSCADError(f"plate {index} of {count} rendered no geometry", [])
+        for part in split:
+            if part.colour not in colours:
+                colours.append(part.colour)
+                warnings.append(
+                    f"plate {index}: {part.colour} is not in the all-plates render; "
+                    f"it gets extruder {len(colours)}"
+                )
+        split.sort(key=lambda part: colours.index(part.colour))
+        parts, solid_warnings = await solid_parts(
+            scad_path, schema, params, split, plate_dir, config=config, extra_defines=defines
+        )
+        # Unprefixed and once each: `geometry.split_colours` reads these back by colour.
+        warnings += [warning for warning in solid_warnings if warning not in warnings]
+        drawn.append((parts, [colours.index(part.colour) + 1 for part in parts]))
+
+    # Dense extruders, as §7 promises: a colour no plate draws gives up its slot.
+    used = sorted({extruder for _, extruders in drawn for extruder in extruders})
+    renumber = {old: new for new, old in enumerate(used, start=1)}
+    for old, colour in enumerate(colours, start=1):
+        if old not in renumber:
+            warnings.append(f"{colour} is drawn only with every plate at once; it is on no plate")
+    plates = [
+        PlateParts(tuple(parts), tuple(renumber[extruder] for extruder in extruders))
+        for parts, extruders in drawn
+    ]
+    return PlateLayout(plates, [colours[old - 1] for old in used], warnings)
+
+
+def result_parts(layout: PlateLayout) -> list[PartInfo]:
+    """One entry per extruder: the name the first plate to use it gives it, and whether
+    every plate's part of that colour is a closed solid."""
+    infos: list[PartInfo] = []
+    for extruder, colour in enumerate(layout.colours, start=1):
+        parts = [
+            part
+            for plate in layout.plates
+            for part, number in zip(plate.parts, plate.extruders, strict=True)
+            if number == extruder
+        ]
+        infos.append(
+            PartInfo(
+                name=parts[0].name,
+                colour=colour,
+                extruder=extruder,
+                watertight=all(part.watertight for part in parts),
+            )
+        )
+    return infos
+
+
+def result_plates(layout: PlateLayout) -> list[PlateInfo]:
+    """The job result's per-plate summary: empty for a one-plate render."""
+    if len(layout.plates) == 1:
+        return []
+    return [
+        PlateInfo(
+            index=index,
+            bbox_mm=bounding_box(plate.parts),
+            colors=[layout.colours[extruder - 1] for extruder in plate.extruders],
+        )
+        for index, plate in enumerate(layout.plates, start=1)
+    ]
 
 
 async def plate_thumbnails(
@@ -185,7 +340,7 @@ async def plate_thumbnails(
     `render_timeout` rather than a new knob: this is the same job's time.
 
     The degradation is a 3MF with no cover images, NOT a failed job — the model
-    is what the user asked for and the cover is a nicety. `write_bambu_3mf` then
+    is what the user asked for and the cover is a nicety. `write_plates_3mf` then
     omits the png content type, the cover relationships and the plate's
     `thumbnail_file`/`top_file`/`pick_file` along with the images, so the package
     stays self-consistent rather than carrying dangling references.
@@ -195,15 +350,32 @@ async def plate_thumbnails(
     this work is O(faces) plus O(covered pixels) with no loop that can fail to
     terminate, whereas a `.scad` can legitimately spin forever. It is also why the
     queue passes its own `executor` (#116): on the loop's default one an orphan
-    holds a slot `write_bambu_3mf` needs, so a backlog of slow covers could stall
+    holds a slot `write_plates_3mf` needs, so a backlog of slow covers could stall
     jobs whose own render finished in budget. On a dedicated pool a backlog only
     queues the next cover, which then times out like any other.
     """
+    covers, warnings = await plates_thumbnails([parts], config=config, executor=executor)
+    return (covers[0] if covers is not None else None), warnings
+
+
+async def plates_thumbnails(
+    plates: Sequence[Sequence[ColourPart]],
+    *,
+    config: Config,
+    executor: Executor | None = None,
+) -> tuple[list[PlateThumbnails] | None, list[str]]:
+    """Every plate's cover images, under the ONE budget :func:`plate_thumbnails`
+    documents: a multi-plate render (spec §6.4) is still one job to bound. All or
+    none, as the 3MF writer takes them."""
     loop = asyncio.get_running_loop()
-    faces = sum(len(part.mesh.faces) for part in parts)
+    faces = sum(len(part.mesh.faces) for parts in plates for part in parts)
+
+    def render_all() -> list[PlateThumbnails]:
+        return [render_plate_thumbnails(parts) for parts in plates]
+
     try:
         rendered = await asyncio.wait_for(
-            loop.run_in_executor(executor, render_plate_thumbnails, parts),
+            loop.run_in_executor(executor, render_all),
             timeout=config.render_timeout,
         )
     except TimeoutError:
@@ -277,6 +449,7 @@ async def resolve_source(
     *,
     paths: DataPaths,
     history: ModelHistory | None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> ModelSource:
     """Resolve a model to the source a render reads: the live one, or an export of
     an older revision.
@@ -288,6 +461,9 @@ async def resolve_source(
     renderer -- including the wrapper `render_solids` drops next to the source --
     works on it unchanged, and nothing generated lands in the repository. Commits
     are immutable, so a populated export is never stale.
+
+    With a ``fetcher``, a pinned library checkout missing from the volume is cloned
+    back into place rather than failing the resolve (#169).
     """
     current = (
         await asyncio.to_thread(history.last_commit, model_path(slug))
@@ -301,7 +477,9 @@ async def resolve_source(
             version=current,
             # Off the loop: `model.json` and each checkout are reads
             # on the same PVC the history's calls are offloaded for.
-            library_path=await asyncio.to_thread(model_search_path, paths, slug),
+            library_path=await resolve_search_path(
+                fetcher, partial(model_search_path, paths, slug)
+            ),
         )
     assert history is not None  # a requested revision implies a repository
     directory = paths.model_revision_dir(slug, requested)
@@ -318,8 +496,8 @@ async def resolve_source(
         scad=directory / SOURCE_NAME,
         schema_cache=directory / SCHEMA_CACHE_NAME,
         version=requested,
-        library_path=await asyncio.to_thread(
-            revision_search_path, history, paths, directory, requested
+        library_path=await resolve_search_path(
+            fetcher, partial(revision_search_path, history, paths, directory, requested)
         ),
     )
 
@@ -380,7 +558,7 @@ def _export_atomically(history: ModelHistory, slug: str, version: str, directory
 
 
 @asynccontextmanager
-async def _library_lease(
+async def library_lease(
     checkouts: CheckoutGate | None, holder: str, library_path: Sequence[Path]
 ) -> AsyncIterator[None]:
     """A lease on the checkouts a render resolved, when there are any to hold.
@@ -421,6 +599,7 @@ async def render_job(
     thumbnail_executor: Executor | None = None,
     metrics: Metrics | None = None,
     checkouts: CheckoutGate | None = None,
+    fetcher: CheckoutFetcher | None = None,
 ) -> tuple[JobResult, list[str]]:
     def stage(name: RenderStage) -> AbstractContextManager[None]:
         return metrics.stage(name) if metrics is not None else nullcontext()
@@ -430,7 +609,9 @@ async def render_job(
     # render newer source while claiming the older revision.
     async with AsyncExitStack() as held:
         with stage("source"):
-            source = await resolve_source(job.slug, job.model_version, paths=paths, history=history)
+            source = await resolve_source(
+                job.slug, job.model_version, paths=paths, history=history, fetcher=fetcher
+            )
             scad = source.scad
             # #90 stamps the model's own commit id, which `provenance.source_version`
             # was written to accept (a free string, never a structured field). The
@@ -446,16 +627,20 @@ async def render_job(
             # Held from here for every openscad run below -- the schema derivation
             # included: those are what read the checkouts on OPENSCADPATH, and a
             # removal must not take one out from under them (#253).
-            await held.enter_async_context(_library_lease(checkouts, job.id, source.library_path))
+            await held.enter_async_context(library_lease(checkouts, job.id, source.library_path))
             schema = await cached_schema(scad, source.schema_cache, config=config)
         work = attempt_work_dir(paths, job)
         work.mkdir(parents=True, exist_ok=True)
 
         with staged_assets(schema, job.params, scad.parent, assets) as params:
             with stage("render"):
-                output = await render_3mf(
-                    scad, schema, params, work / RAW_RENDER_NAME, config=config
-                )
+                try:
+                    output = await render_3mf(
+                        scad, schema, params, work / RAW_RENDER_NAME, config=config
+                    )
+                except OpenSCADError as error:
+                    error.warnings = failed_render_warnings(error.missing_files, schema, job.params)
+                    raise
             with stage("split"):
                 preview_parts = extruder_order(
                     split_by_material(work / RAW_RENDER_NAME), schema, params
@@ -466,23 +651,33 @@ async def render_job(
                         output.log_tail,
                         diagnostics=output.diagnostics,
                         diagnostics_dropped=output.diagnostics_dropped,
+                        missing_files=output.missing_files,
+                        warnings=failed_render_warnings(output.missing_files, schema, job.params),
                     )
                 preview_path = work / PREVIEW_NAME
                 box = write_glb(preview_parts, preview_path)
 
             with stage("solids"):
-                parts, warnings = await solid_parts(
-                    scad, schema, params, preview_parts, work, config=config
+                # One plate unless the template asked for more (spec §6.4); every plate
+                # beyond the ordinary render is rendered and solidified here.
+                layout = await plate_layout(
+                    scad,
+                    schema,
+                    params,
+                    preview_parts,
+                    output.plates or 1,
+                    work,
+                    config=config,
                 )
     # Exit 0 with the picture missing is otherwise invisible: the preview simply
     # has no overlay, and nothing says why.
     warnings = [
         *(MISSING_FILE_WARNING.format(name=name) for name in output.missing_files),
-        *warnings,
+        *layout.warnings,
     ]
     with stage("thumbnail"):
-        thumbnails, thumbnail_warnings = await plate_thumbnails(
-            parts, config=config, executor=thumbnail_executor
+        thumbnails, thumbnail_warnings = await plates_thumbnails(
+            [plate.parts for plate in layout.plates], config=config, executor=thumbnail_executor
         )
     warnings += thumbnail_warnings
     warnings += unreadable_colour_warnings(schema, job.params)
@@ -492,8 +687,9 @@ async def render_job(
     # `builtin:` prefix is not something to show as the model's title.
     with stage("write"):
         await asyncio.to_thread(
-            write_bambu_3mf,
-            parts,
+            write_plates_3mf,
+            layout.plates,
+            layout.colours,
             model_3mf,
             thumbnails=thumbnails,
             model_name=job.slug.removeprefix(BUILTIN_PREFIX),
@@ -503,18 +699,11 @@ async def render_job(
         model_3mf=str(model_3mf.relative_to(paths.root)),
         preview_glb=str(preview_path.relative_to(paths.root)),
         source_version=version,
-        parts=[
-            PartInfo(
-                name=part.name,
-                colour=part.colour,
-                extruder=index,
-                watertight=part.watertight,
-            )
-            for index, part in enumerate(parts, start=1)
-        ],
+        parts=result_parts(layout),
         bbox_mm=box,
-        colors=[part.colour for part in parts],
+        colors=list(layout.colours),
         warnings=warnings,
+        plates=result_plates(layout),
         diagnostics=list(output.diagnostics),
         diagnostics_dropped=output.diagnostics_dropped,
         notes=list(output.notes),
@@ -528,6 +717,16 @@ RenderCallable = Callable[[Job], Awaitable[tuple[JobResult, list[str]]]]
 INITIAL_RENDER_ESTIMATE = 10.0
 #: Weight of the newest render in the running mean that sizes Retry-After.
 RENDER_ESTIMATE_WEIGHT = 0.2
+
+
+@dataclass
+class _Background[T]:
+    """A piece of background work, and the future its caller awaits for what the
+    work returns. Held in the process, never in the job store (see
+    `RenderQueue.run_background`)."""
+
+    work: Callable[[], Awaitable[T]]
+    done: asyncio.Future[T]
 
 
 class RenderQueue:
@@ -575,6 +774,7 @@ class RenderQueue:
         metrics: Metrics | None = None,
         events: EventBus | None = None,
         checkouts: CheckoutGate | None = None,
+        fetcher: CheckoutFetcher | None = None,
         assets: AssetStore | None = None,
     ) -> None:
         self.config = config
@@ -609,6 +809,7 @@ class RenderQueue:
                 thumbnail_executor=self._thumbnails,
                 metrics=self.metrics,
                 checkouts=checkouts,
+                fetcher=fetcher,
             )
         )
         self._tasks: list[asyncio.Task[None]] = []
@@ -622,6 +823,14 @@ class RenderQueue:
         self._busy = 0
         #: Worker seconds per render, smoothed: what Retry-After says on a 503.
         self._render_estimate = INITIAL_RENDER_ESTIMATE
+        #: Background work waiting for a worker with no render to claim. Each entry's
+        #: work returns its own type; only its caller's future carries it.
+        self._background: deque[_Background[Any]] = deque()
+
+    @property
+    def thumbnail_executor(self) -> Executor:
+        """The cover rasteriser's pool, for background work that draws plate images."""
+        return self._thumbnails
 
     async def start(self) -> None:
         self.paths.ensure()
@@ -710,6 +919,42 @@ class RenderQueue:
             self._wakeup.set()
         return submitted.job
 
+    async def run_background[T](self, work: Callable[[], Awaitable[T]]) -> T:
+        """Run ``work`` on one of this process's render workers, once no render is
+        waiting to be claimed -- the default-render previews.
+
+        A worker takes it only when `store.claim` finds nothing, so it never starts
+        ahead of a render someone asked for, including one submitted after it was
+        queued (with Postgres, one waiting on any replica). It holds a worker while
+        it runs, so the process never runs more openscad than `render_concurrency`
+        allows. It is not preempted once started: a caller keeps at most one of
+        these in flight, which leaves every other worker to requested renders.
+
+        It never touches the job store. So it is never a job: never a row or a job
+        file, never listed, never counted by admission (`render_queue_max`) or the
+        queue metrics, never announced as a `job.*` event, and never makes a model's
+        delete wait. Returns what ``work`` returns, or raises what it raised.
+        """
+        done: asyncio.Future[T] = asyncio.get_running_loop().create_future()
+        self._background.append(_Background[T](work=work, done=done))
+        self._wakeup.set()
+        return await done
+
+    async def _run_background[T](self, item: _Background[T]) -> None:
+        if item.done.done():  # its caller gave up waiting
+            return
+        try:
+            result = await item.work()
+        except asyncio.CancelledError:
+            item.done.cancel()
+            raise
+        except Exception as error:  # the caller's to handle; the worker lives on
+            if not item.done.done():
+                item.done.set_exception(error)
+        else:
+            if not item.done.done():
+                item.done.set_result(result)
+
     def _announce(self, job: Job, kind: JobKind) -> None:
         emit(self.events, JobEvent(kind=kind, job_id=job.id, slug=job.slug))
 
@@ -785,10 +1030,15 @@ class RenderQueue:
             # the wait below sets it again, so the wait returns at once.
             self._wakeup.clear()
             self._busy += 1
+            background: _Background[Any] | None = None
             try:
                 job = await asyncio.to_thread(self.store.claim)
                 if job is not None:
                     await self._run(job)
+                elif self._background:
+                    # Only with no render to claim; the next loop claims again first.
+                    background = self._background.popleft()
+                    await self._run_background(background)
             except asyncio.CancelledError:
                 raise
             except Exception:  # a store outage must not kill the worker
@@ -805,7 +1055,7 @@ class RenderQueue:
             if failed:
                 await asyncio.sleep(self.config.render_poll_interval)
                 continue
-            if job is None:
+            if job is None and background is None:
                 with suppress(TimeoutError):
                     await asyncio.wait_for(self._wakeup.wait(), timeout=self.idle_poll_interval)
 
@@ -878,6 +1128,7 @@ class RenderQueue:
             job.log_tail = error.log_tail
             job.diagnostics = error.diagnostics
             job.diagnostics_dropped = error.diagnostics_dropped
+            job.warnings = error.warnings
         except Exception as error:  # the job carries the failure, the worker lives on
             outcome = "failed"
             job.state = "failed"
@@ -889,6 +1140,7 @@ class RenderQueue:
             job.log_tail = log_tail
             job.diagnostics = result.diagnostics
             job.diagnostics_dropped = result.diagnostics_dropped
+            job.warnings = result.warnings
         finally:
             heartbeat.cancel()
             with suppress(asyncio.CancelledError):

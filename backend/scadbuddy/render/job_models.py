@@ -21,6 +21,17 @@ class PartInfo(BaseModel):
     watertight: bool
 
 
+class PlateInfo(BaseModel):
+    """One plate of a multi-plate render (spec §6.4): what the customizer checks
+    against the printer, plate by plate."""
+
+    #: 1-based, the ``plate_id`` a print of it queues.
+    index: int
+    bbox_mm: BoundingBox
+    #: The filament colours this plate uses, in extruder order.
+    colors: list[str]
+
+
 class JobResult(BaseModel):
     model_3mf: str
     preview_glb: str
@@ -44,6 +55,9 @@ class JobResult(BaseModel):
     #: parameters it was given, say a size capped to fit the plate. Defaulted, like
     #: `source_version`, so a result stored before the field existed still loads.
     notes: list[str] = Field(default_factory=list)
+    #: Every plate of a template that asks for more than one (spec §6.4). Empty for
+    #: the ordinary one-plate render, whose plate is ``bbox_mm`` and ``colors``.
+    plates: list[PlateInfo] = Field(default_factory=list)
 
 
 class Job(BaseModel):
@@ -68,6 +82,10 @@ class Job(BaseModel):
     #: Stored where the job record lives: the job file, or `render_jobs` columns.
     diagnostics: list[Diagnostic] = Field(default_factory=list)
     diagnostics_dropped: int = 0
+    #: ScadBuddy's own warnings (#408): the result's on success, and on failure the
+    #: ones the failed run can still give (`failed_render_warnings`), which have no
+    #: result to live on. Stored beside `diagnostics`, for the same reason.
+    warnings: list[str] = Field(default_factory=list)
     result: JobResult | None = None
     #: Which try this is, as the store that handed the job to a worker numbered it.
     #: Not on the wire: it is how `finish` tells the attempt that still holds a job

@@ -27,11 +27,16 @@ interface Props {
   capture: () => Promise<Blob | null>
   /** #81 — whether the model fits the chosen printer, which the Print button warns of. */
   fit: PlateFit | undefined
+  /**
+   * #289 — every problem the fit check found, each named by its plate when the render
+   * has more than one. Without it the tooltip states `fit`'s own, unnamed.
+   */
+  fitProblems?: string[]
   /** #81 — the model of the printer the print picker has in view. */
   onPrinterModel: (model: string | null) => void
   onGenerated: (output: Output) => void
   onSent: (result: SendResult) => void
-  /** #86 — a pipeline run started from the print picker. */
+  /** A print sliced and queued from the print dialog (spec 2026-09-27). */
   onRan: (result: PrintRunResult) => void
 }
 
@@ -43,6 +48,7 @@ export function ActionBar({
   output,
   capture,
   fit,
+  fitProblems,
   onPrinterModel,
   onGenerated,
   onSent,
@@ -180,7 +186,7 @@ export function ActionBar({
             onClick={() => setPrintOpen(true)}
             disabled={!output}
             data-testid="print"
-            title={misfit && fit ? fitMessages(fit, unit).join('\n') : undefined}
+            title={misfit && fit ? (fitProblems ?? fitMessages(fit, unit)).join('\n') : undefined}
           >
             Print
             {misfit && <span className="text-[12px]">· {misfit}</span>}

@@ -1,9 +1,9 @@
-"""``/api/v1/print/…`` — choosing, creating and running a Bambuddy slicer pipeline.
+"""``/api/v1/print/…`` — the print dialog's choices, and running a spool-first print.
 
-Kept out of ``outputs.py`` because these routes are about Bambuddy's pipelines rather
-than about an output, and only two of the five are output-scoped at all. ``POST
-/outputs/{id}/send`` stays where it was: it is the send bar's one-click path, and it
-now resolves the same per-model default this router sets.
+Kept out of ``outputs.py`` because these routes are about the print dialog rather
+than about an output, and only some of them are output-scoped at all. ``POST
+/outputs/{id}/send`` stays where it was: it is the send bar's one-click path and
+still runs a Bambuddy slicer pipeline, unrelated to the dialog's own run.
 """
 
 from __future__ import annotations
@@ -21,22 +21,13 @@ from scadbuddy.api.deps import (
     SlugPath,
 )
 from scadbuddy.api.outputs import require_output
+from scadbuddy.bambuddy.choices import ChoicesView, choices_for_output
 from scadbuddy.bambuddy.client import client_for
 from scadbuddy.bambuddy.filaments import FilamentOptions
-from scadbuddy.bambuddy.models import PipelineCreate, PresetRef, PresetSource
 from scadbuddy.bambuddy.pipelines import (
-    EligibilityOverview,
-    PipelineChoices,
-    PipelineDefault,
-    PipelineView,
-    PresetOptions,
     PrintRunRequest,
     PrintRunResult,
-    check_pipelines,
-    create_pipeline,
-    describe_pipelines,
     filament_options_for_output,
-    preset_options,
     run_for_output,
 )
 from scadbuddy.bambuddy.progress import PrintProgress, progress_for
@@ -53,18 +44,6 @@ from scadbuddy.core.problems import ApiError
 from scadbuddy.library.settings_store import ModelPrintChoices
 
 router = APIRouter(prefix="/print", tags=["print"])
-
-
-class EligibilityCheck(BaseModel):
-    """``pipeline_ids`` omitted means every pipeline Bambuddy has."""
-
-    pipeline_ids: list[int] | None = None
-
-
-class PipelineDefaultPatch(BaseModel):
-    """``null`` clears this model's default, falling back to the global one."""
-
-    pipeline_id: int | None = None
 
 
 class PrinterBedTypePut(BaseModel):
@@ -92,78 +71,6 @@ class ProjectAttach(BaseModel):
     queue_item_ids: list[int] = Field(default_factory=list)
 
 
-@router.get(
-    "/presets",
-    response_model=PresetOptions,
-    summary="Presets a new pipeline can be built from",
-)
-async def get_presets(
-    store: SettingsStoreDep,
-    printer_preset_source: Annotated[PresetSource | None, Query()] = None,
-    printer_preset_id: Annotated[str | None, Query()] = None,
-) -> PresetOptions:
-    """Printer presets and bed types, plus — once a printer preset is named — the
-    process and filament presets compatible with it.
-
-    The filter is server-side on purpose: the live instance holds ~4000 process and
-    filament presets across the cloud and standard tiers, which is not a payload to
-    hand a browser so it can filter them itself. Nozzle diameter is not a field
-    anywhere; it lives in the process preset's *name* ("… H2C 0.2 nozzle"), which is
-    why the form picks a process preset rather than a diameter.
-    """
-    chosen = (
-        PresetRef(source=printer_preset_source, id=printer_preset_id)
-        if printer_preset_source is not None and printer_preset_id is not None
-        else None
-    )
-    async with client_for(store.load()) as client:
-        return await preset_options(client, printer_preset=chosen)
-
-
-@router.post(
-    "/pipelines",
-    response_model=PipelineView,
-    summary="Create a pipeline from presets",
-)
-async def post_pipeline(body: PipelineCreate, store: SettingsStoreDep) -> PipelineView:
-    """``POST /api/v1/slicer-pipelines/`` verbatim.
-
-    ``SlicerPipelineCreate`` carries no target or fanout fields, so the new pipeline
-    cannot be created pre-aimed at a printer — Bambuddy targets it and the response
-    reports what it chose. Re-targeting is a ``PUT`` ScadBuddy does not make.
-    """
-    async with client_for(store.load()) as client:
-        return await create_pipeline(client, body)
-
-
-@router.get(
-    "/models/{slug}/pipelines",
-    response_model=PipelineChoices,
-    summary="Pipelines, with this model's default",
-)
-async def get_model_pipelines(slug: SlugPath, store: SettingsStoreDep) -> PipelineChoices:
-    settings = store.load()
-    async with client_for(settings) as client:
-        return await describe_pipelines(client, settings, slug)
-
-
-@router.put(
-    "/models/{slug}/pipeline",
-    response_model=PipelineDefault,
-    summary="Remember this model's pipeline",
-)
-def put_model_pipeline(
-    slug: SlugPath, body: PipelineDefaultPatch, store: SettingsStoreDep
-) -> PipelineDefault:
-    """Needs no Bambuddy: this is ScadBuddy's own preference, stored per slug."""
-    settings = store.set_model_pipeline(slug, body.pipeline_id)
-    return PipelineDefault(
-        slug=slug,
-        pipeline_id=settings.model_pipelines.get(slug),
-        global_pipeline_id=settings.pipeline_id,
-    )
-
-
 @router.put(
     "/models/{slug}/choices",
     response_model=ModelPrintChoices,
@@ -172,10 +79,11 @@ def put_model_pipeline(
 def put_model_choices(
     slug: SlugPath, body: ModelPrintChoices, store: SettingsStoreDep
 ) -> ModelPrintChoices:
-    """The rest of what the picker chose, beside the model's pipeline (#78).
+    """The printer and spools the picker last chose for this model (#78).
 
     Replaces this model's entry whole; an empty body forgets it, so the picker opens on
-    the auto-match again. Needs no Bambuddy, like the pipeline default.
+    the auto-match again. Needs no Bambuddy: this is ScadBuddy's own preference, stored
+    per slug.
     """
     settings = store.set_model_choices(slug, body)
     return settings.model_print_choices.get(slug, ModelPrintChoices())
@@ -201,38 +109,9 @@ def put_printer_bed_type(
 
 
 @router.post(
-    "/outputs/{output_id}/eligibility",
-    response_model=EligibilityOverview,
-    summary="Which pipelines would accept this output",
-)
-async def post_eligibility(
-    output_id: OutputIdPath,
-    body: EligibilityCheck,
-    outputs: OutputsDep,
-    store: SettingsStoreDep,
-) -> EligibilityOverview:
-    """Uploads the 3MF if Bambuddy does not have it yet, then asks each pipeline.
-
-    Bambuddy judges a *library file*, so there is no eligibility answer before an
-    upload. The upload happens once per output: an output is immutable, so a recorded
-    ``library_file_id`` still describes this 3MF.
-
-    Every report comes back as Bambuddy sent it, including ``printer_reports`` — under
-    ``target_kind="printer_class"`` that is where the per-printer reasons are, and the
-    top-level ``ok`` means only that *some* printer passes.
-    """
-    meta = require_output(outputs, output_id)
-    settings = store.load()
-    async with client_for(settings) as client:
-        return await check_pipelines(
-            client, outputs, meta, settings, pipeline_ids=body.pipeline_ids
-        )
-
-
-@router.post(
     "/outputs/{output_id}/run",
     response_model=PrintRunResult,
-    summary="Run a pipeline for this output",
+    summary="Slice this output with the dialog's choices and queue it",
 )
 async def post_run(
     output_id: OutputIdPath,
@@ -241,17 +120,12 @@ async def post_run(
     store: SettingsStoreDep,
     observer: PrintProgressDep,
 ) -> PrintRunResult:
-    """``POST /api/v1/slicer-pipelines/{id}/run`` with ``copies`` and an explicit
-    ``force``.
+    """Derive every slicer preset from the chosen spools, nozzles, quality and plate
+    (spec 2026-09-27 §4), slice, then queue on one printer. No pipeline is run.
 
-    Without ``pipeline_id`` the model's own default is used, then the global one. A
-    blocking eligibility issue is Bambuddy's 409, whose body this passes through as the
-    ``bambuddy_body`` problem extension; ``force: true`` runs anyway and Bambuddy records
-    ``eligibility_overridden``.
-
-    There is deliberately no printer here. ``PipelineRunRequest`` carries none, so a
-    class-targeted pipeline fans out by its own ``fanout_strategy`` and reports the
-    printer per copy in ``run.jobs[]``.
+    A choice the resolver cannot turn into presets — mixed nozzle sizes, or a slot with
+    no filament preset for the nozzle — is a 422 before anything is sliced. Which AMS
+    tray and extruder each spool feeds is still Bambuddy's decision at dispatch.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -271,8 +145,8 @@ async def get_filaments(
     outputs: OutputsDep,
     store: SettingsStoreDep,
     printer_id: Annotated[int | None, Query()] = None,
-    nozzle_diameter: Annotated[str | None, Query(max_length=16)] = None,
     plate_id: Annotated[int, Query(ge=1)] = 1,
+    all_plates: Annotated[bool, Query()] = False,
 ) -> FilamentOptions:
     """Bambuddy's whole spool inventory, joined to where each spool is loaded (#87).
 
@@ -284,9 +158,10 @@ async def get_filaments(
     ``printer_id`` is what turns "the inventory" into "the inventory, and where it is on
     this printer": without one the spools are still listed, with their last known
     assignment, but the reconciled remaining weights are not. It is also what reads the
-    mounted nozzles, which ``nozzle_diameter`` is compared against (#78): the pipeline's
-    nozzle as ``PipelineView.nozzle_diameter`` reported it, passed back rather than
-    re-derived, because naming a preset means reading the whole catalogue again.
+    mounted nozzles (#78).
+
+    ``all_plates`` answers for an all-plates print: one row per slot any plate uses, in
+    place of ``plate_id``'s, so a slot only a later plate uses still gets a spool.
     """
     meta = require_output(outputs, output_id)
     settings = store.load()
@@ -297,9 +172,28 @@ async def get_filaments(
             meta,
             settings,
             printer_id=printer_id,
-            nozzle_diameter=nozzle_diameter,
             plate_id=plate_id,
+            all_plates=all_plates,
         )
+
+
+@router.get(
+    "/outputs/{output_id}/choices",
+    response_model=ChoicesView,
+    summary="What the print dialog offers for this output",
+)
+async def get_choices(
+    output_id: OutputIdPath,
+    outputs: OutputsDep,
+    store: SettingsStoreDep,
+    printer_id: Annotated[int | None, Query()] = None,
+) -> ChoicesView:
+    """Printers, installed nozzles, quality tiers and processes, plates with the last one
+    used, and the filament step — one read for the whole dialog (spec §3)."""
+    meta = require_output(outputs, output_id)
+    settings = store.load()
+    async with client_for(settings) as client:
+        return await choices_for_output(client, outputs, meta, settings, printer_id=printer_id)
 
 
 @router.get(
