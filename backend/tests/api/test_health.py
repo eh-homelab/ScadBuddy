@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from scadbuddy.core.settings import Settings
 from scadbuddy.main import create_app
+from tests.conftest import UNUSED_DATABASE_URL
 
 
 def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) -> None:
@@ -21,13 +22,8 @@ def test_healthz_reports_openscad_and_a_writable_data_dir(client: TestClient) ->
     }
 
 
-def test_healthz_is_degraded_without_openscad(data_dir: Path, seed_dir: Path) -> None:
-    settings = Settings(
-        openscad="definitely-not-installed",
-        data_dir=data_dir,
-        seed_models_dir=seed_dir,
-        frontend_dir=Path("/nonexistent"),
-    )
+def test_healthz_is_degraded_without_openscad(settings: Settings) -> None:
+    settings = settings.model_copy(update={"openscad": "definitely-not-installed"})
     with TestClient(create_app(settings)) as client:
         body = client.get("/healthz").json()
     assert body["status"] == "degraded"
@@ -72,10 +68,13 @@ def test_a_built_in_never_overwrites_a_model_of_mine(
 
 
 def test_an_explicit_directory_must_exist_to_be_used(tmp_path: Path) -> None:
-    assert Settings(seed_models_dir=tmp_path).resolve_seed_models_dir() == tmp_path
-    assert Settings(seed_models_dir=tmp_path / "gone").resolve_seed_models_dir() is None
-    assert Settings(frontend_dir=tmp_path).resolve_frontend_dir() == tmp_path
-    assert Settings(frontend_dir=tmp_path / "gone").resolve_frontend_dir() is None
+    def settings(**fields: Path) -> Settings:
+        return Settings(database_url=UNUSED_DATABASE_URL, **fields)  # type: ignore[arg-type]
+
+    assert settings(seed_models_dir=tmp_path).resolve_seed_models_dir() == tmp_path
+    assert settings(seed_models_dir=tmp_path / "gone").resolve_seed_models_dir() is None
+    assert settings(frontend_dir=tmp_path).resolve_frontend_dir() == tmp_path
+    assert settings(frontend_dir=tmp_path / "gone").resolve_frontend_dir() is None
 
 
 def test_the_environment_overrides_every_field(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -86,6 +85,7 @@ def test_the_environment_overrides_every_field(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("SCADBUDDY_BAMBUDDY_API_KEY", "k")
     monkeypatch.setenv("SCADBUDDY_REVISION", "0123456789abcdef0123456789abcdef01234567")
     monkeypatch.setenv("SCADBUDDY_VERSION", "1.2.3")
+    monkeypatch.setenv("SCADBUDDY_DATABASE_URL", UNUSED_DATABASE_URL)
 
     config = Settings().to_config()
     assert config.data_dir == Path("/srv/scad")

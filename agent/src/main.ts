@@ -3,17 +3,19 @@ import { getConnInfo } from '@hono/node-server/conninfo'
 import { backendReachable, createBackendClient } from './api/backend.js'
 import { createApp } from './app.js'
 import { DEFAULT_MCP_AUTH } from './auth/authenticate.js'
-import { FailClosedTokenStore } from './auth/tokens.js'
+import { FailClosedTokenStore, PostgresTokenStore } from './auth/tokens.js'
 import { loadConfig } from './config.js'
 import { CredentialStore, SettingsStore } from './credentials.js'
 import { connectDatabase } from './db.js'
 import { MigrationChecksumError, MigrationLedgerError } from './db/migrations.js'
+import { PgEventListener } from './events/pgListener.js'
 import { DEFAULT_STATE_DIR } from './harness/options.js'
 import { ensureStateDirs, StateDirError } from './harness/stateDirs.js'
 import { testConnection } from './harness/testConnection.js'
 import { originPolicy } from './http/origins.js'
 import { forwardForRun, PluginForwarder } from './plugins/forwarder.js'
 import { loadEnabledPlugins, PluginStore } from './plugins/registry.js'
+import { ResourceHub } from './resources/hub.js'
 import { loadKek } from './secrets.js'
 import { approvalHashKey } from './approvals/service.js'
 import { SessionManager } from './sessions/manager.js'
@@ -92,7 +94,15 @@ const plugins = database ? new PluginStore(database.sql) : undefined
 // goes through this loopback forwarder (plugins/forwarder.ts).
 const pluginForwarder = await PluginForwarder.start()
 const backend = createBackendClient(config.backendUrl)
+
+// The event bus (spec §7, #264): LISTEN on `scadbuddy_events` on a connection
+// of its own, retried in the background, feeding MCP resource subscriptions.
+const events = config.databaseUrl ? new PgEventListener(config.databaseUrl) : undefined
+events?.start()
+const resources = new ResourceHub(events)
 const paths = { stateDir: DEFAULT_STATE_DIR }
+// One store for Settings (routes/mcpTokens.ts) and /mcp.
+const tokens = database ? new PostgresTokenStore(database.sql) : new FailClosedTokenStore()
 
 // Sessions (#300) and their approvals (#258). Nothing starts a session over
 // HTTP yet (#266's socket and #251's /mcp do); the approval routes and the
@@ -134,6 +144,7 @@ const app = createApp({
   credentials,
   plugins,
   pluginForwarder,
+  tokens: database ? tokens : undefined,
   testConnection: async (credential) => {
     const model = await settings?.get<string>('model')
     return testConnection(credential, { paths, ...(typeof model === 'string' ? { model } : {}) })
@@ -149,6 +160,7 @@ const app = createApp({
   },
   mcp: {
     tools: ALL_TOOLS,
+    resources,
     services: {
       backend,
       pending: new PendingActionStore(),
@@ -156,11 +168,11 @@ const app = createApp({
       renderWaitMs: 10 * 60_000,
       publicBaseUrl: config.publicUrl,
     },
-    // TODO(#251 follow-up): the Postgres token store (an `ai_mcp_tokens`
-    // migration in db/migrations.ts) and the auth mode read from `ai_settings`.
-    // Until then `bearer` (the default) verifies no token, so /mcp answers
-    // 401 to every request in production: fail closed, not open.
-    tokens: new FailClosedTokenStore(),
+    // Tokens live in `ai_mcp_tokens` (db/migrations/20260928T0734Z_mcp_tokens.sql).
+    // Without a database /mcp answers 503 before auth (app.ts), and the
+    // fail-closed store only makes sure nothing could verify anyway.
+    // TODO(#251 follow-up): the auth mode read from `ai_settings`.
+    tokens,
     authSettings: () => DEFAULT_MCP_AUTH,
   },
 })
@@ -183,7 +195,11 @@ for (const signal of ['SIGTERM', 'SIGINT'] as const) {
     void shutdown({
       // End the /mcp sessions first: their standing SSE streams would
       // otherwise hold server.close() until the deadline.
-      closeSessions: () => app.close(),
+      closeSessions: async () => {
+        await app.close()
+        resources.close()
+        await events?.close()
+      },
       closeServer: async () => {
         await new Promise<void>((resolve, reject) => server.close((err) => (err ? reject(err) : resolve())))
         await pluginForwarder.close()
